@@ -122,6 +122,17 @@ describe('agent updates', () => {
     expect(runner).toHaveBeenCalledTimes(2);
   });
 
+  // keep every version and installer command disabled without a proven launch account
+  it('reports updates unavailable without HOME and never invokes a runner', async () => {
+    const runner = vi.fn<AgentUpdateRunner>(async () => ({ code: 0, output: 'must not run' }));
+    const service = new AgentUpdateService(configured(), undefined, runner);
+
+    await expect(service.statuses()).resolves.toEqual([{ kind: 'codex', updateAvailable: false, error: 'Version check unavailable' }]);
+    expect(service.startUpdate('codex')).toEqual({ outcome: 'unavailable' });
+    await expect(service.update('codex')).resolves.toEqual({ outcome: 'unavailable' });
+    expect(runner).not.toHaveBeenCalled();
+  });
+
   it('lists a pinned kind with the pin as current and the published version as latest, and never runs an update for it', async () => {
     const runner = vi.fn<AgentUpdateRunner>(async () => ({ code: 0, output: '0.152.1\n' }));
     const pinned = (JSON.parse(await readFile(new URL('../node_modules/@earendil-works/pi-coding-agent/package.json', import.meta.url), 'utf8')) as { version: string }).version;

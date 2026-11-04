@@ -37,7 +37,7 @@ describe('conversations switch API', () => {
       dashboard: async () => ({ generation: launched ? 2 : 1, places: [], adapters: {}, agents: launched ? [replacement] : [], projects: [] }),
     };
     const launch = { canResumeConversation: () => true, resumeConversation: async (worktreeId: string, id: string, kind?: AgentKind) => { launched = worktreeId === cora.id && id === conversationId && kind === 'claude'; return launched; } };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 51).toString('base64url')), discovery: discovery as never, launch: launch as never, launchPollDelay: async () => undefined });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 51).toString('base64url')), discovery: discovery as never, launch: launch as never, launchPollDelay: async () => undefined });
     try {
       const headers = await authenticatedHeaders(app);
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
@@ -69,7 +69,7 @@ describe('conversations switch API', () => {
       dashboard: async () => { events.push('dashboard'); return { generation: 1, places: [], adapters: {}, agents: [], projects: [] }; },
     };
     const launch = { canResumeConversation: () => true, resumeConversation: async () => { events.push('resume'); return false; } };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 60).toString('base64url')), discovery: discovery as never, launch: launch as never });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 60).toString('base64url')), discovery: discovery as never, launch: launch as never });
     try {
       const headers = await authenticatedHeaders(app);
       // neither owner may claim the ambiguous conversation
@@ -100,7 +100,7 @@ describe('conversations switch API', () => {
     const launch = { canResumeConversation: () => true, resumeConversation: async (worktreeId: string, id: string, kind?: AgentKind) => { events.push(`resume:${worktreeId}:${id}:${kind}`); resumed = true; return true; } };
     // expose an empty queue and no pending reset
     const queuedPrompts = { list: async () => [], resets: { get: async () => undefined } };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 52).toString('base64url')), discovery: discovery as never, launch: launch as never, queuedPrompts: queuedPrompts as never, tmux: { close: async () => { events.push(`close:${firstAgent.id}`); return true; } } as never, launchPollDelay: async () => undefined });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 52).toString('base64url')), discovery: discovery as never, launch: launch as never, queuedPrompts: queuedPrompts as never, tmux: { close: async () => { events.push(`close:${firstAgent.id}`); return true; } } as never, launchPollDelay: async () => undefined });
     try {
       const headers = await authenticatedHeaders(app);
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
@@ -128,7 +128,7 @@ describe('conversations switch API', () => {
     };
     const launch = { canResumeConversation: () => true, resumeConversation: async (worktreeId: string, id: string, kind?: AgentKind) => { events.push(`resume:${worktreeId}:${id}:${kind}`); resumed = true; return true; } };
     const queuedPrompts = { list: async () => [], resets: { get: async () => undefined } };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 54).toString('base64url')), discovery: discovery as never, launch: launch as never, queuedPrompts: queuedPrompts as never, tmux: { close: async () => { events.push(`close:${firstAgent.id}`); return true; } } as never, launchPollDelay: async () => undefined });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 54).toString('base64url')), discovery: discovery as never, launch: launch as never, queuedPrompts: queuedPrompts as never, tmux: { close: async () => { events.push(`close:${firstAgent.id}`); return true; } } as never, launchPollDelay: async () => undefined });
     try {
       const headers = await authenticatedHeaders(app);
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
@@ -153,7 +153,7 @@ describe('conversations switch API', () => {
       dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [first, second], projects: [] }),
     };
     const launch = { canResumeConversation: () => true, resumeConversation: async () => { resumed = true; return true; } };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 53).toString('base64url')), discovery: discovery as never, launch: launch as never });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 53).toString('base64url')), discovery: discovery as never, launch: launch as never });
     try {
       const headers = await authenticatedHeaders(app);
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
@@ -182,7 +182,7 @@ describe('conversations switch API', () => {
     const queuedPrompts = { list: async () => [], resets: { get: async () => undefined } };
     // the immediate poll delay makes a regressed working-gate fail fast (close+resume+poll)
     // rather than hang, and lets this assert the specific not-idle reason
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 54).toString('base64url')), discovery: discovery as never, launch: launch as never, queuedPrompts: queuedPrompts as never, tmux: { close: async () => true } as never, launchPollDelay: async () => undefined });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 54).toString('base64url')), discovery: discovery as never, launch: launch as never, queuedPrompts: queuedPrompts as never, tmux: { close: async () => true } as never, launchPollDelay: async () => undefined });
     try {
       const headers = await authenticatedHeaders(app);
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
@@ -207,7 +207,7 @@ describe('conversations switch API', () => {
       dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [] }),
     };
     const launch = { canResumeConversation: () => true, resumeConversation: async () => { resumed = true; return true; } };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 55).toString('base64url')), discovery: discovery as never, launch: launch as never });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 55).toString('base64url')), discovery: discovery as never, launch: launch as never });
     try {
       const headers = await authenticatedHeaders(app);
       // asking cora to resume owen's Conversation is refused before any handoff
@@ -233,7 +233,7 @@ describe('conversations switch API', () => {
       dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [] }),
     };
     const launch = { canResumeConversation: () => true, resumeConversation: async () => { resumed = true; return true; } };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 59).toString('base64url')), discovery: discovery as never, launch: launch as never });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 59).toString('base64url')), discovery: discovery as never, launch: launch as never });
     try {
       const headers = await authenticatedHeaders(app);
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
@@ -257,7 +257,7 @@ describe('conversations switch API', () => {
       dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [] }),
     };
     const launch = { canResumeConversation: () => true, resumeConversation: async () => { resumed = true; return true; } };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 56).toString('base64url')), discovery: discovery as never, launch: launch as never });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 56).toString('base64url')), discovery: discovery as never, launch: launch as never });
     try {
       const headers = await authenticatedHeaders(app);
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: 'not-a-session' } });
@@ -286,7 +286,7 @@ describe('conversations switch API', () => {
     // some kind is launchable (canResumeConversation true), but the row's own kind is not
     const launch = { canResumeConversation: () => true, isLaunchableKind: (kind: AgentKind) => kind !== 'claude', resumeConversation: async () => { resumed = true; return true; } };
     // expose no pending queue or reset during the handoff
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 60).toString('base64url')), discovery: discovery as never, launch: launch as never, queuedPrompts: { list: async () => [], resets: { get: async () => undefined } } as never, tmux: { close: async () => { closed = true; return true; } } as never });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 60).toString('base64url')), discovery: discovery as never, launch: launch as never, queuedPrompts: { list: async () => [], resets: { get: async () => undefined } } as never, tmux: { close: async () => { closed = true; return true; } } as never });
     try {
       const headers = await authenticatedHeaders(app);
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
@@ -320,7 +320,7 @@ describe('conversations switch API', () => {
     const launch = { canResumeConversation: () => true, resumeConversation: async (worktreeId: string, _id: string, kind?: AgentKind) => { resumes.push({ worktreeId, kind }); launchedOn = worktreeId; return true; } };
     // Owen last launched OMX; Cora last launched Claude (not codex-family → stays Codex)
     const worktreeStore = { launchProfiles: async () => ({ [owen.id]: 'omx', [cora.id]: 'claude' }) };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 57).toString('base64url')), discovery: discovery as never, launch: launch as never, worktreeStore: worktreeStore as never, launchPollDelay: async () => undefined });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 57).toString('base64url')), discovery: discovery as never, launch: launch as never, worktreeStore: worktreeStore as never, launchPollDelay: async () => undefined });
     try {
       const headers = await authenticatedHeaders(app);
       // the client sends a stale `codex` kind, but Owen last launched OMX, so the server
@@ -341,7 +341,7 @@ describe('conversations switch API', () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const cora = testWorktree({ id: 'potato:/wt/cora', projectId: 'potato', label: 'Cora', path: '/wt/cora', identity: '/wt/cora', hostPath: '/host/cora' });
     const discovery = { target: async () => undefined, worktreesNow: () => [cora], place: async () => undefined, conversations: async () => [], dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [] }) };
-    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 58).toString('base64url')), discovery: discovery as never });
+    const app = await buildApp(testConfig({ adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), { auth: new AuthService(hash, Buffer.alloc(32, 58).toString('base64url')), discovery: discovery as never });
     try {
       const headers = await authenticatedHeaders(app);
       const unknown = await app.inject({ method: 'POST', url: '/api/worktrees/nope/conversations/switch', headers, payload: { kind: 'claude', id: conversationId } });

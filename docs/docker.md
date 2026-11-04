@@ -142,9 +142,21 @@ directory shared at the **same absolute path** on the host and in the container.
 For example, a state directory below the already shared checkout's `.data/`
 avoids an additional mount. Store provider credentials in that directory's
 owner-only `auth.json`; do not place keys in adapter arguments or environment.
-Set `adapters.pi.env.HOME` to the host account's absolute home directory, so
-Pi's shell and sandbox protect the host's credentials rather than the
-container account's. This is required for bridged Pi launches.
+Pi's launcher checks npm for newer Pi releases, independently of upstream RAC.
+Its update icon opens a confirmation explaining that Pi is bundled in RAC.
+**Submit prompt** asks an agent in the RAC checkout to update the exact Pi pin,
+its matching dependencies and the lockfile, then validate compatibility;
+**Cancel** makes no change. Submitting does not install a global Pi, pull an
+upstream RAC release or deploy the local change. Deployment remains a separate
+action. For a configured host-bridged Pi, console Git updates install the frozen
+host dependencies and build the server helpers before rebuilding Compose. If
+preparation fails, the existing console is not replaced.
+
+A blank or omitted `adapters.pi.env.HOME` inherits the host account's home
+from the host tmux environment, so Pi's shell and sandbox protect that user's
+credentials rather than the container account's. An explicit absolute HOME
+overrides this default. If the host home cannot be resolved, bridged Pi stays
+unavailable until the bridge is restored or an explicit HOME is configured.
 
 Node's canonical executable must have one hard link and live outside every Pi
 Place and configured writable sandbox root. Host checks run before execution

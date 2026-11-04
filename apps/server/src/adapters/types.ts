@@ -507,7 +507,7 @@ export interface StructuredAdapter {
  * the Conductor: its client then takes the console's MCP access, and it gets the console's role prompt.
  */
 export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string; role?: 'conductor' };
-/** One Allowed model (`adapters.pi.allowedModels`): an exact `provider/id` and an optional default Effort. */
+/** one ordered Allowed model for an Adapter, with its optional default Effort. */
 export type AllowedModel = { model: string; effort?: string };
 
 /**
@@ -547,7 +547,7 @@ export type AdapterCapability = {
   steer: boolean;
   commands: boolean;
   sandbox: boolean;
-  /** a structured kind's Allowed models, in the operator's order, which a launch may choose from, and every Effort its models may take */
+  /** authored Allowed models in operator order; absent uses the native default while empty denies launches */
   allowedModels?: AllowedModel[];
   efforts?: string[];
 };

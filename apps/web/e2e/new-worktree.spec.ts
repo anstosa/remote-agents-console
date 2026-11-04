@@ -6,9 +6,10 @@ const dashboard = {
   generation: 1,
   serverStartedAt: 1001,
   reviewTour: { available: true },
+  adapters: { codex: { program: '/bin/codex', launchable: true, stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: true } },
   agents: [],
   projects: [
-    { id: 'repo', label: 'Repo', available: true, manageWorktrees: true, setup: true, worktrees: [
+    { id: 'repo', label: 'Repo', available: true, manageWorktrees: true, setup: true, launch: { kind: 'codex', origin: 'project' }, worktrees: [
       { id: 'repo:/repo', projectId: 'repo', label: 'Repo', path: '/repo', main: true, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'main' }
     ] },
     { id: 'ro', label: 'Mounted Elsewhere', available: true, manageWorktrees: false, manageWorktreesReason: 'the container does not mount this project at its host path, so git cannot manage its worktrees', worktrees: [
@@ -31,6 +32,8 @@ const switchPrs = {
   pullRequestsSupported: true
 };
 
+const launchOptions = { kinds: [{ kind: 'codex', optionsRevision: 'new-worktree-rev', modelPolicy: { state: 'explicit', allowed: [{ model: 'gpt-default' }, { model: 'gpt-review' }], defaultSelection: { mode: 'model', id: 'gpt-default' }, catalog: [{ id: 'gpt-default', name: 'GPT Default', efforts: ['medium'] }, { id: 'gpt-review', name: 'GPT Review', efforts: ['high'] }], catalogStatus: 'ready' }, security: { controls: [{ id: 'approval', label: 'Approvals', icon: 'hand', options: [{ id: 'ask', label: 'Ask first', risk: 'normal', detail: 'Ask before tool actions' }, { id: 'never', label: 'Never ask', risk: 'warning', detail: 'Run allowed tool actions directly' }] }], defaults: { approval: 'ask' }, constraints: [], status: 'ready' } }] };
+
 async function stub(page: import('@playwright/test').Page, onCreate: (body: unknown) => void) {
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -38,6 +41,7 @@ async function stub(page: import('@playwright/test').Page, onCreate: (body: unkn
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: dashboard });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (url.pathname === '/api/launch/options' && request.method() === 'POST') return route.fulfill({ json: launchOptions });
     if (url.pathname === '/api/projects/repo/branches') return route.fulfill({ json: { branches: [
       { name: 'main', ref: 'main', remote: false, checkedOut: true },
       { name: 'feature', ref: 'feature', remote: false, checkedOut: false },
@@ -106,6 +110,67 @@ test('bases a new branch on a chosen branch, sending the ref that resolves it', 
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
 
   await expect.poll(() => created).toEqual({ mode: 'new', branch: 'feature/login', base: 'origin/hotfix', open: 'agent' });
+});
+
+test('agent chooser click-away consumes the background Create action', async ({ page }) => {
+  let created: unknown;
+  await stub(page, body => { created = body; });
+  await page.goto('/');
+  const dialog = await openNewWorktree(page);
+  await dialog.getByLabel('Branch name').fill('feature/click-away');
+  const create = dialog.getByRole('button', { name: 'Create worktree' });
+  await expect(create).toBeEnabled();
+  await dialog.getByRole('button', { name: 'Choose agent' }).click();
+  const menu = page.getByRole('menu', { name: 'Choose agent' });
+  await expect(menu).toBeVisible();
+  const createBounds = await create.boundingBox();
+  expect(createBounds).not.toBeNull();
+  await page.mouse.click(createBounds!.x + createBounds!.width / 2, createBounds!.y + createBounds!.height / 2);
+  await expect(menu).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  expect(created).toBeUndefined();
+});
+
+test('new worktree Agent options send one nested semantic launch choice', async ({ page }) => {
+  let created: unknown;
+  await stub(page, body => { created = body; });
+  await page.goto('/');
+  const dialog = await openNewWorktree(page);
+  await dialog.getByLabel('Branch name').fill('feature/semantic-launch');
+  await dialog.getByRole('button', { name: 'Choose agent' }).click();
+  const menu = page.getByRole('menu', { name: 'Choose agent' });
+  const card = menu.getByRole('group', { name: 'Codex agent' });
+  const model = card.getByRole('button', { name: /Codex model and Effort/u });
+  await model.click();
+  const modelPanel = menu.getByRole('dialog', { name: 'Codex model and Effort', exact: true });
+  await modelPanel.getByRole('radio', { name: /GPT Review/u }).click();
+  await expect(modelPanel).toBeVisible();
+  const effort = modelPanel.getByRole('combobox', { name: 'Effort', exact: true });
+  await effort.click();
+  let effortOptions = page.getByRole('listbox', { name: 'Effort options', exact: true });
+  await expect(effortOptions).toBeVisible();
+  expect(await effortOptions.evaluate(element => element.parentElement === document.body)).toBe(true);
+  expect(await effortOptions.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    return element.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
+  })).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect(effortOptions).toHaveCount(0);
+  await expect(modelPanel).toBeVisible();
+  await expect(effort).toBeFocused();
+  await effort.click();
+  effortOptions = page.getByRole('listbox', { name: 'Effort options', exact: true });
+  await effortOptions.getByRole('option', { name: 'high', exact: true }).click();
+  await modelPanel.getByRole('button', { name: /Back to agents/u }).click();
+  await expect(model).toBeFocused();
+  await card.getByRole('button', { name: /^Codex security/u }).click();
+  await menu.getByLabel('Never ask').check();
+  await page.keyboard.press('Escape');
+  await card.locator('.launch-card-summary').click();
+  await expect(menu).toBeVisible();
+  await card.getByRole('menuitem', { name: 'Launch Codex', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Create worktree' }).click();
+  await expect.poll(() => created).toEqual({ mode: 'new', branch: 'feature/semantic-launch', base: 'main', open: 'agent', choice: { kind: 'codex', model: { mode: 'model', id: 'gpt-review' }, effort: { mode: 'effort', id: 'high' }, security: { approval: 'never' }, optionsRevision: 'new-worktree-rev' } });
 });
 
 test('explains that setup is running while a create blocks on it', async ({ page }) => {

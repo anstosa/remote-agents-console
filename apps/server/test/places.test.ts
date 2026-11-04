@@ -105,6 +105,11 @@ describe('scratchHome', () => {
       // a folder the console cannot resolve (a host path under the bridge) is taken as written
       await expect(scratchHome('/host/only/scratch', [])).resolves.toBe('/host/only/scratch');
       await expect(scratchHome(undefined, [project({ hostPath: '/host/me/notes' })])).resolves.toBe('/host/me');
+      await expect(scratchHome(undefined, [project({ hostPath: '/srv/repos/project' })], '/accounts/actual')).resolves.toBe('/accounts/actual');
+      await expect(scratchHome(undefined, [project({ hostPath: '/srv/repos/project' })], null)).resolves.toBeUndefined();
+      // an explicit Scratch folder remains ahead of the runtime account home
+      await expect(scratchHome('/host/only/scratch', [project({ hostPath: '/srv/repos/project' })], '/accounts/actual')).resolves.toBe('/host/only/scratch');
+      await expect(scratchHome('/host/only/scratch', [project({ hostPath: '/srv/repos/project' })], null)).resolves.toBe('/host/only/scratch');
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

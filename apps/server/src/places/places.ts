@@ -23,13 +23,14 @@ export type Place = { id: string; kind: PlaceKind; projectId: string; label: str
 
 // the configured Places, in the order a tie between equally deep homes resolves: Worktrees,
 // then directory Projects, then the configured Scratch folder
-export function configuredPlaces(worktrees: readonly Worktree[], projects: readonly Project[], scratchHome: string): Place[] {
+export function configuredPlaces(worktrees: readonly Worktree[], projects: readonly Project[], scratchHome: string | undefined): Place[] {
   const places: Place[] = worktrees.map(worktreePlace);
   for (const project of projects) {
     if (!project.available || project.mode !== 'directory') continue;
     places.push({ id: worktreeWireId(project.id, project.identity), kind: 'directory', projectId: project.id, label: project.label, home: project.identity, ...(project.hostPath === undefined ? {} : { hostPath: project.hostPath }) });
   }
-  places.push({ id: worktreeWireId(scratchProjectId, scratchHome), kind: 'scratch', projectId: scratchProjectId, label: scratchPlaceLabel, home: scratchHome });
+  // unresolved launch identity has no default scratch folder
+  if (scratchHome !== undefined) places.push({ id: worktreeWireId(scratchProjectId, scratchHome), kind: 'scratch', projectId: scratchProjectId, label: scratchPlaceLabel, home: scratchHome });
   return places;
 }
 
@@ -120,7 +121,9 @@ export function accountHome(projects: readonly Project[], projectId?: string): s
 // The configured Scratch folder's home: `scratchDirectory`, else the account home, realpath'd
 // so pane roots (which are realpaths) compare equal. Unset, the account home is the Scratch
 // home, so every stray pane under it that is outside a Project lands in that one Place.
-export async function scratchHome(scratchDirectory: string | undefined, projects: readonly Project[]): Promise<string> {
-  const folder = scratchDirectory ?? accountHome(projects);
+export async function scratchHome(scratchDirectory: string | undefined, projects: readonly Project[], launchHome?: string | null): Promise<string | undefined> {
+  // an explicit unavailable result must never become a repository-parent guess
+  if (scratchDirectory === undefined && launchHome === null) return undefined;
+  const folder = scratchDirectory ?? launchHome ?? accountHome(projects);
   return await realpath(folder).catch(() => folder);
 }

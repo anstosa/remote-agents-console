@@ -113,6 +113,23 @@
 .settings-schema-section > header > div { display: grid; gap: .12rem; }
 .settings-schema-section h3 { margin: 0; color: var(--lavender); font: 800 .78rem var(--font-mono); }
 .settings-schema-section p { margin: 0; color: var(--subtext-0); font-size: .68rem; line-height: 1.4; }
+/* keep each adapter in an independently expandable full-width card */
+.settings-adapter-card { position: relative; grid-column: 1 / -1; min-width: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); background: transparent; }
+.settings-adapter-card > summary { display: flex; min-width: 0; align-items: center; gap: .6rem; padding: .75rem; list-style: none; cursor: pointer; }
+.settings-adapter-card[open] > summary { padding-right: 8rem; }
+.settings-adapter-card > summary::-webkit-details-marker { display: none; }
+.settings-adapter-card > summary::before { content: '›'; flex: none; color: var(--subtext-0); font: 700 1rem/1 var(--font-mono); }
+.settings-adapter-card[open] > summary::before { transform: rotate(90deg); }
+.settings-adapter-card > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: var(--control-radius); }
+.settings-adapter-card > summary[aria-disabled='true'] { cursor: default; }
+.settings-adapter-card > summary h3 { margin: 0; color: var(--lavender); font: 800 .78rem var(--font-mono); }
+.settings-adapter-card > summary > span { min-width: 0; margin-left: auto; color: var(--overlay-1); font: 500 .6rem/1.4 var(--font-mono); overflow-wrap: anywhere; }
+.settings-adapter-card > summary > .settings-adapter-status-configured { color: var(--green); font-weight: 700; }
+.settings-adapter-card-action { position: absolute; z-index: 1; top: .42rem; right: .55rem; }
+.settings-adapter-card-action > .settings-remove-button { min-height: 1.85rem; }
+.settings-adapter-card-body { min-width: 0; padding: 0 .75rem .75rem; }
+.settings-pi-sandbox > header { align-items: flex-start; }
+.settings-pi-sandbox > header .client-settings-toggle { flex: none; }
 /* keep future adapters visible without implying their controls work */
 .settings-unimplemented-field { opacity: .55; }
 .settings-unimplemented-field :is(h3, strong, small) { color: var(--overlay-0); }
@@ -170,6 +187,25 @@
 .settings-field-guidance { margin: 0; color: var(--overlay-1); font: 500 .6rem/1.4 var(--font-mono); }
 .settings-field-guidance-error { color: var(--red); }
 .settings-field-guidance > button { min-height: 1.45rem; margin-left: .25rem; padding: .12rem .38rem; }
+.settings-agent-models { gap: .45rem; }
+.settings-agent-model-list { display: grid; min-width: 0; gap: .38rem; }
+.settings-agent-model-row { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .55rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); padding: .55rem; background: color-mix(in srgb, var(--mantle) 74%, transparent); }
+.settings-agent-model-row[data-default='true'] { border-color: color-mix(in srgb, var(--mauve) 56%, var(--surface-1)); }
+.settings-agent-model-row[data-unavailable='true'] { border-color: color-mix(in srgb, var(--yellow) 44%, var(--surface-1)); }
+.settings-agent-model-copy { display: grid; min-width: 0; gap: .12rem; }
+.settings-agent-model-copy > strong { overflow-wrap: anywhere; color: var(--text); font: 700 .66rem/1.35 var(--font-mono); }
+.settings-agent-model-copy > small { color: var(--overlay-1); font: 500 .58rem/1.35 var(--font-mono); }
+.settings-agent-model-controls { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: .35rem; }
+.settings-agent-model-controls > .settings-select { width: min(12rem, 34vw); min-width: 8rem; }
+.settings-center button.settings-agent-default-button { display: grid; width: 1.85rem; min-width: 1.85rem; height: 1.85rem; min-height: 1.85rem; place-items: center; padding: 0; color: var(--overlay-1); }
+.settings-agent-default-button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+.settings-center button.settings-agent-default-button.selected { border-color: color-mix(in srgb, var(--yellow) 55%, var(--surface-2)); color: var(--yellow); }
+.settings-agent-default-button.selected svg { fill: currentColor; }
+@container settings-panel (max-width: 520px) {
+  .settings-agent-model-row { grid-template-columns: minmax(0, 1fr); }
+  .settings-agent-model-controls { justify-content: stretch; }
+  .settings-agent-model-controls > .settings-select { width: auto; flex: 1; }
+}
 .settings-conductor-schema { gap: .85rem; }
 .settings-conductor-enabled { padding-bottom: .75rem; border-bottom: 1px solid var(--surface-1); }
 .settings-field input[type='text'],

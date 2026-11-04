@@ -122,19 +122,40 @@ function describeButtonList(list: SettingsSchema): void {
 function describeApplicationCommands(schema: SettingsSchema): void {
   Object.assign(schema.properties!.editor!, { editor: 'shell' as const, singleLine: true });
   const adapters = schema.properties!.adapters!.properties!;
-  const allowed = adapters.pi!.properties!.allowedModels!;
-  Object.assign(allowed, {
-    label: 'Allowed models',
-    description: 'The only models Pi Agents may run on, in your order; the first is the default for a new conversation. Enter each as an exact provider/id, such as openai/gpt-5.6, or openrouter/ followed by the id from openrouter.ai.',
-    placeholder: 'None: Pi uses its own default model and the model picker is hidden. Add models to choose them per Agent.'
-  });
-  Object.assign(allowed.items!, { label: 'Allowed model' });
-  Object.assign(allowed.items!.properties!.model!, { label: 'Model (provider/id)' });
-  Object.assign(allowed.items!.properties!.effort!, { label: 'Default Effort', description: 'Pi\'s thinking level when switching to this model. Unset keeps the current Effort.' });
   // annotate every supported adapter's lifecycle and update commands
-  for (const adapter of Object.values(adapters)) {
+  for (const [kind, adapter] of Object.entries(adapters)) {
+    const allowed = adapter.properties!.allowedModels;
+    // annotate model policy controls wherever the adapter supports them
+    if (allowed !== undefined) {
+      Object.assign(allowed, {
+        label: 'Allowed models',
+        description: `The models ${kind === 'pi' ? 'Pi' : adapter.label ?? kind} Agents may run on. The first is the default for a new agent.`,
+        placeholder: 'No explicit policy; the native default is used.'
+      });
+      Object.assign(allowed.items!, { label: 'Allowed model' });
+      Object.assign(allowed.items!.properties!.model!, { label: kind === 'pi' ? 'Model (provider/id)' : 'Model' });
+      Object.assign(allowed.items!.properties!.effort!, { label: 'Default Effort', description: 'The native thinking level for this model. Default keeps the model-owned setting.' });
+    }
     Object.assign(adapter.properties!.args!, { default: [] });
     Object.assign(adapter.properties!.env!, { label: 'Environment & keys' });
+    // distinguish additional sandbox rules from launch security and variable values
+    if (kind === 'pi') {
+      const policy = adapter.properties!.sandbox!;
+      Object.assign(policy, { label: 'Custom sandbox rules' });
+      const fields = policy.properties!;
+      Object.assign(fields.allowedDomains!, { label: 'Allowed domains', description: 'Additional host names or patterns sandboxed commands may reach.' });
+      Object.assign(fields.deniedDomains!, { label: 'Denied domains', description: 'Host names or patterns sandboxed commands must not reach.' });
+      Object.assign(fields.allowWrite!, { label: 'Allow write', description: 'Additional paths sandboxed commands may write to.' });
+      Object.assign(fields.denyWrite!, { label: 'Deny write', description: 'Paths sandboxed commands must not write to.' });
+      Object.assign(fields.denyRead!, { label: 'Deny read', description: 'Paths sandboxed commands must not read.' });
+      Object.assign(fields.env!, { label: 'Environment variable names', description: 'Additional Pi environment variable names sandboxed commands may inherit. Set their values in Environment & keys above.' });
+      Object.assign(fields.allowedDomains!.items!, { label: 'Allowed domain' });
+      Object.assign(fields.deniedDomains!.items!, { label: 'Denied domain' });
+      Object.assign(fields.allowWrite!.items!, { label: 'Write path' });
+      Object.assign(fields.denyWrite!.items!, { label: 'Denied write path' });
+      Object.assign(fields.denyRead!.items!, { label: 'Denied read path' });
+      Object.assign(fields.env!.items!, { label: 'Environment variable' });
+    }
     Object.assign(adapter.properties!.setup!, { editor: 'shell' as const, default: '', placeholder: 'Disabled (when blank)' });
     Object.assign(adapter.properties!.teardown!, { editor: 'shell' as const, default: '', placeholder: 'Disabled (when blank)' });
     // Pi is pinned by the console and has no update commands (ADR 0017)

@@ -563,7 +563,7 @@ describe('claude adapter configuration', () => {
 
   it('enables Pi with the pinned program and refuses a program or update commands of its own', async () => {
     const config = await validateConfig({ ...scratch, adapters: { pi: { args: ['--verbose'], env: { RAC_TEST: '1' } } } });
-    expect(config.adapters?.pi).toEqual({ program: process.execPath, args: ['--verbose'], env: { RAC_TEST: '1' }, launchable: true, sandbox: { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] } });
+    expect(config.adapters?.pi).toEqual({ program: process.execPath, args: ['--verbose'], env: { RAC_TEST: '1', HOME: config.launchHome }, launchable: true, sandbox: { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] } });
     await expect(validateConfig({ ...scratch, adapters: { pi: { program: process.execPath } } })).rejects.toThrow(/pinned/u);
     await expect(validateConfig({ ...scratch, adapters: { pi: { updates: { current: 'a', latest: 'b', run: 'c' } } } })).rejects.toThrow(/pinned/u);
   });
@@ -571,8 +571,8 @@ describe('claude adapter configuration', () => {
   it('carries Pi\'s Allowed models in order, each an exact provider/id listed once with a Pi Effort', async () => {
     const allowedModels = [{ model: 'openai/gpt-5.6', effort: 'medium' }, { model: 'openrouter/~anthropic/claude-opus-latest' }];
     expect((await validateConfig({ ...scratch, adapters: { pi: { allowedModels } } })).adapters?.pi?.allowedModels).toEqual(allowedModels);
-    // an empty list is no list: Pi runs on its own default
-    expect((await validateConfig({ ...scratch, adapters: { pi: { allowedModels: [] } } })).adapters?.pi?.allowedModels).toBeUndefined();
+    // an explicit empty list remains a blocked model policy
+    expect((await validateConfig({ ...scratch, adapters: { pi: { allowedModels: [] } } })).adapters?.pi?.allowedModels).toEqual([]);
     await expect(validateConfig({ ...scratch, adapters: { pi: { allowedModels: [{ model: 'gpt-5.6' }] } } })).rejects.toThrow(/provider\/id/u);
     await expect(validateConfig({ ...scratch, adapters: { pi: { allowedModels: [{ model: 'openai/gpt-5.6' }, { model: 'openai/gpt-5.6' }] } } })).rejects.toThrow(/once/u);
     await expect(validateConfig({ ...scratch, adapters: { pi: { allowedModels: [{ model: 'openai/gpt-5.6', effort: 'extreme' }] } } })).rejects.toThrow();

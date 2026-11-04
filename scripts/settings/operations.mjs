@@ -1612,7 +1612,7 @@ export function removeOperationStage(descriptor, requestId) {
 }
 
 // load a validated pending descriptor without promoting it
-function loadDesiredDescriptor(descriptor) {
+export function loadDesiredDescriptor(descriptor) {
   const path = resolve(descriptor.controlRoot, "desired-installation.json");
   if (!existsSync(path)) {
     return descriptor;

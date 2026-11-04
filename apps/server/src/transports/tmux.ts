@@ -87,6 +87,8 @@ export const paneSnapshot = (agent: Agent): PaneSnapshot => ({ title: agent.titl
 export async function launchTmuxAgent(waitForAgent: AgentWaiter, before: Set<string>, matches: (agent: Agent) => boolean, start: () => Promise<boolean>): Promise<LaunchOutcome> {
   if (!await start()) return { failure: 'refused' };
   const agent = await waitForAgent(before, matches);
+  // retain the replacement fact without claiming a failed process is ready
+  if (agent?.structured?.lifecycle === 'failed') return { failure: 'refused', agentId: agent.id, error: 'The replacement Agent could not start safely. Open its log for details.' };
   return agent === undefined ? { failure: 'timed-out' } : { agent };
 }
 

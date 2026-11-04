@@ -136,3 +136,28 @@ test('Clear starts a new Conversation, since a structured Agent takes no slash c
   await expect.poll(() => posts).toEqual([{ path: 'conversations/new', body: undefined }]);
   await expect(page.getByRole('status').filter({ hasText: 'Cora cleared' })).toContainText('new conversation');
 });
+
+// intrinsic choice menus must not stretch the summary form's reading width
+for (const width of [1280, 390, 208]) {
+  test(`Compact form retains a readable viewport-bounded width at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const posts = await mockPi(page, { attention: 'finished' });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Agent power options' }).click();
+    await page.getByRole('menuitem', { name: 'Compact…', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Compact the conversation' });
+    await expect(dialog.getByRole('textbox', { name: /Instructions for the summary/u })).toBeVisible();
+    // resize observation settles the placement after switching menu pages
+    await expect.poll(async () => (await dialog.boundingBox())!.width).toBeLessThanOrEqual(Math.min(352, width - 16) + 1);
+    const bounds = (await dialog.boundingBox())!;
+    expect(bounds.width).toBeGreaterThan(width === 208 ? 180 : 300);
+    expect(bounds.x).toBeGreaterThanOrEqual(7);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 7);
+    expect(bounds.y).toBeGreaterThanOrEqual(7);
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(893);
+    expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    expect(posts).toEqual([]);
+  });
+}

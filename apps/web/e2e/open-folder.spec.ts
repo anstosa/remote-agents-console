@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { installFilesFixture } from './files-panel-fixture.js';
 import { installPaneMock, seedPaneSize } from './pane-stream-mock.js';
 
-type OpenRecord = { path: string; action: string; kind?: string; sandboxed?: boolean };
+type OpenRecord = { path: string; action: string; kind?: string; sandboxed?: boolean; model?: unknown; effort?: unknown; optionsRevision?: string };
 
 const adapters = { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } };
 const scratch = { id: 'scratch:/home/ubuntu', kind: 'scratch', projectId: 'scratch', label: 'Scratch', home: '/home/ubuntu', pinned: false };
@@ -12,7 +12,7 @@ const repo = { id: 'repo-0123abcd', projectId: 'repo-0123abcd', label: 'repo', p
 const notes = { id: 'scratch:/home/ubuntu/notes', kind: 'scratch', projectId: 'scratch', label: 'notes', home: '/home/ubuntu/notes', adhoc: true, pinned: false };
 
 // stub a console whose dashboard gains the Place each successful open names
-async function stubConsole(page: Page, { openStatus = 201, openError, needsOperator }: { openStatus?: number; openError?: string; needsOperator?: string } = {}) {
+async function stubConsole(page: Page, { openStatus = 201, openError, needsOperator, semantic = false }: { openStatus?: number; openError?: string; needsOperator?: string; semantic?: boolean } = {}) {
   const opens: OpenRecord[] = [];
   const forgotten: string[] = [];
   let recents = [{ path: '/home/ubuntu/repo', openedAt: '2026-10-22T10:00:00.000Z', kind: 'git' }, { path: '/home/ubuntu/notes', openedAt: '2026-10-21T10:00:00.000Z', kind: 'folder' }];
@@ -32,6 +32,8 @@ async function stubConsole(page: Page, { openStatus = 201, openError, needsOpera
       return route.fulfill({ json: { generation, adapters, agents, projects, places, scratchLaunch: { kind: 'codex', origin: 'default' } } });
     }
     if (url.pathname === '/api/folders/recent') return route.fulfill({ json: { folders: recents } });
+    // opt selected scenarios into target-specific launch controls
+    if (url.pathname === '/api/launch/options' && semantic) return route.fulfill({ json: { kinds: [{ kind: 'codex', optionsRevision: 'folder-rev', modelPolicy: { state: 'explicit', allowed: [{ model: 'gpt-default' }, { model: 'gpt-folder' }], defaultSelection: { mode: 'model', id: 'gpt-default' }, catalog: [{ id: 'gpt-default', name: 'GPT Default', efforts: ['medium'] }, { id: 'gpt-folder', name: 'GPT Folder', efforts: ['high'] }], catalogStatus: 'ready' }, security: { controls: [], defaults: {}, constraints: [], status: 'unsupported', message: 'Uses Codex native security.' } }] } });
     if (url.pathname === '/api/folders/forget') {
       forgotten.push(String(body?.path));
       recents = recents.filter(entry => entry.path !== body?.path);
@@ -124,9 +126,61 @@ test('a recent folder launches the kind chosen from its launch split', async ({ 
   const dialog = await openOtherLocations(page);
   const entry = dialog.getByRole('listitem').filter({ hasText: '/home/ubuntu/repo' });
   await entry.getByRole('button', { name: 'More workspace actions' }).click();
-  await page.getByRole('menu', { name: 'More workspace actions' }).getByRole('menuitem', { name: /^Codex/u }).click();
+  await page.getByRole('menu', { name: 'More workspace actions' }).getByRole('menuitem', { name: 'Launch Codex', exact: true }).click();
   await expect(page.getByRole('tab', { name: /^repo — /u, selected: true })).toBeVisible();
   expect(opens).toEqual([{ path: '/home/ubuntu/repo', action: 'agent', kind: 'codex', sandboxed: false }]);
+});
+
+test('a folder Agent action sends its target-specific model and Effort', async ({ page }) => {
+  const { opens } = await stubConsole(page, { semantic: true });
+  await page.goto('/');
+  const dialog = await openOtherLocations(page);
+  const entry = dialog.getByRole('listitem').filter({ hasText: '/home/ubuntu/repo' });
+  await entry.getByRole('button', { name: 'More workspace actions' }).click();
+  const menu = page.getByRole('menu', { name: 'More workspace actions' });
+  const card = menu.getByRole('group', { name: 'Codex agent' });
+  const model = card.getByRole('button', { name: /Codex model and Effort/u });
+  await model.click();
+  const modelPanel = menu.getByRole('dialog', { name: 'Codex model and Effort', exact: true });
+  await modelPanel.getByRole('radio', { name: /GPT Folder/u }).click();
+  await expect(modelPanel).toBeVisible();
+  const effort = modelPanel.getByRole('combobox', { name: 'Effort', exact: true });
+  await effort.click();
+  const effortOptions = page.getByRole('listbox', { name: 'Effort options', exact: true });
+  await expect(effortOptions).toBeVisible();
+  expect(await effortOptions.evaluate(element => element.parentElement === document.body)).toBe(true);
+  expect(await effortOptions.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    return element.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
+  })).toBe(true);
+  await effortOptions.getByRole('option', { name: 'high', exact: true }).click();
+  await expect(modelPanel).toBeVisible();
+  await modelPanel.getByRole('button', { name: /Back to agents/u }).click();
+  await expect(model).toBeFocused();
+  await card.locator('.launch-card-summary').click();
+  expect(opens).toEqual([]);
+  await card.getByRole('menuitem', { name: 'Launch Codex', exact: true }).click();
+  await expect.poll(() => opens).toEqual([{ path: '/home/ubuntu/repo', action: 'agent', kind: 'codex', model: { mode: 'model', id: 'gpt-folder' }, effort: { mode: 'effort', id: 'high' }, optionsRevision: 'folder-rev' }]);
+});
+
+// restore nested keyboard dismissals one layer at a time
+test('Escape returns an Other locations launch menu to its opening control', async ({ page }) => {
+  await stubConsole(page, { semantic: true });
+  await page.goto('/');
+  const dialog = await openOtherLocations(page);
+  const entry = dialog.getByRole('listitem').filter({ hasText: '/home/ubuntu/repo' });
+  const opener = entry.getByRole('button', { name: 'More workspace actions' });
+  await opener.click();
+  const menu = page.getByRole('menu', { name: 'More workspace actions' });
+  const model = menu.getByRole('button', { name: /Codex model and Effort/u });
+  await model.click();
+  await page.keyboard.press('Escape');
+  await expect(model).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(opener).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
 });
 
 test('Forget removes a folder from the recents', async ({ page }) => {
@@ -154,10 +208,11 @@ test('the Other locations button sits in the Scratch row without making it talle
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 360, height: 740 }]) {
   test(`at ${viewport.width}px each recent fits its three actions on one line without scrolling sideways`, async ({ page }) => {
-    await page.setViewportSize(viewport);
     await stubConsole(page);
     await page.goto('/');
     const dialog = await openOtherLocations(page);
+    // the main toolbar plus is intentionally hidden on phones
+    await page.setViewportSize(viewport);
     await dialog.getByRole('textbox', { name: 'Folder path' }).fill('/home/ubuntu/a-rather-long-folder-name/that-keeps-going/and-going');
     const panel = dialog.locator(':scope > div');
     expect(await panel.evaluate(element => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(0);

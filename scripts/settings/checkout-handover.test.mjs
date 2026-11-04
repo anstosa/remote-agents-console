@@ -32,7 +32,7 @@ test("checkout adoption requires the exact host runtime protocol", () => {
   const current = fixture();
   try {
     validateCheckoutHandover(current.active, current.desired);
-    writeFileSync(resolve(current.to, "scripts/settings/queue.mjs"), "incompatible helper", { mode: 0o644 });
+    writeFileSync(resolve(current.to, "scripts/settings/pi-update.mjs"), "incompatible helper", { mode: 0o644 });
     assert.throws(() => validateCheckoutHandover(current.active, current.desired), { code: "checkout-helper-incompatible" });
     assert.equal(readFileSync(resolve(current.unitRoot, "remote-agent-settings-apply.service"), "utf8"), current.oldService);
   } finally { rmSync(current.root, { recursive: true, force: true }); }

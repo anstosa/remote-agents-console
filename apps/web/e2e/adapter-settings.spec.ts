@@ -3,11 +3,14 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 type VoiceSettings = { enabled: boolean; available: boolean; name: string; context: string };
 type SettingsPatch = { op: string; path: string[]; value?: unknown };
 type SettingsSave = { changes: Array<{ sourceId: string; revisionId: string; patches?: SettingsPatch[] }> };
+type PiUpdatePrompt = { requestId: string; currentVersion: string; targetVersion: string };
+type PiUpdatePromptResponse = { status?: number; json: { agentId?: string; error?: string } } | { abort: true };
 
 // stub a controlled console whose dashboard carries the given adapter capabilities
-async function openSettings(page: import('@playwright/test').Page, adapters: unknown, options: { defaultAgent?: string; davo?: VoiceSettings; onDefaultAgent?: (kind: string) => void; onDavo?: (settings: Omit<VoiceSettings, 'available'>) => void; onSettingsSave?: (settings: SettingsSave) => void; agentUpdates?: Array<{ kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string; pinned?: true }>; onAgentUpdate?: (kind: string) => { kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }; emptyWorkspace?: boolean; open?: boolean } = {}) {
+async function openSettings(page: import('@playwright/test').Page, adapters: unknown, options: { defaultAgent?: string; davo?: VoiceSettings; onDefaultAgent?: (kind: string) => void; onDavo?: (settings: Omit<VoiceSettings, 'available'>) => void; onSettingsSave?: (settings: SettingsSave) => void; agentUpdates?: Array<{ kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string; pinned?: true }>; onAgentUpdate?: (kind: string) => { kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }; onPiUpdatePrompt?: (prompt: PiUpdatePrompt) => PiUpdatePromptResponse | Promise<PiUpdatePromptResponse>; onDashboard?: (read: number) => Record<string, unknown>; emptyWorkspace?: boolean; open?: boolean } = {}) {
   let davo = options.davo ?? { enabled: false, available: true, name: 'Davo', context: 'Existing Davo persona.' };
   let settingsRevision = 1;
+  let dashboardReads = 0;
   let agentUpdates = options.agentUpdates ?? [];
   const settingsStatus = { pending: false, targets: [], effective: 'known', restartAvailable: true };
   const appSource = {
@@ -73,6 +76,13 @@ async function openSettings(page: import('@playwright/test').Page, adapters: unk
     }
     // publish and mutate agent versions
     if (url.pathname === '/api/agents/updates' && route.request().method() === 'GET') return route.fulfill({ json: { agents: agentUpdates } });
+    // submit one server-owned Pi pin-update prompt
+    if (url.pathname === '/api/agents/pi/update-prompt' && route.request().method() === 'POST') {
+      const result = await options.onPiUpdatePrompt?.(route.request().postDataJSON() as PiUpdatePrompt) ?? { json: { agentId: 'agent-pi-update' } };
+      // reproduce a lost response without inventing an application error
+      if ('abort' in result) return route.abort('connectionreset');
+      return route.fulfill({ status: result.status ?? 200, json: result.json });
+    }
     const agentUpdate = /^\/api\/agents\/([^/]+)\/update$/u.exec(url.pathname);
     // execute one mocked update
     if (agentUpdate !== null && route.request().method() === 'POST') {
@@ -81,8 +91,12 @@ async function openSettings(page: import('@playwright/test').Page, adapters: unk
       agentUpdates = [...agentUpdates.filter(status => status.kind !== kind), updated];
       return route.fulfill({ json: { agent: updated } });
     }
-    // provide an agentless worktree for the two full-size launch controls
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters, scratchLaunch: { kind: 'codex', origin: 'default' }, agents: options.emptyWorkspace ? [] : [{ id: 'agent-cora', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', unread: false }], projects: options.emptyWorkspace ? [{ id: 'proj', label: 'Proj', available: true, worktrees: [{ id: 'cora', label: 'Cora', path: '/worktrees/cora', available: true, pinned: true, order: 1, launch: { kind: 'codex', origin: 'worktree' } }] }] : [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
+    // publish either the default fixture or one stateful dashboard sequence
+    if (url.pathname === '/api/dashboard') {
+      dashboardReads += 1;
+      const dashboard = options.onDashboard?.(dashboardReads) ?? { generation: 1, adapters, scratchLaunch: { kind: 'codex', origin: 'default' }, agents: options.emptyWorkspace ? [] : [{ id: 'agent-cora', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', unread: false }], projects: options.emptyWorkspace ? [{ id: 'proj', label: 'Proj', available: true, worktrees: [{ id: 'cora', label: 'Cora', path: '/worktrees/cora', available: true, pinned: true, order: 1, launch: { kind: 'codex', origin: 'worktree' } }] }] : [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } };
+      return route.fulfill({ json: dashboard });
+    }
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     if (url.pathname === '/api/agents/agent-cora/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-cora/saved-prompts') return route.fulfill({ json: { prompts: [] } });
@@ -106,6 +120,14 @@ async function openSettings(page: import('@playwright/test').Page, adapters: unk
 async function openAgentMenu(page: import('@playwright/test').Page) {
   await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^(?:Choose|Launch) agent/u }).click();
   return page.getByRole('menu', { name: 'Choose agent' });
+}
+
+// read the visible attention contract instead of sampling animation frames
+async function updateAttention(control: Locator) {
+  return control.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { name: style.animationName, duration: style.animationDuration };
+  });
 }
 
 // sample the registered angle at deterministic points without relying on wall-clock timing
@@ -140,16 +162,139 @@ async function startRunningCodexUpdate(page: Page) {
   return { toolbar, ring: toolbar.locator('.update-progress-ring') };
 }
 
-test('lists the pinned Pi with its published version and offers no update for it', async ({ page }) => {
-  await openSettings(page, {
-    codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
-    pi: { program: '/usr/bin/node', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: false, sandbox: false }
-  }, { open: false, agentUpdates: [{ kind: 'pi', currentVersion: '1.4.0', latestVersion: '1.5.0', updateAvailable: true, pinned: true }] });
+const piAdapter = { program: '/usr/bin/node', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: false, sandbox: false };
+const piAvailable = [{ kind: 'pi', currentVersion: '1.4.0', latestVersion: '1.5.0', updateAvailable: true, pinned: true } as const];
+
+test('offers the bundled Pi prompt independently of RAC updates and cancels without mutation', async ({ page }) => {
+  const posts: string[] = [];
+  page.on('request', request => { /* retain only forbidden update mutations */ if (request.method() === 'POST' && (request.url().includes('/api/server/update') || /\/api\/agents\/pi\/update$/u.test(new URL(request.url()).pathname))) posts.push(new URL(request.url()).pathname); });
+  await openSettings(page, { pi: piAdapter }, { open: false, agentUpdates: piAvailable });
   const menu = await openAgentMenu(page);
-  const pi = menu.getByRole('group', { name: 'Pi agent' });
-  await expect(pi.locator('.launch-row')).toContainText('v1.4.0 → v1.5.0');
-  await expect(pi.getByRole('menuitem', { name: /^Update Pi/u })).toHaveCount(0);
+  const update = menu.getByRole('group', { name: 'Pi agent' }).getByRole('menuitem', { name: 'Update Pi to 1.5.0', exact: true });
+  await expect(update).toBeVisible();
+  await update.click();
+  const dialog = page.getByRole('dialog', { name: 'Update bundled Pi' });
+  await expect(dialog).toContainText('Pi is bundled in RAC');
+  await expect(dialog).toContainText('1.4.0 → 1.5.0');
+  await expect(dialog).toContainText('Create a local change to update the pinned version?');
+  await expect(dialog).toContainText('It does not update RAC from upstream or deploy the change.');
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', { name: 'Submit prompt' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', { name: 'Close Pi update' })).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(dialog.getByRole('button', { name: 'Submit prompt' })).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  expect(posts).toEqual([]);
+  await (await openAgentMenu(page)).getByRole('group', { name: 'Pi agent' }).getByRole('menuitem', { name: 'Update Pi to 1.5.0' }).click();
+  await page.getByRole('dialog', { name: 'Update bundled Pi' }).getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('dialog', { name: 'Update bundled Pi' })).toHaveCount(0);
+  expect(posts).toEqual([]);
 });
+
+test('submits the Pi change prompt once and blocks dismissal while its result is pending', async ({ page }) => {
+  let release: ((result: PiUpdatePromptResponse) => void) | undefined;
+  const prompts: PiUpdatePrompt[] = [];
+  const pending = new Promise<PiUpdatePromptResponse>(resolve => { release = resolve; });
+  await openSettings(page, { pi: piAdapter }, { open: false, agentUpdates: piAvailable, onPiUpdatePrompt: prompt => { prompts.push(prompt); return pending; } });
+  await (await openAgentMenu(page)).getByRole('group', { name: 'Pi agent' }).getByRole('menuitem', { name: 'Update Pi to 1.5.0' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Update bundled Pi' });
+  await dialog.getByRole('button', { name: 'Submit prompt' }).click();
+  await expect(dialog.getByRole('button', { name: 'Submitting…' })).toHaveAttribute('aria-busy', 'true');
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeVisible();
+  expect(prompts).toHaveLength(1);
+  expect(prompts[0]).toMatchObject({ currentVersion: '1.4.0', targetVersion: '1.5.0' });
+  expect(prompts[0]!.requestId).toMatch(/^[0-9a-f-]{36}$/u);
+  release?.({ json: { agentId: 'agent-pi-update' } });
+  await expect(dialog).toHaveCount(0);
+  await expect(page).toHaveURL(/#agent=agent-pi-update$/u);
+  expect(prompts).toHaveLength(1);
+});
+
+test('retries a rejected Pi prompt with the same request identity', async ({ page }) => {
+  const prompts: PiUpdatePrompt[] = [];
+  await openSettings(page, { pi: piAdapter }, { open: false, agentUpdates: piAvailable, onPiUpdatePrompt: prompt => {
+    prompts.push(prompt);
+    return prompts.length === 1 ? { status: 409, json: { error: 'The available Pi release changed.' } } : { json: { agentId: 'agent-pi-retry' } };
+  } });
+  await (await openAgentMenu(page)).getByRole('group', { name: 'Pi agent' }).getByRole('menuitem', { name: 'Update Pi to 1.5.0' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Update bundled Pi' });
+  await dialog.getByRole('button', { name: 'Submit prompt' }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('The available Pi release changed.');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Submit prompt' }).click();
+  await expect(page).toHaveURL(/#agent=agent-pi-retry$/u);
+  expect(prompts).toHaveLength(2);
+  expect(prompts[1]).toEqual(prompts[0]);
+});
+
+test('retries an ambiguous Pi prompt response with the same request identity', async ({ page }) => {
+  const prompts: PiUpdatePrompt[] = [];
+  await openSettings(page, { pi: piAdapter }, { open: false, agentUpdates: piAvailable, onPiUpdatePrompt: prompt => {
+    prompts.push(prompt);
+    return prompts.length === 1 ? { abort: true } : { json: { agentId: 'agent-pi-network-retry' } };
+  } });
+  await (await openAgentMenu(page)).getByRole('group', { name: 'Pi agent' }).getByRole('menuitem', { name: 'Update Pi to 1.5.0' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Update bundled Pi' });
+  await dialog.getByRole('button', { name: 'Submit prompt' }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Unable to confirm prompt submission. Retry to check the same request.');
+  await dialog.getByRole('button', { name: 'Submit prompt' }).click();
+  await expect(page).toHaveURL(/#agent=agent-pi-network-retry$/u);
+  expect(prompts).toHaveLength(2);
+  expect(prompts[1]).toEqual(prompts[0]);
+});
+
+test('selects the submitted Pi update agent when the same worktree reports it later', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('rac.hidden-agent:place-cora', '1'));
+  let revealSubmittedAgent = false;
+  const oldAgent = { id: 'agent-cora', panel: 'transcript', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 1, title: 'Existing task', kind: 'codex', attention: 'finished', queuedPromptCount: 0, unread: false };
+  const submittedAgent = { ...oldAgent, id: 'agent-pi-delayed', title: 'Update bundled Pi' };
+  const dashboard = () => ({
+    generation: revealSubmittedAgent ? 2 : 1,
+    adapters: { pi: piAdapter, codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } },
+    scratchLaunch: { kind: 'codex', origin: 'default' },
+    agents: revealSubmittedAgent ? [oldAgent, submittedAgent] : [oldAgent],
+    projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [{ id: 'cora', label: 'Cora', path: '/worktrees/cora', available: true, pinned: true, order: 1, launch: { kind: 'codex', origin: 'worktree' } }] }],
+    cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' }
+  });
+  await openSettings(page, { pi: piAdapter }, { open: false, agentUpdates: piAvailable, onDashboard: dashboard, onPiUpdatePrompt: () => ({ json: { agentId: 'agent-pi-delayed' } }) });
+  await page.evaluate(() => { (window as typeof window & { piUpdatePageMarker?: string }).piUpdatePageMarker = 'same-document'; });
+  await expect(page.locator('[data-prompt-id="agent-cora"]')).toHaveCount(0);
+  await (await openAgentMenu(page)).getByRole('group', { name: 'Pi agent' }).getByRole('menuitem', { name: 'Update Pi to 1.5.0' }).click();
+  await page.getByRole('dialog', { name: 'Update bundled Pi' }).getByRole('button', { name: 'Submit prompt' }).click();
+  await expect(page).toHaveURL(/#agent=agent-pi-delayed$/u);
+  await expect(page.locator('[data-prompt-id="agent-pi-delayed"]')).toHaveCount(0);
+  revealSubmittedAgent = true;
+  await expect(page.locator('[data-prompt-id="agent-pi-delayed"]')).toBeVisible({ timeout: 12_000 });
+  await expect(page.locator('[data-prompt-id="agent-cora"]')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as typeof window & { piUpdatePageMarker?: string }).piUpdatePageMarker)).toBe('same-document');
+});
+
+// keep the confirmation usable at desktop, phone and minimum supported widths
+for (const width of [1280, 390, 208]) {
+  test(`keeps the bundled Pi prompt confirmation within ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 844 });
+    await openSettings(page, { pi: piAdapter }, { open: false, agentUpdates: piAvailable });
+    await (await openAgentMenu(page)).getByRole('group', { name: 'Pi agent' }).getByRole('menuitem', { name: 'Update Pi to 1.5.0' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Update bundled Pi' });
+    const card = dialog.locator(':scope > div');
+    await expect(dialog).toBeVisible();
+    const bounds = await card.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+    expect(await card.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('pi-update-modal.png'), fullPage: true });
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toHaveCount(0);
+  });
+}
 
 test('moves Codex accounts from settings into the launcher submenu', async ({ page }) => {
   const settingsPage = await openSettings(page, {
@@ -179,7 +324,10 @@ test('keeps agent management in the far-left toolbar while + dropdowns only choo
   await expect(toolbar.locator('.workspace-toolbar-actions > :first-child')).toHaveClass(/launch-split/u);
   const menu = await openAgentMenu(page);
   const codex = menu.getByRole('group', { name: 'Codex agent' });
-  await expect(codex.locator(':scope > button')).toHaveText([/Codex/u, /Accounts/u, 'Update', '★']);
+  await expect(codex.getByRole('menuitem', { name: 'Launch Codex', exact: true })).toBeVisible();
+  await expect(codex.getByRole('menuitem', { name: 'Codex accounts' })).toBeVisible();
+  await expect(codex.getByRole('menuitem', { name: 'Update Codex to 0.153.2' })).toBeVisible();
+  await expect(codex.getByRole('menuitemradio', { name: /^Make .+ default$/u })).toHaveCount(0);
   await codex.getByRole('menuitem', { name: 'Codex accounts' }).click();
   await expect(menu.getByRole('group', { name: 'Codex accounts' }).getByRole('heading', { name: 'Accounts' })).toBeVisible();
   await page.keyboard.press('Escape');
@@ -191,23 +339,24 @@ test('keeps agent management in the far-left toolbar while + dropdowns only choo
   const worktree = worktreeLaunch.locator('..');
   await worktree.getByRole('button', { name: 'More workspace actions' }).click();
   const choices = page.getByRole('menu', { name: 'More workspace actions' });
-  await expect(choices.getByRole('menuitem', { name: /^Codex/u })).toBeVisible();
-  await expect(choices.locator('.launch-agent-details, .launch-agent-default, .launch-agent-accounts, .launch-agent-update, .launch-menu-error')).toHaveCount(0);
+  await expect(choices.getByRole('menuitem', { name: 'Launch Codex', exact: true })).toBeVisible();
+  await expect(choices.locator('.launch-agent-details, .launch-agent-accounts, .launch-agent-update, .launch-menu-error')).toHaveCount(0);
+  await expect(choices.getByRole('menuitemradio', { name: /^Make .+ default$/u })).toHaveCount(0);
   await expect(choices.getByRole('menuitem', { name: 'Codex accounts' })).toHaveCount(0);
   await expect(plus.getByRole('button', { name: 'Choose agent' })).toHaveCount(0);
 });
 
-test('changes the default agent from the launch menu', async ({ page }) => {
-  let selected: string | undefined;
+test('does not expose or mutate the default agent from the launch menu', async ({ page }) => {
+  const selected: string[] = [];
   await openSettings(page, {
     codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
     claude: { program: '/opt/claude', launchable: true, stateSource: 'reported', turnCapture: false, inlineQuestions: false, commands: true, sandbox: false }
-  }, { defaultAgent: 'codex', onDefaultAgent: kind => { selected = kind; }, open: false });
+  }, { defaultAgent: 'codex', onDefaultAgent: kind => { selected.push(kind); }, open: false });
   const menu = await openAgentMenu(page);
-  await expect(menu.getByRole('menuitemradio', { name: 'Make Codex default' })).toHaveAttribute('aria-checked', 'true');
-  await menu.getByRole('menuitemradio', { name: 'Make Claude default' }).click();
-  await expect.poll(() => selected).toBe('claude');
-  await expect(menu.getByRole('menuitemradio', { name: 'Make Claude default' })).toHaveAttribute('aria-checked', 'true');
+  await expect(menu.getByRole('menuitemradio', { name: /^Make .+ default$/u })).toHaveCount(0);
+  await menu.getByRole('group', { name: 'Codex agent' }).getByRole('menuitem', { name: 'Codex accounts' }).click();
+  await menu.getByRole('group', { name: 'Codex accounts' }).getByRole('button', { name: /Back to agents/u }).click();
+  expect(selected).toEqual([]);
 });
 
 test('shows agent versions and updates in launch menu with indicator on launch button', async ({ page }) => {
@@ -240,6 +389,7 @@ test('shows agent versions and updates in launch menu with indicator on launch b
   expect(attention.height).toBe(6);
   expect(attention.top).toBeCloseTo(4);
   expect(attention.right).toBeCloseTo(4);
+  expect(await updateAttention(launch)).toEqual({ name: 'settings-update-glow', duration: '1.4s' });
   await expect(plus.locator('.new-agent-update-dot')).toHaveCount(0);
   await expect(plus).not.toHaveClass(/updates-available/u);
   await expect(settings.locator('.server-switcher-settings-update-dot')).toHaveCount(0);
@@ -249,27 +399,65 @@ test('shows agent versions and updates in launch menu with indicator on launch b
   await expect(launch.locator('.launch-update-dot')).toBeVisible();
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   const menu = await openAgentMenu(page);
+  const menuBounds = await menu.boundingBox();
+  expect(menuBounds).not.toBeNull();
+  expect(menuBounds!.width).toBeLessThan(448);
+  expect(menuBounds!.x).toBeGreaterThanOrEqual(8);
+  expect(menuBounds!.x + menuBounds!.width).toBeLessThanOrEqual((page.viewportSize()?.width ?? 1280) - 8);
   const codexLine = menu.getByRole('group', { name: 'Codex agent' });
   await expect(codexLine.getByText('v0.152.1 → v0.153.2', { exact: true })).toBeVisible();
-  await expect(codexLine.locator(':scope > button')).toHaveText([/Codex/u, /Accounts/u, 'Update', '☆']);
-  // hover treatment fades across the launch action and its controls together
-  const idleBackground = await codexLine.evaluate(element => getComputedStyle(element).backgroundColor);
-  await codexLine.getByRole('menuitem', { name: /^Codex ·/u }).hover();
-  await expect.poll(() => codexLine.evaluate(element => getComputedStyle(element).backgroundColor)).not.toBe(idleBackground);
-  await page.waitForTimeout(200);
-  const hoverBackground = await codexLine.evaluate(element => getComputedStyle(element).backgroundColor);
-  await codexLine.getByRole('menuitem', { name: 'Codex accounts' }).hover();
-  await expect(codexLine).toHaveCSS('background-color', hoverBackground);
-  await codexLine.getByRole('menuitem', { name: 'Update Codex to 0.153.2' }).hover();
-  await expect(codexLine).toHaveCSS('background-color', hoverBackground);
-  await codexLine.getByRole('menuitemradio', { name: 'Make Codex default' }).hover();
-  await expect(codexLine).toHaveCSS('background-color', hoverBackground);
+  const launchAction = codexLine.getByRole('menuitem', { name: 'Launch Codex', exact: true });
+  const accountsAction = codexLine.getByRole('menuitem', { name: 'Codex accounts' });
+  const updateAction = codexLine.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
+  const modelAction = codexLine.getByRole('button', { name: /^Codex model and Effort:/u });
+  const controls = codexLine.getByLabel('Codex launch options');
+  await expect(launchAction).toBeVisible();
+  await expect(accountsAction).toBeVisible();
+  await expect(updateAction).toBeVisible();
+  const controlLabels = await controls.locator(':scope > button').evaluateAll(elements => elements.map(element => element.getAttribute('aria-label')));
+  expect(controlLabels).toEqual([
+    expect.stringMatching(/^Codex model and Effort:/u),
+    'Update Codex to 0.153.2',
+    'Codex accounts',
+    'Codex security',
+    'Launch Codex',
+  ]);
+  const typography = await codexLine.evaluate(element => ({
+    details: Number.parseFloat(getComputedStyle(element.querySelector('.launch-agent-details')!).fontSize),
+    model: Number.parseFloat(getComputedStyle(element.querySelector('.launch-model-trigger')!).fontSize),
+    modelTextAlign: getComputedStyle(element.querySelector('.launch-model-trigger > span')!).textAlign,
+    modelTextGrow: getComputedStyle(element.querySelector('.launch-model-trigger > span')!).flexGrow,
+  }));
+  expect(typography.details).toBeGreaterThanOrEqual(typography.model);
+  expect(typography.modelTextAlign).toBe('left');
+  expect(typography.modelTextGrow).toBe('1');
+  expect(await updateAttention(updateAction)).toEqual(await updateAttention(launch));
+  await expect(codexLine.getByRole('menuitemradio', { name: /^Make .+ default$/u })).toHaveCount(0);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  expect((await updateAttention(launch)).name).toBe('none');
+  expect((await updateAttention(updateAction)).name).toBe('none');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
+  expect((await updateAttention(launch)).name).toBe('none');
+  expect((await updateAttention(updateAction)).name).toBe('none');
+  await page.evaluate(() => { delete document.documentElement.dataset.motion; });
+  expect(await updateAttention(updateAction)).toEqual({ name: 'settings-update-glow', duration: '1.4s' });
+  const summary = codexLine.locator('.launch-card-summary');
+  await expect(summary).toHaveJSProperty('tagName', 'DIV');
+  const idleBackground = await summary.evaluate(element => getComputedStyle(element).backgroundColor);
+  await launchAction.hover();
+  await expect(launchAction).toHaveCSS('background-image', /linear-gradient/u);
+  await expect(summary).toHaveCSS('background-color', idleBackground);
+  await accountsAction.hover();
+  await expect(summary).toHaveCSS('background-color', idleBackground);
+  await updateAction.hover();
+  await expect(summary).toHaveCSS('background-color', idleBackground);
+  await modelAction.hover();
+  await expect(summary).toHaveCSS('background-color', idleBackground);
   await page.mouse.move(0, 0);
-  await page.waitForTimeout(75);
-  await expect(codexLine).toHaveCSS('background-color', idleBackground);
-  await expect(codexLine).toHaveCSS('transition-property', 'background-color');
+  await expect(summary).toHaveCSS('background-color', idleBackground);
   await expect(menu.getByRole('group', { name: 'OMX agent' }).getByText('v0.21.3', { exact: true })).toBeVisible();
-  await menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' }).click();
+  await updateAction.click();
   await openAgentMenu(page);
   await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.153.2', { exact: true })).toBeVisible();
   await expect(menu.getByRole('menuitem', { name: /Update Codex/u })).toHaveCount(0);
@@ -277,7 +465,7 @@ test('shows agent versions and updates in launch menu with indicator on launch b
   await expect(launch.getByRole('button', { name: 'Choose agent', exact: true })).toBeVisible();
 });
 
-test('keeps version errors visible while changing the default agent', async ({ page }) => {
+test('keeps version errors visible across account disclosure', async ({ page }) => {
   const adapters = {
     codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
     claude: { program: '/opt/claude', launchable: true, stateSource: 'reported', turnCapture: false, inlineQuestions: false, commands: true, sandbox: false }
@@ -285,12 +473,13 @@ test('keeps version errors visible while changing the default agent', async ({ p
   await openSettings(page, adapters, { defaultAgent: 'codex', open: false, agentUpdates: [{ kind: 'codex', updateAvailable: false, error: 'Version check failed' }] });
   const menu = await openAgentMenu(page);
   await expect(menu.getByRole('alert')).toHaveText('Version check failed');
-  await menu.getByRole('group', { name: 'Claude agent' }).getByRole('menuitemradio', { name: 'Make Claude default' }).click();
-  await expect(menu.getByRole('group', { name: 'Claude agent' }).getByRole('menuitemradio', { name: 'Make Claude default' })).toHaveAttribute('aria-checked', 'true');
+  await expect(menu.getByRole('menuitemradio', { name: /^Make .+ default$/u })).toHaveCount(0);
+  await menu.getByRole('group', { name: 'Codex agent' }).getByRole('menuitem', { name: 'Codex accounts' }).click();
+  await menu.getByRole('group', { name: 'Codex accounts' }).getByRole('button', { name: /Back to agents/u }).click();
   await expect(menu.getByRole('alert')).toHaveText('Version check failed');
 });
 
-test('marks an unavailable persisted default in the launch menu', async ({ page }) => {
+test('keeps an unavailable persisted adapter read-only without default controls', async ({ page }) => {
   const adapters = {
     codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
     claude: { program: '/opt/claude', launchable: false, unavailableReason: 'Not executable', stateSource: 'reported', turnCapture: false, inlineQuestions: false, commands: true, sandbox: false }
@@ -298,9 +487,9 @@ test('marks an unavailable persisted default in the launch menu', async ({ page 
   await openSettings(page, adapters, { defaultAgent: 'claude', open: false });
   const menu = await openAgentMenu(page);
   const claude = menu.getByRole('group', { name: 'Claude agent' });
-  await expect(claude.getByRole('menuitemradio', { name: 'Make Claude default' })).toHaveAttribute('aria-checked', 'true');
-  await expect(claude.getByRole('menuitemradio', { name: 'Make Claude default' })).toBeDisabled();
-  await expect(claude.getByRole('menuitem', { name: /^Claude(?! accounts)/u })).toBeDisabled();
+  await expect(claude.getByRole('menuitemradio', { name: /^Make .+ default$/u })).toHaveCount(0);
+  await expect(claude.getByRole('menuitem', { name: 'Launch Claude', exact: true })).toBeDisabled();
+  await expect(claude).toContainText('Not executable');
 });
 
 test('stages Davo and advanced voice fields until the global settings save', async ({ page }) => {
@@ -593,6 +782,12 @@ test('keeps the agent update orbit visible across desktop and phone launcher sta
   await expect.poll(() => ringParent.getByRole('button').evaluateAll(elements => elements.every(element => element.getAnimations().length === 0))).toBe(true);
   await expect.poll(() => ringParent.getByRole('button').locator('[aria-hidden="true"]').evaluateAll(elements => elements.every(element => element.getAnimations().length === 0))).toBe(true);
   await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+  const busyMenu = await openAgentMenu(page);
+  const busyUpdate = busyMenu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
+  await expect(busyUpdate).toHaveAttribute('aria-busy', 'true');
+  await expect(busyUpdate).toHaveClass(/progress-border/u);
+  expect((await updateAttention(busyUpdate)).name).toBe('none');
+  await page.keyboard.press('Escape');
 
   // keep the same orbit on the phone's single launch control
   await page.setViewportSize({ width: 430, height: 932 });
@@ -692,7 +887,10 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   await expect.poll(() => polls.codex).toBeGreaterThan(0);
   await openAgentMenu(page);
   await expect(menu.getByRole('alert')).toHaveCount(0);
-  await expect(codexUpdate).toContainText('Updating…');
+  // busy icon actions retain progress semantics without a text label
+  await expect(codexUpdate).toHaveAttribute('aria-busy', 'true');
+  await expect(codexUpdate).toHaveText('');
+  await expect(codexUpdate.locator('.launch-update-icon')).toBeVisible();
   await expect(codexUpdate).toBeDisabled();
   await expect(omxUpdate).toBeDisabled();
   await expect(toolbar.getByRole('button', { name: /Choose agent — update in progress$/u })).toBeVisible();
@@ -701,7 +899,7 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   // outlast the former seven-minute browser deadline
   await page.clock.fastForward(8 * 60_000);
   await expect.poll(() => polls.codex).toBeGreaterThan(codexPolls);
-  await expect(codexUpdate).toContainText('Updating…');
+  await expect(codexUpdate).toHaveAttribute('aria-busy', 'true');
   await expect(codexUpdate).toBeDisabled();
   expect(posts.codex).toBe(1);
   complete.add('codex');
@@ -715,7 +913,7 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   await expect.poll(() => starts.omx).toMatchObject({ contentType: 'application/json', body: '{}' });
   await expect.poll(() => polls.omx).toBeGreaterThan(0);
   await openAgentMenu(page);
-  await expect(omxUpdate).toContainText('Updating…');
+  await expect(omxUpdate).toHaveAttribute('aria-busy', 'true');
   expect(posts.omx).toBe(1);
   complete.add('omx');
   await page.clock.runFor(1_001);
@@ -758,7 +956,7 @@ test('recovers agent update polling after a transient HTML 524 response', async 
   await update.click();
   await expect.poll(() => polls).toBe(1);
   await openAgentMenu(page);
-  await expect(update).toContainText('Updating…');
+  await expect(update).toHaveAttribute('aria-busy', 'true');
   await expect(page.getByRole('alert', { name: 'Reconnecting to console' })).toHaveCount(0);
   await page.clock.runFor(1_001);
   await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.153.2', { exact: true })).toBeVisible();
@@ -811,6 +1009,8 @@ test('shows a dismissible toast after a queued agent update fails with its menu 
   await expect(menu.getByRole('alert')).toHaveCount(0);
   await expect(update).toBeEnabled();
   expect(posts).toBe(1);
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
   await toast.getByRole('button', { name: 'Dismiss operation status' }).click();
   await expect(toast).toHaveCount(0);
   await openAgentMenu(page);
@@ -826,7 +1026,7 @@ test('shows a dismissible toast after a queued agent update fails with its menu 
   await openAgentMenu(page);
   await update.click();
   await openAgentMenu(page);
-  await expect(update).toContainText('Updating…');
+  await expect(update).toHaveAttribute('aria-busy', 'true');
   await expect(toast).toHaveCount(0);
   expect(posts).toBe(3);
   failUpdate = true;
@@ -854,6 +1054,8 @@ test('shows a dismissible toast when an agent update cannot start', async ({ pag
   await openAgentMenu(page);
   await expect(menu.getByRole('alert')).toHaveCount(0);
   await expect(update).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
   await toast.getByRole('button', { name: 'Dismiss operation status' }).click();
   await expect(toast).toHaveCount(0);
   expect(posts).toBe(1);
@@ -936,7 +1138,7 @@ test('stops transient agent update polling at the seventeen-minute deadline', as
   const update = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
   await update.click();
   await openAgentMenu(page);
-  await expect(update).toContainText('Updating…');
+  await expect(update).toHaveAttribute('aria-busy', 'true');
   await page.clock.runFor(1_001);
   await expect.poll(() => polls).toBeGreaterThan(0);
   await page.clock.fastForward(17 * 60_000);

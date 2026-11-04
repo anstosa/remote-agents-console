@@ -34,7 +34,8 @@ export function createAgentWaiter(discovery: { dashboard(force?: boolean): Promi
     // poll for up to sixty seconds
     for (let attempt = 0; attempt < launchPollAttempts; attempt += 1) {
       const dashboard = await discovery.dashboard();
-      const agent = dashboard.agents.find(candidate => !before.has(candidate.id) && matches(candidate));
+      const agent = dashboard.agents.find(candidate => !before.has(candidate.id) && matches(candidate) && (candidate.structured?.preparing !== true || candidate.structured.lifecycle === 'failed'));
+      // a desired-model guard must settle before a launch is ready
       // return the ready agent
       if (agent) return agent;
       // pause before retrying

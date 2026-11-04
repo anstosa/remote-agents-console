@@ -45,6 +45,7 @@ const hostNodeBin = process.env.RAC_HOST_NODE_BIN;
 const hostInteractiveShell = process.env.RAC_HOST_INTERACTIVE_SHELL;
 const hostPath = process.env.RAC_HOST_PATH;
 const adapterFilesDir = process.env.RAC_ADAPTER_FILES_DIR;
+const processHome = process.env.HOME;
 const tempDirs: string[] = [];
 // default external tmux operations to success
 beforeEach(() => { hostPiRuntime.mockReset(); hostPiRuntime.mockReturnValue(undefined); verifyHostPiNode.mockReset(); verifyHostPiNode.mockResolvedValue('b'.repeat(64)); run.mockResolvedValue({ code: 0, stdout: '', stderr: '' }); });
@@ -68,6 +69,8 @@ afterEach(async () => {
   else process.env.RAC_HOST_PATH = hostPath;
   if (adapterFilesDir === undefined) delete process.env.RAC_ADAPTER_FILES_DIR;
   else process.env.RAC_ADAPTER_FILES_DIR = adapterFilesDir;
+  if (processHome === undefined) delete process.env.HOME;
+  else process.env.HOME = processHome;
   await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
 
@@ -222,6 +225,30 @@ describe('LaunchService', () => {
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['-c', '/srv/scratch']));
     // HOME the shell exports stays the account home (dirname of the hostPath), independent of the cwd
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining([expect.stringContaining("export HOME='/host/home'")]));
+  });
+
+  // use the resolved account independently from repository placement and Scratch cwd
+  it('uses launchHome for agents and default Scratch while an explicit Scratch directory still wins', async () => {
+    const project = { id: 'proj', hostPath: '/srv/repos/project' };
+    const inherited = new LaunchService({ ...codex, launchHome: '/accounts/actual', projects: [project] } as never);
+    const explicit = new LaunchService({ ...codex, launchHome: '/accounts/actual', scratchDirectory: '/srv/scratch', projects: [project] } as never);
+
+    expect(inherited.agentHome()).toBe('/accounts/actual');
+    expect(inherited.agentHome('proj')).toBe('/accounts/actual');
+    await expect(inherited.scratchPlace()).resolves.toMatchObject({ home: '/accounts/actual' });
+    await expect(explicit.scratchPlace()).resolves.toMatchObject({ home: '/srv/scratch' });
+    expect(explicit.agentHome('proj')).toBe('/accounts/actual');
+  });
+
+  // never infer a missing validated account from an unrelated repository parent
+  it('refuses default Scratch when launch HOME is explicitly unavailable', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    const config = { ...codex, launchHome: null, projects: [{ id: 'proj', hostPath: '/srv/repos/project' }] };
+    const service = new LaunchService(config as never);
+
+    expect(() => service.agentHome('proj')).toThrow(/home/u);
+    await expect(service.launchHome()).resolves.toBe(false);
+    expect(run).not.toHaveBeenCalled();
   });
 
   it('launches a non-git directory Project in place, labeled with the Project and remembering its kind', async () => {
@@ -432,7 +459,7 @@ describe('LaunchService', () => {
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%7', '@rac_console_managed', '1']);
   });
 
-  it('records @rac_sandboxed on a Sandboxed launch and leaves an ordinary launch unmarked', async () => {
+  it('does not claim console sandbox enforcement from a native launch boolean', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
     run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%7\n' : '', stderr: '' }));
     const worktree = cora();
@@ -440,7 +467,7 @@ describe('LaunchService', () => {
     const launchWorktree = (input: { mode: 'fresh'; sandboxed?: boolean }) => (service as unknown as { launchWorktree(id: string, input: unknown): Promise<boolean> }).launchWorktree('cora', input);
 
     await expect(launchWorktree({ mode: 'fresh', sandboxed: true })).resolves.toBe(true);
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%7', '@rac_sandboxed', '1']);
+    expect(run).not.toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%7', '@rac_sandboxed', '1']);
 
     run.mockClear();
     run.mockResolvedValue({ code: 0, stdout: '', stderr: '' });
@@ -470,7 +497,7 @@ describe('LaunchService', () => {
 
     await expect((service as unknown as { launchWorktree(id: string, input: unknown): Promise<boolean> }).launchWorktree('cora', { mode: 'fresh', sandboxed: true })).resolves.toBe(true);
     // the fresh window carries the launch marker while the old shell stays untouched
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%9', '@rac_sandboxed', '1']);
+    expect(run).not.toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%9', '@rac_sandboxed', '1']);
     expect(panes.pastePrompt).not.toHaveBeenCalled();
     expect(panes.enter).not.toHaveBeenCalled();
   });
@@ -1506,6 +1533,17 @@ describe('hostile checkout paths', () => {
 });
 
 describe('Review run launches', () => {
+  // Codex review presets use the short model selector
+  it('keeps one review model selector while preserving read-only restrictions', () => {
+    const config = { adapters: { codex: { program: codexProgram, args: ['--model', 'operator'], env: {}, launchable: true, allowedModels: [{ model: 'allowed' }] } }, projects: [] };
+    const service = new LaunchService(config as never);
+    const review = { runId: 'run_abcdefgh1234', label: 'Review', extraArgs: reviewRunArgs('codex', { model: 'allowed' }), replacedFlags: reviewReplacedFlags('codex', { model: 'allowed' }) };
+    const command = (service as unknown as { composeKindLaunch(kind: string, input: unknown, review: unknown): string }).composeKindLaunch('codex', { mode: 'fresh', cwd: '/repo', sandboxed: false }, review);
+    expect(command.match(/(?:--model|-m) allowed/gu)).toHaveLength(1);
+    expect(command).toContain('--sandbox read-only');
+    expect(command).not.toContain('operator');
+  });
+
   const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
   const runId = 'run_abcdefgh1234';
 
@@ -1553,7 +1591,7 @@ describe('Review run launches', () => {
     run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9\n' : '', stderr: '' }));
     const worktree = cora();
     const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(), enter: vi.fn() };
-    const config = { adapters: { claude: { program: '/usr/local/bin/claude', args: ['--model', 'opus', '--verbose'], env: {}, launchable: true } }, projects: [] };
+    const config = { adapters: { claude: { program: '/usr/local/bin/claude', args: ['--model', 'opus', '--verbose'], env: {}, launchable: true, allowedModels: [{ model: 'sonnet' }] } }, projects: [] };
     const store = { launchProfiles: async () => ({}), rememberLaunchProfile: vi.fn(async () => {}) };
     const service = new LaunchService(config as never, { find: async () => [socket] }, panes as never, undefined, store as never, () => [worktree], undefined, undefined, filesDir);
 
@@ -1674,7 +1712,7 @@ describe('the console\'s private directory', () => {
     hostPiRuntime.mockReturnValue({ node: '/host/bin/node', cli: '/host/pi.js', extension: '/host/extension.js', holder: '/host/holder.js', command: '/host/command.js', fingerprint: 'a'.repeat(64) });
     run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%9' : '', stderr: '' }));
     const worktree = cora({ path: '/host/cora', identity: '/host/cora', hostPath: undefined });
-    const service = new LaunchService(codex, undefined, undefined, undefined, undefined, () => [worktree]);
+    const service = new LaunchService({ ...codex, launchHome: '/home/ubuntu' } as never, undefined, undefined, undefined, undefined, () => [worktree]);
 
     const opened = await service.openHolderWindow(worktreePlace(worktree), 'agent-1', { program: '/host/bin/node', args: ['/host/pi.js'], env: { HOME: '/home/ubuntu', RAC_LAUNCH_NONCE: 'n1' } });
 
@@ -1695,6 +1733,46 @@ describe('the console\'s private directory', () => {
     expect(respawned.join(' ')).toContain('/host/bin/node /host/pi.js');
     expect(respawned.at(-1)).toContain('export PATH=');
     expect(respawned.at(-1)).toContain("export HOME='/home/ubuntu'");
+  });
+
+  // resolve blank holder homes from proven runtime authority without using Docker's account
+  it.each([
+    { label: 'missing HOME from launchHome', launchEnv: {}, launchHome: '/runtime/account', expectedLaunch: '/runtime/account', expectedGeneration: '/runtime/account' },
+    { label: 'blank HOME from launchHome', launchEnv: { HOME: '  ' }, launchHome: '/runtime/account', expectedLaunch: '/runtime/account', expectedGeneration: '/runtime/account' },
+    { label: 'unavailable runtime HOME from host tmux', launchEnv: {}, launchHome: null, expectedLaunch: '/tmux/account', expectedGeneration: '/tmux/account' },
+    { label: 'explicit overrides', launchEnv: { HOME: '/launch/explicit' }, launchHome: '/runtime/account', piHome: '/config/explicit', expectedLaunch: '/launch/explicit', expectedGeneration: '/config/explicit' }
+  ])('keeps bridged holder HOME secure for $label', async ({ launchEnv, launchHome, piHome, expectedLaunch, expectedGeneration }) => {
+    const parent = await mkdtemp(join(tmpdir(), 'rac-holder-home-'));
+    tempDirs.push(parent);
+    process.env.HOME = '/container/root';
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_REPOSITORY = parent;
+    process.env.RAC_HOST_INTERACTIVE_SHELL = '/usr/bin/zsh';
+    hostPiRuntime.mockReturnValue({ node: '/host/bin/node', cli: '/host/pi.js', extension: '/host/extension.js', holder: '/host/holder.js', command: '/host/command.js', fingerprint: 'a'.repeat(64) });
+    run.mockImplementation(async (_binary: string, args: string[]) => {
+      // expose only the fixed host account and synthetic pane id
+      if (args.includes('show-environment')) return { code: 0, stdout: 'HOME=/tmux/account\n', stderr: '' };
+      return { code: 0, stdout: args.includes('new-session') ? '%9' : '', stderr: '' };
+    });
+    const worktree = cora({ path: '/host/cora', identity: '/host/cora', hostPath: undefined });
+    const pi = piHome === undefined ? undefined : { program: '/host/bin/node', args: [], env: { HOME: piHome }, launchable: true };
+    const config = {
+      ...codex,
+      ...(launchHome === undefined ? {} : { launchHome }),
+      adapters: { ...codex.adapters, ...(pi === undefined ? {} : { pi }) }
+    };
+    const service = new LaunchService(config as never, undefined, undefined, undefined, undefined, () => [worktree]);
+
+    await expect(service.openHolderWindow(worktreePlace(worktree), 'agent-home', { program: '/host/bin/node', args: ['/host/pi.js'], env: launchEnv })).resolves.toMatchObject({ agentId: 'agent-home', host: true });
+
+    const respawned = run.mock.calls.find(call => (call[1] as string[]).includes('respawn-pane'))?.[1] as string[];
+    expect(respawned.at(-1)).toContain(`export HOME='${expectedLaunch}'`);
+    expect(respawned.at(-1)).not.toContain('/container/root');
+    expect(verifyHostPiNode.mock.calls.at(-1)?.[1]).toMatchObject({ HOME: expectedGeneration });
+    const homeQueries = run.mock.calls.filter(call => (call[1] as string[]).includes('show-environment'));
+    // query tmux only when configuration supplies no runtime account
+    if (launchHome === undefined || launchHome === null) expect(homeQueries).toEqual(Array.from({ length: 2 }, () => ['/usr/bin/tmux', ['-S', '/host-tmux/default', 'show-environment', '-g', 'HOME'], undefined, 1_500]));
+    else expect(homeQueries).toEqual([]);
   });
 
   it('refuses a bridged holder whose console and host paths differ', async () => {
@@ -1816,7 +1894,7 @@ describe('bridged structured sandbox boundaries', () => {
     process.env.RAC_ADAPTER_FILES_DIR = join(root, '.data/rendered');
     const runtime = { node: '/host/node', fingerprint: 'a'.repeat(64) };
     hostPiRuntime.mockReturnValue(runtime);
-    const service = new LaunchService(codex);
+    const service = new LaunchService({ ...codex, launchHome: '/host/home' } as never);
     const generation = await service.holderGeneration('pi');
 
     expect(generation).toMatch(/^[a-f0-9]{64}$/u);

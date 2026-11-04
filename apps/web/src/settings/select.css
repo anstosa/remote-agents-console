@@ -52,5 +52,22 @@
 .settings-select-option-check { display: grid; width: 1.05rem; height: 1.05rem; place-items: center; color: var(--green); }
 .settings-select-option-check .panel-header-icon { width: .95rem; height: .95rem; }
 .settings-select-empty { padding: .65rem; color: var(--overlay-1); font: 600 .65rem var(--font-mono); text-align: center; }
+.settings-multi-select-menu.more-menu { min-width: 0; }
+.settings-multi-select-options { display: grid; min-width: 0; min-height: 0; gap: .15rem; overflow-y: auto; overscroll-behavior: contain; }
+.settings-multi-select-group { display: grid; min-width: 0; gap: .15rem; margin: 0; border: 0; padding: 0; }
+.settings-multi-select-group + .settings-multi-select-group { margin-top: .2rem; padding-top: .3rem; border-top: 1px solid var(--surface-1); }
+.settings-multi-select-group > legend { width: 100%; box-sizing: border-box; padding: .3rem .48rem .16rem; color: var(--overlay-1); font: 800 .56rem var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }
+.settings-multi-select-option-row { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); border: 1px solid transparent; border-radius: calc(var(--control-radius) - .1rem); }
+.settings-multi-select-option { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: .48rem; padding: .45rem .5rem; color: var(--subtext-0); cursor: pointer; }
+.settings-multi-select-option:hover { border-color: var(--surface-2); background: var(--surface-0); color: var(--text); }
+.settings-multi-select-option-row:hover { border-color: var(--surface-2); background: var(--surface-0); }
+.settings-multi-select-option-row:hover > .settings-multi-select-option { background: transparent; }
+.settings-multi-select-option:has(input:focus-visible) { outline: 2px solid var(--blue); outline-offset: -2px; }
+.settings-multi-select-option:has(input:disabled) { color: var(--overlay-0); cursor: default; opacity: .58; }
+.settings-multi-select-option > input { margin: .12rem 0 0; accent-color: var(--mauve); }
+.settings-multi-select-option-copy { display: grid; min-width: 0; gap: .12rem; }
+.settings-multi-select-option-copy > strong { overflow-wrap: anywhere; font: 700 .67rem/1.35 var(--font-mono); }
+.settings-multi-select-option-copy > small { color: var(--overlay-1); font: 500 .58rem/1.35 var(--font-mono); overflow-wrap: anywhere; }
+.settings-multi-select-option[data-unavailable='true'] .settings-multi-select-option-copy > strong { color: var(--yellow); }
 @media (prefers-reduced-motion: reduce) { .settings-select-chevron, .settings-select-switch-track > span { transition: none; } }
 :root[data-motion='reduced'] :is(.settings-select-chevron, .settings-select-switch-track > span) { transition: none; }

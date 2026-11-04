@@ -340,7 +340,7 @@ export class SettingsService {
     const fallbackContext: EnvironmentFallbackContext = { application, environment: environment(contents.get('env') ?? ''), installation, configPath: this.options.configPath, checkout: this.options.checkout ?? serverCheckout(), home: process.env.HOME ?? homedir(), ...(controller ? { runtime: await this.placeholderRuntime() } : {}) };
     // dynamic schema guidance must obey the same cross-source credential boundary
     const safePlaceholderPath = (value: string | undefined): string | undefined => value !== undefined && protectedValues.some(secret => secret.length > 0 && value.includes(secret)) ? undefined : value;
-    const scratchDirectory = controller ? safePlaceholderPath(await scratchHome(undefined, this.config.projects)) : undefined;
+    const scratchDirectory = controller ? safePlaceholderPath(await scratchHome(undefined, this.config.projects, this.config.launchHome)) : undefined;
     const sources: SettingsSource[] = [];
     // describe each current authoritative source
     for (const [id, doc] of documents) {

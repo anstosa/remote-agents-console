@@ -38,7 +38,7 @@ function discoveryStub(agentAfterLaunch = true) {
 }
 
 async function app(deps: Record<string, unknown>) {
-  return await buildApp(testConfig({ publicOrigin: new URL(`https://${host}`), projects: [testProject({ id: 'proj' })] }), { auth, control, dashboardUpdates, launchPollDelay: async () => {}, ...deps } as never);
+  return await buildApp(testConfig({ publicOrigin: new URL(`https://${host}`), adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true } }, projects: [testProject({ id: 'proj' })] }), { auth, control, dashboardUpdates, launchPollDelay: async () => {}, ...deps, ...(deps.launch === undefined ? {} : { launch: { agentHome: () => '/tmp', ...deps.launch as object } }) } as never);
 }
 
 describe('GET /api/projects/:id/branches', () => {

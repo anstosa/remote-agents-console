@@ -24,6 +24,7 @@ import type { ReviewTour } from '../src/review-tour/contracts.js';
 import { GithubRequestError } from '../src/github/github.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from '../src/dashboard/updates.js';
 const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen:{host:'127.0.0.1',port:8787},publicOrigin:new URL('https://agents.example.com'),trustedProxyIps:new Set(['127.0.0.1']),pollIntervalMs:500,adapters:{},projects:[] };
+const launchAdapters = { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } };
 let queueDirectory: string | undefined;
 // keep default queues independent of persisted developer prompts
 beforeEach(async () => {
@@ -582,8 +583,8 @@ describe('agent launches', () => {
     const stranger = stated({ id: 'socket:%2', pane: { paneId: '%2', sessionId: 'socket:$2', socketFingerprint: 'socket' }, home: '/srv/tools', placeId: 'scratch:/srv/tools', title: '' });
     let dashboards = 0;
     const discovery = { worktreesNow: () => [], dashboard: async () => ({ generation: ++dashboards, places: [], agents: dashboards === 1 ? [] : dashboards === 2 ? [stranger] : [stranger, agent], projects: [] }) };
-    const launch = { launch: async () => true, launchHome: async () => true, scratchPlace: async () => ({ id: 'scratch:/home/ubuntu' }) };
-    const launchApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 3).toString('base64url')), discovery: discovery as never, launch: launch as never });
+    const launch = { launch: async () => true, launchHome: async () => true, scratchPlace: async () => ({ id: 'scratch:/home/ubuntu', home: '/home/ubuntu' }) };
+    const launchApp = await buildApp({ ...config, adapters: launchAdapters }, { auth: new AuthService(hash, Buffer.alloc(32, 3).toString('base64url')), discovery: discovery as never, launch: launch as never });
     try {
       const boot = await launchApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await launchApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
@@ -604,7 +605,7 @@ describe('agent launches', () => {
     const launch = { launch: async (id: string) => id === 'cora', launchHome: async () => true };
     // skip real poll delays
     const skipLaunchPollDelay = async () => {};
-    const launchApp = await buildApp({ ...config }, { auth: new AuthService(hash, Buffer.alloc(32, 4).toString('base64url')), discovery: discovery as never, launch: launch as never, launchPollDelay: skipLaunchPollDelay });
+    const launchApp = await buildApp({ ...config, adapters: launchAdapters }, { auth: new AuthService(hash, Buffer.alloc(32, 4).toString('base64url')), discovery: discovery as never, launch: launch as never, launchPollDelay: skipLaunchPollDelay });
     try {
       const boot = await launchApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await launchApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
@@ -622,8 +623,8 @@ describe('agent launches', () => {
     let dashboards = 0;
     const discovery = { worktreesNow: () => [], dashboard: async () => ({ generation: ++dashboards, places: [], agents: dashboards === 1 ? [] : [agent], projects: [] }) };
     const kinds: Array<string | undefined> = [];
-    const launch = { launch: async () => true, launchHome: async (kind?: string) => { kinds.push(kind); return true; }, scratchPlace: async () => ({ id: 'scratch:/home/ubuntu' }) };
-    const launchApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 9).toString('base64url')), discovery: discovery as never, launch: launch as never });
+    const launch = { launch: async () => true, launchHome: async (kind?: string) => { kinds.push(kind); return true; }, scratchPlace: async () => ({ id: 'scratch:/home/ubuntu', home: '/home/ubuntu' }) };
+    const launchApp = await buildApp({ ...config, adapters: launchAdapters }, { auth: new AuthService(hash, Buffer.alloc(32, 9).toString('base64url')), discovery: discovery as never, launch: launch as never });
     try {
       const boot = await launchApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await launchApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
@@ -639,7 +640,7 @@ describe('agent launches', () => {
 
   it('launches a non-git directory Project in place and returns its labeled agent id', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
-    const directoryConfig = { ...config, projects: [testProject({ id: 'notes', label: 'Notes', path: '/home/me/notes', identity: '/home/me/notes', mode: 'directory', available: true })] };
+    const directoryConfig = { ...config, adapters: launchAdapters, projects: [testProject({ id: 'notes', label: 'Notes', path: '/home/me/notes', identity: '/home/me/notes', mode: 'directory', available: true })] };
     const agent = stated({ id: 'socket:%5', pane: { paneId: '%5', sessionId: 'socket:$5', socketFingerprint: 'socket' }, home: '/home/me/notes', displayLabel: 'Notes', placeId: 'notes:/home/me/notes', title: '' });
     // an Agent at another Place appears first; only the Project's Place match picks the launched one
     const stranger = stated({ id: 'socket:%6', pane: { paneId: '%6', sessionId: 'socket:$6', socketFingerprint: 'socket' }, home: '/home/me', placeId: 'scratch:/home/me', title: '' });
@@ -1086,12 +1087,20 @@ describe('configured worktree deactivation', () => {
       // record the host alias handoff
       resume: async (id: string) => { events.push(`resume:${id}`); resumed = true; return true; }
     };
-    const restartApp = await buildApp({ ...config }, { auth: new AuthService(hash, Buffer.alloc(32, 22).toString('base64url')), discovery: discovery as never, launch: launch as never, tmux: { close: async () => { events.push(`close:${firstAgent.id}`); return true; } } as never, queuedPrompts: new QueuedPromptService(join(directory, 'queue.json')), launchPollDelay: async () => {} });
+    const restartApp = await buildApp({ ...config, adapters: launchAdapters }, { auth: new AuthService(hash, Buffer.alloc(32, 22).toString('base64url')), discovery: discovery as never, launch: launch as never, tmux: { close: async () => { events.push(`close:${firstAgent.id}`); return true; } } as never, queuedPrompts: new QueuedPromptService(join(directory, 'queue.json')), launchPollDelay: async () => {} });
     try {
       const boot = await restartApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await restartApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
       const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
 
+      // malformed security cannot close the running agent
+      const unsupported = await restartApp.inject({ method: 'POST', url: '/api/agents/agent-1/restart', headers, payload: { security: { invented: 'dangerous' } } });
+      expect(unsupported.statusCode).toBe(409);
+      expect(events).toEqual([]);
+      // disallowed models are rejected before acquiring a destructive handoff
+      const forbiddenModel = await restartApp.inject({ method: 'POST', url: '/api/agents/agent-1/restart', headers, payload: { model: { mode: 'model', id: 'outside' } } });
+      expect(forbiddenModel.statusCode).toBe(409);
+      expect(events).toEqual([]);
       const restarted = await restartApp.inject({ method: 'POST', url: '/api/agents/agent-1/restart', headers });
 
       expect(restarted.statusCode).toBe(201);
@@ -1123,7 +1132,7 @@ describe('configured worktree deactivation', () => {
       resumeConversation: async (id: string, threadId: string, kind?: string) => { events.push(`resume:${id}:${threadId}:${kind}`); resumed = true; return true; },
       launch: async (id: string, kind?: string) => { events.push(`fresh:${id}:${kind}`); resumed = true; return true; }
     };
-    const restartApp = await buildApp({ ...config }, { auth: new AuthService(hash, Buffer.alloc(32, 23).toString('base64url')), discovery: discovery as never, launch: launch as never, tmux: { close: async () => { events.push(`close:${restarting.id}`); return true; } } as never, queuedPrompts: new QueuedPromptService(join(directory, 'queue.json')), launchPollDelay: async () => {} });
+    const restartApp = await buildApp({ ...config, adapters: launchAdapters }, { auth: new AuthService(hash, Buffer.alloc(32, 23).toString('base64url')), discovery: discovery as never, launch: launch as never, tmux: { close: async () => { events.push(`close:${restarting.id}`); return true; } } as never, queuedPrompts: new QueuedPromptService(join(directory, 'queue.json')), launchPollDelay: async () => {} });
     try {
       const boot = await restartApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await restartApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });

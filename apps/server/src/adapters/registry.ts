@@ -79,7 +79,7 @@ function structuredCapability(adapter: StructuredAdapter, configured: AdapterCon
     turnCapture: true,
     conversations: true,
     naming: true,
-    allowedModels: configured?.allowedModels ?? [],
+    ...(configured?.allowedModels === undefined ? {} : { allowedModels: configured.allowedModels }),
     efforts: [...adapter.efforts],
     inlineQuestions: true,
     steer: adapter.steers,
@@ -89,8 +89,11 @@ function structuredCapability(adapter: StructuredAdapter, configured: AdapterCon
 }
 
 const launchability = (configured: AdapterConfigs[AgentKind]): Pick<AdapterCapability, 'launchable' | 'unavailableReason' | 'program'> => ({
-  launchable: configured?.launchable ?? false,
-  ...(configured?.unavailableReason === undefined ? {} : { unavailableReason: configured.unavailableReason }),
+  // explicit empty Allowed models disable launches without hiding configuration
+  launchable: (configured?.launchable ?? false) && configured?.allowedModels?.length !== 0,
+  ...(configured?.allowedModels?.length === 0
+    ? { unavailableReason: 'No models are allowed for this Agent.' }
+    : configured?.unavailableReason === undefined ? {} : { unavailableReason: configured.unavailableReason }),
   ...(configured?.program === undefined ? {} : { program: configured.program }),
 });
 
@@ -108,5 +111,7 @@ function capability(adapter: Adapter, transport: Transport, configured: AdapterC
     steer: false,
     commands: adapter.commands !== undefined,
     sandbox: adapter.sandbox !== undefined,
+    ...(configured?.allowedModels === undefined ? {} : { allowedModels: configured.allowedModels }),
+    efforts: [...adapter.reviewRuns?.efforts ?? []],
   };
 }

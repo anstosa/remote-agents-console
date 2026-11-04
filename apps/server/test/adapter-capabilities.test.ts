@@ -25,6 +25,15 @@ describe('adapterCapabilities', () => {
     expect(unavailable).toMatchObject({ launchable: false, program: '/nope', unavailableReason: '/nope is not an executable file' });
   });
 
+  it('keeps native defaults distinct from an explicit deny-all model policy', () => {
+    const nativeDefault = adapterCapabilities({ codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true } }).codex;
+    const denyAll = adapterCapabilities({ codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true, allowedModels: [] } }).codex;
+
+    expect(nativeDefault).toMatchObject({ launchable: true });
+    expect(nativeDefault).not.toHaveProperty('allowedModels');
+    expect(denyAll).toMatchObject({ launchable: false, allowedModels: [], unavailableReason: 'No models are allowed for this Agent.' });
+  });
+
   it('marks a registered kind unlaunchable when an adapters block omits it', () => {
     // an observe-only console: the adapters block exists but configures nothing
     expect(adapterCapabilities({}).codex).toMatchObject({ launchable: false });

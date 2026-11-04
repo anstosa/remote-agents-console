@@ -1144,6 +1144,9 @@ async function setupSettings(
     if (path === "/api/console/theme") return route.fulfill({ status: 204 });
     if (path === "/api/server/update-available")
       return route.fulfill({ json: { available: false } });
+    // keep agent model discovery read-only and unavailable in this generic fixture
+    if (path === "/api/launch/options" && request.method() === "POST")
+      return route.fulfill({ json: { kinds: [] } });
     if (path === "/api/settings/status")
       return route.fulfill({ json: state.status });
     // settle background integration reads without unrelated console errors
@@ -3852,6 +3855,9 @@ test("hides Environment rows represented by active structured settings", async (
       settings.locator(`[data-settings-path="${path}"]`),
     ).toHaveCount(0);
   await selectSettingsSection(settings, "agents", "Agents");
+  // expand configured adapters before checking their source-backed fields
+  for (const kind of ["codex", "claude"])
+    await settings.locator(`details[data-settings-path="adapters.${kind}"] > summary`).click();
   for (const path of ["adapters.codex.program", "adapters.claude.program"])
     await expect(
       settings.locator(`[data-settings-path="${path}"]`),
@@ -5804,11 +5810,17 @@ test("hides unused application fields and marks unsupported adapters unimplement
       `[data-settings-path=${JSON.stringify(path)}]`,
     );
     await expect(adapter).toBeVisible();
-    await expect(adapter).toHaveAttribute("aria-disabled", "true");
-    await expect(adapter.getByText(label, { exact: true })).toBeVisible();
+    await expect(adapter).not.toHaveAttribute("aria-disabled", "true");
     await expect(
-      adapter.getByText("Unimplemented", { exact: true }),
+      adapter.getByRole("heading", { name: label, exact: true, level: 3 }),
     ).toBeVisible();
+    await expect(
+      adapter.locator("summary").getByText("Unimplemented", { exact: true }),
+    ).toBeVisible();
+    await adapter.locator("summary").click();
+    await expect(
+      adapter.getByRole("button", { name: `Add ${label}`, exact: true }),
+    ).toBeDisabled();
     for (const control of await adapter
       .locator("input, textarea, button")
       .all())

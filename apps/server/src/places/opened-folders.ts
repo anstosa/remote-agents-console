@@ -16,9 +16,12 @@ const isEntry = (value: unknown): value is OpenedFolder => value !== null && typ
  * with no control characters, a leading `~` expanded against the account home, absolute,
  * realpath'd, and a directory. Otherwise the reason it is refused.
  */
-export async function resolveFolderPath(input: unknown, home: string): Promise<{ path: string } | { error: string }> {
+export async function resolveFolderPath(input: unknown, home?: string): Promise<{ path: string } | { error: string }> {
   if (typeof input !== 'string' || input.length === 0 || input.length > 4096 || /[\0-\x1f\x7f]/u.test(input)) return { error: 'That is not a valid path.' };
-  const expanded = input === '~' || input.startsWith('~/') ? join(home, input.slice(1)) : input;
+  const relativeToHome = input === '~' || input.startsWith('~/');
+  // absolute folders remain usable without an account home
+  if (relativeToHome && home === undefined) return { error: 'launch_home_unavailable' };
+  const expanded = relativeToHome ? join(home!, input.slice(1)) : input;
   if (!isAbsolute(expanded)) return { error: 'The path must be absolute.' };
   const path = await realpath(expanded).catch(() => undefined);
   if (path === undefined) return { error: 'That folder does not exist.' };

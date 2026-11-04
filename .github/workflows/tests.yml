@@ -107,6 +107,9 @@ jobs:
         run: |
           mkdir -p test-results
           node --test --test-concurrency=1 scripts/settings/*.test.mjs | tee test-results/settings.log
+      # exercise the dependency-free host catalog boundary on every change
+      - name: Test read-only model discovery
+        run: node --test scripts/discover-omx-models.test.mjs
       # preserve the built-in runner output on failure as well as success
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}

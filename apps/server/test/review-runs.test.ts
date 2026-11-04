@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HeadlessReviewRunner } from '../src/review-runs/headless.js';
 import { ModeDispatchReviewRunner } from '../src/review-runs/dispatch.js';
+import { resolveReviewLaunchModel } from '../src/launch/options.js';
 import { acceptsReviewEffort, reviewAgentKinds, reviewEfforts, reviewRunsFor } from '../src/review-runs/kinds.js';
 import { adapters } from '../src/adapters/registry.js';
 import { ReviewRunError, type KindReviewRunner, type ReviewRunCapability, type ReviewRunner, type ReviewRunRequest } from '../src/review-runs/runner.js';
@@ -220,6 +221,31 @@ describe('headless Claude Review runner', () => {
 });
 
 describe('Review run dispatch by mode', () => {
+  // policy refusal precedes headless process dispatch
+  it('enforces the allowed-model default before any review mode starts', async () => {
+    const seen: ReviewRunRequest[] = [];
+    const runner: KindReviewRunner = {
+      // expose the already-probed native capability
+      capability: async () => ({ available: true }),
+      // record only requests accepted by model policy
+      run: async choice => { seen.push(choice); return { value: {} }; }
+    };
+    const configured = { program: '/configured/codex', args: [], env: {}, launchable: true, allowedModels: [{ model: 'allowed', effort: 'high' }] };
+    const dispatch = new ModeDispatchReviewRunner({ codex: { mode: 'headless' }, claude: { mode: 'headless' } }, { codex: runner, claude: runner }, undefined, choice => {
+      // the default and explicit choice use the same resolver
+      const model = resolveReviewLaunchModel(choice.kind, configured, choice);
+      return { ...choice, model: model!.model, effort: model!.effort };
+    });
+    await dispatch.run(request('/w'), new AbortController().signal);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ model: 'allowed' });
+    expect(seen[0]!.effort).toBeUndefined();
+    await dispatch.run(request('/w', { effort: 'low' }), new AbortController().signal);
+    expect(seen[1]).toMatchObject({ model: 'allowed', effort: 'low' });
+    await expect(dispatch.run(request('/w', { model: 'outside' }), new AbortController().signal)).rejects.toMatchObject({ code: 'model_not_allowed' });
+    expect(seen).toHaveLength(2);
+  });
+
   // a kind runner that records the runs it receives
   const recording = (name: string, capability: ReviewRunCapability = { available: true }) => {
     const runs: string[] = [];

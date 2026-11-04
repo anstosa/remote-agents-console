@@ -12,17 +12,18 @@ export interface CodexProtocolClient {
   close(): Promise<void>;
 }
 
-export type CodexProtocolClientFactory = (codexHome: string, options?: { command?: string }) => Promise<CodexProtocolClient>;
+export type CodexProtocolClientFactory = (codexHome: string, options?: JsonlClientOptions) => Promise<CodexProtocolClient>;
 
 type PendingRequest = {
   resolve(value: unknown): void;
   reject(error: Error): void;
 };
 
-type JsonlClientOptions = {
+export type JsonlClientOptions = {
   command?: string;
   args?: string[];
   env?: NodeJS.ProcessEnv;
+  cwd?: string;
 };
 
 const maxProtocolLineBytes = 1024 * 1024;
@@ -185,6 +186,7 @@ export async function createCodexProtocolClient(codexHome: string, options: Json
   delete env.RAC_OPENAI_API_KEY_IDS;
   const child = spawn(options.command, options.args ?? ['app-server', '--listen', 'stdio://'], {
     env,
+    cwd: options.cwd,
     stdio: ['pipe', 'pipe', 'pipe']
   });
   return new JsonlCodexProtocolClient(child);

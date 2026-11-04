@@ -1,9 +1,10 @@
-import { Fragment, type MouseEventHandler, type ReactNode, type Ref, useCallback, useContext, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, Fragment, type MouseEventHandler, type ReactNode, type Ref, useCallback, useContext, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { SettingsHeaderActionsContext } from './header-actions.js';
 import { appendSettingsPatch, effectiveSettingsPatches, hasSettingsDraftChanges, type SettingsDraft } from './draft-changes.js';
 import { settingsDefaultPatches } from './schema-defaults.js';
 import { applyAuthoredProjectPatch } from '../../../server/src/settings/project-normalization.js';
+import type { LaunchKindManifest, LaunchOptionsResponse } from '../../../server/src/launch/options-types.js';
 import { SettingsError } from '../../../server/src/settings/contracts.js';
 import { useBrowserSettingsDraft, useSettingsBrowserDraftState, type BrowserSettingsIdentity } from './browser-settings.js';
 import type { SettingsChange, SettingsEnvironmentFallback, SettingsEnvField, SettingsIssue, SettingsPatch, SettingsSchema, SettingsSnapshot, SettingsSource, SettingsValidation } from './contracts.js';
@@ -21,7 +22,7 @@ import { SplitConfirmation } from '../split-confirmation.js';
 import { SettingsSourceHandover, type SettingsHandoverChoices } from './source-handover.js';
 import { isTmuxSettingsChange, tmuxEnvironmentKeys, tmuxEnvironmentKeysForInstallation } from './tmux-settings.js';
 import { agentEnvironmentKeys, agentEnvironmentKeysForAdapter, agentEnvironmentKeysForInstallation, environmentKeysWithDedicatedControls, googleCalendarEnvironmentKeys, storageEnvironmentKeys, voiceEnvironmentKeys } from './environment-fields.js';
-import { SettingsSelect, type SettingsSelectOption } from './select.js';
+import { SettingsMultiSelect, SettingsSelect, type SettingsMultiSelectOption, type SettingsSelectOption } from './select.js';
 import { inheritedProjectButtons, isConfiguredButtonPath, SettingsButtonColorSwatch, SettingsButtonFields, SettingsButtonPreview } from './button-fields.js';
 import { CloudflareSettings, useCloudflareSetupDraft } from './cloudflare-settings.js';
 import { GoogleCalendarSettings, useGoogleCalendarSetup } from './google-calendar-settings.js';
@@ -642,6 +643,7 @@ type CollectionEntryProps = {
   index: number;
   count: number;
   firstMovableIndex?: number;
+  reorderable?: boolean;
   summary: CollectionSummary;
   headerContent?: ReactNode;
   issues: SettingsIssue[];
@@ -662,7 +664,7 @@ type CollectionEntryProps = {
 };
 
 // keep compact collection actions and confirmation inside one row
-function CollectionEntry({ label, itemLabel, visibleLabel, index, count, firstMovableIndex = 0, summary, headerContent, issues, editing, permanentEditor = false, editorId, disabled, navigationDisabled, structuralReason, confirming, confirmProjectRemoval, onEdit, onMove, onRequestRemove, onCancelRemove, onRemove, children }: CollectionEntryProps) {
+function CollectionEntry({ label, itemLabel, visibleLabel, index, count, firstMovableIndex = 0, reorderable = true, summary, headerContent, issues, editing, permanentEditor = false, editorId, disabled, navigationDisabled, structuralReason, confirming, confirmProjectRemoval, onEdit, onMove, onRequestRemove, onCancelRemove, onRemove, children }: CollectionEntryProps) {
   const structureDisabled = disabled || structuralReason !== undefined || confirming;
   const moveUpTitle = structuralReason ?? `Move ${label} ${index + 1} up`;
   const moveDownTitle = structuralReason ?? `Move ${label} ${index + 1} down`;
@@ -671,8 +673,8 @@ function CollectionEntry({ label, itemLabel, visibleLabel, index, count, firstMo
   const showCollapsedIssue = !permanentEditor && !editing && issues.length > 0;
   return <fieldset className="settings-collection-entry settings-array-entry" data-settings-collection-entry="array" data-settings-entry-index={index} data-settings-editing={editing ? 'true' : 'false'}><legend className="sr-only">{itemLabel}</legend><div className="settings-array-entry-header settings-collection-entry-header"><div className="settings-collection-entry-copy">{headerContent ?? <>{visibleLabel !== undefined && <strong>{visibleLabel}</strong>}<span className="settings-collection-summary" title={summary.primary}>{summary.primary}</span>{summary.secondary && <small>{summary.secondary}</small>}</>}{issues.length > 0 && <span className="settings-collection-issue-badge" aria-label={`${issues.length} validation ${issues.length === 1 ? 'issue' : 'issues'}`}>{issues.length}</span>}</div><span className="settings-array-actions settings-collection-actions">
     {!permanentEditor && <button type="button" className="settings-collection-edit" aria-label={`${editing ? 'Close' : 'Edit'} ${itemLabel}`} aria-expanded={editing} aria-controls={editorId} disabled={navigationDisabled || confirming} onClick={onEdit}><PanelIcon path={editing ? panelIcons.close : panelIcons.editor} /><span>{editing ? 'Close' : 'Edit'}</span></button>}
-    <button type="button" aria-label={`Move ${label} ${index + 1} up`} title={moveUpTitle} disabled={structureDisabled || index <= firstMovableIndex} onClick={() => { /* move one collection entry earlier */ onMove(index - 1); }}><PanelIcon path={panelIcons.moveUp} /></button>
-    <button type="button" aria-label={`Move ${label} ${index + 1} down`} title={moveDownTitle} disabled={structureDisabled || index === count - 1} onClick={() => { /* move one collection entry later */ onMove(index + 1); }}><PanelIcon path={panelIcons.moveDown} /></button>
+    {reorderable && <><button type="button" aria-label={`Move ${label} ${index + 1} up`} title={moveUpTitle} disabled={structureDisabled || index <= firstMovableIndex} onClick={() => { /* move one collection entry earlier */ onMove(index - 1); }}><PanelIcon path={panelIcons.moveUp} /></button>
+    <button type="button" aria-label={`Move ${label} ${index + 1} down`} title={moveDownTitle} disabled={structureDisabled || index === count - 1} onClick={() => { /* move one collection entry later */ onMove(index + 1); }}><PanelIcon path={panelIcons.moveDown} /></button></>}
     <SettingsRemoveButton ariaLabel={`Remove ${label} ${index + 1}`} title={removeTitle} disabled={structureDisabled} labelClassName="settings-array-remove-label" onClick={() => { /* request project confirmation when required */ onRequestRemove(); }} />
   </span></div>{showCollapsedIssue && <span className="settings-collection-issue" role="alert">{issues[0]!.message}</span>}{editing && <div className="settings-collection-editor" id={editorId}>{children}</div>}{confirming && confirmProjectRemoval && <div className="settings-project-remove-confirm" role="alertdialog" aria-label={`Remove ${itemLabel}`}><p>Remove this Project from RAC configuration? Repositories, Worktrees, state, agents, and stacks will not be deleted.</p><span><button type="button" onClick={onCancelRemove}>Keep Project</button><SettingsRemoveButton disabled={disabled || structuralReason !== undefined} title={structuralReason} label="Confirm remove" onClick={onRemove} /></span></div>}</fieldset>;
 }
@@ -697,6 +699,8 @@ function ArrayField({ source, schema, value, path, draft, issues, label, itemLab
   const projectCollection = source.id === 'app' && path.length === 1 && path[0] === 'projects';
   const reviewPresets = source.id === 'app' && path.length === 2 && path[0] === 'review' && path[1] === 'presets';
   const adapterArgs = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && path[2] === 'args';
+  const sandboxList = source.id === 'app' && path.length === 4 && path[0] === 'adapters' && path[1] === 'pi' && path[2] === 'sandbox';
+  const inlineList = adapterArgs || sandboxList;
   const confirmProjectRemoval = label.toLowerCase().startsWith('project');
   // prune transient row state after external collection replacement
   useEffect(() => {
@@ -740,6 +744,8 @@ function ArrayField({ source, schema, value, path, draft, issues, label, itemLab
   };
   // move only after every index-bound subtree is hidden
   const move = (from: number, to: number) => {
+    // policy lists have no ordering controls or mutations
+    if (sandboxList) return;
     // never move an editable entry through its fixed source prefix
     if (from < pinnedCount || to < pinnedCount) return;
     closeForStructuralChange();
@@ -761,24 +767,24 @@ function ArrayField({ source, schema, value, path, draft, issues, label, itemLab
     setOpenEntries(current => { const next = new Set(current); next.delete(index); return next; });
     setConfirmingEntries(new Set([index]));
   };
-  // flatten argument rows without changing other collection cards
-  return <div className={`settings-array settings-collection${adapterArgs ? ' settings-array-arguments' : ''}`} data-settings-collection="array" data-settings-collection-path={path.join('.')}>
+  // keep arguments and policy rows unframed
+  return <div className={`settings-array settings-collection${inlineList ? ' settings-array-arguments' : ''}`} data-settings-collection="array" data-settings-collection-path={path.join('.')}>
     {protectedDraft && <p className="settings-collection-protected-note" role="note">{collectionProtectionReason}</p>}
     <div className="settings-array-list">{inheritedButtons.map(button => <div key={button.text} className="settings-array-entry settings-inherited-button" role="group" aria-label={`Inherited button ${button.text}`} data-settings-inherited-button={button.text}><div className="settings-collection-entry-header"><div className="settings-collection-entry-copy"><SettingsButtonPreview value={button} schema={item} /></div><div className="settings-inherited-button-actions"><small>Inherited from Application</small><button type="button" className="settings-inherited-button-override" aria-label={`Override ${button.text}`} disabled={disabled || navigationDisabled || protectedDraft} onClick={() => { /* copy only this inherited button */ overrideButton(button); }}>Override</button></div></div></div>)}{pinnedRows}{array.map((entry, index) => {
       // source-owner rows expose navigation instead of collection mutations
       if (index < pinnedCount) return null;
       const entryPath = [...path, String(index)];
       const entryLabel = `${itemLabel} ${index + 1}`;
-      // arguments stay editable without opening a separate row editor
-      const editing = !adapterArgs && (reviewPresets || openEntries.has(index));
+      // flat lists stay directly editable
+      const editing = !inlineList && (reviewPresets || openEntries.has(index));
       const editorId = collectionEditorId(source.id, entryPath);
-      // keep argument fields inline while other collections retain their existing editors
-      const editor = renderChild({ ...item, label: adapterArgs ? entryLabel : item.label ?? itemLabel }, entry, entryPath, String(index));
+      // inline policy and argument fields without changing other collections
+      const editor = renderChild({ ...item, label: inlineList ? entryLabel : item.label ?? itemLabel }, entry, entryPath, String(index));
       // keep the same live button preview visible with or without its editor
       const preview = source.id === 'app' && isConfiguredButtonPath(entryPath) ? <SettingsButtonPreview value={entry} schema={item} /> : undefined;
-      const headerContent = adapterArgs ? editor : preview;
+      const headerContent = inlineList ? editor : preview;
       const structuralReason = protectedDraft ? collectionProtectionReason : confirmingEntries.size > 0 && !confirmingEntries.has(index) ? 'Finish or cancel the pending Project removal before changing this list.' : undefined;
-      return <CollectionEntry key={`${path.join('.')}:${index}`} label={label} itemLabel={entryLabel} visibleLabel={projectCollection ? undefined : itemLabel} index={index} count={array.length} firstMovableIndex={pinnedCount} summary={collectionItemSummary(entry, item, projectCollection)} headerContent={headerContent} issues={collectionItemIssues(issues, source.id, entryPath)} editing={editing} permanentEditor={reviewPresets || adapterArgs} editorId={editorId} disabled={disabled} navigationDisabled={navigationDisabled} structuralReason={structuralReason} confirming={confirmingEntries.has(index)} confirmProjectRemoval={confirmProjectRemoval} onEdit={() => { /* toggle this ordered editor */ toggle(index); }} onMove={to => { /* keep index state detached from moved data */ move(index, to); }} onRequestRemove={() => { /* confirm or remove this ordered entry */ requestRemove(index); }} onCancelRemove={() => { /* cancel project removal */ setConfirmingEntries(new Set()); }} onRemove={() => { /* confirm project removal */ remove(index); }}>{adapterArgs ? null : editor}</CollectionEntry>;
+      return <CollectionEntry key={`${path.join('.')}:${index}`} label={label} itemLabel={entryLabel} visibleLabel={projectCollection ? undefined : itemLabel} index={index} count={array.length} firstMovableIndex={pinnedCount} reorderable={!sandboxList} summary={collectionItemSummary(entry, item, projectCollection)} headerContent={headerContent} issues={collectionItemIssues(issues, source.id, entryPath)} editing={editing} permanentEditor={reviewPresets || inlineList} editorId={editorId} disabled={disabled} navigationDisabled={navigationDisabled} structuralReason={structuralReason} confirming={confirmingEntries.has(index)} confirmProjectRemoval={confirmProjectRemoval} onEdit={() => { /* toggle this ordered editor */ toggle(index); }} onMove={to => { /* keep index state detached from moved data */ move(index, to); }} onRequestRemove={() => { /* confirm or remove this ordered entry */ requestRemove(index); }} onCancelRemove={() => { /* cancel project removal */ setConfirmingEntries(new Set()); }} onRemove={() => { /* confirm project removal */ remove(index); }}>{inlineList ? null : editor}</CollectionEntry>;
     })}</div><button type="button" className="settings-collection-add-button" aria-label={`+ Add ${itemLabel}`} disabled={disabled || array.length < pinnedCount} title={array.length < pinnedCount ? 'Configure the source files before adding additional entries.' : undefined} onClick={add}><span>+ Add {itemLabel}</span>{array.length === 0 && schema.placeholder && <span className="settings-collection-placeholder">{schema.placeholder}</span>}</button>
   </div>;
 }
@@ -836,6 +842,107 @@ function conductorModelsFrom(value: unknown): ConductorModel[] | undefined {
 
 // identify one model inside Pi's authored allowlist
 const allowedPiModel = (entries: unknown[], model: string): boolean => entries.some(entry => typeof entry === 'string' ? entry === model : entry !== null && typeof entry === 'object' && (entry as Record<string, unknown>).model === model);
+
+type AgentModelCatalog = { manifests: ReadonlyMap<string, LaunchKindManifest>; loading: boolean; error: string; refresh: () => void };
+type AgentAllowedModel = { model: string; effort?: string };
+const AgentModelCatalogContext = createContext<AgentModelCatalog | undefined>(undefined);
+
+// accept only launch manifests needed by settings
+function launchOptionsFrom(value: unknown): LaunchOptionsResponse | undefined {
+  // require the documented response container
+  if (value === null || typeof value !== 'object' || !Array.isArray((value as Record<string, unknown>).kinds)) return undefined;
+  // validate every model-policy boundary before trusting the response
+  for (const candidate of (value as { kinds: unknown[] }).kinds) {
+    // reject malformed manifest records
+    if (candidate === null || typeof candidate !== 'object') return undefined;
+    const record = candidate as Record<string, unknown>;
+    const policy = record.modelPolicy;
+    // require stable kind and revision identities
+    if (typeof record.kind !== 'string' || typeof record.optionsRevision !== 'string' || policy === null || typeof policy !== 'object') return undefined;
+    const modelPolicy = policy as Record<string, unknown>;
+    // require arrays and a truthful catalog state
+    if (!Array.isArray(modelPolicy.allowed) || !Array.isArray(modelPolicy.catalog) || !['explicit', 'native-default', 'empty'].includes(String(modelPolicy.state)) || !['ready', 'unavailable', 'unsupported'].includes(String(modelPolicy.catalogStatus))) return undefined;
+    // require every allowed model identity
+    if (!modelPolicy.allowed.every(entry => entry !== null && typeof entry === 'object' && typeof (entry as Record<string, unknown>).model === 'string')) return undefined;
+    // require every catalog model and its effort list
+    if (!modelPolicy.catalog.every(entry => entry !== null && typeof entry === 'object' && typeof (entry as Record<string, unknown>).id === 'string' && typeof (entry as Record<string, unknown>).name === 'string' && Array.isArray((entry as Record<string, unknown>).efforts) && ((entry as Record<string, unknown>).efforts as unknown[]).every(effort => typeof effort === 'string'))) return undefined;
+    const selection = modelPolicy.defaultSelection;
+    // require one documented default-selection shape
+    if (selection === null || typeof selection !== 'object' || !['model', 'keep-current', 'native-default'].includes(String((selection as Record<string, unknown>).mode)) || (selection as Record<string, unknown>).mode === 'model' && typeof (selection as Record<string, unknown>).id !== 'string') return undefined;
+  }
+  return value as LaunchOptionsResponse;
+}
+
+// load one canonical scratch-context catalog for the Agents page
+function AgentModelCatalogProvider({ children }: { children: ReactNode }) {
+  const runtime = useSettingsRuntime();
+  const [manifests, setManifests] = useState<ReadonlyMap<string, LaunchKindManifest>>(() => new Map());
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const requestSequence = useRef(0);
+
+  // refresh without changing application settings
+  const refresh = useCallback(() => {
+    const sequence = ++requestSequence.current;
+    setLoading(true);
+    setError('');
+    void (async () => {
+      try {
+        const response = await runtime.request('/api/launch/options', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'scratch' }) });
+        const payload: unknown = response.ok ? await response.json().catch(() => undefined) : undefined;
+        // ignore superseded reads
+        if (sequence !== requestSequence.current) return;
+        // retain saved values after an authoritative request failure
+        if (!response.ok) {
+          setError(await settingsResponseError(response, 'Available agent models could not be loaded.'));
+          return;
+        }
+        const options = launchOptionsFrom(payload);
+        // reject malformed successful responses
+        if (options === undefined) {
+          setError('Available agent models returned an unsupported response.');
+          return;
+        }
+        setManifests(new Map(options.kinds.map(manifest => [manifest.kind, manifest])));
+      } catch {
+        // retain configured choices during transport failures
+        if (sequence === requestSequence.current) setError('Available agent models could not be loaded.');
+      } finally {
+        // release only the current request
+        if (sequence === requestSequence.current) setLoading(false);
+      }
+    })();
+  }, [runtime.request]);
+
+  // refresh when controller authority changes
+  useEffect(() => {
+    refresh();
+    return () => { requestSequence.current += 1; };
+  }, [refresh, runtime.securityEpoch]);
+
+  return <AgentModelCatalogContext.Provider value={{ manifests, loading, error, refresh }}>{children}</AgentModelCatalogContext.Provider>;
+}
+
+// retain valid configured model metadata in authored order
+function agentAllowedModelsFrom(value: unknown): AgentAllowedModel[] {
+  // treat omission independently from an explicit empty list
+  if (!Array.isArray(value)) return [];
+  const allowed: AgentAllowedModel[] = [];
+  // ignore malformed entries until server validation reports them
+  for (const entry of value) {
+    // preserve the legacy string form for repairable settings
+    if (typeof entry === 'string' && entry !== '') {
+      allowed.push({ model: entry });
+      continue;
+    }
+    // require one exact object identity
+    if (entry === null || typeof entry !== 'object' || typeof (entry as Record<string, unknown>).model !== 'string') continue;
+    const model = (entry as Record<string, unknown>).model as string;
+    const effort = (entry as Record<string, unknown>).effort;
+    allowed.push({ model, ...(typeof effort === 'string' && effort !== '' ? { effort } : {}) });
+  }
+  return allowed;
+}
 
 // render the API-backed model selector without changing settings during discovery
 function ConductorModelField({ source, schema, value, issues, disabled, onPatch }: { source: SettingsSource; schema: SettingsSchema; value: unknown; issues: SettingsIssue[]; disabled: boolean; onPatch: SetPatch }) {
@@ -952,6 +1059,129 @@ function ConductorEditor({ source, schema, issues, disabled, onPatch, ...fields 
   </section>;
 }
 
+// distinguish the selected policy default without adding another text action
+function ModelDefaultStar({ model, selected, disabled, onSelect }: { model: string; selected: boolean; disabled: boolean; onSelect: () => void }) {
+  const label = selected ? `${model} is the default model` : `Make ${model} default`;
+  return <button type="button" className={`settings-agent-default-button${selected ? ' selected' : ''}`} aria-label={label} aria-pressed={selected} title={selected ? 'Current default model' : `Make ${model} the default model`} disabled={disabled} onClick={onSelect}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.7 2.5 5.1 5.6.8-4.1 4 1 5.6-5-2.7-5 2.7 1-5.6-4.1-4 5.6-.8Z" /></svg></button>;
+}
+
+// render an ordered policy list backed by the canonical launch manifest
+function AgentModelsField({ source, schema, value, path, issues, disabled, onPatch }: { source: SettingsSource; schema: SettingsSchema; value: unknown; path: string[]; issues: SettingsIssue[]; disabled: boolean; onPatch: SetPatch }) {
+  const catalog = useContext(AgentModelCatalogContext);
+  const kind = path[1] ?? '';
+  const manifest = catalog?.manifests.get(kind);
+  const configured = agentAllowedModelsFrom(value);
+  const explicit = Array.isArray(value);
+  const defaultSelection = manifest?.modelPolicy.defaultSelection;
+  // initialize only the displayed omission fallback
+  const selectedEntries: AgentAllowedModel[] = explicit ? configured : defaultSelection?.mode === 'model' ? [{ model: defaultSelection.id }] : [];
+  const selectedIds = selectedEntries.map(entry => entry.model);
+  const orderedAnchors = useRef(selectedIds);
+  const selectionTouched = useRef(false);
+  // adopt late native-default discovery before the operator edits
+  useEffect(() => {
+    // retain the operator's ordering boundary after input
+    if (selectionTouched.current) return;
+    orderedAnchors.current = selectedIds;
+  }, [selectedIds.join('\0')]);
+  const selected = new Set(selectedIds);
+  const catalogModels = manifest?.modelPolicy.catalog ?? [];
+  const catalogIds = new Set(catalogModels.map(model => model.id));
+  const catalogOrder = new Map(catalogModels.map((model, index) => [model.id, index]));
+  const conductorValue = valueAt(source.value, ['conductor']);
+  const conductor = conductorValue !== null && typeof conductorValue === 'object' && !Array.isArray(conductorValue) ? conductorValue as Record<string, unknown> : undefined;
+  const conductorEnabled = conductor !== undefined && conductor.enabled !== false;
+  const conductorKind = typeof conductor?.kind === 'string' ? conductor.kind : 'pi';
+  const requiredModel = conductorEnabled && conductorKind === kind && typeof conductor?.model === 'string' && conductor.model !== '' ? conductor.model : undefined;
+  const full = selectedIds.length >= 50;
+  const effortSchema = schema.items?.properties?.effort;
+  const modelOptions: SettingsMultiSelectOption[] = [
+    ...selectedEntries.filter(entry => !catalogIds.has(entry.model)).map(entry => ({ value: entry.model, label: entry.model, unavailable: true, ...(entry.model === requiredModel ? { disabled: true, detail: 'Required by Conductor' } : {}) })),
+    ...catalogModels.map(model => ({ value: model.id, label: model.name === model.id ? model.id : `${model.name} (${model.id})`, ...(model.provider === undefined || model.provider === '' ? {} : { group: model.provider }), ...(model.id === requiredModel && selected.has(model.id) ? { disabled: true, detail: 'Required by Conductor' } : full && !selected.has(model.id) ? { disabled: true, detail: 'Maximum 50 allowed models' } : {}) }))
+  ];
+
+  // stage the complete explicit policy
+  const stageEntries = (entries: AgentAllowedModel[]) => {
+    onPatch(source, { op: 'set', path, value: entries });
+  };
+
+  // preserve metadata while changing membership
+  const changeSelection = (nextIds: string[]) => {
+    selectionTouched.current = true;
+    const existing = new Map(selectedEntries.map(entry => [entry.model, entry]));
+    const next = new Set(nextIds);
+    const anchored = orderedAnchors.current.filter(model => next.has(model));
+    const appended = nextIds.filter(model => !anchored.includes(model)).sort((left, right) => (catalogOrder.get(left) ?? Number.MAX_SAFE_INTEGER) - (catalogOrder.get(right) ?? Number.MAX_SAFE_INTEGER) || left.localeCompare(right));
+    orderedAnchors.current = anchored;
+    stageEntries([...anchored, ...appended].map(model => existing.get(model) ?? { model }));
+  };
+
+  // move one existing choice to the policy default
+  const makeDefault = (model: string) => {
+    const current = selectedEntries.find(entry => entry.model === model);
+    // ignore stale or already-default actions
+    if (current === undefined || selectedEntries[0]?.model === model) return;
+    selectionTouched.current = true;
+    const reordered = [current, ...selectedEntries.filter(entry => entry.model !== model)];
+    orderedAnchors.current = reordered.map(entry => entry.model);
+    stageEntries(reordered);
+  };
+
+  // update one model's optional default effort
+  const setEffort = (model: string, effort: string) => {
+    stageEntries(selectedEntries.map(entry => {
+      // replace only the associated model metadata
+      if (entry.model !== model) return entry;
+      return effort === '' ? { model: entry.model } : { model: entry.model, effort };
+    }));
+  };
+
+  const empty = explicit && selectedEntries.length === 0;
+  const catalogUnavailable = catalog?.error !== '' || manifest?.modelPolicy.catalogStatus === 'unavailable' || manifest?.modelPolicy.catalogStatus === 'unsupported';
+  return <div className="settings-field settings-agent-models" data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}>
+    <div className="settings-field-summary"><span className="settings-field-copy"><strong>{schema.label ?? 'Allowed models'}</strong>{schema.description && <small>{schema.description}</small>}</span></div>
+    <SettingsMultiSelect label={`${labelForKey(kind)} allowed models`} value={selectedIds} options={modelOptions} disabled={disabled || catalog?.loading === true && modelOptions.length === 0} onChange={changeSelection} />
+    {catalog?.loading === true && <p className="settings-field-guidance" role="status">Loading available models…</p>}
+    {catalog?.error !== undefined && catalog.error !== '' && <p className="settings-field-guidance settings-field-guidance-error" role="alert">{catalog.error} <button type="button" onClick={() => { /* retry only the catalog read */ catalog.refresh(); }}>Retry</button></p>}
+    {catalog?.error === '' && manifest?.modelPolicy.catalogStatus !== 'ready' && <p className="settings-field-guidance" role="note">{manifest?.modelPolicy.message ?? 'This agent does not currently expose a model catalog.'} <button type="button" onClick={() => { /* retry current native discovery */ catalog.refresh(); }}>Retry</button></p>}
+    {!explicit && selectedEntries.length > 0 && <p className="settings-field-guidance" role="note">Using the current native default. Choose or reorder a model to save an explicit policy.</p>}
+    {!explicit && selectedEntries.length === 0 && !catalog?.loading && <p className="settings-field-guidance" role="note">The native default is not available as an exact model. Choose a model to create an explicit policy.</p>}
+    {catalogUnavailable && selectedEntries.length > 0 && <p className="settings-field-guidance" role="note">Saved model choices remain editable while discovery is unavailable.</p>}
+    {empty && <p className="settings-field-guidance settings-field-guidance-error" role="alert">Choose at least one allowed model before saving.</p>}
+    <div className="settings-agent-model-list" aria-label={`${labelForKey(kind)} selected models`}>
+      {/* keep saved order and per-model controls together */}
+      {selectedEntries.map((entry, index) => {
+        const discovered = catalogModels.find(model => model.id === entry.model);
+        const effortValues = [...new Set([...(discovered?.efforts ?? []), ...(effortSchema?.options ?? []), ...(entry.effort === undefined ? [] : [entry.effort])])];
+        const effortOptions: SettingsSelectOption[] = [{ value: '', label: discovered?.defaultEffort === undefined ? 'Default' : `Default (${discovered.defaultEffort})` }, ...effortValues.map(effort => ({ value: effort, label: !discovered?.efforts.includes(effort) && !(effortSchema?.options ?? []).includes(effort) ? `${effort} (unavailable)` : effort }))];
+        const label = discovered === undefined || discovered.name === entry.model ? entry.model : `${discovered.name} (${entry.model})`;
+        return <div className="settings-agent-model-row" key={entry.model} data-default={index === 0 || undefined} data-unavailable={!catalogIds.has(entry.model) || undefined}>
+          <span className="settings-agent-model-copy"><strong>{label}</strong><small>{index === 0 ? 'Default for new agents' : 'Allowed model'}{entry.model === requiredModel ? ' · Required by Conductor' : ''}</small></span>
+          <span className="settings-agent-model-controls">
+            {effortOptions.length > 1 && <SettingsSelect menuOnly label={`${entry.model} default effort`} value={entry.effort ?? ''} options={effortOptions} disabled={disabled} onChange={effort => { /* retain effort with its model */ setEffort(entry.model, effort); }} />}
+            <ModelDefaultStar model={entry.model} selected={index === 0} disabled={disabled} onSelect={() => { /* move only this selected model and retain its metadata */ makeDefault(entry.model); }} />
+          </span>
+        </div>;
+      })}
+    </div>
+    <FieldIssues issues={issues} sourceId={source.id} path={path} />
+  </div>;
+}
+
+// group each adapter without discarding hidden drafts or retaining disclosures
+function AdapterSettingsCard({ label, path, configured, unimplemented, disabled, navigationDisabled, onCollapse, onRemove, children }: { label: string; path: string[]; configured: boolean; unimplemented: boolean; disabled: boolean; navigationDisabled: boolean; onCollapse: () => void; onRemove?: () => void; children: ReactNode }) {
+  // start every adapter collapsed until opened or revealed by search
+  const [expanded, setExpanded] = useState(false);
+  return <details className={`settings-adapter-card${unimplemented ? ' settings-unimplemented-field' : ''}`} data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)} open={expanded} onToggle={event => {
+    const next = event.currentTarget.open;
+    // keep the transaction's captured disclosure boundary visible until it unlocks
+    if (navigationDisabled && next !== expanded) { event.currentTarget.open = expanded; return; }
+    // revoke secrets only when an expanded adapter is deliberately hidden
+    if (!next && expanded) onCollapse();
+    setExpanded(next);
+  }}><summary aria-label={`${label} adapter`} aria-disabled={navigationDisabled || undefined} tabIndex={navigationDisabled ? -1 : 0} onClick={event => { /* block native disclosure toggles while a transaction owns its values */ if (navigationDisabled) event.preventDefault(); }}><h3>{label}</h3>{(!expanded || !configured || unimplemented) && <span className={configured && !unimplemented ? 'settings-adapter-status-configured' : undefined}>{unimplemented ? 'Unimplemented' : configured ? 'Configured' : 'Not configured'}</span>}</summary>{expanded && configured && !unimplemented && onRemove !== undefined && <span className="settings-adapter-card-action"><SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} label={`Remove ${label}`} disabled={disabled} onClick={onRemove} /></span>}<div className="settings-adapter-card-body">{children}</div></details>;
+}
+
 // render every schema kind with collection-preserving patches
 function SchemaField({ source, schema: providedSchema, value, path, draft, disclosures, issues, disabled: inheritedDisabled, navigationDisabled: inheritedNavigationDisabled = inheritedDisabled, onPatch, onReveal, onRemask, onHideCollection, remoteServers = [], installationKind, renderAdapterEnvironment }: { source: SettingsSource; schema?: SettingsSchema; value: unknown; path: string[]; draft?: Draft; disclosures: Map<string, Disclosure>; issues: SettingsIssue[]; disabled: boolean; navigationDisabled?: boolean; onPatch: SetPatch; onReveal: (source: SettingsSource, path: string[]) => Promise<void>; onRemask: (key: string) => Promise<void>; onHideCollection?: HideCollection; remoteServers?: readonly RemoteServerDefaults[]; installationKind?: SettingsSnapshot['installationKind']; renderAdapterEnvironment?: (adapter: string) => ReactNode }) {
   const controlId = useId();
@@ -965,12 +1195,15 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   const navigationDisabled = inheritedNavigationDisabled || unimplementedAdapter;
   const label = unimplementedAdapter ? 'OpenCode' : schema.label ?? labelForKey(path.at(-1) ?? source.label);
   // inline argument fields keep their labels available to assistive technology only
-  const inlineArgument = source.id === 'app' && path.length === 4 && path[0] === 'adapters' && path[2] === 'args' && schema.type === 'string';
+  const inlineArgument = source.id === 'app' && schema.type === 'string' && (path.length === 4 && path[0] === 'adapters' && path[2] === 'args' || path.length === 5 && path[0] === 'adapters' && path[1] === 'pi' && path[2] === 'sandbox');
   const projectItem = source.id === 'app' && path[0] === 'projects' && path.length === 2 && /^\d+$/u.test(path[1]!);
   const projectField = source.id === 'app' && path[0] === 'projects' && path.length >= 3;
   const projectHostPath = source.id === 'app' && path[0] === 'projects' && path.length === 3 && path[2] === 'hostPath';
   const adapterBlock = source.id === 'app' && path.length === 2 && path[0] === 'adapters';
   const adapterEnvironment = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && path[2] === 'env';
+  const adapterAllowedModels = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && path[2] === 'allowedModels';
+  const piSandbox = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && path[1] === 'pi' && path[2] === 'sandbox';
+  const piSandboxRule = source.id === 'app' && path.length === 4 && path[0] === 'adapters' && path[1] === 'pi' && path[2] === 'sandbox';
   // retain lifecycle controls when their optional command is omitted
   const adapterLifecycleCommand = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && ['setup', 'teardown'].includes(path[2]!);
   const adapterUpdateCommand = source.id === 'app' && path.length === 4 && path[0] === 'adapters' && path[2] === 'updates';
@@ -985,7 +1218,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   if (projectHostPath && installationKind !== 'compose') return null;
   // keep resettable fields visible while omission selects their default state
   const reviewField = source.id === 'app' && path[0] === 'review';
-  const permanentField = reviewField || conductorEffort || enumArray || adapterLifecycleCommand || buttonIcon || source.id === 'app' && path.length === 1 && ['scratchDirectory', 'editor'].includes(path[0]!);
+  const permanentField = reviewField || conductorEffort || enumArray || adapterLifecycleCommand || buttonIcon || piSandbox || piSandboxRule || source.id === 'app' && path.length === 1 && ['scratchDirectory', 'editor'].includes(path[0]!);
   const removable = schema.optional && !hasSchemaDefault(schema) && !projectField && !permanentField;
   // seed only a deliberately edited missing container and retain exact leaf identity
   const stagePatch: SetPatch = (target, next, disclosureDerived) => {
@@ -1000,8 +1233,8 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
     const authored: SettingsPatch = reset ? { op: 'remove', path: reviewField ? reviewResetPath(source.value, next.path) : resetUpdates ? path.slice(0, -1) : next.path } : next;
     // revoke command disclosures before a reset removes their protected control
     if (reset && (adapterUpdateCommand || adapterLifecycleCommand)) onHideCollection?.(target, authored.path);
-    // create the missing preset array only when a row is explicitly added
-    if (reviewField && schema.type === 'array' && value === undefined && authored.op === 'insert') onPatch(target, { op: 'set', path, value: [] });
+    // create a missing preset or policy list only when an item is added
+    if ((reviewField || piSandboxRule) && schema.type === 'array' && value === undefined && authored.op === 'insert') onPatch(target, { op: 'set', path, value: [] });
     // sequence defaults while keeping blank resets independent of revoked plaintext
     for (const prepared of settingsDefaultPatches(schema, value, path, authored)) onPatch(target, prepared, prepared === authored && !reset && disclosureDerived);
   };
@@ -1010,6 +1243,8 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   if (schema.protected === true || isProtectedValue(value) || protectedSettingIdentity(path.at(-1) ?? '')) return <ProtectedField source={source} path={path} label={label} description={schema.description} schema={schema} draft={draft} disclosure={disclosure} disabled={disabled} showRemove={!hasSchemaDefault(schema) && !projectField && !permanentField && !adapterUpdateCommand} issues={issues} onReveal={onReveal} onRemask={onRemask} onPatch={permanentField || adapterUpdateCommand ? stagePatch : onPatch} />;
   // keep launch overrides and service variables together without moving either source
   if (adapterEnvironment && renderAdapterEnvironment !== undefined) return renderAdapterEnvironment(path[1]!);
+  // replace raw ordered collection editing with the model policy control
+  if (adapterAllowedModels) return <AgentModelsField source={source} schema={schema} value={value} path={path} issues={issues} disabled={disabled} onPatch={stagePatch} />;
   // replace numbered remote objects with permanent inherited identity controls
   if (source.id === 'app' && path.length === 2 && path[0] === 'remoteServers' && /^\d+$/u.test(path[1]!)) return <RemoteServerFields value={value} path={path} defaults={remoteServers} disabled={disabled} onPatch={next => { /* stage remote overrides in the same application transaction */ onPatch(source, next); }} renderIssues={fieldPath => <FieldIssues issues={issues} sourceId={source.id} path={fieldPath} />} renderProtected={key => {
     const fieldValue = valueAt(value, [key]);
@@ -1056,8 +1291,9 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   if (effectiveValue === null && schema.nullable) return <div className="settings-field settings-null-field" data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}><div className="settings-field-summary"><span className="settings-field-copy"><strong>{label}</strong><small>{value === undefined ? 'null' : 'Explicitly null'}</small>{schema.description && <small>{schema.description}</small>}</span><span className="settings-field-actions"><button type="button" disabled={disabled} onClick={() => stagePatch(source, { op: 'set', path, value: defaultForSchema({ ...schema, nullable: false }, schema.default !== null) })}>Use a value</button>{removable && <SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} disabled={disabled} onClick={() => stagePatch(source, { op: 'remove', path })} />}</span></div><FieldIssues issues={issues} sourceId={source.id} path={path} /></div>;
   // let optional absent values be created intentionally
   if (value === undefined && schema.optional && !defaulted && !projectField && !permanentField && !(source.id === 'app' && path.length === 1 && path[0] === 'remoteServers')) {
-    const addControl = <div className={`settings-field settings-optional-field${unimplementedAdapter ? ' settings-unimplemented-field' : ''}`} data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)} aria-disabled={unimplementedAdapter || undefined}><span className="settings-field-heading"><strong>{label}</strong><small>{unimplementedAdapter ? 'Unimplemented' : 'Optional'}</small></span>{schema.description && <small>{schema.description}</small>}<button type="button" disabled={disabled} onClick={() => stagePatch(source, { op: 'set', path, value: defaultForSchema(schema) })}>Add {label}</button></div>;
-    return addControl;
+    const addControl = <div className={`settings-field settings-optional-field${unimplementedAdapter ? ' settings-unimplemented-field' : ''}`} data-settings-path={adapterBlock ? undefined : path.join('.')} data-settings-search-path={adapterBlock ? undefined : JSON.stringify(path)} aria-disabled={unimplementedAdapter || undefined}><span className="settings-field-heading"><strong>{label}</strong><small>{unimplementedAdapter ? 'Unimplemented' : 'Optional'}</small></span>{schema.description && <small>{schema.description}</small>}<button type="button" disabled={disabled} onClick={() => stagePatch(source, { op: 'set', path, value: defaultForSchema(schema) })}>Add {label}</button></div>;
+    // unconfigured adapters retain their own expandable card
+    return adapterBlock ? <AdapterSettingsCard label={label} path={path} configured={false} unimplemented={unimplementedAdapter} disabled={disabled} navigationDisabled={inheritedNavigationDisabled} onCollapse={() => { /* revoke any adapter-scoped disclosure */ onHideCollection?.(source, path); }}>{addControl}</AdapterSettingsCard> : addControl;
   }
   // show absent-object inheritance only on its scalar value controls
   const child = (nextSchema: SettingsSchema, nextValue: unknown, nextPath: string[], key: string) => <SchemaField key={key} source={source} schema={effectiveValue === undefined && schema.type === 'object' && ['string', 'number'].includes(nextSchema.type) && nextSchema.placeholder === undefined ? { ...nextSchema, placeholder: schema.placeholder } : nextSchema} value={nextValue} path={nextPath} draft={draft} disclosures={disclosures} issues={issues} disabled={disabled} navigationDisabled={navigationDisabled} onPatch={stagePatch} onReveal={onReveal} onRemask={onRemask} onHideCollection={onHideCollection} remoteServers={remoteServers} installationKind={installationKind} renderAdapterEnvironment={renderAdapterEnvironment} />;
@@ -1112,8 +1348,18 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   } else {
     control = <input id={controlId} type="text" value={typeof scalarValue === 'string' ? scalarValue : ''} placeholder={placeholder} disabled={disabled} onChange={event => stagePatch(source, { op: 'set', path, value: event.target.value })} />;
   }
+  // custom policy presence never changes whether a Pi launch is sandboxed
+  if (piSandbox) return <section className="settings-schema-section settings-pi-sandbox" data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}><header><div><h3>{label}</h3></div><label className="client-settings-toggle"><input type="checkbox" role="switch" aria-label="Pi sandbox policy overrides" checked={value !== undefined} disabled={disabled} onChange={event => {
+    // remove only custom rules while preserving native launch security
+    if (!event.currentTarget.checked) onHideCollection?.(source, path);
+    stagePatch(source, event.currentTarget.checked ? { op: 'set', path, value: {} } : { op: 'remove', path });
+  }} /><span className="client-settings-switch-state">{value !== undefined ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></header>{value !== undefined && control}<FieldIssues issues={issues} sourceId={source.id} path={path} /></section>;
   // omit repeated application and collection headings
-  if (schema.type === 'object') return <section className={`settings-schema-section${unimplementedAdapter ? ' settings-unimplemented-field' : ''}`} aria-disabled={unimplementedAdapter || undefined} data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}>{!projectItem && !buttonItem && !(source.id === 'app' && (path.length === 0 || path.length === 1 && path[0] === 'review')) && <header><div><h3>{label}</h3>{unimplementedAdapter && <small>Unimplemented</small>}{schema.description && <p>{schema.description}</p>}</div>{removable && <SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} disabled={disabled} label={adapterBlock ? `Remove ${label}` : 'Remove section'} onClick={() => { /* revoke adapter secrets before hiding their controls */ if (adapterBlock) onHideCollection?.(source, path); stagePatch(source, { op: 'remove', path }); }} />}</header>}{control}<FieldIssues issues={issues} sourceId={source.id} path={path} /></section>;
+  if (schema.type === 'object') {
+    const section = <section className={`settings-schema-section${unimplementedAdapter ? ' settings-unimplemented-field' : ''}`} aria-disabled={unimplementedAdapter || undefined} data-settings-path={adapterBlock ? undefined : path.join('.')} data-settings-search-path={adapterBlock ? undefined : JSON.stringify(path)}>{!projectItem && !buttonItem && !(source.id === 'app' && (path.length === 0 || path.length === 1 && path[0] === 'review')) && <header><div>{!adapterBlock && <h3>{label}</h3>}{unimplementedAdapter && <small>Unimplemented</small>}{schema.description && <p>{schema.description}</p>}</div>{removable && !adapterBlock && <SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} disabled={disabled} label="Remove section" onClick={() => { /* revoke hidden values before removing their section */ onHideCollection?.(source, path); stagePatch(source, { op: 'remove', path }); }} />}</header>}{control}<FieldIssues issues={issues} sourceId={source.id} path={path} /></section>;
+    // cards stay expandable even while their editable fields are locked
+    return adapterBlock ? <AdapterSettingsCard label={label} path={path} configured={value !== undefined} unimplemented={unimplementedAdapter} disabled={disabled} navigationDisabled={inheritedNavigationDisabled} onCollapse={() => { /* revoke launch and service secrets together */ onHideCollection?.(source, path); }} onRemove={() => { /* revoke adapter secrets before removing its configuration */ onHideCollection?.(source, path); stagePatch(source, { op: 'remove', path }); }}>{section}</AdapterSettingsCard> : section;
+  }
   if (schema.type === 'union' || schema.type === 'json') return <div className="settings-field settings-field-union" data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}><div className="settings-field-summary"><span className="settings-field-copy"><strong>{label}</strong>{schema.description && <small>{schema.description}</small>}</span><span className="settings-field-actions">{schema.nullable && <button type="button" aria-label={`Set ${label} to null`} disabled={disabled} onClick={() => stagePatch(source, { op: 'set', path, value: null })}>Set null</button>}{removable && <SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} disabled={disabled} onClick={() => stagePatch(source, { op: 'remove', path })} />}</span></div>{control}<FieldIssues issues={issues} sourceId={source.id} path={path} /></div>;
   // bind copy only to native controls that expose this generated id
   const ownsNativeControl = schema.type === 'boolean' || schema.type === 'number' || schema.type === 'string';
@@ -1202,9 +1448,15 @@ function EnvironmentEditor({ source, draft, disclosures, issues, disabled, insta
   const record = pathPrefix.length > 0 ? valueAt(source.value, pathPrefix) : undefined;
   const launchEnvironment = pathPrefix.length > 0;
   // project adapter records into the same controls without changing their backing source
-  const allFields: SettingsEnvField[] = launchEnvironment
+  const authoredFields: SettingsEnvField[] = launchEnvironment
     ? Object.entries(record !== null && typeof record === 'object' && !Array.isArray(record) ? record : {}).map(([key, value]) => ({ key, protected: isProtectedValue(value) || protectedSettingIdentity(key), present: isProtectedValue(value) ? value.present : true, hasValue: isProtectedValue(value) ? value.hasValue ?? value.present : value !== '', ...(typeof value === 'string' ? { value } : {}), apply: source.apply }))
     : source.fields ?? [];
+  const permanentLaunchHome = launchEnvironment && pathPrefix.length === 3 && pathPrefix[0] === 'adapters' && pathPrefix[2] === 'env';
+  // keep HOME visible without authoring an override
+  const authoredHome = authoredFields.find(field => field.key === 'HOME');
+  const allFields: SettingsEnvField[] = permanentLaunchHome
+    ? [authoredHome ?? { key: 'HOME', protected: false, present: false, hasValue: false, apply: source.apply }, ...authoredFields.filter(field => field.key !== 'HOME')]
+    : authoredFields;
   // keep each field with its dedicated controls without changing source identity
   let defaultScopedKeys: ReadonlySet<string>;
   // choose one scope without obscuring installation-specific defaults
@@ -1220,7 +1472,7 @@ function EnvironmentEditor({ source, draft, disclosures, issues, disabled, insta
   // remove the final launch override without retaining a newly authored empty record
   const stagePatch: SetPatch = (target, next, derived) => {
     const remove = launchEnvironment && next.op === 'remove' && next.path.length === pathPrefix.length + 1 && pathPrefix.every((part, index) => next.path[index] === part);
-    const authored = remove && allFields.length === 1 ? { ...next, path: pathPrefix } : next;
+    const authored = remove && authoredFields.length === 1 ? { ...next, path: pathPrefix } : next;
     // revoke hidden rows and pending reveals before their controls disappear
     if (remove) onHideCollection?.(target, authored.path);
     onPatch(target, authored, derived);
@@ -1237,16 +1489,17 @@ function EnvironmentEditor({ source, draft, disclosures, issues, disabled, insta
     {fields.map(field => {
       // retain server guidance and describe older or custom environment entries too
       const path = [...pathPrefix, field.key];
-      const description = launchEnvironment ? 'Environment variable passed to this adapter’s launched agents.' : field.description?.trim() || environmentDescription(field.key);
+      const launchHome = permanentLaunchHome && field.key === 'HOME';
+      const description = launchHome ? 'Blank uses the launch user’s home.' : launchEnvironment ? 'Environment variable passed to this adapter’s launched agents.' : field.description?.trim() || environmentDescription(field.key);
       // distinguish unknown defaults from variables with no RAC-owned contract
       const configuredEmpty = field.present && (field.protected ? field.hasValue === false : field.value === '');
-      const fallback: SettingsEnvironmentFallback = configuredEmpty && field.emptyValueHint !== undefined ? { value: field.emptyValueHint, kind: 'derived' } : field.fallback ?? { value: !launchEnvironment && builtinEnvironmentKeys.has(field.key) ? 'Default unavailable; check the owning source' : 'No RAC default (custom variable)', kind: 'derived' };
+      const fallback: SettingsEnvironmentFallback = launchHome ? { value: 'Inherited from launch user’s home', kind: 'derived' } : configuredEmpty && field.emptyValueHint !== undefined ? { value: field.emptyValueHint, kind: 'derived' } : field.fallback ?? { value: !launchEnvironment && builtinEnvironmentKeys.has(field.key) ? 'Default unavailable; check the owning source' : 'No RAC default (custom variable)', kind: 'derived' };
       // saved conflict proof does not establish a winner for local draft values
       const fieldEdited = draft?.patches.some(patch => patch.path.length === path.length && path.every((part, index) => patch.path[index] === part));
       const winningSource = !fieldEdited && field.present && field.winningSource?.trim();
       const provenance = [winningSource && `Winning source: ${winningSource}`, field.overriddenBy && `Overridden by: ${field.overriddenBy}`].filter(Boolean).join(' · ');
       // custom assignments may be removed without revealing their values
-      const remove = field.present && (launchEnvironment || !builtinEnvironmentKeys.has(field.key)) ? <SettingsRemoveButton ariaLabel={`Remove ${field.key}`} title={`Remove ${field.key}`} labelClassName="sr-only" disabled={disabled} onClick={() => stagePatch(source, { op: 'remove', path })} /> : undefined;
+      const remove = !launchHome && field.present && (launchEnvironment || !builtinEnvironmentKeys.has(field.key)) ? <SettingsRemoveButton ariaLabel={`Remove ${field.key}`} title={`Remove ${field.key}`} labelClassName="sr-only" disabled={disabled} onClick={() => stagePatch(source, { op: 'remove', path })} /> : undefined;
       return field.protected ? <ProtectedField key={field.key} source={launchEnvironment ? source : { ...source, value: { [field.key]: { __racProtected: true, present: field.present, hasValue: field.hasValue ?? field.present } } }} path={path} label={field.key} headingAction={remove} description={[description, provenance].filter(Boolean).join(' · ')} fallback={fallback} schema={{ type: 'string', optional: true, apply: field.apply }} draft={draft} disclosure={disclosures.get(disclosureKey(source.id, path))} disabled={disabled} showRemove={false} environmentStyle issues={issues} onReveal={onReveal} onRemask={onRemask} onPatch={stagePatch} /> : <div className="settings-field" data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)} key={field.key}><div className="settings-field-summary"><span className="settings-field-copy"><span className="settings-field-heading"><span className="settings-environment-key"><strong>{field.key}</strong>{remove}</span></span><small>{description}</small>{provenance && <small className="settings-field-origin">{provenance}</small>}</span></div><input type="text" aria-label={field.key} value={field.value ?? ''} placeholder={fallback.value} disabled={disabled} onChange={event => stagePatch(source, event.target.value === '' ? { op: 'remove', path } : { op: 'set', path, value: event.target.value })} /><FieldIssues issues={issues} sourceId={source.id} path={path} /></div>;
     })}
     {scope === 'general' && <section className="settings-env-add" aria-label="Add environment variable">{adding ? <div className="settings-env-add-form"><input className="settings-env-variable-name" aria-label="Variable" placeholder="VARIABLE_NAME" autoFocus value={newKey} disabled={disabled} autoCapitalize="off" spellCheck={false} onChange={event => setNewKey(event.target.value)} /><label>Value<input type={protectedSettingIdentity(newKey) ? 'password' : 'text'} value={newValue} disabled={disabled} autoComplete="new-password" onChange={event => setNewValue(event.target.value)} /></label><span className="settings-inline-actions"><button type="button" disabled={disabled} onClick={() => { /* discard unfinished creation without changing the source */ setAdding(false); setNewKey(''); setNewValue(''); }}>Cancel</button><button type="button" className="settings-primary-button" disabled={disabled || !newKey.trim() || newValue === '' || allFields.some(field => field.key === newKey.trim()) || excludedKeys.has(newKey.trim())} onClick={add}>Add variable</button></span></div> : <button type="button" className="settings-collection-add-button" disabled={disabled} onClick={() => { /* expand the placeholder without staging an empty assignment */ setAdding(true); }}>Add environment variable</button>}</section>}
@@ -1364,7 +1617,7 @@ const sourceGroup = (source: Pick<SettingsSource, 'id' | 'format'>): string => {
 // flag backing sources and the dedicated pages that own their invalid controls
 function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
   const pages = new Set<string>();
-  const applicationPages: Record<string, string> = { adapters: 'agents', conductor: 'conductor', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
+  const applicationPages: Record<string, string> = { defaultAgent: 'agents', adapters: 'agents', conductor: 'conductor', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
   // route only authoritative issue identities never field values or error text
   for (const { sourceId, path } of issues) {
     pages.add(sourceId);
@@ -1868,7 +2121,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // keep calendar config and credential drafts on their dedicated page
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'googleCalendar' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => googleCalendarEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('google-calendar');
   // keep both original backing sources visible on the dedicated Agents page
-  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'adapters' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => agentEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('agents');
+  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'adapters' || next.path[0] === 'defaultAgent' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => agentEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('agents');
   // keep Conductor edits attached to their application transaction
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'conductor' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('conductor');
   // keep data-location drafts visible on Storage without changing either backing source
@@ -2018,6 +2271,10 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
 
   // keep advanced voice configuration beside its existing live controls
   const voiceSource = sources.find(source => source.id === 'app');
+  const agentAdaptersValue = valueAt(voiceSource?.value, ['adapters']);
+  const agentAdapters = agentAdaptersValue !== null && typeof agentAdaptersValue === 'object' && !Array.isArray(agentAdaptersValue) ? agentAdaptersValue as Record<string, unknown> : {};
+  // reject only explicitly authored empty model policies
+  const emptyAgentModelKind = Object.entries(agentAdapters).find(([, entry]) => entry !== null && typeof entry === 'object' && Object.hasOwn(entry, 'allowedModels') && Array.isArray((entry as Record<string, unknown>).allowedModels) && ((entry as Record<string, unknown>).allowedModels as unknown[]).length === 0)?.[0];
   const voiceSchema = voiceSource?.schema?.properties?.integrations?.properties?.realtime;
   const voiceFields = Object.entries(voiceSchema?.properties ?? {}).filter(([key]) => !dedicatedApplicationPaths.has(`integrations.realtime.${key}`));
   const voiceFileDraft = voiceSource === undefined || !changedSourceIds.has(voiceSource.id) ? undefined : drafts[voiceSource.id];
@@ -2087,6 +2344,17 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // share source locks across application-backed structured editors
   const applicationFieldsDisabled = loading || saving || !runtime.canMutate || voiceSource === undefined || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true;
   const adaptersSchema = voiceSource?.schema?.properties?.adapters;
+  const defaultAgentSchema = voiceSource?.schema?.properties?.defaultAgent;
+  const defaultAgentValue = valueAt(voiceSource?.value, ['defaultAgent']);
+  const selectedDefaultAgent = typeof defaultAgentValue === 'string' ? defaultAgentValue : '';
+  const supportedDefaultAgents = defaultAgentSchema?.options ?? Object.keys(adaptersSchema?.properties ?? {});
+  // expose only configured launch adapters in registry order
+  const configuredDefaultAgents = supportedDefaultAgents.filter(kind => kind !== 'opencode' && Object.hasOwn(agentAdapters, kind));
+  const defaultAgentOptions: SettingsSelectOption[] = [
+    { value: '', label: 'Automatic (first available)' },
+    ...configuredDefaultAgents.map(kind => ({ value: kind, label: kind === 'omx' ? 'OMX' : adaptersSchema?.properties?.[kind]?.label ?? labelForKey(kind) })),
+    ...(selectedDefaultAgent !== '' && !configuredDefaultAgents.includes(selectedDefaultAgent) ? [{ value: selectedDefaultAgent, label: `${selectedDefaultAgent === 'omx' ? 'OMX' : selectedDefaultAgent === 'opencode' ? 'OpenCode' : adaptersSchema?.properties?.[selectedDefaultAgent]?.label ?? labelForKey(selectedDefaultAgent)} (unavailable)` }] : [])
+  ];
   // revoke both backing sources before an adapter's environment controls disappear
   const hideAgentCollection: HideCollection = (source, path) => {
     hideCollection(source, path);
@@ -2099,11 +2367,11 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   const renderAdapterEnvironment = (adapter: string): ReactNode => {
     const path = ['adapters', adapter, 'env'];
     const keys = agentEnvironmentKeysForAdapter(adapter, snapshot?.installationKind);
-    const label = adaptersSchema?.properties?.[adapter]?.label ?? labelForKey(adapter);
+    const label = adapter === 'opencode' ? 'OpenCode' : adaptersSchema?.properties?.[adapter]?.label ?? labelForKey(adapter);
     const configured = valueAt(voiceSource?.value, ['adapters', adapter]);
     // do not expose environment controls until the adapter has been added
     if (configured === undefined) return null;
-    const launchDisabled = applicationFieldsDisabled || rawSourceIds.has('app') || adapter === 'pi' || adapter === 'opencode';
+    const launchDisabled = applicationFieldsDisabled || rawSourceIds.has('app') || adapter === 'opencode';
     return <section className="settings-schema-section" aria-label={`${label} Environment & keys`} data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}>
       <header><h3>Environment &amp; keys</h3></header>
       {keys.size > 0 && <>
@@ -2120,7 +2388,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     </section>;
   };
   // reuse adapter schemas and source locks without creating a competing configuration source
-  const agentsEditor = <>
+  const agentsEditor = <AgentModelCatalogProvider>
     {voiceSource === undefined ? <p role="note">Load Application configuration before editing agents.</p>
       : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing agents.</p>
         : adaptersSchema === undefined ? <p role="note">Agent configuration is unavailable in this installation.</p>
@@ -2129,9 +2397,14 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
             {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing agents.</p>}
             {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application configuration back to the structured editor before editing agents.</p>}
             {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing agents.</p>}
+            <div className="settings-field" data-settings-path="defaultAgent" data-settings-search-path={JSON.stringify(['defaultAgent'])}>
+              <div className="settings-field-summary"><span className="settings-field-copy"><strong>Default adapter</strong><small>Used when a launch does not choose an adapter.</small></span></div>
+              <SettingsSelect menuOnly label="Default adapter" value={selectedDefaultAgent} options={defaultAgentOptions} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} onChange={kind => { /* preserve automatic registry priority through omission */ patch(voiceSource, kind === '' ? { op: 'remove', path: ['defaultAgent'] } : { op: 'set', path: ['defaultAgent'], value: kind }); }} />
+              <FieldIssues issues={issues} sourceId={voiceSource.id} path={['defaultAgent']} />
+            </div>
             <SchemaField key={`agents:${catalogEditorEpoch}`} renderAdapterEnvironment={renderAdapterEnvironment} source={voiceSource} schema={adaptersSchema} value={valueAt(voiceSource.value, ['adapters'])} path={['adapters']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideAgentCollection} />
           </>}
-  </>;
+  </AgentModelCatalogProvider>;
   const scratchSchema = voiceSource?.schema?.properties?.scratchDirectory;
   // keep existing storage controls and migration metadata with their original application and environment files
   const storageEditor = <>
@@ -2244,7 +2517,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     { id: 'tmux', group: 'Application', label: 'TMUX', keywords: `tmux polling pollIntervalMs wrapper executable connection discovery socket ${[...tmuxEnvironmentKeys].join(' ')} ${sources.find(source => source.id === 'wrapper')?.path ?? ''}`, content: <TmuxSettings sources={sources} installationKind={snapshot?.installationKind} drafts={drafts} disclosures={disclosures} issues={issues} disabled={loading || saving || !runtime.canMutate} navigationDisabled={loading || saving} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} /> },
     { id: 'storage', group: 'Application', label: 'Storage', keywords: `storage data .data files paths directories scratchDirectory scratch notes prompts history worktrees integrations previews ${[...storageEnvironmentKeys].join(' ')}`, content: storageEditor },
     // group external services without changing their backing sources
-    { id: 'agents', group: 'Integrations', label: 'Agents', keywords: `adapters codex omx claude pi opencode program arguments environment setup teardown updates accounts usage cost ${[...agentEnvironmentKeys].join(' ')}`, content: agentsEditor },
+    { id: 'agents', group: 'Integrations', label: 'Agents', keywords: `default adapter defaultAgent automatic adapters codex omx claude pi opencode program arguments environment setup teardown updates accounts usage cost ${[...agentEnvironmentKeys].join(' ')}`, content: agentsEditor },
     { id: 'google-calendar', group: 'Integrations', label: 'Google Calendar', keywords: `google calendar oauth events activity lifecycle work start finish question retry delivery ${[...googleCalendarEnvironmentKeys].join(' ')}`, content: googleCalendarEditor },
     { id: 'cloudflare', group: 'Deployment', label: 'Cloudflare', keywords: 'cloudflare tunnel remote access hostname token connector dns public origin instructions', content: <CloudflareSettings setup={cloudflare} disabled={loading || saving || !runtime.canMutate} blockedByDrafts={fileAndBrowserDirtyCount > 0 || runtime.status?.pending === true} confirmationTarget={confirmationTarget} advanced={sources.some(source => (source.id === 'cloudflared' || source.id === 'cloudflared-credentials') && source.exists) ? sources.filter(source => source.id === 'cloudflared' || source.id === 'cloudflared-credentials').map(source => <section key={source.id}><h3>{source.label}</h3><RawSourceEditor source={source} draft={drafts[source.id]} disclosure={disclosures.get(disclosureKey(source.id, []))} issues={issues} disabled={loading || saving || !runtime.canMutate || !source.writable} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} /></section>) : undefined} /> }
   ];
@@ -2354,7 +2627,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
       {/* show commit actions only while drafts remain unsaved */}
       {dirtyCount > 0 && <>
         <button type="button" className="panel-header-action settings-header-discard" aria-label="Discard changes" title="Discard changes" disabled={loading || saving || !runtime.canMutate} onClick={() => { /* confirm before discarding any staged settings */ setConfirmation('discard'); }}><PanelIcon path={panelIcons.trash} /></button>
-        {fileAndBrowserDirtyCount > 0 && <button type="button" className={`panel-header-action settings-header-labelled-action settings-header-save${savePending ? ' progress-border progress-blue' : ''}`} aria-busy={savePending || undefined} disabled={loading || saving || !runtime.canMutate || voiceNameInvalid || browserDraft.validate() !== undefined} onClick={() => { /* validate and persist the captured transaction without an implicit restart */ void save(); }}>{savePending && <span className="update-progress-ring" aria-hidden="true" />}<PanelIcon path={panelIcons.save} /><span>{savePending ? 'Saving…' : 'Save changes'}</span></button>}
+        {fileAndBrowserDirtyCount > 0 && <button type="button" className={`panel-header-action settings-header-labelled-action settings-header-save${savePending ? ' progress-border progress-blue' : ''}`} aria-busy={savePending || undefined} disabled={loading || saving || !runtime.canMutate || voiceNameInvalid || emptyAgentModelKind !== undefined || browserDraft.validate() !== undefined} title={emptyAgentModelKind === undefined ? undefined : `${labelForKey(emptyAgentModelKind)} needs at least one allowed model`} onClick={() => { /* validate and persist the captured transaction without an implicit restart */ void save(); }}>{savePending && <span className="update-progress-ring" aria-hidden="true" />}<PanelIcon path={panelIcons.save} /><span>{savePending ? 'Saving…' : 'Save changes'}</span></button>}
       </>}
       {/* retain refresh in the shared toolbar across every settings section */}
       <button type="button" className={`panel-header-action settings-header-refresh${loading ? ' progress-border progress-loading progress-blue' : ''}`} aria-label="Refresh files" aria-busy={loading || undefined} disabled={loading || saving || dirtyCount > 0} title={dirtyCount > 0 ? 'Discard or save local changes before refreshing files' : loading ? 'Refreshing files…' : 'Refresh files'} onClick={() => { /* revoke old plaintext before accepting new source revisions */ void reloadFiles(); }}>{loading && <span className="update-progress-ring" aria-hidden="true" />}<PanelIcon path={panelIcons.refresh} /></button>

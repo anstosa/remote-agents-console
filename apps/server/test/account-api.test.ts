@@ -11,7 +11,7 @@ import { UnsupportedAccountOperationError } from '../src/accounts/index.js';
 import type { ValidatedConfig } from '../src/config/schema.js';
 import { QueuedPromptService } from '../src/prompts/queue.js';
 
-const baseConfig: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen: { host: '127.0.0.1', port: 8787 }, publicOrigin: new URL('https://agents.example.com'), trustedProxyIps: new Set(['127.0.0.1']), pollIntervalMs: 500, adapters: {}, projects: [] };
+const baseConfig: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen: { host: '127.0.0.1', port: 8787 }, publicOrigin: new URL('https://agents.example.com'), trustedProxyIps: new Set(['127.0.0.1']), pollIntervalMs: 500, adapters: { codex: { program: '/bin/false', args: [], env: {}, launchable: true } }, projects: [] };
 
 // authenticate one controlling browser
 const login = async (app: Awaited<ReturnType<typeof buildApp>>) => {

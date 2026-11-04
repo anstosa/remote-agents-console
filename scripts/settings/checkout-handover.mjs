@@ -13,7 +13,7 @@ export const CHECKOUT_RUNTIME_FILES = [
   "scripts/settings/dependencies.mjs", "scripts/settings/fs.mjs", "scripts/settings/inspection.mjs",
   "scripts/settings/install.mjs", "scripts/settings/lock.mjs", "scripts/settings/migrations.mjs",
   "scripts/settings/operations.mjs", "scripts/settings/queue.mjs", "scripts/settings/recovery-command.mjs",
-  "scripts/settings/update.mjs", "scripts/settings/validate.mjs",
+  "scripts/settings/pi-update.mjs", "scripts/settings/update.mjs", "scripts/settings/validate.mjs",
   "systemd/remote-agent-console.service.in", "systemd/remote-agent-settings-apply.service.in",
   "systemd/remote-agent-settings-apply.path.in"
 ];

@@ -12,6 +12,20 @@ function property(schema: SettingsSchema | undefined, key: string): SettingsSche
 }
 
 describe('shell command settings metadata', () => {
+  // keep sandbox inheritance names distinct from launch environment values
+  it('describes Pi policy lists without changing their optional array contract', () => {
+    const pi = property(property(applicationSettingsSchema(), 'adapters'), 'pi');
+    const sandbox = property(pi, 'sandbox');
+    expect(property(pi, 'env')).toMatchObject({ type: 'record', label: 'Environment & keys', optional: true });
+    expect(sandbox).toMatchObject({ type: 'object', optional: true, label: 'Custom sandbox rules' });
+    expect(sandbox.default).toBeUndefined();
+    expect(property(sandbox, 'env')).toMatchObject({ type: 'array', optional: true, label: 'Environment variable names', items: { type: 'string', label: 'Environment variable' } });
+    expect(property(sandbox, 'env').description).toContain('Set their values in Environment & keys');
+    expect(property(sandbox, 'allowWrite')).toMatchObject({ type: 'array', optional: true, items: { type: 'string', label: 'Write path' } });
+    expect(property(sandbox, 'deniedDomains')).toMatchObject({ type: 'array', optional: true, items: { type: 'string', label: 'Denied domain' } });
+    expect(sourceSchema.parse({ publicOrigin: 'https://agents.example.com', adapters: { pi: { env: { HOME: '/home/test', CUSTOM: 'value' }, sandbox: { allowWrite: [], denyRead: ['/private'] } } } }).adapters?.pi).toMatchObject({ env: { CUSTOM: 'value' }, sandbox: { allowWrite: [], denyRead: ['/private'] } });
+  });
+
   // mark application and adapter shell commands without marking literal launch values
   it('annotates application and adapter shell commands only', () => {
     const application = applicationSettingsSchema();

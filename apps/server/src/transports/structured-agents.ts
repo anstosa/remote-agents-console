@@ -112,7 +112,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       if (process.env.RAC_HOST_TMUX_DIR !== undefined && place.home !== placeHostRoot(place)) { console.warn(`[structured] ${place.home}: aliased host paths cannot launch ${kind}`); return undefined; }
       const located = resume === undefined ? undefined : await adapter.conversations.locate(resume, place.home);
       if (resume !== undefined && located === undefined) return undefined;
-      const allowed = configured.allowedModels ?? [];
+      const allowed = configured.allowedModels ?? (model === undefined ? [] : [{ model: model.model }]);
       const rendered = await files(kind);
       const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(located === undefined ? {} : { resume: located }), ...(latest === true ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
       const holder = await windows.openHolderWindow(place, id, { program: configured.program, args: [...spec.args, ...configured.args], env: { ...configured.env, ...spec.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
@@ -154,7 +154,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
 // by `offers` so the web takes each one once. `nonce` is what the latest process's launch report
 // must echo, and `refusal` why its report refused it. `access` is the console MCP token a
 // Conductor's process is given once it reports in, and `scripts` the deadlines of its scripts running
-type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; modelGuard?: Promise<void>; desiredModel?: ModelSetting; desiredNativeDefault?: true; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -221,7 +221,7 @@ export class StructuredAgents {
    * `allowedModels` is the approval boundary for a kind's models (`adapters.<kind>.allowedModels`),
    * in the operator's order: the first is the default, and none means the kind's own default.
    */
-  constructor(private readonly processes: StructuredProcesses, private readonly options: { file?: string; reportTimeoutMs?: number; allowedModels?: (kind: AgentKind) => readonly AllowedModel[] } = {}) {
+  constructor(private readonly processes: StructuredProcesses, private readonly options: { file?: string; reportTimeoutMs?: number; allowedModels?: (kind: AgentKind) => readonly AllowedModel[] | undefined } = {}) {
     this.file = options.file ?? join(serverCheckout(), '.data/structured-agents.json');
   }
 
@@ -237,18 +237,28 @@ export class StructuredAgents {
    * the entry's default. Answers the new Agent's id once its process started (it may then have
    * failed to report in); undefined when it could not start, or `model` is not an Allowed model.
    */
-  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role, spawnedBy }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor'; spawnedBy?: string } = {}): Promise<string | undefined> {
+  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role, spawnedBy, nativeDefaultValidated }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor'; spawnedBy?: string; nativeDefaultValidated?: true } = {}): Promise<string | undefined> {
     // the Conductor starts on its configured model
     if (role === 'conductor') model ??= this.conductor?.model;
+    const configured = this.options.allowedModels?.(kind);
+    // an explicit empty policy never inherits native defaults
+    if (configured !== undefined && configured.length === 0) return undefined;
     const entry = model === undefined ? (resume === undefined && latest !== true ? this.allowed(kind)[0] : undefined) : this.allowed(kind).find(candidate => candidate.model === model.model);
-    if (model !== undefined && entry === undefined) return undefined;
+    // explicit model choices remain within the configured policy
+    if (model !== undefined && entry === undefined && !(configured === undefined && nativeDefaultValidated === true)) return undefined;
     const records = await this.load();
     const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin: spawnedBy === undefined ? 'operator' : { conductor: spawnedBy }, ...(role === undefined ? {} : { role }), launchedAt: Date.now() };
     const live = this.idle();
     records.push(record);
     this.live.set(record.id, live);
     const effort = model?.effort ?? entry?.effort;
-    const started = await this.start(record, live, { id: record.id, kind, place, ...(resume === undefined ? {} : { resume }), ...(latest === true ? { continue: true as const } : {}), ...(entry === undefined ? {} : { model: { model: entry.model, ...(effort === undefined ? {} : { effort }) } }) });
+    // apply a selected resume model only after conversation restoration
+    if (model !== undefined && (resume !== undefined || latest === true)) {
+      live.desiredModel = { model: model.model, ...(effort === undefined ? {} : { effort }) };
+      // only server-validated implicit defaults bypass a missing explicit list
+      if (configured === undefined && nativeDefaultValidated === true) live.desiredNativeDefault = true;
+    }
+    const started = await this.start(record, live, { id: record.id, kind, place, ...(resume === undefined ? {} : { resume }), ...(latest === true ? { continue: true as const } : {}), ...(entry === undefined && model === undefined ? {} : { model: { model: entry?.model ?? model!.model, ...(effort === undefined ? {} : { effort }) } }) });
     if (started === undefined) {
       records.splice(records.indexOf(record), 1);
       this.live.delete(record.id);
@@ -455,8 +465,34 @@ export class StructuredAgents {
     live.cursor = process.cursor;
     live.raw = process.raw;
     record.holder = process.holder;
+    // finish guards whose initial event preceded connection adoption
+    if (live.guarded === true && live.model !== undefined) await this.guardAllowedModels(record, live);
     await this.save();
     this.changed(live);
+  }
+
+  // enforce one restored-model policy gate and release delivery only for its process generation
+  private guardAllowedModels(record: StructuredRecord, live: Live): Promise<void> {
+    const existing = live.modelGuard;
+    // concurrent adoption and model events share the same gate
+    if (existing !== undefined) return existing;
+    const generation = live.generation;
+    live.busy = true;
+    const guard = this.holdToAllowedModels(record, live).catch(async () => {
+      // a replaced or closed process cannot fail its successor
+      if (this.live.get(record.id) !== live || live.generation !== generation) return;
+      await this.fail(record, live, 'The selected model could not be applied.', true);
+    });
+    live.modelGuard = guard;
+    void guard.finally(() => {
+      // only this generation's active guard owns delivery readiness
+      if (live.modelGuard !== guard) return;
+      delete live.modelGuard;
+      if (this.live.get(record.id) !== live || live.generation !== generation) return;
+      live.busy = false;
+      this.changed(live);
+    });
+    return guard;
   }
 
   // Give a Conductor's process the console's MCP access over its protocol before it goes live; one
@@ -624,7 +660,7 @@ export class StructuredAgents {
     return await this.whileIdle(id, async ({ record, live, connection }) => {
       if (!await connection.newConversation()) return false;
       await this.holdToAllowedModels(record, live);
-      return true;
+      return record.lifecycle === 'live';
     });
   }
 
@@ -634,7 +670,7 @@ export class StructuredAgents {
       const reference = await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home);
       if (reference === undefined || !await connection.switchConversation(reference)) return false;
       await this.holdToAllowedModels(record, live);
-      return true;
+      return record.lifecycle === 'live';
     });
   }
 
@@ -740,7 +776,7 @@ export class StructuredAgents {
       // one resyncing after a reattach may be working: nothing takes it to have finished
       const attention = questions.length > 0 ? 'question' : live?.working === true || live?.resyncing === true ? 'working' : 'finished';
       const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }), ...(live?.compacting === true ? { compacting: true } : {}) } };
+      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(live?.desiredModel !== undefined || live?.modelGuard !== undefined ? { preparing: true as const } : {}), ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }), ...(live?.compacting === true ? { compacting: true } : {}) } };
     });
   }
 
@@ -819,7 +855,8 @@ export class StructuredAgents {
           live.guarded = true;
           // nothing is delivered until the Agent is on an Allowed model
           live.busy = true;
-          void this.holdToAllowedModels(record, live).finally(() => { live.busy = false; });
+          // a replay before adoption waits for adopt to supply the connection
+          if (live.connection !== undefined) void this.guardAllowedModels(record, live);
         }
         break;
       case 'turn':
@@ -915,6 +952,7 @@ export class StructuredAgents {
     live.scripts?.clear();
   }
 
+  // retain absent policy separately from its displayed entries
   private allowed(kind: AgentKind): readonly AllowedModel[] {
     return this.options.allowedModels?.(kind) ?? [];
   }
@@ -958,14 +996,40 @@ export class StructuredAgents {
   private async holdToAllowedModels(record: StructuredRecord, live: Live): Promise<void> {
     const allowed = this.allowed(record.kind);
     const current = live.model;
-    if (allowed.length === 0 || current === undefined || allowed.some(entry => entry.model === current.model)) return;
+    // adoption retries a desired model when its connection is ready
+    if (live.connection === undefined || current === undefined) return;
+    const desired = live.desiredModel;
+    // explicit resume selections take precedence over restored state
+    if (desired !== undefined) {
+      delete live.desiredModel;
+      const entry = allowed.find(candidate => candidate.model === desired.model);
+      // never release delivery after a failed or disallowed override
+      if ((entry === undefined && live.desiredNativeDefault !== true) || !await live.connection.setModel(desired)) {
+        await this.fail(record, live, 'The selected model could not be applied.', true);
+        return;
+      }
+      delete live.desiredNativeDefault;
+      this.notice(live, `Model → ${this.modelName(live, desired.model)}`, 'warning');
+      return;
+    }
+    // an empty authored policy must also stop recovered processes
+    if (this.options.allowedModels?.(record.kind) !== undefined && allowed.length === 0) {
+      await this.fail(record, live, 'No models are allowed for this Agent.', true);
+      return;
+    }
+    // a native default or an already allowed model needs no correction
+    if (allowed.length === 0 || allowed.some(entry => entry.model === current.model)) return;
     for (const fallback of allowed) {
-      const effort = fallback.effort ?? current.effort;
+      // retain restored effort only when the target model supports it
+      const supported = live.models?.find(model => model.id === fallback.model)?.efforts;
+      const effort = fallback.effort ?? (current.effort !== undefined && supported?.includes(current.effort) === true ? current.effort : undefined);
       if (live.connection === undefined || !await live.connection.setModel({ model: fallback.model, ...(effort === undefined ? {} : { effort }) })) continue;
       this.notice(live, `Model → ${this.modelName(live, fallback.model)}, effort ${live.model?.effort ?? effort}: ${current.model} is not an Allowed model`, 'warning');
       return;
     }
     this.notice(live, `${current.model} is not an Allowed model, and no Allowed model could be applied. Check Settings → Agents → Pi and the logins.`, 'error');
+    // never release queued prompts onto a forbidden restored model
+    await this.fail(record, live, 'No Allowed model could be applied.', true);
   }
 
   // keep what the Agent's holder window shows of its process: its stderr, once it failed or exited

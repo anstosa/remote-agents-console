@@ -29,7 +29,7 @@ export type QuestionAnswer = number | string | { dismiss: true };
 export type Gate = 'none' | 'anchored' | 'pending' | 'expired' | 'foreign';
 export type InterruptOutcome = 'ok' | 'unavailable' | 'not-working';
 /** A launch's new Agent, or why there is none: its start was refused, or no Agent appeared in time. */
-export type LaunchOutcome = { agent: Agent } | { failure: 'refused' | 'timed-out' };
+export type LaunchOutcome = { agent: Agent } | { failure: 'refused' | 'timed-out'; agentId?: string; error?: string };
 /** `unsent` reached nothing; `stuck` may have left the name unsubmitted in the composer. */
 export type RenameOutcome = 'sent' | 'unavailable' | 'busy' | 'unsent' | 'stuck';
 /**

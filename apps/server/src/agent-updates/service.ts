@@ -87,7 +87,7 @@ export class AgentUpdateService {
   private updating: AgentKind | undefined;
 
   // bind update commands to the launch account and host bridge
-  constructor(private readonly config: ValidatedConfig, private readonly home: string, runner?: AgentUpdateRunner, checkout: string = serverCheckout(), private readonly published: PublishedVersion = npmLatest) {
+  constructor(private readonly config: ValidatedConfig, private readonly home: string | undefined, runner?: AgentUpdateRunner, checkout: string = serverCheckout(), private readonly published: PublishedVersion = npmLatest) {
     this.checkout = checkout;
     // prefer the update repository while preserving legacy workspace overrides
     this.hostCheckout = serverCheckoutOnHost(config.projects, process.env.RAC_HOST_REPOSITORY?.trim() || process.env.RAC_HOST_WORKSPACE, checkout);
@@ -104,7 +104,7 @@ export class AgentUpdateService {
   startUpdate(kind: AgentKind): AgentUpdateStart {
     const commands = this.config.adapters?.[kind]?.updates;
     // refuse kinds without a complete update contract
-    if (commands === undefined) return { outcome: 'unavailable' };
+    if (commands === undefined || this.home === undefined) return { outcome: 'unavailable' };
     const current = this.jobs.get(kind);
     // coalesce duplicate starts for the active kind
     if (current?.state === 'running') return { outcome: 'started', job: current };
@@ -136,7 +136,7 @@ export class AgentUpdateService {
   async update(kind: AgentKind): Promise<AgentUpdateResult> {
     const commands = this.config.adapters?.[kind]?.updates;
     // refuse kinds without a complete update contract
-    if (commands === undefined) return { outcome: 'unavailable' };
+    if (commands === undefined || this.home === undefined) return { outcome: 'unavailable' };
     // serialize updates for one installation
     if (this.updating !== undefined) return { outcome: 'busy' };
     this.updating = kind;
@@ -202,7 +202,7 @@ export class AgentUpdateService {
     if (pin !== undefined) return this.cached(kind, await this.pinnedStatus(kind, pin));
     const commands = this.config.adapters?.[kind]?.updates;
     // retain a safe fallback for a configuration change during runtime
-    if (commands === undefined) return { kind, updateAvailable: false, error: 'Version check unavailable' };
+    if (commands === undefined || this.home === undefined) return { kind, updateAvailable: false, error: 'Version check unavailable' };
     const [current, latest] = await Promise.all([
       this.runner(commands.current, statusTimeoutMs).catch(() => ({ code: -1, output: '' })),
       this.runner(commands.latest, statusTimeoutMs).catch(() => ({ code: -1, output: '' }))
@@ -229,6 +229,8 @@ export class AgentUpdateService {
 
   // execute a trusted command locally or through the host tmux bridge
   private async runConfigured(command: string, timeoutMs: number): Promise<AgentUpdateCommandResult> {
+    // never run a version check or installer under a guessed account
+    if (this.home === undefined) return { code: -1, output: 'Launch account home unavailable.', failure: 'bridge_unavailable' };
     const path = process.env.RAC_HOST_PATH?.trim();
     const prefix = `export HOME=${quote(this.home)}; ${path ? `export PATH=${quote(path)}; ` : ''}cd -- ${quote(this.home)}; `;
     // use the local shell for direct deployments

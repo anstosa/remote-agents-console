@@ -14,6 +14,15 @@ export type SettingsSelectOption = {
   hasIssues?: boolean;
 };
 
+export type SettingsMultiSelectOption = {
+  value: string;
+  label: string;
+  group?: string;
+  detail?: string;
+  disabled?: boolean;
+  unavailable?: boolean;
+};
+
 type IndexedOption = { option: SettingsSelectOption; index: number };
 type OptionSegment = { group?: string; entries: IndexedOption[] };
 
@@ -78,7 +87,7 @@ const optionSegments = (entries: readonly IndexedOption[]): OptionSegment[] => e
 }, []);
 
 // provide one accessible custom settings selector
-export function SettingsSelect({ label, value, options, disabled = false, searchable = false, onChange }: { label: string; value: string; options: readonly SettingsSelectOption[]; disabled?: boolean; searchable?: boolean; onChange: (value: string) => void }) {
+export function SettingsSelect({ label, value, options, disabled = false, searchable = false, menuOnly = false, menuClassName, placeholder, matchAnchorWidth = true, onChange }: { label: string; value: string; options: readonly SettingsSelectOption[]; disabled?: boolean; searchable?: boolean; menuOnly?: boolean; menuClassName?: string; placeholder?: string; matchAnchorWidth?: boolean; onChange: (value: string) => void }) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [searchQuery, setSearchQuery] = useState('');
@@ -88,10 +97,10 @@ export function SettingsSelect({ label, value, options, disabled = false, search
   const listboxId = `settings-select-${generatedId}`;
   const searchId = `${listboxId}-search`;
   const switchDescriptionId = `${listboxId}-switch-description`;
-  const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(open, { align: 'start', matchAnchorWidth: true });
+  const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(open, { align: 'start', matchAnchorWidth });
   const selected = options.find(option => option.value === value);
-  const shown: SettingsSelectOption = selected ?? { value, label: value };
-  const twoWay = !searchable && options.length === 2 && selected !== undefined;
+  const shown: SettingsSelectOption = selected ?? { value, label: placeholder ?? value };
+  const twoWay = !searchable && !menuOnly && options.length === 2 && selected !== undefined;
   const first = twoWay ? options[0]! : undefined;
   const second = twoWay ? options[1]! : undefined;
   const switchChecked = second?.value === value;
@@ -324,7 +333,7 @@ export function SettingsSelect({ label, value, options, disabled = false, search
   const listbox = <div
     ref={searchable ? undefined : flyoutRef}
     id={listboxId}
-    className={`settings-select-listbox${searchable ? '' : ' more-menu flyout-menu'}`}
+    className={`settings-select-listbox${searchable ? '' : ' more-menu flyout-menu'}${!searchable && menuClassName !== undefined ? ` ${menuClassName}` : ''}`}
     role="listbox"
     aria-label={`${label} options`}
     data-has-icons={hasIcons || undefined}
@@ -410,7 +419,7 @@ export function SettingsSelect({ label, value, options, disabled = false, search
       <svg className="settings-select-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
     </button>
     {open && <FlyoutPortal onDismiss={closeMenu}>
-      {searchable ? <div ref={flyoutRef} className="settings-select-searchable-menu more-menu flyout-menu" style={style}>
+      {searchable ? <div ref={flyoutRef} className={`settings-select-searchable-menu more-menu flyout-menu${menuClassName === undefined ? '' : ` ${menuClassName}`}`} style={style}>
         <label className="settings-select-search" htmlFor={searchId}><span className="sr-only">Search {label} options</span><input
           ref={searchInput}
           id={searchId}
@@ -429,6 +438,157 @@ export function SettingsSelect({ label, value, options, disabled = false, search
         /></label>
         {listbox}
       </div> : listbox}
+    </FlyoutPortal>}
+  </span>;
+}
+
+// provide one accessible searchable checkbox picker
+export function SettingsMultiSelect({ label, value, options, disabled = false, onChange }: { label: string; value: readonly string[]; options: readonly SettingsMultiSelectOption[]; disabled?: boolean; onChange: (value: string[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchInput = useRef<HTMLInputElement>(null);
+  const generatedId = useId().replaceAll(':', '');
+  const menuId = `settings-multi-select-${generatedId}`;
+  const searchId = `${menuId}-search`;
+  const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(open, { align: 'start', matchAnchorWidth: true });
+  const selected = new Set(value);
+  const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
+  // retain authored ordering while filtering
+  const visible = normalizedSearch === '' ? options : options.filter(option => `${option.label}\n${option.value}\n${option.group ?? ''}\n${option.detail ?? ''}`.toLocaleLowerCase().includes(normalizedSearch));
+  const groups = visible.reduce<Array<{ group?: string; entries: SettingsMultiSelectOption[] }>>((segments, option) => {
+    const current = segments.at(-1);
+    // extend only an adjacent group
+    if (current !== undefined && current.group === option.group) {
+      current.entries.push(option);
+      return segments;
+    }
+    segments.push({ group: option.group, entries: [option] });
+    return segments;
+  }, []);
+  const selectedLabels = value.map(entry => options.find(option => option.value === entry)?.label ?? entry);
+
+  // clear transient search state
+  const closeMenu = useCallback(() => {
+    setOpen(false);
+    setSearchQuery('');
+  }, []);
+
+  // close after restoring the owning trigger
+  const closeMenuAndFocus = useCallback(() => {
+    closeMenu();
+    window.requestAnimationFrame(() => { anchorRef.current?.focus({ preventScroll: true }); });
+  }, [anchorRef, closeMenu]);
+
+  // open only an available picker
+  const openMenu = useCallback(() => {
+    // ignore unavailable controls
+    if (disabled) return;
+    setOpen(true);
+  }, [disabled]);
+
+  // move every opened picker into search
+  useEffect(() => {
+    // wait for the portal to mount
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => { searchInput.current?.focus(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
+
+  // keep Escape inside the open picker
+  useEffect(() => {
+    // observe only while the portal is open
+    if (!open) return;
+    const restoreOnEscape = (event: KeyboardEvent) => {
+      // leave unrelated keys to the active control
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenuAndFocus();
+    };
+    document.addEventListener('keydown', restoreOnEscape, true);
+    return () => document.removeEventListener('keydown', restoreOnEscape, true);
+  }, [closeMenuAndFocus, open]);
+
+  // close when editing becomes unavailable
+  useEffect(() => {
+    // preserve an available open picker
+    if (!disabled) return;
+    closeMenu();
+  }, [closeMenu, disabled]);
+
+  // stage one complete ordered selection
+  const toggleOption = (option: SettingsMultiSelectOption, checked: boolean) => {
+    // reject locked or stale choices
+    if (disabled || option.disabled === true) return;
+    // append newly checked values without reordering existing choices
+    if (checked) {
+      if (!selected.has(option.value)) onChange([...value, option.value]);
+      return;
+    }
+    onChange(value.filter(entry => entry !== option.value));
+  };
+
+  // keep escape and tab focus behavior predictable
+  const handleSearchKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    // close and restore the trigger
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenuAndFocus();
+      return;
+    }
+    // dismiss before focus leaves the portal
+    if (event.key === 'Tab' && event.shiftKey) closeMenu();
+  };
+
+  const summary = selectedLabels.length === 0 ? 'Choose models' : selectedLabels.length === 1 ? selectedLabels[0]! : `${selectedLabels[0]} +${selectedLabels.length - 1}`;
+  return <span className="settings-select settings-multi-select">
+    <button
+      ref={anchorRef}
+      type="button"
+      className="settings-select-trigger"
+      aria-label={label}
+      aria-expanded={open}
+      aria-haspopup="dialog"
+      aria-controls={menuId}
+      disabled={disabled}
+      onClick={() => { /* toggle without changing selection */ if (open) closeMenu(); else openMenu(); }}
+      onKeyDown={event => { /* close and restore trigger focus */ if (event.key === 'Escape' && open) { event.preventDefault(); closeMenu(); } }}
+    >
+      <span className="settings-select-current-label">{summary}</span>
+      <svg className="settings-select-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+    </button>
+    {open && <FlyoutPortal onDismiss={closeMenu}>
+      <div ref={flyoutRef} id={menuId} className="settings-select-searchable-menu settings-multi-select-menu more-menu flyout-menu" role="dialog" aria-label={label} style={style}>
+        <label className="settings-select-search" htmlFor={searchId}><span className="sr-only">Search {label}</span><input
+          ref={searchInput}
+          id={searchId}
+          type="search"
+          value={searchQuery}
+          placeholder="Search models"
+          autoComplete="off"
+          spellCheck={false}
+          onChange={event => { /* filter without changing selection */ setSearchQuery(event.target.value); }}
+          onKeyDown={handleSearchKeyDown}
+        /></label>
+        <div className="settings-multi-select-options" role="group" aria-label={`${label} choices`}>
+          {visible.length === 0 && <span className="settings-select-empty" role="status">{options.length === 0 ? 'No models available' : 'No matching models'}</span>}
+          {/* render adjacent labelled checkbox groups */}
+          {groups.map((group, groupIndex) => {
+            const choices = <>{/* render every visible checkbox */}{group.entries.map(option => {
+              return <div key={option.value} className="settings-multi-select-option-row">
+                <label className="settings-multi-select-option" data-unavailable={option.unavailable || undefined}>
+                  <input type="checkbox" checked={selected.has(option.value)} disabled={disabled || option.disabled === true} onChange={event => { /* stage one ordered selection */ toggleOption(option, event.currentTarget.checked); }} />
+                  <span className="settings-multi-select-option-copy"><strong>{option.label}</strong>{option.detail !== undefined && <small>{option.detail}</small>}{option.unavailable === true && <small>Unavailable in the current catalog</small>}</span>
+                </label>
+              </div>;
+            })}</>;
+            // expose labelled groups without option roles
+            if (group.group !== undefined) return <fieldset key={`${group.group}:${groupIndex}`} className="settings-multi-select-group"><legend>{group.group}</legend>{choices}</fieldset>;
+            return <Fragment key={`ungrouped:${groupIndex}`}>{choices}</Fragment>;
+          })}
+        </div>
+      </div>
     </FlyoutPortal>}
   </span>;
 }

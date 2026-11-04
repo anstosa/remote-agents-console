@@ -24,6 +24,7 @@ import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject } from './helpers/config.js';
 import { paneLister, processInspector, socketFinder, testSocket } from './helpers/discovery-stubs.js';
 import { LaunchService } from '../src/launch/service.js';
+import { LaunchOptionsService } from '../src/launch/options.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { GithubService } from '../src/github/service.js';
 import { graphqlGithub, sha, type PullFixture } from './helpers/github-graphql.js';
@@ -48,7 +49,7 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
 // reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
-function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false, sandboxFails = false, nonce = undefined as string | undefined, sandboxGeneration = undefined as string | undefined, sandboxGenerationFails = false, stopFails = false, bridged = false, compacting = Promise.resolve() } = {}) {
+function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], initialModel = undefined as ModelSetting | undefined, synchronousInitialModel = false, switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], synchronousAttached = false, gone = false, sandboxFails = false, nonce = undefined as string | undefined, sandboxGeneration = undefined as string | undefined, sandboxGenerationFails = false, stopFails = false, bridged = false, compacting = Promise.resolve() } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -112,6 +113,11 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       lastReport = { ...report, sandbox: { engaged, ...(engaged ? {} : { reason: launch.sandboxed ? 'bwrap: not found' : 'not sandboxed' }) }, version, nonce: nonce ?? launch.nonce };
       const sent = lastReport;
       if (reporting) queueMicrotask(() => emit({ type: 'report', report: sent }));
+      // model a holder replay before adoption as well as the normal live report
+      if (initialModel !== undefined) {
+        if (synchronousInitialModel) events({ type: 'model', current: initialModel });
+        else setTimeout(() => events({ type: 'model', current: initialModel }), 0);
+      }
       if (exits) setTimeout(() => emit({ type: 'exited' }), 10);
       return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9', ...(bridged ? { host: true as const, tmuxSocket: '/host-tmux/default' } : {}), ...(sandboxGeneration === undefined ? {} : { sandboxGeneration }) }, connection: connection(), cursor: () => lines, raw: () => raw?.(grants.at(-1)?.token ?? '') ?? [{ from: 'agent' as const, line: '{"type":"agent_start"}' }] };
     },
@@ -121,7 +127,9 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       if (gone) return undefined;
       emit = events;
       emitters.set(holder.agentId, events);
-      queueMicrotask(() => { for (const event of attached) events(event); });
+      // replays can run while the protocol client is still being constructed
+      if (synchronousAttached) for (const event of attached) events(event);
+      else queueMicrotask(() => { for (const event of attached) events(event); });
       return { holder, connection: connection(), cursor: () => lines, dropped };
     },
     stderr: async () => 'pi: could not load its extension',
@@ -158,7 +166,7 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
   const allowed = options.allowedModels ?? (options.conductor === undefined ? [] : [{ model: 'openai/gpt-5.6' }]);
   const conductor: ConductorConfig | undefined = options.conductor === undefined ? undefined : { kind: 'pi', projectId: 'home', model: 'openai/gpt-5.6', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write'], spawnKinds: ['pi'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10, ...options.conductor };
   if (conductor !== undefined) await mkdir(home);
-  const config = testConfig({ scratchDirectory: root, projects: [project, ...(conductor === undefined ? [] : [testProject({ id: 'home', label: 'Conductor', path: home, identity: home, mode: 'directory' })])], adapters: { pi: { program: '/pinned/pi', args: [], env: {}, launchable: true, ...(allowed.length === 0 ? {} : { allowedModels: allowed }) } }, ...(conductor === undefined ? {} : { conductor }), ...options.config });
+  const config = testConfig({ scratchDirectory: root, projects: [project, ...(conductor === undefined ? [] : [testProject({ id: 'home', label: 'Conductor', path: home, identity: home, mode: 'directory' })])], adapters: { pi: { program: '/pinned/pi', args: [], env: {}, launchable: true, ...(options.allowedModels === undefined && conductor === undefined ? {} : { allowedModels: allowed }) } }, ...(conductor === undefined ? {} : { conductor }), ...options.config });
   const worktreeStore = new WorktreeLaunchStore({ file: join(root, 'worktrees.json') });
   const worktrees = async (path: string) => path === project.path ? [{ path: project.path, branch: 'refs/heads/main', detached: false, bare: false, locked: false, prunable: false }, ...(options.linked === true ? [{ path: join(root, 'feat'), branch: 'refs/heads/feat', detached: false, bare: false, locked: false, prunable: false }] : [])] : undefined;
   const discovery = new DiscoveryService(socketFinder(options.panes === undefined ? [] : [testSocket]), paneLister(options.panes ?? []) as never, processInspector({ kind: 'claude' }), { repositoryAt: async () => undefined, branch: async () => ({}), invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
@@ -168,8 +176,8 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
     vi.stubEnv('RAC_WATCHES_FILE', join(root, 'watches.json'));
     // keep the console's own socket finder off the operator's live tmux server
     vi.stubEnv('RAC_HOST_TMUX_SOURCE', join(root, 'tmux'));
-    const structuredAgents = new StructuredAgents(processes, { file: join(root, 'structured-agents.json'), allowedModels: () => allowed, ...(options.reportTimeoutMs === undefined ? {} : { reportTimeoutMs: options.reportTimeoutMs }) });
-    const app = await buildApp({ ...config, ...changed }, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, promptHistory: new PromptHistoryService(join(root, 'history.json')), queuedPrompts: new QueuedPromptService(join(root, 'queue.json')), notes: new WorktreeNoteService(join(root, 'notes.json')), ...options.deps });
+    const structuredAgents = new StructuredAgents(processes, { file: join(root, 'structured-agents.json'), allowedModels: kind => ({ ...config, ...changed }).adapters[kind]?.allowedModels, ...(options.reportTimeoutMs === undefined ? {} : { reportTimeoutMs: options.reportTimeoutMs }) });
+    const app = await buildApp({ ...config, ...changed }, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, launchOptions: new LaunchOptionsService(({ ...config, ...changed }).adapters, { piModels: { listDetailed: async () => [gpt, opus], defaultSetting: () => undefined } }), promptHistory: new PromptHistoryService(join(root, 'history.json')), queuedPrompts: new QueuedPromptService(join(root, 'queue.json')), notes: new WorktreeNoteService(join(root, 'notes.json')), ...options.deps });
     const headers = await authenticatedHeaders(app);
     const dashboardAgent = async (id: string) => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === id);
     return { app, headers, dashboardAgent, root, structuredAgents };
@@ -594,6 +602,148 @@ const opus = { id: 'openrouter/~anthropic/claude-opus-latest', name: 'Claude Opu
 const allowedModels: AllowedModel[] = [{ model: gpt.id, effort: 'medium' }, { model: opus.id }];
 
 describe('a structured Agent\'s Allowed models', () => {
+  // a holder can replay its restored model before process adoption completes
+  it('guards a synchronously restored launch model before prompt delivery', async () => {
+    const fake = fakeAgent({ models: [gpt], initialModel: { model: 'openai/forbidden' }, synchronousInitialModel: true, unavailable: [gpt.id] });
+    const { app, headers, dashboardAgent } = await consoleWith(fake, { allowedModels: [{ model: gpt.id }] });
+    try {
+      const launched = await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } });
+      expect(launched.statusCode).toBe(409);
+      const id = launched.json().agentId;
+      expect(id).toBeDefined();
+      await vi.waitFor(() => expect(fake.closed()).toBe(true));
+      expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'failed', reason: 'No Allowed model could be applied.' } });
+      await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'Never deliver', attachments: [] } });
+      expect(fake.delivered).toEqual([]);
+    } finally { await app.close(); }
+  });
+
+  // a changed policy must guard state replayed synchronously during reattach
+  it('guards a synchronously reattached model under an explicit empty policy', async () => {
+    const original = fakeAgent();
+    const { app, headers, restart } = await consoleWith(original);
+    const launched = await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } });
+    const id = launched.json().agentId;
+    const next = fakeAgent({ attached: [{ type: 'model', current: { model: gpt.id } }], synchronousAttached: true });
+    const deployed = await restart(next, { adapters: { pi: { program: '/pinned/pi', args: [], env: {}, launchable: true, allowedModels: [] } } });
+    try {
+      await deployed.reattached;
+      await vi.waitFor(() => expect(next.closed()).toBe(true));
+      expect(await deployed.dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'failed', reason: 'No models are allowed for this Agent.' } });
+      await deployed.app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers: deployed.headers, payload: { prompt: 'Never deliver', attachments: [] } });
+      expect(next.delivered).toEqual([]);
+    } finally { await deployed.app.close(); }
+  });
+
+  // in-place conversation changes must report policy-enforcement failure
+  it('refuses a conversation switch when no allowed restored model can be applied', async () => {
+    const fake = fakeAgent({ models: [gpt, opus], switchedTo: { model: 'openai/forbidden' }, unavailable: [gpt.id, opus.id] });
+    const { app, headers, root, dashboardAgent } = await consoleWith(fake, { allowedModels });
+    try {
+      const conversationId = '01a188d1-e7d9-711a-aba8-381b96066aa5';
+      vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
+      await piSession(join(root, 'pi'), join(root, 'repo'), conversationId, 'Switch policy fixture');
+      const worktreeId = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0].id;
+      const launched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktreeId)}/launch`, headers, payload: { kind: 'pi' } });
+      const id = launched.json().agentId;
+      fake.emit({ type: 'conversation', id: 'current' });
+      fake.emit({ type: 'model', current: { model: gpt.id, effort: 'medium' } });
+      await Promise.resolve();
+      const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktreeId)}/conversations/switch`, headers, payload: { kind: 'pi', id: conversationId } });
+      expect(switched.statusCode).toBe(409);
+      expect(fake.operations, JSON.stringify(switched.json())).toEqual(expect.arrayContaining([expect.stringContaining('switch')]));
+      expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'failed' } });
+      expect(fake.delivered).toEqual([]);
+    } finally { await app.close(); }
+  });
+
+  // failed post-resume model selection is a failed handoff with recovery facts
+  it('does not report a failed replacement model as a successful restart', async () => {
+    const fake = fakeAgent({ models: [gpt, opus], initialModel: { model: gpt.id, effort: 'medium' }, refuses: true });
+    const { app, headers, dashboardAgent } = await consoleWith(fake, { allowedModels });
+    try {
+      const dashboard = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json();
+      const worktreeId = dashboard.projects[0].worktrees[0].id;
+      const first = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktreeId)}/launch`, headers, payload: { kind: 'pi' } });
+      expect(first.statusCode).toBe(201);
+      const originalId = first.json().agentId;
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const restarted = await app.inject({ method: 'POST', url: `/api/agents/${originalId}/restart`, headers, payload: { kind: 'pi', model: { mode: 'model', id: opus.id } } });
+      expect(restarted.statusCode).toBe(409);
+      expect(restarted.json().agentId).toBeDefined();
+      expect(restarted.json().agentId).not.toBe(originalId);
+      expect(await dashboardAgent(restarted.json().agentId)).toMatchObject({ structured: { lifecycle: 'failed' } });
+      expect(fake.delivered).toEqual([]);
+    } finally { await app.close(); }
+  });
+
+  // failed restoration correction must never release queued delivery
+  it('stops a restored forbidden model when every allowed replacement is unavailable', async () => {
+    const fake = fakeAgent({ models: [gpt, opus], unavailable: [gpt.id, opus.id] });
+    const { app, headers, dashboardAgent } = await consoleWith(fake, { allowedModels });
+    try {
+      const response = await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } });
+      const id = response.json().agentId;
+      fake.emit({ type: 'model', current: { model: 'openai/forbidden' } });
+      await vi.waitFor(() => expect(fake.closed()).toBe(true));
+      expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'failed', reason: 'No Allowed model could be applied.' } });
+      expect(fake.delivered).toEqual([]);
+    } finally { await app.close(); }
+  });
+
+  // lazy discovery must not start an agent or broaden its policy
+  it('publishes semantic options and launches with selected model and security', async () => {
+    const fake = fakeAgent({ models: [gpt, opus] });
+    const { app, headers } = await consoleWith(fake, { allowedModels });
+    try {
+      const response = await app.inject({ method: 'POST', url: '/api/launch/options', headers, payload: { type: 'scratch' } });
+      expect(response.statusCode).toBe(200);
+      const manifest = response.json().kinds.find((kind: { kind: string }) => kind.kind === 'pi');
+      expect(manifest.modelPolicy.defaultSelection).toEqual({ mode: 'model', id: gpt.id });
+      expect(fake.launches).toEqual([]);
+      const launched = await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', model: { mode: 'model', id: opus.id }, effort: { mode: 'effort', id: 'high' }, security: { sandbox: 'off' }, optionsRevision: manifest.optionsRevision } });
+      expect(launched.statusCode).toBe(201);
+      expect(fake.launches[0]).toMatchObject({ model: { model: opus.id, effort: 'high' }, sandboxed: false });
+    } finally { await app.close(); }
+  });
+
+  // validation must happen before creating a checkout
+  it('refuses invalid new-worktree choices before git management', async () => {
+    const fake = fakeAgent({ models: [gpt, opus] });
+    const add = vi.fn();
+    const { app, headers } = await consoleWith(fake, { allowedModels, deps: { worktreeManagement: { add } } });
+    try {
+      const response = await app.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers, payload: { mode: 'new', branch: 'test/invalid-choice', open: 'agent', choice: { kind: 'pi', model: { mode: 'model', id: 'openai/disallowed' } } } });
+      expect(response.statusCode).toBe(409);
+      expect(add).not.toHaveBeenCalled();
+      expect(fake.launches).toEqual([]);
+    } finally { await app.close(); }
+  });
+
+  // explicit empty and missing policy have different authority
+  it('refuses an explicit empty model policy without starting a holder', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake, { allowedModels: [] });
+    try {
+      const response = await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error).toBe('model_policy_empty');
+      expect(fake.launches).toEqual([]);
+    } finally { await app.close(); }
+  });
+
+  // apply explicit resume choices before the first prompt can run
+  it('applies an explicit model and effort after a conversation restores an allowed model', async () => {
+    const fake = fakeAgent({ models: [gpt, opus] });
+    const { app, structuredAgents, root } = await consoleWith(fake, { allowedModels });
+    try {
+      const id = await structuredAgents.launch({ id: `scratch:${root}`, kind: 'scratch', projectId: 'scratch', label: 'Scratch', home: root }, 'pi', { resume: 'saved-conversation', model: { model: opus.id, effort: 'high' } });
+      expect(id).toBeDefined();
+      fake.emit({ type: 'model', current: { model: gpt.id, effort: 'low' } });
+      await vi.waitFor(() => expect(fake.operations).toContain(`model ${opus.id} high`));
+    } finally { await app.close(); }
+  });
+
   it('launches a new Conversation on the first Allowed model by default, and only ever on an Allowed model', async () => {
     const fake = fakeAgent({ models: [gpt, opus] });
     const { app, headers } = await consoleWith(fake, { allowedModels });
@@ -603,8 +753,8 @@ describe('a structured Agent\'s Allowed models', () => {
     expect((await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', effort: 'low' } })).statusCode).toBe(201);
     expect(fake.launches.map(launch => launch.model)).toEqual([{ model: gpt.id, effort: 'medium' }, { model: opus.id, effort: 'high' }, { model: gpt.id, effort: 'low' }]);
 
-    expect((await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', model: 'openai/gpt-4' } })).statusCode).toBe(400);
-    expect((await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', model: gpt.id, effort: 'lots' } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', model: 'openai/gpt-4' } })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', model: gpt.id, effort: 'lots' } })).statusCode).toBe(409);
     expect(fake.launches).toHaveLength(3);
     await app.close();
   });
@@ -661,7 +811,7 @@ describe('a structured Agent\'s Allowed models', () => {
     expect(fake.launches[0]!.model).toBeUndefined();
     expect(await dashboardAgent(id)).toMatchObject({ structured: { model: { id: gpt.id }, switchable: false } });
     expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: gpt.id } })).statusCode).toBe(409);
-    expect((await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', model: gpt.id } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', model: gpt.id } })).statusCode).toBe(409);
     expect(fake.operations).toEqual([]);
     await app.close();
   });

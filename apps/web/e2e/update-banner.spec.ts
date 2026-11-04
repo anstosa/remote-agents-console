@@ -14,6 +14,12 @@ const openUpstreamUpdate = async (page: Page) => {
 // let React consume one completed mock response and paint its resulting state
 const settleBrowserFrames = (page: Page) => page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 
+// read the shared attention contract without depending on animation phase
+const updateAttention = (control: import('@playwright/test').Locator) => control.evaluate(element => {
+  const style = getComputedStyle(element);
+  return { name: style.animationName, duration: style.animationDuration };
+});
+
 // use semantic skeletons for version metadata reads without borrowing mutation rings
 test('skeletonizes agent and server versions while their reads are pending', async ({ page }) => {
   let releaseAgents!: () => void;
@@ -309,7 +315,21 @@ test('opens the commit review before starting and retains update failures in the
   const selector = page.getByRole('button', { name: /^Switch server/u });
   await expect(selector).toHaveAccessibleName(/update available$/u);
   await expect(selector.locator(':scope > .update-progress-ring')).toHaveCount(0);
-  await openUpstreamUpdate(page);
+  expect(await updateAttention(selector)).toEqual({ name: 'settings-update-glow', duration: '1.4s' });
+  await selector.click();
+  const serverMenu = page.getByRole('group', { name: 'Current server details' });
+  const viewUpdate = serverMenu.getByRole('button', { name: 'View upstream update' });
+  expect(await updateAttention(viewUpdate)).toEqual(await updateAttention(selector));
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  expect((await updateAttention(selector)).name).toBe('none');
+  expect((await updateAttention(viewUpdate)).name).toBe('none');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
+  expect((await updateAttention(selector)).name).toBe('none');
+  expect((await updateAttention(viewUpdate)).name).toBe('none');
+  await page.evaluate(() => { delete document.documentElement.dataset.motion; });
+  expect(await updateAttention(viewUpdate)).toEqual({ name: 'settings-update-glow', duration: '1.4s' });
+  await viewUpdate.click();
 
   const dialog = page.getByRole('dialog', { name: 'Review update' });
   await expect(dialog).toBeVisible();
@@ -325,8 +345,20 @@ test('opens the commit review before starting and retains update failures in the
   expect(updateStarts).toBe(0);
   const update = dialog.getByRole('button', { name: 'Update', exact: true });
   await expect(update).toBeEnabled();
+  expect(await updateAttention(update)).toEqual({ name: 'settings-update-glow', duration: '1.4s' });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  expect((await updateAttention(update)).name).toBe('none');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
+  expect((await updateAttention(update)).name).toBe('none');
+  await page.evaluate(() => { delete document.documentElement.dataset.motion; });
+  expect(await updateAttention(update)).toEqual({ name: 'settings-update-glow', duration: '1.4s' });
   await update.click();
   await expect.poll(() => updateStarts).toBe(1);
+  const updatingAction = dialog.getByRole('button', { name: 'Updating…', exact: true });
+  await expect(updatingAction).toHaveAttribute('aria-busy', 'true');
+  await expect(updatingAction).toHaveClass(/progress-border/u);
+  expect((await updateAttention(updatingAction)).name).toBe('none');
   await expect(dialog.getByText('Pulling the reviewed revision, rebuilding, and restarting…')).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Close server update' })).toBeDisabled();
   await dialog.getByRole('button', { name: 'Minimize server update' }).click();
@@ -468,12 +500,14 @@ test('opens an advisor for flagged update paths before enabling Update', async (
   await expect(page.getByRole('tab', { name: /Update Advisor/u })).toHaveCount(0);
   const update = dialog.getByRole('button', { name: 'Update', exact: true });
   await expect(update).toBeDisabled();
+  expect((await updateAttention(update)).name).toBe('none');
   await expect(dialog.getByText('I reviewed the advisor guidance for this exact update.')).toBeVisible();
   // Move focus out of the pane before acknowledging: a focused xterm swallows the first click
   // that lands outside it, and an operator acknowledging is not mid-keystroke in the terminal.
   await dialog.getByRole('heading', { name: 'Host changes need review' }).click();
   await dialog.getByRole('checkbox').check();
   await expect(update).toBeEnabled();
+  expect(await updateAttention(update)).toEqual({ name: 'settings-update-glow', duration: '1.4s' });
   await dialog.getByLabel('Approval or feedback').fill('Double-check the rollback steps.');
   await expect(output.locator('.log-output')).not.toHaveClass(/input-active/u);
   await expect(output.getByLabel('Terminal keys')).toBeHidden();

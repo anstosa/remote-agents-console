@@ -1737,6 +1737,11 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .workspace-toolbar-actions .launch-split.updates-available { position: relative; z-index: 1; overflow: visible; outline: 1px solid var(--mauve); outline-offset: -1px; box-shadow: inset 0 0 .65rem color-mix(in srgb, var(--mauve) 30%, transparent), 0 0 .6rem color-mix(in srgb, var(--mauve) 48%, transparent); animation: settings-update-glow 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .workspace-toolbar-actions .launch-split.updates-available { animation: none; } }
 :root[data-motion="reduced"] .workspace-toolbar-actions .launch-split.updates-available { animation: none; }
+/* share toolbar update attention without disturbing busy progress borders */
+:is(.launch-card-main, .server-menu, .server-update-dialog) .update-attention { outline: 1px solid var(--mauve); outline-offset: -1px; box-shadow: inset 0 0 .65rem color-mix(in srgb, var(--mauve) 30%, transparent), 0 0 .6rem color-mix(in srgb, var(--mauve) 48%, transparent); animation: settings-update-glow 1.4s ease-in-out infinite; }
+/* retain static update attention when either motion preference is reduced */
+@media (prefers-reduced-motion: reduce) { :is(.launch-card-main, .server-menu, .server-update-dialog) .update-attention { animation: none; } }
+:root[data-motion="reduced"] :is(.launch-card-main, .server-menu, .server-update-dialog) .update-attention { animation: none; }
 /* advance working borders through two accelerating and decelerating half turns */
 @property --update-orbit-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
 @keyframes update-border-orbit { 0% { --update-orbit-angle: 0deg; } 50% { --update-orbit-angle: 180deg; } 100% { --update-orbit-angle: 360deg; } }
@@ -1974,8 +1979,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .more > svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .flyout-backdrop { position: fixed; inset: 0; z-index: calc(var(--layer-popover) - 1); background: transparent; cursor: default; }
 .more-menu { position: absolute; right: 0; z-index: var(--layer-popover); width: max-content; max-width: calc(100vw - 1rem); max-height: calc(100vh - 1rem); overflow: auto; padding: .3rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); box-shadow: 0 .7rem 1.8rem color-mix(in srgb, var(--crust) 80%, transparent); font: 700 .78rem var(--font-mono); letter-spacing: .035em; }
-/* keep power actions and restart choices compact */
-.more-menu.agent-power-menu { width: 13rem; }
+/* let power actions and restart choices size to their contents */
+.more-menu.agent-power-menu { width: max-content; max-height: min(var(--flyout-available-height, 100dvh), calc(100dvh - 1rem)); }
 .more-menu.agent-power-menu .agent-power-off { color: var(--red); }
 .more-menu.agent-power-menu.compacting { width: min(22rem, calc(100vw - 1rem)); }
 .agent-compact-form { display: grid; gap: .5rem; padding: .4rem; }
@@ -2097,6 +2102,9 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .client-rename-dialog form input { width: 100%; min-width: 0; }
 .client-rename-dialog footer { display: flex; justify-content: flex-end; gap: .45rem; }
 .client-rename-dialog footer button { min-width: 5rem; justify-content: center; }
+.pi-update-dialog > div { overflow-y: auto; }
+.pi-update-dialog p { overflow-wrap: anywhere; }
+.pi-update-dialog footer { flex-wrap: wrap; }
 /* keep the pending save glyph circular inside its flex button */
 .client-rename-dialog footer .worktree-rename-reset { margin-right: auto; }
 /* the guided review's start sheet: the rename dialog's frame, a bottom sheet on a phone */
@@ -2469,34 +2477,81 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .launch-lock.open { opacity: .7; color: var(--yellow); }
 
 /* the actions menu (flyout or inline) */
-.launch-menu { width: min(23rem, calc(100vw - 1rem)); padding: .4rem; }
+.launch-menu { z-index: calc(var(--layer-popover) + 1); width: max-content; max-width: calc(100vw - 1rem); max-height: min(var(--flyout-available-height, 100dvh), calc(100dvh - 1rem)); padding: .4rem; }
+/* keep click-away surfaces above the chooser's originating flyout or dialog */
+.flyout-backdrop:has(+ .launch-menu) { z-index: var(--layer-popover); }
+.flyout-backdrop:has(+ .launch-menu.launch-menu-dialog-layer), body:has(> .open-folder-dialog) > .flyout-backdrop:has(+ .launch-menu) { z-index: var(--layer-dialog); }
+.launch-menu.launch-menu-dialog-layer { z-index: calc(var(--layer-dialog) + 1); }
 .launch-menu-heading { margin: .2rem .5rem .35rem; color: var(--overlay-1); font: 800 .6rem var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
 .launch-menu-subheading { margin-top: .1rem; }
 .launch-menu-note { margin: .4rem .5rem .2rem; color: var(--yellow); font: 600 .64rem var(--font-mono); white-space: normal; }
 .launch-menu-empty { margin: .4rem .5rem; color: var(--overlay-1); font: 600 .7rem var(--font-mono); white-space: normal; }
 .launch-menu-empty code { color: var(--mauve); }
-.launch-agent-line { display: flex; width: 100%; align-items: center; border-radius: calc(var(--control-radius) - .1rem); background: transparent; transition: background-color .15s ease; }
-/* let the entire row and its controls share one hover exit animation */
-.launch-agent-line:hover { background: var(--surface-0); }
-.launch-agent-line > .launch-row { flex: 1 1 auto; width: auto; min-width: 0; }
-.launch-agent-line > .launch-row:not(:disabled):hover { background: transparent; }
+.launch-agent-line { display: block; width: 100%; border-radius: calc(var(--control-radius) - .1rem); background: transparent; }
+.launch-card-main { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; min-width: 0; }
+.launch-card-main > .launch-row { grid-column: 1; width: 100%; min-width: 0; min-height: 0; padding: .28rem .55rem .12rem !important; }
+.launch-card-main > .launch-row:not(:disabled):hover { background: transparent; }
+.launch-card-main .launch-row-copy { display: flex; align-items: baseline; gap: .4rem; overflow: hidden; white-space: nowrap; }
+.launch-card-main .launch-row-copy > :is(strong, small) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* size the chooser from its controls rather than incidental metadata text */
+.launch-card-controls { z-index: 2; display: grid; grid-template-columns: minmax(6rem, 1fr); grid-auto-flow: column; grid-auto-columns: max-content; box-sizing: border-box; width: 100%; min-width: 0; grid-column: 1; align-items: center; gap: .3rem; padding: 0 .35rem .28rem; }
+/* wrap only when the viewport cannot fit the standard controls on one line */
+@media (max-width: 360px) { .launch-card-controls { display: flex; flex-wrap: wrap; } }
+.launch-card-main .launch-card-trigger { display: inline-flex; width: auto; min-width: var(--standard-control-size); height: var(--standard-control-size); align-items: center; justify-content: center; gap: .3rem; padding: 0 .45rem; border: 1px solid var(--surface-2); border-radius: var(--control-radius); background: var(--mantle); box-shadow: none; color: var(--subtext-1); font: 700 .75rem var(--font-mono); }
+.launch-card-main .launch-card-trigger:not(:disabled):hover, .launch-card-main .launch-card-trigger[aria-expanded='true'] { border-color: var(--lavender); background: var(--surface-0); color: var(--text); filter: none; }
+.launch-card-main .launch-card-trigger:disabled { opacity: .48; }
+.launch-card-main .launch-model-trigger { width: auto !important; min-width: min(6rem, 100%) !important; max-width: none; flex: 1 1 auto; justify-content: flex-start; text-align: left; }
+/* keep the explicit launch action recognizable beside secondary icon controls */
+.launch-card-main .launch-card-launch, .launch-card-main .launch-card-launch:not(:disabled):hover { flex: none; margin-left: auto; background: linear-gradient(135deg, var(--mauve), var(--blue)); border-color: color-mix(in srgb, var(--lavender) 54%, transparent); color: var(--crust); }
+.launch-model-trigger > span { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.launch-model-trigger :is(.launch-model-icon, .launch-chevron-icon) { flex: none; width: .9rem; height: .9rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.launch-model-trigger .launch-chevron-icon { width: .72rem; }
+.launch-card-main :is(.launch-security-trigger, .launch-agent-accounts, .launch-agent-update) { width: var(--standard-control-size); min-width: var(--standard-control-size); flex: none; padding: 0; }
+.launch-security-trigger.dangerous { border-color: var(--red) !important; color: var(--red) !important; }
+.launch-security-icon, .launch-account-icon, .launch-update-icon { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+/* keep nested dismissal targets out of menu button hover styles */
+.launch-card-main .launch-card-backdrop { position: fixed; inset: 0; z-index: 4; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; cursor: default; }
+.launch-card-popover { position: fixed; top: calc(var(--standard-control-size) + .62rem); right: .35rem; z-index: 5; display: grid; grid-template-columns: minmax(0, 1fr); width: max-content; max-width: calc(100vw - 1rem); max-height: min(27rem, 70dvh, var(--flyout-available-height, 70dvh)); gap: .55rem; overflow-x: hidden; overflow-y: auto; padding: .65rem; border: 1px solid color-mix(in srgb, var(--lavender) 55%, var(--surface-2)); border-radius: var(--control-radius); background: var(--mantle); box-shadow: 0 .7rem 1.8rem #0008; }
+.launch-card-search { display: grid; gap: .25rem; color: var(--overlay-1); font: 700 .6rem var(--font-mono); text-transform: uppercase; }
+.launch-card-search input { width: 100%; min-width: 0; height: 2rem; padding: 0 .55rem; border: 1px solid var(--surface-2); border-radius: var(--control-radius); background: var(--crust); color: var(--text); font: 650 .7rem var(--font-mono); }
+/* shrink intrinsic option tracks before wrapping long model and provider names */
+.launch-card-popover > * { min-width: 0; max-width: 100%; }
+.launch-card-options { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: .2rem; }
+.launch-card-popover .launch-card-option { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; min-width: 0; justify-items: start; gap: .1rem; padding: .4rem .45rem; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; box-shadow: none; color: var(--text); text-align: left; }
+.launch-card-popover .launch-card-option:hover, .launch-card-popover .launch-card-option[aria-checked='true'] { border-color: var(--surface-2); background: var(--surface-0); filter: none; }
+.launch-card-option strong { max-width: 100%; font: 750 .75rem var(--font-mono); white-space: normal; overflow-wrap: anywhere; }
+.launch-card-option small { min-width: 0; max-width: 100%; color: var(--overlay-1); font: 600 .61rem var(--font-mono); white-space: normal; overflow-wrap: anywhere; }
+.launch-card-empty, .launch-card-status { margin: .15rem; color: var(--overlay-1); font: 600 .64rem/1.4 var(--font-mono); white-space: normal; }
+.launch-card-status.warning { color: var(--yellow); }
+.launch-card-popover .launch-effort { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .55rem; color: var(--subtext-0); font: 700 .65rem var(--font-mono); }
+/* keep the third-level selector and its dismissal surface above launch dialogs */
+.launch-effort-menu { z-index: calc(var(--layer-dialog) + 3); }
+.flyout-backdrop:has(+ .launch-effort-menu) { z-index: calc(var(--layer-dialog) + 2); }
+.launch-card-popover-title { margin: 0; color: var(--subtext-1); font: 800 .66rem var(--font-mono); letter-spacing: .04em; text-transform: uppercase; }
+.launch-security-control { display: grid; gap: .3rem; margin: 0; padding: .45rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); }
+.launch-security-control legend { display: flex; align-items: center; gap: .35rem; padding: 0 .25rem; color: var(--subtext-1); font: 800 .66rem var(--font-mono); }
+.launch-security-axis, .launch-security-axis svg { width: 1rem; height: 1rem; }
+.launch-security-axis svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.launch-security-option { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: .45rem; padding: .35rem; border-radius: var(--control-radius); color: var(--text); cursor: pointer; }
+.launch-security-option:hover { background: var(--surface-0); }
+.launch-security-option input { margin-top: .18rem; }
+.launch-security-option > span { display: grid; gap: .1rem; }
+.launch-security-option strong { font: 750 .68rem var(--font-mono); }
+.launch-security-option small { color: var(--overlay-1); font: 600 .61rem/1.4 var(--font-mono); }
+.launch-security-option.risk-warning strong { color: var(--yellow); }
+.launch-security-option.risk-danger strong { color: var(--red); }
 /* keep the selected account to the right of the version without widening the menu */
 .launch-agent-details { display: flex; min-width: 0; align-items: baseline; gap: .4rem; }
-.launch-agent-version { flex: none; color: var(--mauve); font: 700 .62rem var(--font-mono); white-space: nowrap; }
-.launch-agent-account { min-width: 0; overflow: hidden; color: var(--green); font: 700 .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.launch-agent-version { flex: none; color: var(--mauve); font: 700 .75rem var(--font-mono); white-space: nowrap; }
+.launch-agent-account { min-width: 0; overflow: hidden; color: var(--green); font: 700 .75rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .launch-menu-error { color: var(--red) !important; }
 .launch-menu-error { margin: .4rem .5rem; font: 600 .64rem var(--font-mono); white-space: normal; }
-.launch-menu .launch-agent-default, .launch-menu .launch-agent-update { width: auto; min-width: 0; min-height: 1.7rem; flex: none; justify-content: center !important; align-self: center; margin-right: .3rem; padding: .2rem .4rem !important; border: 1px solid var(--surface-2) !important; border-radius: .3rem; background: transparent; box-shadow: none; color: var(--overlay-1); font: 700 .63rem var(--font-mono); }
-.launch-menu .launch-agent-default { font-size: .9rem; }
-.launch-menu .launch-agent-default[aria-checked='true'] { color: var(--yellow); }
-.launch-menu .launch-agent-update { border-color: var(--mauve) !important; background: color-mix(in srgb, var(--mauve) 14%, transparent); color: var(--mauve); }
-.launch-menu .launch-agent-update:not(:disabled):hover { background: var(--mauve); color: var(--crust); }
-.launch-menu .launch-agent-accounts { width: auto; min-width: 0; min-height: 1.7rem; flex: none; align-self: center; gap: .3rem; margin-right: .3rem; border: 1px solid var(--green); border-radius: .3rem; padding: .2rem .4rem; background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); font: 700 .63rem var(--font-mono); }
-.launch-menu .launch-agent-accounts:hover { background: color-mix(in srgb, var(--green) 22%, var(--surface-0)); }
+.launch-card-main .launch-agent-update { border-color: var(--mauve); background: color-mix(in srgb, var(--mauve) 14%, var(--mantle)); color: var(--mauve); }
+.launch-card-main .launch-agent-update:not(:disabled):hover { background: var(--mauve); color: var(--crust); }
 /* format the moved account section as an in-place launcher submenu */
 .launch-accounts-submenu { display: grid; min-width: 0; gap: .5rem; }
-.launch-menu .launch-submenu-back { width: auto; justify-self: start; padding: .3rem .4rem; color: var(--green); font: 700 .68rem var(--font-mono); }
-.launch-menu .launch-submenu-back:hover { background: var(--surface-0); }
+.launch-menu .launch-submenu-back, .launch-card-popover .launch-submenu-back { width: auto; justify-self: start; padding: .3rem .4rem; color: var(--green); font: 700 .68rem var(--font-mono); }
+.launch-menu .launch-submenu-back:hover, .launch-card-popover .launch-submenu-back:hover { background: var(--surface-0); }
 .launch-accounts-submenu .client-settings-accounts { gap: .6rem; padding: .1rem .25rem .35rem; }
 .launch-accounts-submenu .client-settings-accounts > header > h2 { font-size: .95rem; }
 .launch-accounts-submenu .client-settings-account-list { grid-template-columns: minmax(0, 1fr); gap: .45rem; }
@@ -2506,8 +2561,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .launch-row:not(:disabled):hover { background: var(--surface-0); filter: none; }
 .launch-row:disabled { opacity: .5; }
 .launch-row-copy { display: grid; min-width: 0; flex: 1; gap: .12rem; }
-.launch-row-copy strong { color: var(--text); font-size: .76rem; }
-.launch-row-copy strong em { color: var(--overlay-1); font-size: .62rem; font-style: normal; font-weight: 600; }
+.launch-row-copy strong { color: var(--text); font-size: .82rem; }
+.launch-row-copy strong em { color: var(--overlay-1); font-size: .72rem; font-style: normal; font-weight: 600; }
 .launch-row-copy small { color: var(--overlay-1); font: 600 .62rem var(--font-mono); white-space: normal; }
 .launch-row-unsandboxed .launch-lock { color: var(--yellow); }
 .launch-entry-icon { color: var(--overlay-1); }
@@ -2651,6 +2706,10 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .new-worktree-open label:has(input:checked) { border-color: color-mix(in srgb, var(--lavender) 60%, transparent); background: color-mix(in srgb, var(--lavender) 16%, transparent); }
 .new-worktree-open label:has(input:focus-visible) { outline: 2px solid var(--lavender); outline-offset: 1px; }
 .new-worktree-open label:has(input:disabled) { opacity: .45; cursor: not-allowed; }
+.new-worktree-launch-choice { display: flex; min-width: 0; align-items: center; gap: .55rem; padding: .45rem .55rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); color: var(--subtext-0); font: 700 .68rem var(--font-mono); }
+.new-worktree-launch-choice > span { flex: none; }
+.new-worktree-launch-choice > small { min-width: 0; overflow: hidden; color: var(--green); text-overflow: ellipsis; white-space: nowrap; }
+.new-worktree-launch-choice .launch-split { margin-left: auto; }
 .new-worktree-prs { border: 1px solid var(--surface-1); border-radius: var(--control-radius); }
 .new-worktree-prs .git-status-switch-list { max-height: min(22rem, 45vh); }
 /* a pull request's Select is a radio drawn as a checkbox (one pick, so radio semantics);
@@ -3295,4 +3354,15 @@ a.github-list-row:hover, button.github-list-row:hover { background: var(--surfac
 @container (max-width: 42rem) {
   .github-freshness { display: none; }
   .github-scope-toggle button { max-width: 7rem; overflow: hidden; text-overflow: ellipsis; }
+}
+
+/* keep launch-card controls usable at 390 px */
+@media (max-width: 480px) {
+  .launch-card-main { grid-template-columns: minmax(0, 1fr); }
+  .launch-card-main > .launch-row { min-height: 0; }
+  .launch-card-controls { align-items: center; flex-direction: row; }
+  .launch-model-trigger { max-width: none; }
+  .launch-card-popover { position: fixed; top: 4rem; right: .5rem; left: .5rem; width: auto; max-height: min(var(--flyout-available-height, 100dvh), calc(100dvh - 1rem)); }
+  .new-worktree-launch-choice { align-items: flex-start; flex-wrap: wrap; }
+  .new-worktree-launch-choice .launch-split { margin-left: 0; }
 }

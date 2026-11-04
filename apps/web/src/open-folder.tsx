@@ -34,7 +34,7 @@ function FolderActions({ path, label, resolution, pending, onOpen }: { path: str
   const busy = (action: FolderAction) => pending?.path === path && pending.action === action;
   const action = (kind: 'terminal' | 'empty', text: string, icon: ReactNode) => <button type="button" className={`open-folder-action${busy(kind) ? ' progress-border progress-blue' : ''}`} aria-label={text} aria-busy={busy(kind) || undefined} title={`${text} at ${label}`} disabled={pending !== undefined} onClick={() => onOpen(kind)}>{busy(kind) && <span className="update-progress-ring" aria-hidden="true" />}{icon}<span className="open-folder-action-label">{text}</span></button>;
   return <span className="open-folder-actions" role="group" aria-label={`Open ${label}`}>
-    <LaunchSplitButton label={label} resolution={resolution} compact placeActions alwaysShowMenu launchDisabled={pending !== undefined} pending={busy('agent')} onLaunch={choice => onOpen('agent', choice)} />
+    <LaunchSplitButton label={label} resolution={resolution} target={{ type: 'folder', path }} compact placeActions alwaysShowMenu launchDisabled={pending !== undefined} pending={busy('agent')} onLaunch={choice => onOpen('agent', choice)} />
     {action('terminal', 'Terminal', <svg viewBox="0 0 24 24" aria-hidden="true"><path d={terminalIconPath} /></svg>)}
     {action('empty', 'Empty workspace', <EmptyWorkspaceIcon />)}
   </span>;

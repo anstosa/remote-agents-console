@@ -18,6 +18,7 @@ import { resolveReviewConfig, reviewConfigSchema, type ResolvedReviewConfig } fr
 import { agentModel } from '../launch/agent-choice.js';
 import { piEfforts } from '../transports/pi.js';
 import { hostPiRuntime, verifyHostPiNode } from '../adapters/pi-runtime.js';
+import { inheritedHomeEnvironment, resolveLaunchUserHome } from '../places/launch-home.js';
 import { parseKeysConfig, type KeysConfig } from './keys.js';
 import { applicationButtonsSchema, countButtonDefinitions, projectButtonsSchema, type ButtonSlots } from './buttons.js';
 import { googleCalendarConfigSchema, type GoogleCalendarConfig } from '../google-calendar/contracts.js';
@@ -109,10 +110,13 @@ const adapterUpdates = z.object({ current: adapterUpdateCommand, latest: adapter
 // Project's stack commands): `setup` runs in the launched pane before the program and
 // aborts the launch on failure; `teardown` runs best-effort after the console stops an
 // agent of this kind, in the stopped agent's home.
-const adapterEntry = z.object({ program: adapterProgram, args: z.array(adapterArgument).max(64).optional(), env: z.record(adapterEnvName, adapterArgument).optional(), setup: command.optional(), teardown: command.optional(), updates: adapterUpdates.optional() }).strict();
+const nativeEffort = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/u, 'Effort is a bounded native token');
+const nativeAllowedModels = z.array(z.object({ model: agentModel, effort: nativeEffort.optional() }).strict()).max(50)
+  .refine(entries => new Set(entries.map(entry => entry.model)).size === entries.length, 'each Allowed model is listed once');
+const adapterEntry = z.object({ program: adapterProgram, args: z.array(adapterArgument).max(64).optional(), env: z.record(adapterEnvName, adapterArgument).optional(), setup: command.optional(), teardown: command.optional(), updates: adapterUpdates.optional(), allowedModels: nativeAllowedModels.optional() }).strict();
 // Pi's Allowed models: exact `provider/id` entries in the operator's order (the first is the
 // default), each with an optional default Effort; the only models a Pi Agent may run on
-const allowedModels = z.array(z.object({ model: agentModel.refine(value => /^[^/[\]]+\/[^[\]]+$/u.test(value), 'an Allowed model is an exact `provider/id`, never a pattern'), effort: z.enum(piEfforts).optional() }).strict()).max(50)
+const piAllowedModels = z.array(z.object({ model: agentModel.refine(value => /^[^/[\]]+\/[^[\]]+$/u.test(value), 'an Allowed model is an exact `provider/id`, never a pattern'), effort: z.enum(piEfforts).optional() }).strict()).max(50)
   .refine(entries => new Set(entries.map(entry => entry.model)).size === entries.length, 'each Allowed model is listed once');
 // What a Sandboxed Agent's commands may reach (ADR 0004), shared at the top level and per kind:
 // domains in the sandbox runtime's grammar (`host`, `*.host`), absolute or `~/` paths, and the
@@ -121,7 +125,7 @@ const sandboxPath = z.string().min(1).max(4096).refine(value => (value.startsWit
 const sandboxDomain = z.string().min(1).max(253).regex(/^[^\s/:@]+(?::\d{1,5})?$/u, 'a sandbox domain is a host name or pattern, not a URL');
 const sandboxLists = z.object({ allowedDomains: z.array(sandboxDomain).max(256).optional(), deniedDomains: z.array(sandboxDomain).max(256).optional(), allowWrite: z.array(sandboxPath).max(256).optional(), denyWrite: z.array(sandboxPath).max(256).optional(), denyRead: z.array(sandboxPath).max(256).optional(), env: z.array(adapterEnvName).max(256).optional() }).strict();
 // the console pins Pi and supplies its program (ADR 0017), so `adapters.pi` only enables the kind
-const piEntry = adapterEntry.omit({ program: true, updates: true }).extend({ allowedModels: allowedModels.optional(), sandbox: sandboxLists.optional() }).strict('adapters.pi takes only args, env, setup, teardown, allowedModels and sandbox: Pi is pinned by the console as its own dependency, so it has no program or update commands');
+const piEntry = adapterEntry.omit({ program: true, updates: true, allowedModels: true }).extend({ allowedModels: piAllowedModels.optional(), sandbox: sandboxLists.optional() }).strict('adapters.pi takes only args, env, setup, teardown, allowedModels and sandbox: Pi is pinned by the console as its own dependency, so it has no program or update commands');
 // keyed by kind, one strict entry each; an omitted block is observe-only (nothing launches)
 const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: adapterEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
 // constrain icons to supported aliases
@@ -201,12 +205,13 @@ export type DavoSettings = z.output<typeof davoSettingsSchema>;
  * which leaves it off.
  */
 export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; spawnKinds: ConductorSpawnKind[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
-export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; buttons?: ButtonSlots; projects: Project[] };
+// launchHome is runtime-only; null means account lookup failed, omission supports legacy callers
+export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; launchHome?: string | null; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable
 // programs, a crossed OMX/Codex program); `checkExecutables` runs the boot X_OK probe
 // and is skipped under the host bridge, where `program` is a host path the container
 // cannot stat. Defaults: no-op warnings, probe on unless the host bridge is configured.
-export type ValidateConfigOptions = { warn?: (message: string) => void; checkExecutables?: boolean };
+export type ValidateConfigOptions = { warn?: (message: string) => void; checkExecutables?: boolean; resolveLaunchHome?: () => Promise<string | undefined> };
 // support legacy test fixtures
 export const defaultIntegrationConfig: IntegrationConfig = integrationFeatures.parse(undefined);
 
@@ -398,13 +403,13 @@ export function applyListenOverrides(input: unknown, env: Record<string, string 
 type ParsedAdapters = z.output<typeof adaptersSchema>;
 // resolve each configured adapter program: normalise args/env, probe executability
 // (unless bridged), and warn about operator arguments the Adapter reserves.
-async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean, warn: (message: string) => void, sandbox?: z.output<typeof sandboxLists>, writeRoots: readonly string[] = []): Promise<AdapterConfigs> {
+async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean, warn: (message: string) => void, sandbox?: z.output<typeof sandboxLists>, writeRoots: readonly string[] = [], launchHome?: string): Promise<AdapterConfigs> {
   const configs: AdapterConfigs = {};
-  if (parsed.pi !== undefined) configs.pi = await piConfig(parsed.pi, warn, sandbox, writeRoots);
+  if (parsed.pi !== undefined) configs.pi = await piConfig(parsed.pi, warn, sandbox, writeRoots, launchHome);
   for (const kind of agentKinds) {
     const entry = kind === 'pi' ? undefined : parsed[kind] as z.output<typeof adapterEntry> | undefined;
     if (entry === undefined) continue;
-    const config: AdapterLaunchConfig = { program: entry.program, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.updates === undefined ? {} : { updates: entry.updates }) };
+    const config: AdapterLaunchConfig = { program: entry.program, args: entry.args ?? [], env: inheritedHomeEnvironment(entry.env), launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.updates === undefined ? {} : { updates: entry.updates }), ...(entry.allowedModels === undefined ? {} : { allowedModels: entry.allowedModels }) };
     // a missing program, a directory, or a non-executable file never refuses boot;
     // it disables that kind with a reason (a directory is +x, so require a real file)
     if (checkExecutables) {
@@ -453,15 +458,15 @@ async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean
   return configs;
 }
 // a bridged Pi uses the host's matching pinned build, never a container-only executable
-async function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void, shared?: z.output<typeof sandboxLists>, writeRoots: readonly string[] = []): Promise<AdapterLaunchConfig> {
-  const config: AdapterLaunchConfig = { program: process.execPath, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.allowedModels === undefined || entry.allowedModels.length === 0 ? {} : { allowedModels: entry.allowedModels }), sandbox: sandboxSettings(shared, entry.sandbox) };
+async function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void, shared?: z.output<typeof sandboxLists>, writeRoots: readonly string[] = [], launchHome?: string): Promise<AdapterLaunchConfig> {
+  const config: AdapterLaunchConfig = { program: process.execPath, args: entry.args ?? [], env: inheritedHomeEnvironment(entry.env, launchHome), launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.allowedModels === undefined ? {} : { allowedModels: entry.allowedModels }), sandbox: sandboxSettings(shared, entry.sandbox) };
   // native Pi keeps its existing local runtime and lifecycle hooks
   if (process.env.RAC_HOST_TMUX_DIR === undefined) return config;
   try {
     // lifecycle commands are not yet routed through host structured transport
     if (entry.setup !== undefined || entry.teardown !== undefined) throw new Error('Pi host bridge does not support setup or teardown hooks');
     // the sandbox must protect the host user's credentials, not the container user's
-    if (entry.env?.HOME === undefined || !isAbsolute(entry.env.HOME)) throw new Error('Pi host bridge requires an absolute adapters.pi.env.HOME for the host account');
+    if (config.env.HOME === undefined || !isAbsolute(config.env.HOME) || /[\u0000-\u001f\u007f]/u.test(config.env.HOME)) throw new Error('Pi host bridge requires a proven host home or an absolute adapters.pi.env.HOME for the host account');
     config.program = hostPiRuntime()!.node;
     await verifyHostPiNode(config.program, { ...process.env, HOME: config.env.HOME }, undefined, [...writeRoots, ...config.sandbox!.allowWrite]);
   } catch (error) {
@@ -493,7 +498,9 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
   const checkExecutables = options.checkExecutables ?? process.env.RAC_HOST_TMUX_DIR === undefined;
   // host launch code must live outside every configured writable Place and explicit sandbox root
   const writeRoots = [...(parsed.scratchDirectory === undefined ? [] : [parsed.scratchDirectory]), ...parsed.projects.flatMap(project => [project.path, ...(project.hostPath === undefined ? [] : [project.hostPath]), ...(project.worktreesDirectory === undefined ? [] : [project.worktreesDirectory])]), ...Object.values(parsed.adapters).flatMap(adapter => adapter !== undefined && 'sandbox' in adapter ? adapter.sandbox?.allowWrite ?? [] : [])];
-  const adapters = await resolveAdapters(parsed.adapters, checkExecutables, warn, parsed.sandbox, writeRoots);
+  // inherit the launch account only at runtime, without changing authored settings
+  const launchHome = await (options.resolveLaunchHome ?? resolveLaunchUserHome)();
+  const adapters = await resolveAdapters(parsed.adapters, checkExecutables, warn, parsed.sandbox, writeRoots, launchHome);
   const review = resolveReviewConfig(parsed.review, parsed.adapters);
   const keys = parsed.keys === undefined ? undefined : parseKeysConfig(parsed.keys);
   if (isIP(parsed.listen.host) === 0) throw new Error('listener host must be an IP address literal');
@@ -523,5 +530,5 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
   }
   // retain disabled source configuration without exposing a running Conductor or its tools
   const conductor = parsed.conductor === undefined || parsed.conductor.enabled === false ? undefined : conductorConfig(parsed.conductor, projects, adapters);
-  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), ...(conductor === undefined ? {} : { conductor }), googleCalendar: parsed.googleCalendar, review, buttons: parsed.buttons, projects };
+  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), launchHome: launchHome ?? null, ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), ...(conductor === undefined ? {} : { conductor }), googleCalendar: parsed.googleCalendar, review, buttons: parsed.buttons, projects };
 }

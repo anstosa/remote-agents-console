@@ -8,10 +8,13 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('../src/adapters/registry.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/adapters/registry.js')>(),
   adapterFor: (kind: string) => (kind === 'codex' || kind === 'claude' ? { kind } : undefined),
-  adapterCapabilities: (configs?: Record<string, { launchable?: boolean; unavailableReason?: string }>) =>
+  adapterCapabilities: (configs?: Record<string, { launchable?: boolean; unavailableReason?: string; allowedModels?: unknown[] }>) =>
     Object.fromEntries(['codex', 'claude'].map(kind => [kind, {
-      launchable: configs?.[kind]?.launchable ?? false,
-      ...(configs?.[kind]?.unavailableReason === undefined ? {} : { unavailableReason: configs[kind]!.unavailableReason }),
+      launchable: (configs?.[kind]?.launchable ?? false) && configs?.[kind]?.allowedModels?.length !== 0,
+      ...(configs?.[kind]?.allowedModels?.length === 0
+        ? { unavailableReason: 'No models are allowed for this Agent.' }
+        : configs?.[kind]?.unavailableReason === undefined ? {} : { unavailableReason: configs[kind]!.unavailableReason }),
+      ...(configs?.[kind]?.allowedModels === undefined ? {} : { allowedModels: configs[kind]!.allowedModels }),
       stateSource: 'title', turnCapture: false, conversations: false, naming: false, inlineQuestions: false, commands: false, sandbox: false,
     }])),
 }));
@@ -65,6 +68,19 @@ describe('resolveLaunchKind with more than one launchable kind', () => {
     const service = new LaunchService(twoKinds(false), undefined, undefined, undefined, store());
     expect(await service.resolveLaunchKind(cora, 'claude')).toBeUndefined();
     expect(await service.resolveLaunchKind(cora, 'pi' as never)).toBeUndefined();
+  });
+
+  it('skips deny-all defaults while preserving their explicit policy refusal', async () => {
+    const config = twoKinds(true, 'codex') as { adapters: Record<string, Record<string, unknown>> };
+    config.adapters.codex!.allowedModels = [];
+    const service = new LaunchService(config as never, undefined, undefined, undefined, store('codex'));
+
+    expect(service.defaultAgent()).toBe('claude');
+    expect(await service.resolveLaunchKind(cora, 'codex')).toBe('codex');
+    expect(await service.resolveLaunchKind(cora)).toBe('claude');
+    expect((await service.launchResolutions([cora])).get(cora)).toEqual({
+      kind: 'claude', origin: 'default', skipped: { kind: 'codex', origin: 'worktree', reason: 'No models are allowed for this Agent.' }
+    });
   });
 });
 

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/app.js';
 import { WorktreeLaunchStore } from '../src/worktrees/store.js';
+import { LaunchOptionsError } from '../src/launch/options.js';
 import { OpenedFolderStore } from '../src/places/opened-folders.js';
 import type { Place } from '../src/places/places.js';
 import { testConfig } from './helpers/config.js';
@@ -32,7 +33,7 @@ async function tempRoot(): Promise<string> {
 }
 
 // an app over a real folder `<root>/repo`, which discovery opens as `place`
-async function start(options: { place?: (folder: string) => Place | undefined; launch?: object; dashboard?: (call: number, folder: string) => unknown; tmux?: object; target?: (id: string) => unknown } = {}) {
+async function start(options: { launchHome?: string | null; piHome?: string; launchOptions?: object; place?: (folder: string) => Place | undefined; launch?: object; dashboard?: (call: number, folder: string) => unknown; tmux?: object; target?: (id: string) => unknown } = {}) {
   const root = await tempRoot();
   const folder = join(root, 'repo');
   await mkdir(join(folder, 'src'), { recursive: true });
@@ -49,9 +50,9 @@ async function start(options: { place?: (folder: string) => Place | undefined; l
     target: async (id: string) => options.target?.(id),
   };
   const launch = { launchResolutions: async () => new Map(), agentHome: () => root, ...options.launch };
-  const app = await buildApp(testConfig({ publicOrigin: new URL(`https://${host}`) }), {
+  const app = await buildApp(testConfig({ publicOrigin: new URL(`https://${host}`), ...(options.launchHome === undefined ? {} : { launchHome: options.launchHome }), adapters: { ...(options.piHome === undefined ? {} : { pi: { program: process.execPath, args: [], env: { HOME: options.piHome }, launchable: true } }), codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } } }), {
     auth, control, dashboardUpdates, launchPollDelay: zeroPollDelay, worktreeStore, openedFolders,
-    discovery: discovery as never, launch: launch as never, tmux: (options.tmux ?? {}) as never,
+    discovery: discovery as never, launch: launch as never, ...(options.launchOptions === undefined ? {} : { launchOptions: options.launchOptions as never }), tmux: (options.tmux ?? {}) as never,
   });
   return { app, root, folder, worktreeStore, openedFolders, openFolder, invalidateWorktrees };
 }
@@ -70,6 +71,47 @@ describe('opening a folder', () => {
         reasons.push(response.json().error);
       }
       expect(reasons).toEqual(['The path must be absolute.', 'That folder does not exist.', 'That is not a folder.', 'That is not a valid path.', 'That is not a valid path.', 'That is not a valid path.', 'That is not a valid path.']);
+      expect(openFolder).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
+  // absolute empty workspaces do not depend on an account home
+  it('opens absolute empty folders without launch HOME', async () => {
+    const { app, folder, openFolder } = await start({ launchHome: null, launch: { agentHome: () => { throw new Error('launch_home_unavailable'); } } });
+    try {
+      const response = await app.inject(open({ path: folder, action: 'empty' }));
+      expect(response.statusCode).toBe(201);
+      expect(openFolder).toHaveBeenCalledWith(folder);
+    } finally { await app.close(); }
+  });
+
+  // unavailable account actions fail before folder or process mutation
+  it('refuses home-relative, terminal, and Codex actions with a fixed conflict', async () => {
+    const createConsoleShell = vi.fn();
+    const launchAt = vi.fn();
+    const { app, folder, openFolder } = await start({ launchHome: null, launch: { agentHome: () => { throw new Error('launch_home_unavailable'); }, createConsoleShell, launchAt } });
+    try {
+      // each account-dependent boundary reports the same stable refusal
+      for (const payload of [{ path: '~/repo', action: 'empty' }, { path: folder, action: 'terminal' }, { path: folder, action: 'agent', kind: 'codex' }]) {
+        const response = await app.inject(open(payload));
+        expect(response.statusCode).toBe(409);
+        expect(response.json()).toEqual({ error: 'launch_home_unavailable' });
+      }
+      expect(openFolder).not.toHaveBeenCalled();
+      expect(createConsoleShell).not.toHaveBeenCalled();
+      expect(launchAt).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
+  // a validated Pi HOME still reaches semantic preparation for an absolute folder
+  it('prepares absolute Pi targets with an explicit HOME without a console account', async () => {
+    const prepare = vi.fn(async () => { throw new LaunchOptionsError(409, 'launch_option_unsupported'); });
+    const { app, folder, openFolder } = await start({ launchHome: null, piHome: '/explicit/pi', launchOptions: { prepare } });
+    try {
+      const response = await app.inject(open({ path: folder, action: 'agent', kind: 'pi' }));
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({ error: 'launch_option_unsupported' });
+      expect(prepare).toHaveBeenCalledWith('pi', { kind: 'pi' }, expect.objectContaining({ cwd: folder, home: undefined }));
       expect(openFolder).not.toHaveBeenCalled();
     } finally { await app.close(); }
   });
@@ -130,7 +172,7 @@ describe('opening a folder', () => {
       const response = await app.inject(open({ path: folder, action: 'agent', kind: 'codex' }));
       expect(response.statusCode).toBe(201);
       expect(response.json()).toEqual({ placeId: `scratch:${folder}`, agentId: 'socket:%3' });
-      expect(launchAt).toHaveBeenCalledWith(adhoc(folder), 'codex', undefined, undefined);
+      expect(launchAt).toHaveBeenCalledWith(adhoc(folder), 'codex', undefined, undefined, expect.objectContaining({ kind: 'codex', nativeDefault: true }));
     } finally { await app.close(); }
   });
 

@@ -326,7 +326,7 @@ test('shows the editable launch composer without overflowing a mobile viewport',
   const harness = await mountLifecycle(page);
   // the phone launch action opens a chooser before starting the selected agent
   await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: 'Launch agent' }).click();
-  await page.getByRole('menu', { name: 'Choose agent' }).getByRole('menuitem', { name: /^Codex ·/u }).click();
+  await page.getByRole('menu', { name: 'Choose agent' }).getByRole('menuitem', { name: 'Launch Codex', exact: true }).click();
   await expect.poll(harness.attempts).toBe(1);
 
   const composer = page.getByRole('region', { name: 'Prompt composer' });
@@ -392,8 +392,9 @@ test('prepares and hands off a directory prompt before dashboard discovery', asy
 test('a pending scratch session keeps the mobile keyboard gutter', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const harness = await mountPendingSession(page, 'scratch');
-  await openAgentLauncher(page);
-  await page.getByRole('group', { name: 'Agent launcher' }).locator('.launcher-row').filter({ hasText: 'Scratch' }).getByRole('button', { name: 'Launch ~ Scratch' }).click();
+  // mobile launches use the persistent chooser rather than the hidden tab-strip plus
+  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: 'Launch agent', exact: true }).click();
+  await page.getByRole('menu', { name: 'Choose agent' }).getByRole('menuitem', { name: 'Launch Codex', exact: true }).click();
   await expect.poll(harness.launchRequests).toBe(1);
 
   const pendingPanel = page.locator('.log > .log-split > .log-output');

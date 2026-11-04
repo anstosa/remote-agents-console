@@ -24,9 +24,13 @@ import type { HolderLaunch, HolderRef, HolderStatus, HolderWindows } from '../tr
 import { isFullGitSha } from '../git/revision.js';
 import { accountHome, configuredPlaces, placeHostRoot, scratchHome, scratchPlaceLabel, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
+import { inheritedHomeEnvironment, resolveLaunchUserHome } from '../places/launch-home.js';
+import { compileNativeLaunch } from './native-options.js';
+import { resolveAllowedLaunchModel } from './options.js';
+import type { PreparedLaunchChoice } from './options-types.js';
 
 /** How a structured Agent launches: resuming one Conversation, continuing the latest, or a new one on a chosen model; Sandboxed or not. */
-export type StructuredLaunchOptions = { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean };
+export type StructuredLaunchOptions = { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; nativeDefaultValidated?: true };
 
 export function expandCommand(command: string, worktree: Pick<Worktree, 'identity'>): string {
   const directory = `'${worktree.identity.replaceAll("'", "'\\''")}'`;
@@ -96,7 +100,9 @@ export function withoutFlags(args: string[], flags: ReadonlyMap<string, Replaced
 export type ConsoleShellPlace = Pick<Place, 'id' | 'kind' | 'projectId' | 'home' | 'hostPath'>;
 
 // one worktree launch request: which conversation (if any) and whether to confine it
-type LaunchRequest = { mode: LaunchMode; conversationId?: string; sandboxed: boolean };
+type LaunchRequest = { mode: LaunchMode; conversationId?: string; sandboxed: boolean; model?: ModelSetting; prepared?: PreparedLaunchChoice };
+// preserve validated semantics while native adapters compile their own grammar
+type ChosenLaunchInput = LaunchInput & { model?: ModelSetting; prepared?: PreparedLaunchChoice };
 
 // one tmux session on its socket: the session a launch or a Console shell at a Place joins
 export type TmuxSession = { socket: SocketRef; session: string };
@@ -134,7 +140,7 @@ const updateAdvisorReplacedFlags = new Map<string, ReplacedFlagValue>([
 export class LaunchService implements HolderWindows {
   private pending = new Set<string>();
   // the configured Scratch folder's realpath, resolved once
-  private scratchHomeValue?: Promise<string>;
+  private scratchHomeValue?: Promise<string | undefined>;
   private readonly tmux = process.env.RAC_TMUX_BIN ?? '/usr/bin/tmux'; private readonly hostSocket = process.env.RAC_HOST_TMUX_DIR === undefined ? undefined : join(process.env.RAC_HOST_TMUX_DIR, 'default');
   // the controlling browser's Light/Dark choice, which new panes start in; in memory, as that
   // browser posts it again whenever it reconnects
@@ -271,7 +277,10 @@ export class LaunchService implements HolderWindows {
     // a missing policy or runtime cannot authorize a surviving host process
     if (runtime === undefined || policy === undefined) throw new Error('Pi host bridge generation is unavailable');
     const writeRoots = [...(place === undefined ? [] : [place.home, placeHostRoot(place)]), ...(this.config.scratchDirectory === undefined ? [] : [this.config.scratchDirectory]), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory, ...(project.hostPath === undefined ? [] : [project.hostPath])]), ...Object.values(this.config.adapters).flatMap(adapter => adapter?.sandbox?.allowWrite ?? [])];
-    const home = this.config.adapters.pi?.env.HOME ?? process.env.HOME;
+    const configuredHome = inheritedHomeEnvironment(this.config.adapters.pi?.env, this.config.launchHome ?? undefined).HOME;
+    const home = configuredHome ?? await resolveLaunchUserHome();
+    // never authorize protected roots against the container account
+    if (home === undefined || !isAbsolute(home) || /[\u0000-\u001f\u007f]/u.test(home)) throw new Error('Pi host bridge requires a proven host home or an absolute adapters.pi.env.HOME');
     const directory = canonical(dirname(policy));
     const protectedState = canonical(join(hostVisibleRepoRoot()!, '.data'));
     const inProtectedState = directory === protectedState || directory.startsWith(`${protectedState}${sep}`);
@@ -286,13 +295,17 @@ export class LaunchService implements HolderWindows {
     if (!fileInfo.isFile() || fileInfo.nlink !== 1 || fileInfo.uid !== process.getuid?.() || (fileInfo.mode & 0o022) !== 0 || !directoryInfo.isDirectory() || directoryInfo.uid !== process.getuid?.() || (directoryInfo.mode & 0o022) !== 0 || canonical(policy) !== resolve(policy)) throw new Error('Pi host bridge policy is not private immutable console state');
     // generations authorize server-rendered bytes, never whatever a sandbox left on disk
     if (this.expectedPiPolicy === undefined || !contents.equals(Buffer.from(this.expectedPiPolicy))) throw new Error('Pi host bridge policy does not match its server-rendered configuration');
-    const node = await verifyHostPiNode(runtime.node, { ...process.env, HOME: this.config.adapters.pi?.env.HOME ?? process.env.HOME }, undefined, writeRoots);
+    const node = await verifyHostPiNode(runtime.node, { ...process.env, HOME: home }, undefined, writeRoots);
     return createHash('sha256').update('pi-host-sandbox-v1').update(runtime.fingerprint).update(node).update(this.expectedPiPolicy).digest('hex');
   }
 
   // the launchable kinds in registry (resolution) order for the current configuration
   private launchableKinds(): AgentKind[] {
-    return agentKinds.filter(kind => (this.config.adapters[kind]?.launchable ?? false) && (adapterFor(kind) ?? structuredAdapterFor(kind)) !== undefined);
+    return agentKinds.filter(kind => {
+      const configured = this.config.adapters[kind];
+      // deny-all policies remain configured but cannot become a launch default
+      return (configured?.launchable ?? false) && configured?.allowedModels?.length !== 0 && (adapterFor(kind) ?? structuredAdapterFor(kind)) !== undefined;
+    });
   }
 
   // expose the effective server default, falling back when its configured kind is unavailable
@@ -311,8 +324,12 @@ export class LaunchService implements HolderWindows {
   // the one the Launch button named (an unreadable store falls back to the first launchable)
   async resolveLaunchKind(scopeKey: string, requested?: AgentKind): Promise<AgentKind | undefined> {
     const kinds = this.launchableKinds();
+    // explicit requests keep their fixed model-policy error instead of becoming target errors
+    if (requested !== undefined) {
+      const configured = this.config.adapters[requested];
+      return (configured?.launchable ?? false) && (adapterFor(requested) ?? structuredAdapterFor(requested)) !== undefined ? requested : undefined;
+    }
     if (kinds.length === 0) return undefined;
-    if (requested !== undefined) return kinds.includes(requested) ? requested : undefined;
     // a single launchable kind is always the answer; skip the store read on the hot path
     if (kinds.length === 1) return kinds[0];
     const remembered = await this.worktreeStore.launchProfiles().catch(() => ({} as Record<string, AgentKind | undefined>));
@@ -347,42 +364,60 @@ export class LaunchService implements HolderWindows {
   // Compose the inner shell command for a launch of `kind`: [program, …adapter args,
   // …operator args] from the kind's configured entry, then a Review run's own arguments
   // with the operator flags they replace dropped. A kind with no entry cannot launch.
-  private composeKindLaunch(kind: AgentKind, input: LaunchInput, review?: ReviewRunLaunch): string | undefined {
+  private composeKindLaunch(kind: AgentKind, input: ChosenLaunchInput, review?: ReviewRunLaunch): string | undefined {
     const adapter = adapterFor(kind);
     const configured = this.config.adapters[kind];
     if (adapter === undefined || configured === undefined) return undefined;
     const spec = adapter.launch(input);
-    const operatorArgs = review === undefined ? configured.args : withoutFlags(configured.args, review.replacedFlags);
-    return composeLaunch(configured.program, spec.args, operatorArgs, spec.env, configured.env, configured.setup, review?.extraArgs);
+    // fixed review restrictions remain separate from manual security
+    if (review !== undefined) {
+      const modelIndex = review.extraArgs.findIndex(argument => argument === '--model' || argument === '-m');
+      const requested = modelIndex < 0 ? undefined : { model: review.extraArgs[modelIndex + 1]! };
+      const selected = resolveAllowedLaunchModel(kind, configured, requested);
+      const replacements = new Map(review.replacedFlags);
+      const extra = [...review.extraArgs];
+      // an explicit policy owns model selection even when the preset omits it
+      if (selected !== undefined) {
+        replacements.set('--model', 'one');
+        replacements.set('-m', 'one');
+        if (modelIndex < 0) extra.push('--model', selected.model);
+      }
+      return composeLaunch(configured.program, spec.args, withoutFlags(configured.args, replacements), spec.env, configured.env, configured.setup, extra);
+    }
+    const selection = input.model === undefined && input.prepared === undefined ? undefined : { ...(input.model === undefined ? {} : { model: input.model }), ...(input.prepared === undefined ? {} : { security: input.prepared.security }) };
+    const compiled = compileNativeLaunch(kind, input, configured.args, selection, spec);
+    return composeLaunch(configured.program, compiled.args, [], compiled.env, configured.env, configured.setup);
   }
 
   // the inner command for a worktree launch
   private async worktreeCommand(worktree: Worktree, kind: AgentKind, input: LaunchRequest): Promise<string | undefined> {
     const files = await this.adapterFiles(kind);
-    return this.composeKindLaunch(kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), cwd: worktree.identity, sandboxed: input.sandboxed, ...(files === undefined ? {} : { files }) });
+    return this.composeKindLaunch(kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), cwd: worktree.identity, sandboxed: input.sandboxed, ...(input.model === undefined ? {} : { model: input.model }), ...(input.prepared === undefined ? {} : { prepared: input.prepared }), ...(files === undefined ? {} : { files }) });
   }
 
   // the inner command for a scratch launch
-  private async scratchCommand(kind: AgentKind, cwd: string): Promise<string | undefined> {
+  private async scratchCommand(kind: AgentKind, cwd: string, model?: ModelSetting, prepared?: PreparedLaunchChoice): Promise<string | undefined> {
     const files = await this.adapterFiles(kind);
-    return this.composeKindLaunch(kind, { mode: 'fresh', cwd, sandboxed: false, ...(files === undefined ? {} : { files }) });
+    return this.composeKindLaunch(kind, { mode: 'fresh', cwd, sandboxed: false, ...(model === undefined ? {} : { model }), ...(prepared === undefined ? {} : { prepared }), ...(files === undefined ? {} : { files }) });
   }
 
   // resolve the authenticated account home independently from the launch directory
   agentHome(projectId?: string): string {
-    return accountHome(this.config.projects, projectId);
+    // preserve offline settings without authorizing a guessed account
+    if (this.config.launchHome === null) throw new Error('launch_home_unavailable');
+    return this.config.launchHome ?? accountHome(this.config.projects, projectId);
   }
 
   // every configured Place over the current Worktree snapshot
   private async places(): Promise<Place[]> {
-    this.scratchHomeValue ??= scratchHome(this.config.scratchDirectory, this.config.projects);
+    this.scratchHomeValue ??= scratchHome(this.config.scratchDirectory, this.config.projects, this.config.launchHome);
     return configuredPlaces(this.discoveredWorktrees(), this.config.projects, await this.scratchHomeValue);
   }
 
   // the configured Scratch folder's Place, which a Scratch launch joins
   async scratchPlace(): Promise<Place> {
     const place = (await this.places()).find(candidate => candidate.kind === 'scratch');
-    // configuredPlaces always lists the configured Scratch folder
+    // an unresolved launch account cannot supply a default scratch folder
     if (place === undefined) throw new Error('no configured Scratch Place');
     return place;
   }
@@ -476,8 +511,10 @@ export class LaunchService implements HolderWindows {
   }
   // launch one ordinary scratch agent of the resolved (or requested) kind at the Scratch Place:
   // the configured Scratch directory when set, else the account home
-  async launchHome(kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
-    return await this.launchRemembering(await this.scratchPlace(), scratchLaunchKey, kind, model, sandboxed);
+  async launchHome(kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
+    // an offline account must not launch under a guessed scratch home
+    if (this.config.launchHome === null && this.config.scratchDirectory === undefined) return false;
+    return await this.launchRemembering(await this.scratchPlace(), scratchLaunchKey, kind, model, sandboxed, prepared);
   }
 
   // launch one agent directly in a non-git `directory` Project — the same in-place spawn
@@ -486,27 +523,27 @@ export class LaunchService implements HolderWindows {
   // under the Scratch persistence key for the directory. Only an available `directory` Project
   // launches this way: a `repository` Project launches through its Worktrees, and an
   // unavailable one has nothing to launch into. Remembers the kind under the Project scope.
-  async launchProjectDirectory(projectId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
+  async launchProjectDirectory(projectId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
     const place = await this.directoryPlace(projectId);
-    return place !== undefined && await this.launchRemembering(place, projectId, kind, model, sandboxed);
+    return place !== undefined && await this.launchRemembering(place, projectId, kind, model, sandboxed, prepared);
   }
 
   // launch a fresh agent at any Place through its own launch: a Worktree's, a directory
   // Project's, the Scratch folder's, or in place in an ad-hoc Scratch folder, remembering the kind
   // under that folder's own scope. Only Open folder launches in an ad-hoc folder.
-  async launchAt(place: Place, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
-    if (place.kind === 'worktree') return await this.launch(place.id, kind, model, sandboxed);
-    if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind, model, sandboxed);
-    return place.adhoc === true ? await this.launchRemembering(place, place.id, kind, model, sandboxed) : await this.launchHome(kind, model, sandboxed);
+  async launchAt(place: Place, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
+    if (place.kind === 'worktree') return await this.launch(place.id, kind, model, sandboxed, undefined, prepared);
+    if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind, model, sandboxed, prepared);
+    return place.adhoc === true ? await this.launchRemembering(place, place.id, kind, model, sandboxed, prepared) : await this.launchHome(kind, model, sandboxed, prepared);
   }
 
   // launch in place at a directory-Project or Scratch Place with the resolved (or requested) kind,
   // remembering it under `scope`; a storage failure never fails a live launch
-  private async launchRemembering(place: Place, scope: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
+  private async launchRemembering(place: Place, scope: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
     const resolved = await this.resolveLaunchKind(scope, kind);
     // refuse an unconfigured or unlaunchable kind
     if (resolved === undefined) return false;
-    const launched = await this.launchInPlace(place, resolved, model, sandboxed);
+    const launched = await this.launchInPlace(place, resolved, model, sandboxed, prepared);
     if (launched) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
     return launched;
   }
@@ -540,16 +577,19 @@ export class LaunchService implements HolderWindows {
   }
 
   // launch into a directory-Project or Scratch Place without modifying an idle shell's input
-  private async launchInPlace(place: Place, kind: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
+  private async launchInPlace(place: Place, kind: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
     if (this.pending.has(place.id)) { console.warn(`[launch] ${place.home}: a launch is already in progress`); return false; }
     this.pending.add(place.id);
     try {
+      // automatic and manual launches share explicit-list enforcement
+      const validatedModel = resolveAllowedLaunchModel(kind, this.config.adapters[kind], model, { nativeDefaultValidated: prepared !== undefined });
+      model = prepared === undefined ? validatedModel : model === undefined ? undefined : { ...model };
       // a structured Agent runs under a holder rather than in a pane (ADR 0015)
-      if (structuredAdapterFor(kind) !== undefined) return await this.launchStructured(place, kind, { ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, sandboxed) });
+      if (structuredAdapterFor(kind) !== undefined) return await this.launchStructured(place, kind, { ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, sandboxed), ...(prepared === undefined ? {} : { nativeDefaultValidated: true as const }) });
       // under the Docker bridge the host-visible path is what the host tmux can cd into; HOME is
       // the default account home for every directory-Project and Scratch launch
       const site: LaunchSite = { cwd: placeHostRoot(place), home: this.agentHome() };
-      const command = await this.scratchCommand(kind, site.cwd);
+      const command = await this.scratchCommand(kind, site.cwd, model, prepared);
       if (command === undefined) { console.warn(`[launch] ${place.home}: agent kind ${kind} produced no launch command`); return false; }
       const id = randomBytes(18).toString('base64url');
       const joined = await this.placeSession(place);
@@ -612,8 +652,8 @@ export class LaunchService implements HolderWindows {
 
   // launch a fresh agent in a worktree, resolving the kind (or using the requested one); a
   // Conductor's worker names it as `spawnedBy` (ADR 0018), which only a pane launch records
-  async launch(worktreeId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, spawnedBy?: string): Promise<boolean> {
-    return await this.launchWorktree(worktreeId, { mode: 'fresh', ...(kind === undefined ? {} : { kind }), ...(model === undefined ? {} : { model }), ...(sandboxed === undefined ? {} : { sandboxed }), ...(spawnedBy === undefined ? {} : { spawnedBy }) });
+  async launch(worktreeId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, spawnedBy?: string, prepared?: PreparedLaunchChoice): Promise<boolean> {
+    return await this.launchWorktree(worktreeId, { mode: 'fresh', ...(kind === undefined ? {} : { kind }), ...(model === undefined ? {} : { model }), ...(sandboxed === undefined ? {} : { sandboxed }), ...(spawnedBy === undefined ? {} : { spawnedBy }), ...(prepared === undefined ? {} : { prepared }) });
   }
 
   // launch a Review run's Agent (ADR 0010): a `kind` pane in the Worktree's Workspace, fresh or
@@ -663,18 +703,18 @@ export class LaunchService implements HolderWindows {
   }
 
   // resume the previous conversation (Codex: `codex resume --last`), no shell alias
-  async resume(worktreeId: string, kind?: AgentKind): Promise<boolean> {
-    return await this.launchWorktree(worktreeId, { mode: 'continue', ...(kind === undefined ? {} : { kind }) });
+  async resume(worktreeId: string, kind?: AgentKind, prepared?: PreparedLaunchChoice): Promise<boolean> {
+    return await this.launchWorktree(worktreeId, { mode: 'continue', ...(kind === undefined ? {} : { kind }), ...(prepared === undefined ? {} : { prepared, model: prepared.model }) });
   }
 
   // resume one exact listed conversation by its id, through its Adapter kind
-  async resumeConversation(worktreeId: string, threadId: string, kind?: AgentKind): Promise<boolean> {
+  async resumeConversation(worktreeId: string, threadId: string, kind?: AgentKind, prepared?: PreparedLaunchChoice): Promise<boolean> {
     // validate the id through the resuming Adapter rather than a hard-coded UUID pattern, so a
     // kind whose ids are not UUIDs still resumes; a validated id also keeps the host command
     // free of shell input, whether the id is quoted or substituted
     const resumeKind = kind ?? await this.resolveLaunchKind(worktreeId);
     if (resumeKind === undefined || (adapterFor(resumeKind) ?? structuredAdapterFor(resumeKind))?.conversations?.validId(threadId) !== true) return false;
-    return await this.launchWorktree(worktreeId, { mode: 'resume', conversationId: threadId, kind: resumeKind });
+    return await this.launchWorktree(worktreeId, { mode: 'resume', conversationId: threadId, kind: resumeKind, ...(prepared === undefined ? {} : { prepared, model: prepared.model }) });
   }
 
   // expose exact-resume support before destructive lifecycle work: a known Worktree
@@ -684,7 +724,7 @@ export class LaunchService implements HolderWindows {
   }
 
   // start one worktree in the requested mode, composing its command from the Adapter
-  private async launchWorktree(worktreeId: string, input: { mode: LaunchMode; conversationId?: string; sandboxed?: boolean; kind?: AgentKind; model?: ModelSetting; spawnedBy?: string }): Promise<boolean> {
+  private async launchWorktree(worktreeId: string, input: { mode: LaunchMode; conversationId?: string; sandboxed?: boolean; kind?: AgentKind; model?: ModelSetting; spawnedBy?: string; prepared?: PreparedLaunchChoice }): Promise<boolean> {
     const worktree = this.worktreeById(worktreeId);
     // Every refusal below logs its reason. The web only ever sees a bare "couldn't
     // start", so without this the operator has nothing to diagnose from — the cause
@@ -697,13 +737,17 @@ export class LaunchService implements HolderWindows {
       const kind = await this.resolveLaunchKind(worktreeId, input.kind);
       // refuse an unconfigured or unlaunchable kind
       if (kind === undefined) { console.warn(`[launch] ${worktree.identity}: no launchable agent kind (check adapters.*.launchable and the agent binary)`); return false; }
-      const sandboxed = input.sandboxed === true;
+      // validate policy before launching a replacement process
+      const keepRestored = input.prepared?.keepCurrent === true || (structuredAdapterFor(kind) !== undefined && input.mode !== 'fresh' && input.model === undefined && input.prepared === undefined);
+      const validatedModel = keepRestored ? undefined : resolveAllowedLaunchModel(kind, this.config.adapters[kind], input.model, { nativeDefaultValidated: input.prepared !== undefined });
+      const model = input.prepared === undefined ? validatedModel : input.model === undefined ? undefined : { ...input.model };
+      const sandboxed = structuredAdapterFor(kind) !== undefined && (input.prepared?.security.sandbox === 'off' ? false : input.prepared?.security.sandbox === 'on' ? true : input.sandboxed === true);
       let launched: boolean;
       if (structuredAdapterFor(kind) !== undefined) {
-        launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.mode === 'continue' ? { continue: true as const } : {}), ...(input.model === undefined ? {} : { model: input.model }), sandboxed: structuredSandboxed(kind, input.sandboxed) });
+        launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.mode === 'continue' ? { continue: true as const } : {}), ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, input.prepared?.security.sandbox === 'off' ? false : input.prepared?.security.sandbox === 'on' ? true : input.sandboxed), ...(input.prepared === undefined ? {} : { nativeDefaultValidated: true as const }) });
       } else {
         const id = randomBytes(18).toString('base64url');
-        const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed });
+        const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed, ...(model === undefined ? {} : { model }), ...(input.prepared === undefined ? {} : { prepared: input.prepared }) });
         // a worktree with no launch command (and no override) cannot start
         if (command === undefined) { console.warn(`[launch] ${worktree.identity}: agent kind ${kind} produced no launch command`); return false; }
         launched = await this.dispatchWorktreeLaunch(worktree, command, id, { sandboxed, ...(input.spawnedBy === undefined ? {} : { spawnedBy: input.spawnedBy }) });
@@ -786,6 +830,8 @@ export class LaunchService implements HolderWindows {
   // basename), so it never displaces another. It is a Console shell's login shell without the
   // Console shell role, marked through its new pane id (a dotted session name is no tmux target).
   async startWorktreeShell(worktree: Worktree): Promise<boolean> {
+    // preserve completed worktree creation when its account is offline
+    if (this.config.launchHome === null) return false;
     const name = await this.availableSessionName(worktreeSessionName(worktreeHostRoot(worktree)));
     const { cwd, argv } = this.consoleShellCommand(worktreePlace(worktree), '');
     const pane = await this.openPane(name, cwd, argv, worktree.identity);
@@ -820,6 +866,8 @@ export class LaunchService implements HolderWindows {
   // else a fresh console session named for the Place — so agent and shells stay in one session.
   // `keyBinding` (`table chord`) tags the pane of a key binding's Terminal, so `reuse` finds it.
   async createConsoleShell(place: ConsoleShellPlace, name: string, command = '', keyBinding?: string): Promise<string | undefined> {
+    // refuse before session lookup or pane creation under an unknown account
+    if (this.config.launchHome === null) return undefined;
     const { cwd, argv } = this.consoleShellCommand(place, command);
     const joined = await this.placeSession(place);
     const pane = joined !== undefined
@@ -896,8 +944,12 @@ export class LaunchService implements HolderWindows {
     const host = this.hostSocket !== undefined;
     // bridged structured sessions require one canonical path for history and sandbox policy
     if (host && place.home !== placeHostRoot(place)) { console.warn(`[launch] ${place.home}: structured Agents cannot launch through an aliased host path`); return undefined; }
+    // a blank override inherits the proven launch account, never Docker's HOME
+    const environment = inheritedHomeEnvironment(launch.env, this.config.launchHome ?? undefined);
+    // legacy callers without validated runtime defaults still resolve the actual account
+    if (environment.HOME === undefined) Object.assign(environment, inheritedHomeEnvironment({}, await resolveLaunchUserHome()));
     // a bridged shell must protect and load the host account rather than the container account
-    if (host && (launch.env.HOME === undefined || !isAbsolute(launch.env.HOME))) throw new Error('Pi host bridge requires an absolute adapters.pi.env.HOME');
+    if (host && (environment.HOME === undefined || !isAbsolute(environment.HOME) || /[\u0000-\u001f\u007f]/u.test(environment.HOME))) throw new Error('Pi host bridge requires a proven host home or an absolute adapters.pi.env.HOME');
     const runtime = host ? hostPiRuntime() : undefined;
     // a bridged launch must never fall back to container-only runtime paths
     if (host && runtime === undefined) throw new Error('Pi host bridge runtime is unavailable');
@@ -910,14 +962,14 @@ export class LaunchService implements HolderWindows {
     if (Buffer.byteLength(socket) > 107) { console.warn(`[launch] ${place.home}: holder socket path is too long`); return undefined; }
     await this.privateDirectory('holders', privateRoot);
     const [node, ...holder] = runtime === undefined ? holderArgv(socket, [launch.program, ...launch.args]) : [runtime.node, runtime.holder, socket, '--', launch.program, ...launch.args];
-    const command = composeLaunch(node!, holder, [], launch.env, {}, launch.setup);
+    const command = composeLaunch(node!, holder, [], environment, {}, launch.setup);
     const cwd = placeHostRoot(place);
     const joined = await this.placeSession(place);
     const tmuxSocket = joined?.socket.path ?? this.hostSocket;
     const socketArgs = tmuxSocket === undefined ? [] : ['-S', tmuxSocket];
     const pane = await this.openPane(joined ?? await this.availableSessionName(placeSessionName(place)), cwd, holderPlaceholder, place.home);
     if (pane === undefined) return undefined;
-    const account = host ? launch.env.HOME! : this.agentHome(place.kind === 'worktree' ? place.projectId : undefined);
+    const account = host ? environment.HOME! : this.agentHome(place.kind === 'worktree' ? place.projectId : undefined);
     const launchArgv = host ? this.hostShellArgv(expandHomeCommand(command, cwd), account) : [this.localShell, '-lc', interactiveShellBootstrap(expandHomeCommand(command, cwd), '$HOME', this.localShell)];
     const started = await this.finishCreatedPane(tmuxSocket, pane, place.home, async () =>
       (await run(this.tmux, [...socketArgs, 'set-option', '-w', '-t', pane, 'remain-on-exit', 'on', ';', 'set-option', '-p', '-t', pane, '@rac_role', holderPaneRole, ';', 'set-option', '-p', '-t', pane, holderAgentOption, agentId])).code === 0

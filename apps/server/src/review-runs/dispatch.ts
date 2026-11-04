@@ -9,7 +9,8 @@ export class ModeDispatchReviewRunner implements ReviewRunner {
   // the last turn queued on each resumed conversation, settled either way
   private readonly turns = new Map<string, Promise<unknown>>();
 
-  constructor(private readonly agents: ResolvedReviewConfig['agents'], private readonly headless: Record<ReviewAgentKind, KindReviewRunner>, private readonly interactive?: ReviewRunner) {}
+  // optionally bind every review mode to the console model policy
+  constructor(private readonly agents: ResolvedReviewConfig['agents'], private readonly headless: Record<ReviewAgentKind, KindReviewRunner>, private readonly interactive?: ReviewRunner, private readonly resolveRequest?: (request: ReviewRunRequest) => ReviewRunRequest) {}
 
   // report the runnable state of the kind's configured mode
   async capability(kind: ReviewAgentKind): Promise<ReviewRunCapability> {
@@ -19,6 +20,8 @@ export class ModeDispatchReviewRunner implements ReviewRunner {
 
   // run on the kind's configured mode, after any earlier turn on the same conversation
   async run(request: ReviewRunRequest, signal: AbortSignal): Promise<ReviewRunResult> {
+    // validate before any headless or interactive process starts
+    if (this.resolveRequest !== undefined) request = this.resolveRequest(request);
     if (request.resume === undefined) return await this.dispatch(request, signal);
     const key = conversationKey(request.kind, request.resume);
     const turn = (this.turns.get(key) ?? Promise.resolve()).then(() => this.dispatch(request, signal));
