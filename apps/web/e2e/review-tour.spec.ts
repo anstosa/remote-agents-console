@@ -1123,12 +1123,13 @@ test('starts a tour with the chosen comparison, tour effort and AI code review',
   await expect.poll(() => jobRequests).toEqual([{ scope: 'pr', includeTests: true, includeDocs: false, effort: 'high', codeReview: { preset: 'security', effort: 'medium', focus: 'look hard at the migration' } }]);
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('rac.code-review-choice') ?? 'null'))).toEqual({ preset: 'security', efforts: { security: 'medium' } });
 
-  // the next start opens unchecked, on the last preset and effort, with no extra focus
+  // the next start reopens the last checkboxes, preset and effort, with no extra focus
   await page.reload();
   await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Review', exact: true }).click();
-  await expect(sheet.getByLabel('Add AI code review')).not.toBeChecked();
-  await sheet.getByLabel('Add AI code review').check();
+  await expect(sheet.getByLabel('Tests')).toBeChecked();
+  await expect(sheet.getByLabel('Docs')).not.toBeChecked();
+  await expect(sheet.getByLabel('Add AI code review')).toBeChecked();
   await expect(sheet.getByLabel('Preset')).toHaveValue('security');
   await expect(sheet.getByLabel('Review effort')).toHaveValue('medium');
   await expect(sheet.getByLabel('Extra focus')).toHaveValue('');

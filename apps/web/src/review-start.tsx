@@ -99,6 +99,21 @@ function CodeReviewFields({ choice }: { choice: CodeReviewChoiceState }) {
   </>;
 }
 
+// The start sheet's Include and AI review checkboxes as last started on this device; Cancel saves nothing.
+type StartChecks = { tests: boolean; docs: boolean; codeReview: boolean };
+const startChecksKey = 'rac.review-start-checks';
+const readStartChecks = (): StartChecks => {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(startChecksKey) ?? 'null');
+    const flag = (name: keyof StartChecks) => typeof stored === 'object' && stored !== null && (stored as Record<string, unknown>)[name] === true;
+    return { tests: flag('tests'), docs: flag('docs'), codeReview: flag('codeReview') };
+  } catch { return { tests: false, docs: false, codeReview: false }; }
+};
+const saveStartChecks = (checks: StartChecks): void => {
+  try { localStorage.setItem(startChecksKey, JSON.stringify(checks)); }
+  catch { /* storage unavailable: the boxes open unchecked next time */ }
+};
+
 // the Worktree branch's saved All PR base and the origin branches it may name; `branch` is absent
 // when HEAD is detached
 type MergeBaseChoices = { branch?: string; configured?: string; branches: string[] };
@@ -108,7 +123,7 @@ type MergeBaseChoices = { branch?: string; configured?: string; branches: string
 // fixes the scope to that commit; `prBase` is the flyout's PR base. The All PR base
 // can be picked from origin's branches; Start saves a changed pick as the branch's `gh-merge-base`,
 // which outranks a pull request's base, before launching. Cancel saves nothing.
-// The opt-in AI Code review is unchecked on every open; `codeReview` absent hides it.
+// Tests, Docs and the AI Code review open as last started; `codeReview` absent hides the review.
 export function ReviewStartSheet({ target, prBase, request, tour, codeReview, onStart, onCancel }: { target: ReviewTarget; prBase?: string; request: (url: string, init?: RequestInit) => Promise<Response>; tour?: ReviewTourCapability; codeReview?: CodeReviewCapability; onStart: (launch: ReviewLaunch) => void; onCancel: () => void }) {
   const [scope, setScope] = useState<ReviewScope>(target.scope === 'commit' ? 'commit' : target.scope === 'pr' && prBase !== undefined ? 'pr' : 'working');
   // a just-launched Agent's PR base can arrive after the sheet opens; take the asked-for All PR then
@@ -123,12 +138,14 @@ export function ReviewStartSheet({ target, prBase, request, tour, codeReview, on
     awaitingPrBase.current = false;
     setScope(next);
   };
-  const [includeTests, setIncludeTests] = useState(false);
-  const [includeDocs, setIncludeDocs] = useState(false);
+  const [remembered] = useState(readStartChecks);
+  const [includeTests, setIncludeTests] = useState(remembered.tests);
+  const [includeDocs, setIncludeDocs] = useState(remembered.docs);
   const tourEfforts = effortList(tour?.efforts);
   const [tourEffort, setTourEffort] = useState('');
-  const [reviewEnabled, setReviewEnabled] = useState(false);
   const choice = useCodeReviewChoice(codeReview);
+  // a remembered review opens checked only while one of its presets can run
+  const [reviewEnabled, setReviewEnabled] = useState(remembered.codeReview && choice.preset !== undefined);
   const reviewOptions = reviewEnabled ? choice.options : undefined;
   const [choices, setChoices] = useState<MergeBaseChoices | { error: string }>();
   // the picked base: '' is the default ladder, a name is an origin branch
@@ -175,6 +192,8 @@ export function ReviewStartSheet({ target, prBase, request, tour, codeReview, on
       }
     }
     if (reviewOptions !== undefined) choice.remember();
+    // a hidden review box keeps its remembered state
+    saveStartChecks({ tests: includeTests, docs: includeDocs, codeReview: codeReview === undefined ? remembered.codeReview : reviewEnabled });
     onStart({ worktreeId: target.worktreeId, scope, ...(scope === 'commit' && target.commit !== undefined ? { commit: target.commit } : {}), includeTests, includeDocs, ...(tourEffort === '' ? {} : { effort: tourEffort }), ...(reviewOptions === undefined ? {} : { codeReview: reviewOptions }) });
   };
   return <StartSheetFrame title="Start guided review" eyebrow="Guided review" submitLabel="Start" submitDisabled={(reviewEnabled && reviewOptions === undefined) || (scope === 'pr' && !prReady)} pending={saving} {...(saveError === undefined ? {} : { error: saveError })} onSubmit={() => void start()} onCancel={onCancel}>
