@@ -11,7 +11,7 @@ import { codeReviewCount, codeReviewErrorMessage, useCodeReviewPoll, type CodeRe
 import { failureCode, isReviewJob, reviewRunFrom, useJobElapsed, type ReviewJob, type ReviewRunLink } from './review-jobs.js';
 import { CodeReviewSheet, reviewAgentLabel, type ReviewAgentKind } from './review-start.js';
 import { MarkdownBlocks } from './note-markdown.js';
-import { dismissalKey, EarlierThread, EarlierThreadsSection, EarlierVerdictSummary, earlierThreadNotes, evidenceThread, isEarlierThreads, useEarlierThreadResolve, VerdictEvidence, verdictEvidenceNotes, type EarlierThreads, type EarlierVerdicts } from './earlier-threads.js';
+import { dismissalKey, EarlierThread, EarlierThreadsSection, EarlierVerdictSummary, earlierThreadNotes, evidenceThread, isEarlierThreads, maxReply, shownVerdict, threadWhere, useEarlierThreadResolve, VerdictEvidence, verdictEvidenceNotes, type EarlierReplies, type EarlierThreads, type EarlierVerdicts } from './earlier-threads.js';
 import { useTerminalFontSize } from './terminal-font-size.js';
 
 // The diff renderer pulls in `@pierre/diffs` (~177 kB), so it is loaded on demand — this panel is in
@@ -46,21 +46,25 @@ type ReviewFailure = { code?: string; message?: string };
 type FindingTriage = { state: 'kept'; commentId: string } | { state: 'noted'; note: string } | { state: 'dismissed' };
 // a kept general Finding and its note
 type GeneralNote = { finding: GeneralFinding; note: string };
-// The reviewed branch's open or draft pull request, which an All PR tour can post its feedback to.
+// The reviewed branch's open or draft pull request, which an All PR or Since my review tour can post
+// its feedback to.
 export type ReviewPullRequest = { number: number; url: string };
 // What one post to the pull request did with an inline comment: a line comment, a file-level one
 // quoting its lines (`reason` says why its lines were not placed), or failed; `location` names where
 // the comment sat when posted, so the summary can list it after the comment is edited or deleted.
 type PostedComment = { result: 'line' | 'file' | 'failed'; reason?: string; location: string };
+// What one post did with a reply to an earlier thread; `location` names the thread.
+type PostedReply = { result: 'posted' | 'failed'; reason?: string; location: string };
 // The draft (pending) review on the pull request so far: where to finish it, the markdown of each
-// body section it took by section key, and each posted comment's outcome by comment id.
-type PullRequestPost = { url: string; number: number; sections: Record<string, string>; comments: Record<string, PostedComment> };
+// body section it took by section key, and each posted comment's and reply's outcome by comment and
+// thread id.
+type PullRequestPost = { url: string; number: number; sections: Record<string, string>; comments: Record<string, PostedComment>; replies: Record<string, PostedReply> };
 // One keyed section of the review body, appended to it as its own chunk so it carries its own heading:
 // a kept general Finding's note (`general:<id>`), a step's note (`step:<id>`), or the retained
 // feedback (`retained`). A later post sends only the sections new or changed since one was posted.
 type BodySection = { key: string; markdown: string };
-// a successful post: the review to finish on GitHub, which sections its body took, each comment's outcome
-type PostedResponse = { review: { url: string; pullRequest: { number: number } }; sections: { key: string; posted: boolean }[]; comments: { id: string; result: PostedComment['result']; reason?: string }[] };
+// a successful post: the review to finish on GitHub, which sections its body took, each comment's and reply's outcome
+type PostedResponse = { review: { url: string; pullRequest: { number: number } }; sections: { key: string; posted: boolean }[]; comments: { id: string; result: PostedComment['result']; reason?: string }[]; replies?: { threadId: string; result: PostedReply['result']; reason?: string }[] };
 
 const maxFeedback = 4_000;
 const maxFeedbackTotal = 20_000;
@@ -75,8 +79,9 @@ const compactWidth = 720;
 // The operator's work on one tour, kept per Worktree so a reload or a remount resumes it. `tour` binds
 // it to the tour it was written on: the fingerprint names only the Comparison, which a fresh tour of
 // unchanged code shares. `dispatch` is the change request, only once edited by hand; `resolvedThreads`
-// the earlier threads resolved from the tour, and `dismissedVerdicts` the verdicts I dismissed (`dismissalKey`).
-type ReviewDraft = { tour: string; current: number; statuses: Record<string, StepState>; feedback: Record<string, string>; comments: ReviewDiffComment[]; orphanFeedback: string; triage: Record<string, FindingTriage>; dispatch?: string; resolvedThreads?: string[]; dismissedVerdicts?: string[] };
+// the earlier threads resolved from the tour, `dismissedVerdicts` the verdicts I dismissed (`dismissalKey`),
+// and `replies` my replies to earlier threads by thread id.
+type ReviewDraft = { tour: string; current: number; statuses: Record<string, StepState>; feedback: Record<string, string>; comments: ReviewDiffComment[]; orphanFeedback: string; triage: Record<string, FindingTriage>; dispatch?: string; resolvedThreads?: string[]; dismissedVerdicts?: string[]; replies?: Record<string, string> };
 const reviewDraftKey = (worktreeId: string) => `remote-agent-console:review-draft:${worktreeId}`;
 const tourIdentity = (tour: ReviewTour) => JSON.stringify([tour.fingerprint, tour.title, tour.steps.map(step => step.id)]);
 const isText = (value: unknown, max: number): value is string => typeof value === 'string' && value.length <= max;
@@ -111,7 +116,8 @@ function readReviewDraft(worktreeId: string, tour: ReviewTour): ReviewDraft | un
     && Array.isArray(draft.comments) && draft.comments.every(comment => isDraftComment(comment, changeIds))
     && isText(draft.orphanFeedback, maxDispatch) && isRecordOf(draft.triage, id => id.length <= 100, isTriage)
     && (draft.dispatch === undefined || isText(draft.dispatch, maxDispatch))
-    && [draft.resolvedThreads, draft.dismissedVerdicts].every(ids => ids === undefined || Array.isArray(ids) && ids.length <= 100 && ids.every(id => isText(id, 300)));
+    && [draft.resolvedThreads, draft.dismissedVerdicts].every(ids => ids === undefined || Array.isArray(ids) && ids.length <= 100 && ids.every(id => isText(id, 300)))
+    && (draft.replies === undefined || isRecordOf(draft.replies, id => id.length <= 200, reply => isText(reply, maxReply)));
   return valid ? draft as ReviewDraft : undefined;
 }
 
@@ -383,9 +389,10 @@ function sectionBatch(sections: BodySection[]): BodySection[] {
 
 // validate a post's per-comment outcomes
 function isPostedResponse(body: Record<string, unknown>): body is Record<string, unknown> & PostedResponse {
-  const { review, sections, comments } = body as Partial<PostedResponse>;
+  const { review, sections, comments, replies } = body as Partial<PostedResponse>;
   return body.status === 'ok' && review !== null && typeof review === 'object' && typeof review.url === 'string' && review.pullRequest !== null && typeof review.pullRequest === 'object' && typeof review.pullRequest.number === 'number'
-    && Array.isArray(sections) && sections.every(section => section !== null && typeof section === 'object' && typeof section.key === 'string' && typeof section.posted === 'boolean') && Array.isArray(comments) && comments.every(comment => comment !== null && typeof comment === 'object' && typeof comment.id === 'string' && ['line', 'file', 'failed'].includes(comment.result) && (comment.reason === undefined || typeof comment.reason === 'string'));
+    && Array.isArray(sections) && sections.every(section => section !== null && typeof section === 'object' && typeof section.key === 'string' && typeof section.posted === 'boolean') && Array.isArray(comments) && comments.every(comment => comment !== null && typeof comment === 'object' && typeof comment.id === 'string' && ['line', 'file', 'failed'].includes(comment.result) && (comment.reason === undefined || typeof comment.reason === 'string'))
+    && (replies === undefined || Array.isArray(replies) && replies.every(reply => reply !== null && typeof reply === 'object' && typeof reply.threadId === 'string' && ['posted', 'failed'].includes(reply.result) && (reply.reason === undefined || typeof reply.reason === 'string')));
 }
 
 // Translate a refused post to the pull request. The server words its own refusals (`message`); the
@@ -437,7 +444,8 @@ export function ReviewPanelColumn({ onSlot }: { onSlot: (slot: ReviewPanelSlot |
 // (`initialCodeReviewJob`); `codeReviewCapability` lists the presets "Add AI review" offers, and
 // `tourAgent` names the agent that narrates the tour in its failures. `onOpenAgent` selects an
 // interactive Review run's Agent in the console, for its "Open pane" link. `pullRequest`, the reviewed
-// branch's open or draft pull request, lets an All PR tour's summary post its feedback there as a draft review;
+// branch's open or draft pull request, lets an All PR or Since my review tour's summary post its feedback
+// (and a Since my review tour's replies to my earlier threads) there as a draft review;
 // `projectId`, the reviewed Worktree's github.com Project, is where the overview reads its description.
 // `onError` raises a failure the panel has no place to show, such as a diff's lines not expanding.
 export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, projectId, onMinimize, onDismiss, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent, onError }: { launch: ReviewLaunch; sendAgentId?: string; request: ReviewRequest; slot?: ReviewPanelSlot; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: ReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; projectId?: string; onMinimize: () => void; onDismiss: () => Promise<boolean>; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void; onError?: (message: string, detail: string) => void }) {
@@ -508,6 +516,13 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   // the Code review's verdicts on them, those I dismissed, and the thread to open on the first step
   const [dismissedVerdicts, setDismissedVerdicts] = useState<ReadonlySet<string>>(() => new Set(draft?.dismissedVerdicts));
   const [focusedThread, setFocusedThread] = useState<string>();
+  // my replies to them, by thread id; only Post to PR sends them, never the change request
+  const [replies, setReplies] = useState<Record<string, string>>(draft?.replies ?? {});
+  const earlierReplies = useMemo((): EarlierReplies => ({
+    text: replies,
+    posted: new Set(Object.entries(pullRequestPost?.replies ?? {}).flatMap(([threadId, outcome]) => outcome.result === 'posted' ? [threadId] : [])),
+    onChange: (threadId, text) => setReplies(({ [threadId]: _previous, ...rest }) => text === undefined ? rest : { ...rest, [threadId]: text })
+  }), [replies, pullRequestPost]);
   const clearFocusedThread = useCallback(() => setFocusedThread(undefined), []);
   const verdicts = useMemo((): EarlierVerdicts => ({
     judged: codeReview !== undefined,
@@ -740,8 +755,8 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   // save the operator's work as it changes; an empty comment is still being written, or discarded
   useEffect(() => {
     if (tour === undefined) return;
-    saveReviewDraft(launch.worktreeId, { tour: tourIdentity(tour), current, statuses, feedback, comments: comments.filter(comment => comment.body.trim() !== ''), orphanFeedback, triage, ...(dispatchEdited ? { dispatch } : {}), ...(resolving.resolved.size === 0 ? {} : { resolvedThreads: [...resolving.resolved] }), ...(dismissedVerdicts.size === 0 ? {} : { dismissedVerdicts: [...dismissedVerdicts] }) });
-  }, [launch.worktreeId, tour, current, statuses, feedback, comments, orphanFeedback, triage, dispatch, dispatchEdited, resolving.resolved, dismissedVerdicts]);
+    saveReviewDraft(launch.worktreeId, { tour: tourIdentity(tour), current, statuses, feedback, comments: comments.filter(comment => comment.body.trim() !== ''), orphanFeedback, triage, ...(dispatchEdited ? { dispatch } : {}), ...(resolving.resolved.size === 0 ? {} : { resolvedThreads: [...resolving.resolved] }), ...(dismissedVerdicts.size === 0 ? {} : { dismissedVerdicts: [...dismissedVerdicts] }), ...(Object.keys(replies).length === 0 ? {} : { replies }) });
+  }, [launch.worktreeId, tour, current, statuses, feedback, comments, orphanFeedback, triage, dispatch, dispatchEdited, resolving.resolved, dismissedVerdicts, replies]);
 
   // poll comparison freshness while reviewing
   useEffect(() => {
@@ -1040,27 +1055,35 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   const unpostedSections = tour === undefined ? [] : pullRequestBodySections(tour, feedback, retainedForPullRequest, generalNotes).filter(section => pullRequestPost?.sections[section.key] !== section.markdown);
   // one post takes the first `maxPostComments` comments and the sections within the caps; the rest wait for the next
   const pendingComments = unpostedComments.filter(comment => pullRequestPost?.comments[comment.id] === undefined).length;
-  const allPosted = unpostedSections.length === 0 && unpostedComments.length === 0;
-  const canPost = launch.scope === 'pr' && pullRequest !== undefined;
+  // the non-blank replies to the tour's earlier threads, on the pull request a post goes to
+  const postableReplies = earlierThreads === undefined || earlierThreads.pullRequest !== pullRequest?.number ? [] : Object.entries(replies).flatMap(([threadId, body]) => body.trim() !== '' && earlierThreads.threads.some(thread => thread.id === threadId) ? [{ threadId, body }] : []);
+  const unpostedReplies = postableReplies.filter(reply => pullRequestPost?.replies[reply.threadId]?.result !== 'posted');
+  const failedReplies = postableReplies.filter(reply => pullRequestPost?.replies[reply.threadId]?.result === 'failed');
+  const pendingReplies = unpostedReplies.length - failedReplies.length;
+  const allPosted = unpostedSections.length === 0 && unpostedComments.length === 0 && unpostedReplies.length === 0;
+  const canPost = (launch.scope === 'pr' || launch.scope === 'since-review') && pullRequest !== undefined;
   // Post feedback to the pull request as the operator's draft review: everything not yet posted, or
   // with `retry` only the failed comments. The server de-duplicates, so a repeat is harmless.
   const postToPullRequest = async (retry = false) => {
     const outgoing = (retry ? failedComments : unpostedComments).slice(0, maxPostComments);
     const sections = retry ? [] : sectionBatch(unpostedSections);
-    if (posting || !canPost || tour === undefined || (sections.length === 0 && outgoing.length === 0)) return;
+    const outgoingReplies = retry ? failedReplies : unpostedReplies;
+    if (posting || !canPost || tour === undefined || (sections.length === 0 && outgoing.length === 0 && outgoingReplies.length === 0)) return;
     setPosting(true);
     setPostError(undefined);
     try {
       // reject changed Comparisons before posting
       if (!await comparisonCurrent()) { setState('tour'); return; }
-      const response = await request(`/api/worktrees/${encodeURIComponent(launch.worktreeId)}/review-tour/pr-review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'pr', includeTests, includeDocs, fingerprint: tour.fingerprint, pullRequestNumber: pullRequest.number, sections, comments: outgoing.map(({ id, changeId, startSide, startLine, endSide, endLine, body: text }) => ({ id, changeId, startSide, startLine, endSide, endLine, body: text.trim() })) }) }, false);
+      const response = await request(`/api/worktrees/${encodeURIComponent(launch.worktreeId)}/review-tour/pr-review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...reviewScope(launch), includeTests, includeDocs, fingerprint: tour.fingerprint, pullRequestNumber: pullRequest.number, sections, comments: outgoing.map(({ id, changeId, startSide, startLine, endSide, endLine, body: text }) => ({ id, changeId, startSide, startLine, endSide, endLine, body: text.trim() })), replies: outgoingReplies.map(({ threadId, body: text }) => ({ threadId, body: text.trim() })) }) }, false);
       const responseJson = await responseBody(response);
       if (response.ok && isPostedResponse(responseJson)) {
         const locations = new Map(outgoing.map(comment => [comment.id, commentLocation(tour.changes.find(change => change.id === comment.changeId)?.file ?? '', comment)]));
         const outcomes = Object.fromEntries(responseJson.comments.map(({ id, result, reason }) => [id, { result, ...(reason === undefined ? {} : { reason }), location: locations.get(id) ?? '' }]));
         const taken = new Set(responseJson.sections.flatMap(({ key, posted }) => posted ? [key] : []));
         const posted = Object.fromEntries(sections.flatMap(section => taken.has(section.key) ? [[section.key, section.markdown]] : []));
-        setPullRequestPost(current => ({ url: responseJson.review.url, number: responseJson.review.pullRequest.number, sections: { ...current?.sections, ...posted }, comments: { ...current?.comments, ...outcomes } }));
+        const threads = new Map(earlierThreads?.threads.map(thread => [thread.id, thread]));
+        const replied = Object.fromEntries((responseJson.replies ?? []).map(({ threadId, result, reason }) => { const thread = threads.get(threadId); return [threadId, { result, ...(reason === undefined ? {} : { reason }), location: thread === undefined ? '' : threadWhere(thread) }]; }));
+        setPullRequestPost(current => ({ url: responseJson.review.url, number: responseJson.review.pullRequest.number, sections: { ...current?.sections, ...posted }, comments: { ...current?.comments, ...outcomes }, replies: { ...current?.replies, ...replied } }));
         return;
       }
       // a moved Comparison freezes the tour, as a stale send does
@@ -1108,15 +1131,17 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
     return <AskThreadView key={findingId} role="reviewer" thread={askThreads.threads.get(findingId)} pending={askThreads.pending.get(findingId)} failed={askThreads.failures.get(findingId)} onAsk={question => askThreads.ask('reviewer', { target: 'reviewer', findingId }, { changeId: finding.changeId, side: finding.side, startLine: finding.startLine, endLine: finding.endLine, findingId }, question)} onUseAnswer={answer => copyAnswer(findingId, answer)} {...runLink} />;
   };
   // the questions to the reviewer about its verdict on one of my earlier threads (or the verdict it
-  // did not give), while the review that judged them kept a conversation to ask
+  // did not give), while the review that judged them kept a conversation to ask; an answer copies
+  // into my reply on the thread (started from the verdict, as Reply starts it) until that reply is posted
+  const copyToReply = (threadId: string, answer: string) => earlierReplies.onChange(threadId, [(replies[threadId] ?? shownVerdict(verdicts, threadId)?.body ?? '').trimEnd(), answer.trim()].filter(text => text !== '').join('\n\n').slice(0, maxReply));
   const askVerdict = (threadId: string): ReactNode => !reviewerAskable || codeReview?.verdicts === undefined ? null
-    : <AskThreadView key={threadId} role="reviewer" placeholder="Ask the reviewer about this verdict" thread={askThreads.threads.get(threadId)} pending={askThreads.pending.get(threadId)} failed={askThreads.failures.get(threadId)} onAsk={question => askThreads.ask('reviewer', { target: 'reviewer', reviewThreadId: threadId }, { reviewThreadId: threadId }, question)} {...runLink} />;
+    : <AskThreadView key={threadId} role="reviewer" placeholder="Ask the reviewer about this verdict" thread={askThreads.threads.get(threadId)} pending={askThreads.pending.get(threadId)} failed={askThreads.failures.get(threadId)} onAsk={question => askThreads.ask('reviewer', { target: 'reviewer', reviewThreadId: threadId }, { reviewThreadId: threadId }, question)} {...(earlierReplies.posted.has(threadId) ? {} : { onUseAnswer: (answer: string) => copyToReply(threadId, answer), useLabel: 'Copy to reply' })} {...runLink} />;
   // an earlier thread on the lines it sits on, or a verdict's evidence marker leading back to it
   const renderEarlierThread = (id: string): ReactNode => {
     const evidenceOf = evidenceThread(id);
     const thread = earlierThreads?.threads.find(candidate => candidate.id === (evidenceOf ?? id));
     if (thread === undefined) return null;
-    return evidenceOf === undefined ? <EarlierThread thread={thread} resolving={resolving} verdicts={verdicts} askFor={askVerdict} /> : <VerdictEvidence thread={thread} verdicts={verdicts} onOpen={showEarlierThreads} />;
+    return evidenceOf === undefined ? <EarlierThread thread={thread} resolving={resolving} verdicts={verdicts} replying={earlierReplies} askFor={askVerdict} /> : <VerdictEvidence thread={thread} verdicts={verdicts} onOpen={showEarlierThreads} />;
   };
   // dismiss the review, stale or never built, so a new one can start
   const dismiss = async () => {
@@ -1163,7 +1188,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   })}</section>;
   // the step's narration and feedback: a left column in a wide panel, the notes drawer in a compact one; the
   // first step leads with the general Findings
-  const narration = step && <>{current === 0 && earlierThreads !== undefined && <EarlierThreadsSection earlier={earlierThreads} resolving={resolving} verdicts={verdicts} askFor={askVerdict} fontSize={fontSize} focused={focusedThread} onFocused={clearFocusedThread} />}{current === 0 && generalFindings}<small>Logical change</small><h3>{step.title}</h3><div className="note-markdown review-tour-explanation" style={{ fontSize }}><MarkdownBlocks text={step.explanation} /></div><label>Feedback for this change<textarea value={stepFeedback} maxLength={maxFeedback} onChange={event => updateFeedback(step.id, event.target.value)} />{stepFeedback.length >= maxFeedback && <span role="status">{maxFeedback.toLocaleString()} character limit reached</span>}</label>{orphanFeedback !== '' && <label>Feedback from regenerated steps<textarea value={orphanFeedback} maxLength={maxFeedbackTotal} onChange={event => updateOrphanFeedback(event.target.value)} />{orphanFeedback.length >= maxFeedbackTotal && <span role="status">{maxFeedbackTotal.toLocaleString()} retained feedback character limit reached</span>}</label>}</>;
+  const narration = step && <>{current === 0 && earlierThreads !== undefined && <EarlierThreadsSection earlier={earlierThreads} resolving={resolving} verdicts={verdicts} replying={earlierReplies} askFor={askVerdict} fontSize={fontSize} focused={focusedThread} onFocused={clearFocusedThread} />}{current === 0 && generalFindings}<small>Logical change</small><h3>{step.title}</h3><div className="note-markdown review-tour-explanation" style={{ fontSize }}><MarkdownBlocks text={step.explanation} /></div><label>Feedback for this change<textarea value={stepFeedback} maxLength={maxFeedback} onChange={event => updateFeedback(step.id, event.target.value)} />{stepFeedback.length >= maxFeedback && <span role="status">{maxFeedback.toLocaleString()} character limit reached</span>}</label>{orphanFeedback !== '' && <label>Feedback from regenerated steps<textarea value={orphanFeedback} maxLength={maxFeedbackTotal} onChange={event => updateOrphanFeedback(event.target.value)} />{orphanFeedback.length >= maxFeedbackTotal && <span role="status">{maxFeedbackTotal.toLocaleString()} retained feedback character limit reached</span>}</label>}</>;
   // The Code review's state in the status line: running with its time (or waiting on the operator), its
   // Findings count, a failure with Retry, or "Add AI review" for a current tour with none. An
   // interactive run links to its pane.
@@ -1186,13 +1211,14 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   const postedOutcomes = Object.entries(pullRequestPost?.comments ?? {});
   const fileLevel = postedOutcomes.filter(([, outcome]) => outcome.result === 'file');
   const lineCount = postedOutcomes.filter(([, outcome]) => outcome.result === 'line').length;
-  const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+  const plural = (count: number, noun: string, nouns = `${noun}s`) => `${count} ${count === 1 ? noun : nouns}`;
+  const postedReplies = Object.values(pullRequestPost?.replies ?? {}).filter(outcome => outcome.result === 'posted').length;
   const pullRequestStatus = pullRequestPost !== undefined && <section className="review-tour-pr-post" aria-label="Draft review on GitHub">
     <p role="status"><a href={pullRequestPost.url} target="_blank" rel="noreferrer">Draft review on PR #{pullRequestPost.number} — finish it on GitHub</a></p>
-    <p>{[plural(lineCount, 'line comment'), plural(fileLevel.length, 'file-level comment'), ...(Object.keys(pullRequestPost.sections).length > 0 ? ['notes in the review body'] : [])].join(' · ')}</p>
+    <p>{[plural(lineCount, 'line comment'), plural(fileLevel.length, 'file-level comment'), ...(postedReplies > 0 ? [plural(postedReplies, 'reply', 'replies')] : []), ...(Object.keys(pullRequestPost.sections).length > 0 ? ['notes in the review body'] : [])].join(' · ')}</p>
     {fileLevel.length > 0 && <ul aria-label="File-level comments">{fileLevel.map(([id, outcome]) => <li key={id}><strong>{outcome.location}</strong>{outcome.reason !== undefined && <small>{outcome.reason}</small>}</li>)}</ul>}
-    {failedComments.length > 0 && <div className="review-tour-pr-failed"><strong role="status">{plural(failedComments.length, 'comment')} failed</strong><ul aria-label="Failed comments">{failedComments.map(comment => { const outcome = pullRequestPost.comments[comment.id]!; return <li key={comment.id}><strong>{outcome.location}</strong>{outcome.reason !== undefined && <small>{outcome.reason}</small>}</li>; })}</ul><button type="button" disabled={posting || stale} onClick={() => void postToPullRequest(true)}>Retry failed</button></div>}
-    {pendingComments + unpostedSections.length > 0 && <p>{[...(pendingComments > 0 ? [plural(pendingComments, 'comment')] : []), ...(unpostedSections.length > 0 ? [plural(unpostedSections.length, 'note')] : [])].join(' and ')} not posted yet{unpostedComments.length > maxPostComments || sectionBatch(unpostedSections).length < unpostedSections.length ? ' — one post cannot take them all; Post again for the rest' : ''}.</p>}
+    {failedComments.length + failedReplies.length > 0 && <div className="review-tour-pr-failed">{failedComments.length > 0 && <><strong role="status">{plural(failedComments.length, 'comment')} failed</strong><ul aria-label="Failed comments">{failedComments.map(comment => { const outcome = pullRequestPost.comments[comment.id]!; return <li key={comment.id}><strong>{outcome.location}</strong>{outcome.reason !== undefined && <small>{outcome.reason}</small>}</li>; })}</ul></>}{failedReplies.length > 0 && <><strong role="status">{plural(failedReplies.length, 'reply', 'replies')} failed</strong><ul aria-label="Failed replies">{failedReplies.map(reply => { const outcome = pullRequestPost.replies[reply.threadId]!; return <li key={reply.threadId}><strong>{outcome.location}</strong>{outcome.reason !== undefined && <small>{outcome.reason}</small>}</li>; })}</ul></>}<button type="button" disabled={posting || stale} onClick={() => void postToPullRequest(true)}>Retry failed</button></div>}
+    {pendingComments + pendingReplies + unpostedSections.length > 0 && <p>{[...(pendingComments > 0 ? [plural(pendingComments, 'comment')] : []), ...(pendingReplies > 0 ? [plural(pendingReplies, 'reply', 'replies')] : []), ...(unpostedSections.length > 0 ? [plural(unpostedSections.length, 'note')] : [])].join(' and ')} not posted yet{unpostedComments.length > maxPostComments || sectionBatch(unpostedSections).length < unpostedSections.length ? ' — one post cannot take them all; Post again for the rest' : ''}.</p>}
     <small>Comments and notes already posted are not updated by later edits; new comments and new or changed notes are added to the review.</small>
   </section>;
   // keep generation and freshness polling mounted while minimized or out of view
@@ -1210,7 +1236,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
       ? <><button ref={notesBar} type="button" className="review-tour-notes-bar" aria-label="Show step notes" aria-expanded={notesOpen} onClick={() => setNotesOpen(true)}><span><strong>{step.title}</strong><span>{step.explanation}</span></span>{current === 0 && untriagedGeneral > 0 ? <small className="has-feedback">{untriagedGeneral} general</small> : current === 0 && earlierThreads !== undefined && earlierThreads.threads.length > 0 ? <small>{earlierThreads.threads.length} earlier</small> : <small className={stepFeedback.trim() === '' ? undefined : 'has-feedback'}>{stepFeedback.trim() === '' ? 'Notes' : 'Feedback'}</small>}</button>
         {notesOpen && <><button type="button" className="review-tour-notes-backdrop" aria-label="Close step notes" onClick={closeNotes} /><section ref={notesDrawer} className="review-tour-narration review-tour-notes-drawer" onScroll={keepNarrationScroll} role="dialog" aria-label="Step notes" tabIndex={-1}><div className="review-tour-notes-head"><span>Step notes</span><button type="button" aria-label="Close step notes" title="Close" onClick={closeNotes}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></div>{narration}</section></>}</>
       : <section className="review-tour-narration" onScroll={keepNarrationScroll}>{narration}</section>}<section className="review-tour-diffs" aria-label="Relevant changes"><Suspense fallback={<p className="review-tour-diff-loading progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading diff…</p>}><ReviewDiffs changes={changes} comments={comments} openCommentIds={openCommentIds} onCommentAdd={addComment} onCommentChange={updateComment} onCommentOpen={openComment} onCommentClose={closeComment} onCommentDelete={deleteComment} suggestions={suggestions} onSuggestionKeep={keepFinding} onSuggestionDismiss={dismissFinding} onSuggestionRestore={restoreFinding} threadFor={threadFor} asks={guide.lineAsks} notes={diffNotes} renderNote={renderEarlierThread} {...(guideAskable ? { onAskStart: askGuide, askLabel: 'Ask guide' } : {})} loadFile={loadFile} onExpandError={expandError} scrollTop={scrolled.current.diffs} onScroll={scrollTop => { scrolled.current.diffs = scrollTop; }} expandedLines={expandedLines} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} /></Suspense></section></main><footer className="review-tour-actions"><button type="button" onClick={back}>Back</button><button type="button" onClick={skip}>Skip</button><span>{feedbackTotal >= maxFeedbackTotal || limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{complete && <button type="button" disabled={stale || feedbackTotal > maxFeedbackTotal} onClick={() => void summarize()}>Review summary</button>}{(!complete || current < tour.steps.length - 1) && <button type="button" onClick={next}>Next</button>}</footer></>}
-    {tour && state === 'summary' && <main className="review-tour-summary"><h3>Review complete</h3><ul>{tour.steps.map(candidate => <li key={candidate.id}><span className={statuses[candidate.id]}>{statuses[candidate.id]}</span><strong>{candidate.title}</strong>{(untriagedByStep.get(candidate.id) ?? 0) > 0 && <small className="review-tour-finding-count" title="AI review findings not yet kept or dismissed">{untriagedByStep.get(candidate.id)}</small>}</li>)}</ul>{untriagedTotal > 0 && <div className="review-tour-untriaged" role="status"><span><strong>{untriagedTotal} {untriagedTotal === 1 ? 'finding' : 'findings'} not reviewed</strong> Untriaged findings are not sent.</span><button type="button" onClick={reviewUntriaged}>Review findings</button></div>}{earlierThreads !== undefined && <EarlierVerdictSummary earlier={earlierThreads} verdicts={verdicts} onReview={() => showEarlierThreads()} />}{generalFindings}{orphanFeedback !== '' && <p>Feedback from regenerated steps is retained in the consolidated change request.</p>}{feedbackTotal === 0 ? <p>No feedback was recorded. You can finish without sending anything.</p> : <><label>Consolidated change request<textarea value={dispatch} maxLength={maxDispatch} onChange={event => { setDispatch(event.target.value); setDispatchEdited(true); }} />{dispatch.length >= maxDispatch && <span role="status">{maxDispatch.toLocaleString()} character limit reached</span>}</label>{dispatchEdited && dispatch !== builtDispatch && !sent && <div className="review-tour-rebuild"><span>Edited by hand, so feedback changes are not added.</span><button type="button" onClick={rebuildDispatch}>Rebuild from feedback</button></div>}</>}{error && <p ref={dispatchError} className="review-tour-error" role="alert" tabIndex={-1}>{error}</p>}{sent && <p className="review-tour-sent" role="status">Change request sent to the implementation agent.</p>}{pullRequestStatus}{postError !== undefined && <div ref={postErrorRef} className="review-tour-pr-error" role="alert" tabIndex={-1}><p className="review-tour-error">{postError.message}</p>{postError.retryable && <button type="button" disabled={posting || stale} onClick={() => void postToPullRequest(postError.retry)}>Try again</button>}</div>}<footer className="review-tour-actions"><button type="button" onClick={() => setState('tour')}>Back to tour</button><span>{limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{feedbackTotal > 0 && !sent && <button type="button" className={dispatching ? 'progress-border progress-blue' : undefined} aria-busy={dispatching || undefined} disabled={dispatching || sendAgentId === undefined || dispatch.trim() === '' || dispatch.length > maxDispatch} title={sendAgentId === undefined ? 'Start an agent in this worktree to send the change request' : undefined} onClick={() => void send()}>{dispatching && <span className="update-progress-ring" aria-hidden="true" />}{dispatching ? 'Sending…' : 'Send change request'}</button>}{canPost && (feedbackTotal > 0 || pullRequestPost !== undefined) && <button type="button" className={`review-tour-pr-button${posting ? ' progress-border progress-blue' : ''}`} aria-busy={posting || undefined} disabled={posting || stale || allPosted} title={allPosted ? 'Everything is posted' : `Post as your draft review on PR #${pullRequest.number}`} onClick={() => void postToPullRequest()}>{posting && <span className="update-progress-ring" aria-hidden="true" />}{posting ? 'Posting…' : allPosted && pullRequestPost !== undefined ? `Posted to PR #${pullRequest.number}` : `Post to PR #${pullRequest.number}`}</button>}<button type="button" onClick={onMinimize}>Finish</button></footer></main>}
+    {tour && state === 'summary' && <main className="review-tour-summary"><h3>Review complete</h3><ul>{tour.steps.map(candidate => <li key={candidate.id}><span className={statuses[candidate.id]}>{statuses[candidate.id]}</span><strong>{candidate.title}</strong>{(untriagedByStep.get(candidate.id) ?? 0) > 0 && <small className="review-tour-finding-count" title="AI review findings not yet kept or dismissed">{untriagedByStep.get(candidate.id)}</small>}</li>)}</ul>{untriagedTotal > 0 && <div className="review-tour-untriaged" role="status"><span><strong>{untriagedTotal} {untriagedTotal === 1 ? 'finding' : 'findings'} not reviewed</strong> Untriaged findings are not sent.</span><button type="button" onClick={reviewUntriaged}>Review findings</button></div>}{earlierThreads !== undefined && <EarlierVerdictSummary earlier={earlierThreads} verdicts={verdicts} onReview={() => showEarlierThreads()} />}{generalFindings}{orphanFeedback !== '' && <p>Feedback from regenerated steps is retained in the consolidated change request.</p>}{feedbackTotal === 0 ? <p>{postableReplies.length === 0 ? 'No feedback was recorded. You can finish without sending anything.' : 'No feedback for the agent was recorded; your replies go only to the pull request.'}</p> : <><label>Consolidated change request<textarea value={dispatch} maxLength={maxDispatch} onChange={event => { setDispatch(event.target.value); setDispatchEdited(true); }} />{dispatch.length >= maxDispatch && <span role="status">{maxDispatch.toLocaleString()} character limit reached</span>}</label>{dispatchEdited && dispatch !== builtDispatch && !sent && <div className="review-tour-rebuild"><span>Edited by hand, so feedback changes are not added.</span><button type="button" onClick={rebuildDispatch}>Rebuild from feedback</button></div>}</>}{error && <p ref={dispatchError} className="review-tour-error" role="alert" tabIndex={-1}>{error}</p>}{sent && <p className="review-tour-sent" role="status">Change request sent to the implementation agent.</p>}{pullRequestStatus}{postError !== undefined && <div ref={postErrorRef} className="review-tour-pr-error" role="alert" tabIndex={-1}><p className="review-tour-error">{postError.message}</p>{postError.retryable && <button type="button" disabled={posting || stale} onClick={() => void postToPullRequest(postError.retry)}>Try again</button>}</div>}<footer className="review-tour-actions"><button type="button" onClick={() => setState('tour')}>Back to tour</button><span>{limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{feedbackTotal > 0 && !sent && <button type="button" className={dispatching ? 'progress-border progress-blue' : undefined} aria-busy={dispatching || undefined} disabled={dispatching || sendAgentId === undefined || dispatch.trim() === '' || dispatch.length > maxDispatch} title={sendAgentId === undefined ? 'Start an agent in this worktree to send the change request' : undefined} onClick={() => void send()}>{dispatching && <span className="update-progress-ring" aria-hidden="true" />}{dispatching ? 'Sending…' : 'Send change request'}</button>}{canPost && (feedbackTotal > 0 || postableReplies.length > 0 || pullRequestPost !== undefined) && <button type="button" className={`review-tour-pr-button${posting ? ' progress-border progress-blue' : ''}`} aria-busy={posting || undefined} disabled={posting || stale || allPosted} title={allPosted ? 'Everything is posted' : `Post as your draft review on PR #${pullRequest.number}`} onClick={() => void postToPullRequest()}>{posting && <span className="update-progress-ring" aria-hidden="true" />}{posting ? 'Posting…' : allPosted && pullRequestPost !== undefined ? `Posted to PR #${pullRequest.number}` : `Post to PR #${pullRequest.number}`}</button>}<button type="button" onClick={onMinimize}>Finish</button></footer></main>}
     </div>
     <div className="review-tour-comparison"><span>{comparisonLabel}</span>{codeReviewChip}</div>
     {codeReviewSheet}

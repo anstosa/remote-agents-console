@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
-import { ReviewTourError, type ReviewComparison } from '../src/review-tour/contracts.js';
-import { commentMarker, coveredRows, fileThreadBody, orderedComment, parsePullRequestReviewInput, placedComments, placementProblem, PullRequestReviewError, PullRequestReviewService, appendSections, sectionMarker, sectionText, threadInput, type PullRequestReviewComment, type PullRequestReviewInput } from '../src/review-tour/pr-review.js';
+import { ReviewTourError, type ReviewComparison, type ReviewTourInput } from '../src/review-tour/contracts.js';
+import { replyMarker, commentMarker, coveredRows, fileThreadBody, orderedComment, parsePullRequestReviewInput, placedComments, placementProblem, PullRequestReviewError, PullRequestReviewService, appendSections, sectionMarker, sectionText, threadInput, type PullRequestReviewComment, type PullRequestReviewInput, type PullRequestReviewReply } from '../src/review-tour/pr-review.js';
 import { ambiguousBatch, threadMutation, threadOutcomes } from '../src/github/writes.js';
 import { diffRows } from '../src/review-tour/diff-rows.js';
 import { GithubService } from '../src/github/service.js';
@@ -105,7 +105,7 @@ describe('pull request review GraphQL', () => {
   });
 
   it('parses only the exact All PR request, at its boundaries', () => {
-    const valid = { scope: 'pr', includeTests: false, includeDocs: true, fingerprint, pullRequestNumber: 7, sections: [], comments: [comment()] };
+    const valid = { scope: 'pr', includeTests: false, includeDocs: true, fingerprint, pullRequestNumber: 7, sections: [], comments: [comment()], replies: [] };
     expect(parsePullRequestReviewInput(valid)).toEqual(valid);
     const sectionsOnly = { ...valid, sections: [{ key: 'general', markdown: 'Notes' }], comments: [] };
     expect(parsePullRequestReviewInput(sectionsOnly)).toEqual(sectionsOnly);
@@ -129,6 +129,22 @@ describe('pull request review GraphQL', () => {
     expect(parsePullRequestReviewInput({ ...sectionsOnly, sections: sections(101) })).toBeUndefined();
     expect(parsePullRequestReviewInput({ ...sectionsOnly, sections: [{ key: 'a', markdown: 'x'.repeat(20_000) }, { key: 'b', markdown: 'x'.repeat(20_000) }] })).toBeDefined();
     expect(parsePullRequestReviewInput({ ...sectionsOnly, sections: [{ key: 'a', markdown: 'x'.repeat(20_000) }, { key: 'b', markdown: 'x'.repeat(20_001) }] })).toBeUndefined();
+  });
+
+  it('parses a Since my review post whose replies alone are something to post', () => {
+    const since = { scope: 'since-review', reviewedCommit: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint, pullRequestNumber: 7, sections: [], comments: [], replies: [{ threadId: 'PRRT_kwDO-a_1', body: 'Still open.' }] };
+    expect(parsePullRequestReviewInput(since)).toEqual(since);
+    // an old-style base64 node id
+    expect(parsePullRequestReviewInput({ ...since, replies: [{ threadId: 'MDIzOlB1bGw+/=', body: 'x' }] })).toBeDefined();
+    expect(parsePullRequestReviewInput({ ...since, reviewedCommit: undefined })).toBeUndefined();
+    expect(parsePullRequestReviewInput({ ...since, replies: [] })).toBeUndefined();
+    expect(parsePullRequestReviewInput({ ...since, replies: [{ threadId: 'T -->', body: 'x' }] })).toBeUndefined();
+    expect(parsePullRequestReviewInput({ ...since, replies: [{ threadId: 'T', body: ' ' }] })).toBeUndefined();
+    expect(parsePullRequestReviewInput({ ...since, replies: [{ threadId: 'T', body: 'x'.repeat(4_001) }] })).toBeUndefined();
+    expect(parsePullRequestReviewInput({ ...since, replies: [{ threadId: 'T', body: 'x' }, { threadId: 'T', body: 'y' }] })).toBeUndefined();
+    const replies = (count: number) => Array.from({ length: count }, (_, index) => ({ threadId: `T${index}`, body: 'x' }));
+    expect(parsePullRequestReviewInput({ ...since, replies: replies(100) })).toBeDefined();
+    expect(parsePullRequestReviewInput({ ...since, replies: replies(101) })).toBeUndefined();
   });
 });
 
@@ -156,6 +172,10 @@ type Scenario = {
   updateFailure?: 'lost';
   // how the pull request query fails once
   queryFailure?: 502 | 401 | 'graphql-forbidden';
+  // Review threads deleted since the tour read them
+  deletedThreads?: string[];
+  // the first reply batch applies its even replies, then answers 502
+  replyFailure?: 'lost';
 };
 
 const markerId = (body: string) => /<!-- rac:([A-Za-z0-9_-]+) -->/u.exec(body)?.[1];
@@ -171,7 +191,8 @@ function harness(scenario: Scenario = {}) {
   const state: { review?: FakeReview } = scenario.pending === undefined ? {} : { review: { id: 'PRR_old', body: scenario.pending.body, commit: scenario.pending.commit, comments: scenario.pending.comments ?? [] } };
   const requests: Recorded[] = [];
   const commands: string[][] = [];
-  let { threadFailure, reviewFailure, updateFailure, queryFailure } = scenario;
+  let { threadFailure, reviewFailure, updateFailure, queryFailure, replyFailure } = scenario;
+  const captured: ReviewTourInput[] = [];
   const json = (value: unknown, status = 200) => ({ ok: status < 300, status, json: async () => value });
   const pullNode = () => scenario.pull === null ? null : { id: 'PR_1', number: 7, url: 'https://github.com/octo/repo/pull/7', state: 'OPEN', headRefName: 'feature/x', headRefOid: head, headRepositoryOwner: { login: 'Octo' }, reviews: { nodes: state.review === undefined ? [] : [{ id: state.review.id, body: state.review.body, commit: { oid: state.review.commit } }] }, ...scenario.pull };
   const command = async (_binary: string, args: string[]) => {
@@ -217,6 +238,21 @@ function harness(scenario: Scenario = {}) {
       state.review!.body = (variables.input as { body: string }).body;
       return failure === undefined ? json({ data: { updatePullRequestReview: { pullRequestReview: { id: state.review!.id } } } }) : json({ message: 'Bad Gateway' }, 502);
     }
+    if (query.includes('addPullRequestReviewThreadReply(')) {
+      const failure = replyFailure;
+      replyFailure = undefined;
+      const inputs = Object.values(variables) as Array<{ pullRequestReviewId: string; pullRequestReviewThreadId: string; body: string }>;
+      const data: Record<string, unknown> = {};
+      const errors: unknown[] = [];
+      inputs.forEach((input, index) => {
+        if (failure === 'lost' && index % 2 === 1) return;
+        expect(input.pullRequestReviewId).toBe(state.review!.id);
+        if (scenario.deletedThreads?.includes(input.pullRequestReviewThreadId)) { data[`t${index}`] = null; errors.push({ path: [`t${index}`], type: 'NOT_FOUND', message: `Could not resolve to a node with the global id of '${input.pullRequestReviewThreadId}'` }); return; }
+        state.review!.comments.push({ body: input.body, subjectType: 'LINE', path: 'src/feature.ts' });
+        data[`t${index}`] = { comment: { id: `C${state.review!.comments.length}` } };
+      });
+      return failure === 'lost' ? json({ message: 'Bad Gateway' }, 502) : json({ data, ...(errors.length === 0 ? {} : { errors }) });
+    }
     if (query.includes('addPullRequestReviewThread(')) {
       const failure = threadFailure;
       threadFailure = undefined;
@@ -240,14 +276,17 @@ function harness(scenario: Scenario = {}) {
   const service = new PullRequestReviewService(async (worktreeId, input) => {
     // the tour's own Comparison choices reach the capture
     expect(worktreeId).toBe('cora');
-    expect(input).toEqual({ scope: 'pr', includeTests: true, includeDocs: false });
+    captured.push(input);
     return comparison;
   }, command, github);
   const mutations = (name?: string) => requests.filter(entry => entry.query?.startsWith('mutation') === true && (name === undefined || entry.query.includes(`${name}(`)));
-  return { service, github, requests, commands, state, mutations };
+  return { service, github, requests, commands, state, mutations, captured };
 }
 
-const request = (comments: PullRequestReviewComment[], sections = [general]): PullRequestReviewInput => ({ scope: 'pr', includeTests: true, includeDocs: false, fingerprint, pullRequestNumber: 7, sections, comments });
+const request = (comments: PullRequestReviewComment[], sections = [general]): PullRequestReviewInput => ({ scope: 'pr', includeTests: true, includeDocs: false, fingerprint, pullRequestNumber: 7, sections, comments, replies: [] });
+const reviewedCommit = 'b'.repeat(40);
+// a Since my review post of replies alone
+const replying = (replies: PullRequestReviewReply[]): PullRequestReviewInput => ({ scope: 'since-review', reviewedCommit, includeTests: true, includeDocs: false, fingerprint, pullRequestNumber: 7, sections: [], comments: [], replies });
 const marked = (text: string, id: string) => `${text}\n\n${commentMarker(id)}`;
 
 // the error a rejected post throws
@@ -292,7 +331,7 @@ describe('pull request review service', () => {
       { id: 'file', result: 'file', reason: 'The commented lines are not in the tour\'s diff.' },
       { id: 'unknown', result: 'failed', reason: 'The comment\'s change is not in the tour.' },
       { id: 'absent', result: 'failed', reason: 'The file is not part of the pull request on GitHub.' }
-    ] });
+    ], replies: [] });
     expect(commands.find(args => args.includes('status'))).toEqual(['--no-optional-locks', '--literal-pathspecs', '-C', '/worktrees/cora', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', 'src/feature.ts', 'src/missing.ts']);
     expect(requests.find(entry => entry.query?.includes('pullRequest(number:'))?.variables).toEqual({ owner: 'octo', name: 'repo', number: 7 });
     expect(mutations('addPullRequestReview')[0]?.variables).toEqual({ input: { pullRequestId: 'PR_1', commitOID: head, body: sectionText(general) } });
@@ -480,6 +519,75 @@ describe('pull request review service', () => {
     expect(requests).toHaveLength(0);
   });
 
+  it('adds Since my review replies to the draft review on their threads', async () => {
+    const { service, mutations, state, captured, github } = harness();
+    const changed = vi.spyOn(github, 'changed');
+    const result = await service.post('cora', replying([{ threadId: 'PRRT_1', body: ' Still open. ' }, { threadId: 'PRRT_2', body: 'Thanks, fixed.' }]));
+    expect(captured).toEqual([{ scope: 'since-review', reviewedCommit, includeTests: true, includeDocs: false }]);
+    expect(result.replies).toEqual([{ threadId: 'PRRT_1', result: 'posted' }, { threadId: 'PRRT_2', result: 'posted' }]);
+    expect(result.comments).toEqual([]);
+    // a draft opens on the head for them, with no body
+    expect(mutations('addPullRequestReview')[0]?.variables).toEqual({ input: { pullRequestId: 'PR_1', commitOID: head } });
+    const [replies] = mutations('addPullRequestReviewThreadReply');
+    expect(replies?.query).toBe('mutation($i0:AddPullRequestReviewThreadReplyInput!,$i1:AddPullRequestReviewThreadReplyInput!){t0:addPullRequestReviewThreadReply(input:$i0){comment{id}} t1:addPullRequestReviewThreadReply(input:$i1){comment{id}}}');
+    expect(replies?.variables).toEqual({
+      i0: { pullRequestReviewId: 'PRR_new', pullRequestReviewThreadId: 'PRRT_1', body: `Still open.\n\n${replyMarker({ threadId: 'PRRT_1', body: 'Still open.' })}` },
+      i1: { pullRequestReviewId: 'PRR_new', pullRequestReviewThreadId: 'PRRT_2', body: `Thanks, fixed.\n\n${replyMarker({ threadId: 'PRRT_2', body: 'Thanks, fixed.' })}` }
+    });
+    expect(state.review!.comments.map(entry => entry.body)).toEqual([expect.stringMatching(/^Still open\.\n\n<!-- rac-reply:PRRT_1:[0-9a-f]{16} -->$/u), expect.stringMatching(/^Thanks, fixed\.\n\n<!-- rac-reply:PRRT_2:[0-9a-f]{16} -->$/u)]);
+    expect(mutations()).toHaveLength(2);
+    expect(changed).toHaveBeenCalledWith({ owner: 'octo', name: 'repo' }, 7);
+  });
+
+  it('marks a reply by its thread and text', () => {
+    expect(replyMarker({ threadId: 'PRRT_1', body: 'Fixed?' })).toMatch(/^<!-- rac-reply:PRRT_1:[0-9a-f]{16} -->$/u);
+    expect(replyMarker({ threadId: 'PRRT_1', body: ' Fixed?\n' })).toBe(replyMarker({ threadId: 'PRRT_1', body: 'Fixed?' }));
+    expect(replyMarker({ threadId: 'PRRT_1', body: 'Other' })).not.toBe(replyMarker({ threadId: 'PRRT_1', body: 'Fixed?' }));
+    expect(replyMarker({ threadId: 'PRRT_2', body: 'Fixed?' })).not.toBe(replyMarker({ threadId: 'PRRT_1', body: 'Fixed?' }));
+  });
+
+  it('skips replies a retry finds in the draft and fails only a deleted thread\'s reply', async () => {
+    const { service, mutations, state } = harness({ deletedThreads: ['PRRT_gone'] });
+    const replies = [{ threadId: 'PRRT_1', body: 'One' }, { threadId: 'PRRT_gone', body: 'Two' }, { threadId: 'PRRT_3', body: 'Three' }];
+    const first = await service.post('cora', replying(replies));
+    expect(first.replies).toEqual([{ threadId: 'PRRT_1', result: 'posted' }, { threadId: 'PRRT_gone', result: 'failed', reason: 'Could not resolve to a node with the global id of \'PRRT_gone\'' }, { threadId: 'PRRT_3', result: 'posted' }]);
+    const retried = await service.post('cora', replying(replies));
+    expect(retried.replies).toEqual(first.replies);
+    // the retry read the draft and sent only the failed reply
+    expect(mutations('addPullRequestReviewThreadReply').map(entry => Object.values(entry.variables!).map(input => (input as { pullRequestReviewThreadId: string }).pullRequestReviewThreadId))).toEqual([['PRRT_1', 'PRRT_gone', 'PRRT_3'], ['PRRT_gone']]);
+    expect(state.review!.comments).toHaveLength(2);
+    // a changed text is a new reply
+    const edited = await service.post('cora', replying([{ threadId: 'PRRT_1', body: 'One, edited' }]));
+    expect(edited.replies).toEqual([{ threadId: 'PRRT_1', result: 'posted' }]);
+    expect(state.review!.comments).toHaveLength(3);
+  });
+
+  it('reads back a reply batch whose response was lost', async () => {
+    const { service, mutations, state } = harness({ replyFailure: 'lost' });
+    const replies = [{ threadId: 'PRRT_a', body: 'A' }, { threadId: 'PRRT_b', body: 'B' }, { threadId: 'PRRT_c', body: 'C' }];
+    const result = await service.post('cora', replying(replies));
+    expect(result.replies).toEqual([{ threadId: 'PRRT_a', result: 'posted' }, { threadId: 'PRRT_b', result: 'failed', reason: 'GitHub could not add the replies (502): Bad Gateway' }, { threadId: 'PRRT_c', result: 'posted' }]);
+    expect(mutations('addPullRequestReviewThreadReply')).toHaveLength(1);
+    expect((await service.post('cora', replying(replies))).replies.map(entry => entry.result)).toEqual(['posted', 'posted', 'posted']);
+    expect(state.review!.comments).toHaveLength(3);
+  });
+
+  it('posts replies beside comments and notes into one draft on the head', async () => {
+    const { service, mutations, state } = harness({ pending: { commit: head, body: '' } });
+    const result = await service.post('cora', { ...replying([{ threadId: 'PRRT_1', body: 'Reply' }]), comments: [comment()], sections: [general] });
+    expect(result.comments).toEqual([{ id: 'c1', result: 'line' }]);
+    expect(result.replies).toEqual([{ threadId: 'PRRT_1', result: 'posted' }]);
+    expect(result.sections).toEqual([{ key: 'general', posted: true }]);
+    expect(mutations('addPullRequestReview')).toHaveLength(0);
+    expect(state.review!.comments).toHaveLength(2);
+  });
+
+  it('refuses replies into a draft review on an older commit', async () => {
+    const { service, mutations } = harness({ pending: { commit: 'c'.repeat(40), body: '' } });
+    expect((await refusal(service.post('cora', replying([{ threadId: 'PRRT_1', body: 'Reply' }])))).code).toBe('pending_review_outdated');
+    expect(mutations()).toHaveLength(0);
+  });
+
   it('refuses a stale tour and missing credentials', async () => {
     expect((await refusal(harness().service.post('cora', { ...request([comment()]), fingerprint: 'another-fingerprint-1' }))).code).toBe('stale');
     expect((await refusal(harness({ token: null }).service.post('cora', request([comment()])))).code).toBe('no_github_token');
@@ -503,7 +611,7 @@ describe('pull request review API', () => {
     app = await buildApp(testConfig(), { auth: await testAuthService(), pullRequestReviews: pullRequestReviews as never, discovery: { worktreesNow: () => [] } as never });
     const headers = { ...await authenticatedHeaders(app), 'content-type': 'application/json' };
     const url = '/api/worktrees/cora/review-tour/pr-review';
-    const payload = JSON.stringify({ scope: 'pr', includeTests: false, includeDocs: false, fingerprint, pullRequestNumber: 7, sections: [general], comments: [comment()] });
+    const payload = JSON.stringify({ scope: 'pr', includeTests: false, includeDocs: false, fingerprint, pullRequestNumber: 7, sections: [general], comments: [comment()], replies: [] });
     const send = async () => await app!.inject({ method: 'POST', url, headers, payload });
     const working = await app.inject({ method: 'POST', url, headers, payload: JSON.stringify({ ...JSON.parse(payload), scope: 'working' }) });
     const { 'x-csrf-token': _csrf, ...withoutCsrf } = headers;

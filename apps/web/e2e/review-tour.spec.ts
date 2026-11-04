@@ -1410,6 +1410,100 @@ test('asks the reviewer about its verdict on one of my earlier threads', async (
   const answer = questions.locator('.review-ask-answer');
   await expect(answer).toContainText('Yes, 410 fits a removed resource.');
   await expect(answer.locator('strong')).toHaveText('410');
+  // an answer copies into my reply on the thread, which starts from the verdict
+  await questions.getByRole('button', { name: 'Copy to reply' }).click();
+  await expect(row.getByLabel('Reply to your comment on src/api.ts line 9')).toHaveValue('The author argues for 410.\n\nYes, **410** fits a removed resource.');
+});
+
+test('replies to my earlier threads from the tour, pre-filled from the verdict, and posts the replies into my draft review', async ({ page }) => {
+  const reviewedCommit = `a1b2c3d${'0'.repeat(33)}`;
+  const comment = (id: string, author: string, body: string) => ({ id, author, bot: false, ...(author === 'octocat' ? { mine: true } : {}), body, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/owner/repo/pull/7#discussion_${id}` });
+  const patch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -4,4 +4,4 @@\n const a = 1;\n-const x = 8;\n+const x = 9;\n const b = 2;\n const c = 3;\n';
+  const earlierThreads = { pullRequest: 7, threads: [
+    { id: 'T1', path: 'src/route.ts', line: 5, resolved: false, outdated: false, diffHunk: '@@ -4 +4 @@', comments: [comment('C1', 'octocat', 'Why eight?')] },
+    { id: 'T2', path: 'src/old.ts', line: 3, resolved: false, outdated: true, diffHunk: '@@ -3 +3 @@', comments: [comment('C3', 'octocat', 'Drop this file.')] },
+    { id: 'T3', path: 'src/docs.ts', line: 2, resolved: false, outdated: false, diffHunk: '@@ -2 +2 @@', comments: [comment('C7', 'octocat', 'Typo.')] }
+  ] };
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
+  const verdicts = [{ threadId: 'T1', status: 'addressed', body: 'Now nine.' }, { threadId: 'T2', status: 'not_addressed', body: 'The file is still there.' }];
+  const codeReview = { fingerprint: tour.fingerprint, preset: { id: 'correctness', label: 'Correctness', agent: 'claude' }, completedAt: '2026-10-04T12:00:00.000Z', findings: [], general: [], verdicts };
+  const posts: PrReviewPost[] = [];
+  const prompts: string[] = [];
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour, codeReview } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/pr-review' && request.method() === 'POST') {
+      const post = request.postDataJSON() as PrReviewPost;
+      posts.push(post);
+      // the first post's T3 thread was deleted on GitHub since the tour read it
+      return route.fulfill({ json: { status: 'ok', review: { url: 'https://github.com/owner/repo/pull/7/files', pullRequest: { number: 7, url: 'https://github.com/owner/repo/pull/7' } }, sections: post.sections.map(({ key }) => ({ key, posted: true })), comments: [], replies: post.replies.map(({ threadId }) => posts.length === 1 && threadId === 'T3' ? { threadId, result: 'failed', reason: 'Could not resolve to a node with the global id of \'T3\'' } : { threadId, result: 'posted' }) } });
+    }
+    if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') { prompts.push((request.postDataJSON() as { prompt: string }).prompt); return route.fulfill({ status: 204 }); }
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  const panel = page.getByRole('region', { name: 'Review fixes' });
+  await panel.getByRole('button', { name: 'Start tour' }).click();
+
+  // Reply opens an editable reply pre-filled with the verdict, or empty without one
+  const earlier = panel.getByRole('region', { name: 'Your earlier comments (3)' });
+  const notAddressed = earlier.getByRole('group', { name: 'Your earlier comment on src/old.ts line 3' });
+  await notAddressed.getByRole('button', { name: 'Reply' }).click();
+  const notAddressedReply = notAddressed.getByLabel('Reply to your comment on src/old.ts line 3');
+  await expect(notAddressedReply).toHaveValue('The file is still there.');
+  await notAddressedReply.fill('The file is still there. Please drop it.');
+  const noVerdict = earlier.getByRole('group', { name: 'Your earlier comment on src/docs.ts line 2' });
+  await noVerdict.getByRole('button', { name: 'Reply' }).click();
+  await expect(noVerdict.getByLabel('Reply to your comment on src/docs.ts line 2')).toHaveValue('');
+  await noVerdict.getByLabel('Reply to your comment on src/docs.ts line 2').fill('Thanks.');
+  // a discarded reply is gone
+  const addressed = earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts line 5' });
+  await addressed.getByRole('button', { name: 'Show' }).click();
+  await addressed.getByRole('button', { name: 'Reply' }).click();
+  await addressed.getByRole('button', { name: 'Discard reply' }).click();
+  await expect(addressed.getByLabel('Reply to your comment on src/route.ts line 5')).toHaveCount(0);
+  await panel.getByLabel('Feedback for this change').fill('Route reads well.');
+
+  // the tour's draft keeps the replies across a reload
+  await page.reload();
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  await expect(notAddressed.getByLabel('Reply to your comment on src/old.ts line 3')).toHaveValue('The file is still there. Please drop it.');
+  await expect(noVerdict.getByLabel('Reply to your comment on src/docs.ts line 2')).toHaveValue('Thanks.');
+
+  // the change request to the Agent carries the feedback, not the replies
+  await panel.getByRole('button', { name: 'Review summary' }).click();
+  await panel.getByRole('button', { name: 'Send change request' }).click();
+  await expect.poll(() => prompts.length).toBe(1);
+  expect(prompts[0]).toContain('Route reads well.');
+  expect(prompts[0]).not.toContain('Please drop it.');
+  expect(prompts[0]).not.toContain('Thanks.');
+
+  // Post to PR sends the replies with the notes; a deleted thread fails only its own reply
+  await panel.getByRole('button', { name: 'Post to PR #7' }).click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0]).toEqual({ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint, pullRequestNumber: 7, sections: [{ key: 'step:route', markdown: '## Fix the route\n\nRoute reads well.' }], comments: [], replies: [{ threadId: 'T2', body: 'The file is still there. Please drop it.' }, { threadId: 'T3', body: 'Thanks.' }] });
+  const posted = panel.getByRole('region', { name: 'Draft review on GitHub' });
+  await expect(posted).toContainText('1 reply');
+  await expect(posted.getByRole('list', { name: 'Failed replies' })).toContainText('src/docs.ts line 2Could not resolve to a node with the global id of \'T3\'');
+  await posted.getByRole('button', { name: 'Retry failed' }).click();
+  await expect.poll(() => posts.length).toBe(2);
+  expect(posts[1]).toMatchObject({ sections: [], comments: [], replies: [{ threadId: 'T3', body: 'Thanks.' }] });
+  await expect(posted).toContainText('2 replies');
+  await expect(panel.getByRole('button', { name: 'Posted to PR #7' })).toBeDisabled();
+
+  // a posted reply shows as in the draft review
+  await panel.getByRole('button', { name: 'Back to tour' }).click();
+  await expect(notAddressed).toContainText('In your draft review on GitHub');
+  await expect(notAddressed.getByLabel('Reply to your comment on src/old.ts line 3')).toHaveCount(0);
 });
 
 test('updates a Worktree behind its pull request to the head, then offers Since my review', async ({ page }) => {
@@ -2161,12 +2255,12 @@ test('starts the Worktree\'s guided review from a Review run\'s pane', async ({ 
 const postRoutePatch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -4,4 +4,4 @@\n const a = 1;\n+const x = 9;\n const b = 2;\n const c = 3;\n-const y = 8;\n';
 const postTour = { title: 'Post tour', overview: 'Review the route constants.', scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'post-fingerprint-123456', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: postRoutePatch }, { id: 'chg_service01', file: 'src/service.ts', category: 'implementation', kind: 'hunk', patch: 'diff --git a/src/service.ts b/src/service.ts\nindex 3333333..4444444 100644\n--- a/src/service.ts\n+++ b/src/service.ts\n@@ -4 +4 @@\n-old service\n+new service\n' }], steps: [{ id: 'route', title: 'Accept the request', explanation: 'The route renames its constants.', changeIds: ['chg_route0001'] }, { id: 'service', title: 'Apply the operation', explanation: 'The service performs the transition.', changeIds: ['chg_service01'] }] };
 const openPullRequest = { number: 123, title: 'Review tour', status: 'open', url: 'https://github.com/owner/repo/pull/123' };
-type PrReviewPost = { scope: string; includeTests: boolean; includeDocs: boolean; fingerprint: string; pullRequestNumber: number; sections: { key: string; markdown: string }[]; comments: { id: string; changeId: string; startSide: string; startLine: number; endSide: string; endLine: number; body: string }[] };
+type PrReviewPost = { scope: string; reviewedCommit?: string; includeTests: boolean; includeDocs: boolean; fingerprint: string; pullRequestNumber: number; sections: { key: string; markdown: string }[]; comments: { id: string; changeId: string; startSide: string; startLine: number; endSide: string; endLine: number; body: string }[]; replies: { threadId: string; body: string }[] };
 const draftReview = { url: 'https://github.com/owner/repo/pull/123/files', pullRequest: { number: 123, url: openPullRequest.url } };
 // a post GitHub takes whole: every section, and every comment on its lines
-const postedWhole = (post: PrReviewPost, route: Route) => route.fulfill({ json: { status: 'ok', review: draftReview, sections: post.sections.map(({ key }) => ({ key, posted: true })), comments: post.comments.map(comment => ({ id: comment.id, result: 'line' })) } });
+const postedWhole = (post: PrReviewPost, route: Route) => route.fulfill({ json: { status: 'ok', review: draftReview, sections: post.sections.map(({ key }) => ({ key, posted: true })), comments: post.comments.map(comment => ({ id: comment.id, result: 'line' })), replies: post.replies.map(({ threadId }) => ({ threadId, result: 'posted' })) } });
 // the post's fixed fields for the post tour; a test adds its sections and comments
-const postEnvelope = { scope: 'pr', includeTests: false, includeDocs: false, fingerprint: postTour.fingerprint, pullRequestNumber: 123 };
+const postEnvelope = { scope: 'pr', includeTests: false, includeDocs: false, fingerprint: postTour.fingerprint, pullRequestNumber: 123, replies: [] };
 
 // Restore the post tour on a Worktree with a pull request (or, with null, none), with `stored`
 // beside it in the stored review (a Code review, say); `respond` answers each post. The returned `comparison` is the Worktree's current one: moving its fingerprint makes the
@@ -2307,7 +2401,7 @@ test('shows the pull request description on an All PR tour overview', async ({ p
   await expect(working.dialog.locator('.review-tour-pr-description')).toHaveCount(0);
 });
 
-test('offers Post to PR only for an All PR tour of a branch with an open or draft pull request', async ({ page }) => {
+test('offers Post to PR on an All PR tour only for a branch with an open or draft pull request', async ({ page }) => {
   for (const [options, offered] of [[{ pullRequest: null }, false], [{ scope: 'working' as const }, false], [{ pullRequest: { ...openPullRequest, status: 'merged' } }, false], [{ pullRequest: { ...openPullRequest, status: 'draft' } }, true]] as const) {
     await page.unrouteAll({ behavior: 'ignoreErrors' });
     const { dialog } = await openPostTour(page, options);
@@ -2484,7 +2578,7 @@ test('orders a comment range across both sides by its rows in the diff', async (
   await expect(dialog.getByLabel('Consolidated change request')).toHaveValue(/### src\/route\.ts new 5 – old 7\n```diff\n\+const x = 9;\n const b = 2;\n const c = 3;\n-const y = 8;\n```\nTop down\./u);
   await dialog.getByRole('button', { name: 'Post to PR #123' }).click();
   await expect.poll(() => posts.length).toBe(1);
-  expect(Object.keys(posts[0]!).sort()).toEqual(['comments', 'fingerprint', 'includeDocs', 'includeTests', 'pullRequestNumber', 'scope', 'sections']);
+  expect(Object.keys(posts[0]!).sort()).toEqual(['comments', 'fingerprint', 'includeDocs', 'includeTests', 'pullRequestNumber', 'replies', 'scope', 'sections']);
   expect(posts[0]!.comments.map(({ startSide, startLine, endSide, endLine, body }) => ({ startSide, startLine, endSide, endLine, body }))).toEqual([
     { startSide: 'additions', startLine: 5, endSide: 'deletions', endLine: 7, body: 'Top down.' },
     { startSide: 'additions', startLine: 5, endSide: 'deletions', endLine: 7, body: 'Bottom up.' },

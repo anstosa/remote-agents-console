@@ -33,7 +33,7 @@ export function createReviewDraftPort(deps: ReviewDraftDependencies) {
     if (comments === undefined) return developerFailure('stale_preparation', 'A requested review line is unavailable in the prepared comparison.', true);
     const body = typeof input.body === 'string' ? input.body : undefined;
     const sections = [{ key: `mcp:${shortDigest(input.request_id)}`, markdown: body === undefined || body.trim() === '' ? '<!-- rac-mcp-draft -->' : body }];
-    const reviewInput: PullRequestReviewInput = { scope: 'pr', includeTests: resolved.comparison.includeTests, includeDocs: resolved.comparison.includeDocs, fingerprint: resolved.comparison.fingerprint, pullRequestNumber: input.number as number, sections, comments };
+    const reviewInput: PullRequestReviewInput = { scope: 'pr', includeTests: resolved.comparison.includeTests, includeDocs: resolved.comparison.includeDocs, fingerprint: resolved.comparison.fingerprint, pullRequestNumber: input.number as number, sections, comments, replies: [] };
     try {
       const result = await deps.post(resolved.worktree.id, reviewInput);
       // missing effect identity is post-dispatch uncertainty for gateway settlement

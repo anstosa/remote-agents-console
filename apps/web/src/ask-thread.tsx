@@ -8,9 +8,10 @@ import { MarkdownBlocks } from './note-markdown.js';
 // under its Finding, the guide under the asked-about lines), the question still being answered (with
 // its pane, when the agent runs interactive), and a box for the next one. Closed and empty, it is one
 // "Ask reviewer" button; a thread just started from the gutter (`onCancel`) opens on its box instead,
-// and Cancel drops it. Answers copy into a comment where there is one to copy them into (`onUseAnswer`).
+// and Cancel drops it. Answers copy into a comment where there is one to copy them into (`onUseAnswer`,
+// its button named by `useLabel`).
 // `placeholder` names what the first question is about when it is not the role's usual subject.
-export function AskThreadView({ role, thread, pending, failed, placeholder, onAsk, onUseAnswer, onOpenRun, onCancel }: { role: AskRole; thread?: AskThread; pending?: PendingAsk; failed?: AskFailure; placeholder?: string; onAsk: (question: string) => Promise<string | undefined>; onUseAnswer?: (answer: string) => void; onOpenRun?: (run: ReviewRunLink) => void; onCancel?: () => void }) {
+export function AskThreadView({ role, thread, pending, failed, placeholder, onAsk, onUseAnswer, useLabel = 'Copy to comment', onOpenRun, onCancel }: { role: AskRole; thread?: AskThread; pending?: PendingAsk; failed?: AskFailure; placeholder?: string; onAsk: (question: string) => Promise<string | undefined>; onUseAnswer?: (answer: string) => void; useLabel?: string; onOpenRun?: (run: ReviewRunLink) => void; onCancel?: () => void }) {
   const copy = askRoleCopy[role];
   const turns = thread?.turns ?? [];
   const [open, setOpen] = useState(onCancel !== undefined);
@@ -35,7 +36,7 @@ export function AskThreadView({ role, thread, pending, failed, placeholder, onAs
         <article key={turn.id} className="review-ask-turn">
           <p className="review-ask-question">{turn.question}</p>
           {turn.answer !== undefined
-            ? <><div className="note-markdown review-ask-answer"><MarkdownBlocks text={turn.answer} /></div>{onUseAnswer !== undefined && <div className="review-ask-actions"><button type="button" onClick={() => onUseAnswer(turn.answer!)}>Copy to comment</button></div>}</>
+            ? <><div className="note-markdown review-ask-answer"><MarkdownBlocks text={turn.answer} /></div>{onUseAnswer !== undefined && <div className="review-ask-actions"><button type="button" onClick={() => onUseAnswer(turn.answer!)}>{useLabel}</button></div>}</>
             : <p className="review-ask-error" role="alert">{askErrorMessage(role, turn.error?.code)}{turn.error?.retryable === true && !busy && <button type="button" onClick={() => void send(turn.question)}>Ask again</button>}</p>}
         </article>
       ))}

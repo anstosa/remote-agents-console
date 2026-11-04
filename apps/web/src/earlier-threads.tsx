@@ -69,17 +69,24 @@ export type EarlierThreadResolve = ReturnType<typeof useEarlierThreadResolve>;
 
 // "line 5", "lines 38-40", "old line 5" on the removed side, or nothing for a thread on a whole file
 const linesLabel = (thread: PullRequestReviewThread): string => thread.line === undefined ? '' : `${thread.leftSide ? ' old' : ''} ${thread.startLine === undefined ? 'line' : 'lines'} ${threadLines(thread)}`;
-const threadWhere = (thread: PullRequestReviewThread): string => `${thread.path}${linesLabel(thread)}`;
+export const threadWhere = (thread: PullRequestReviewThread): string => `${thread.path}${linesLabel(thread)}`;
 
 // The AI review's verdicts on my earlier threads, by thread id, and those I dismissed by
 // `dismissalKey`: a dismissed verdict shows as none, and a later review's other verdict on that
 // thread shows again. `judged` once a Code review completed, so a thread it gave none shows so.
 export type EarlierVerdicts = { judged: boolean; verdicts: ReadonlyMap<string, Verdict>; dismissed: ReadonlySet<string>; onDismiss: (verdict: Verdict) => void; onRestore: (verdict: Verdict) => void };
 export const dismissalKey = (verdict: Verdict): string => `${verdict.threadId}:${verdict.status}`;
-const shownVerdict = (view: EarlierVerdicts, threadId: string): Verdict | undefined => {
+export const shownVerdict = (view: EarlierVerdicts, threadId: string): Verdict | undefined => {
   const verdict = view.verdicts.get(threadId);
   return verdict === undefined || view.dismissed.has(dismissalKey(verdict)) ? undefined : verdict;
 };
+
+// The replies I am writing to my earlier threads, by thread id: kept in the tour's draft and sent only
+// by Post to PR, into my draft review; `posted` the threads whose reply that draft now holds. A reply
+// starts from the shown verdict's body, and `onChange` with no text discards it.
+export type EarlierReplies = { text: Readonly<Record<string, string>>; posted: ReadonlySet<string>; onChange: (threadId: string, text: string | undefined) => void };
+// the server's cap on one reply, as on an inline comment
+export const maxReply = 4_000;
 
 // each verdict's badge and what its evidence lines show about its thread
 const verdictText: Record<VerdictStatus, { label: string; evidence: string }> = {
@@ -94,15 +101,17 @@ const verdictLabel = (status: VerdictStatus | undefined): string => status === u
 const VerdictBadge = ({ status }: { status: VerdictStatus | undefined }) => <span className={`review-tour-verdict-badge ${status ?? 'none'}`}>{verdictLabel(status)}</span>;
 
 // One of my earlier threads: its file and lines, its state and verdict, my first comment, the latest
-// reply, the verdict's explanation, Resolve while it is open, and its questions to the reviewer
-// (`askFor`). An addressed one starts collapsed; `focus` opens and focuses it.
-export function EarlierThread({ thread, resolving, verdicts, askFor, focus = false, onFocused }: { thread: PullRequestReviewThread; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; askFor?: (threadId: string) => ReactNode; focus?: boolean; onFocused?: () => void }) {
+// reply, the verdict's explanation, my reply to it, Resolve while it is open, and its questions to
+// the reviewer (`askFor`). An addressed one starts collapsed; `focus` opens and focuses it.
+export function EarlierThread({ thread, resolving, verdicts, replying, askFor, focus = false, onFocused }: { thread: PullRequestReviewThread; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; replying: EarlierReplies; askFor?: (threadId: string) => ReactNode; focus?: boolean; onFocused?: () => void }) {
   const [first, ...replies] = thread.comments as [PullRequestComment, ...PullRequestComment[]];
   const latest = replies.at(-1);
   const resolvedHere = resolving.resolved.has(thread.id);
   const busy = resolving.busy.has(thread.id);
   const verdict = shownVerdict(verdicts, thread.id);
   const dismissed = verdict === undefined ? verdicts.verdicts.get(thread.id) : undefined;
+  const reply = replying.text[thread.id];
+  const replied = replying.posted.has(thread.id);
   // undefined until toggled, so a verdict arriving later still collapses an addressed thread
   const [expanded, setExpanded] = useState<boolean>();
   const collapsible = verdict?.status === 'addressed';
@@ -128,8 +137,11 @@ export function EarlierThread({ thread, resolving, verdicts, askFor, focus = fal
       <p>{first.body}</p>
       {latest !== undefined && <p className="review-tour-earlier-reply">@{latest.author}: {latest.body}</p>}
       {verdict !== undefined && <div className="note-markdown review-tour-verdict-body"><MarkdownBlocks text={verdict.body} /></div>}
+      {reply !== undefined && (replied
+        ? <div className="review-tour-earlier-reply-box"><small>In your draft review on GitHub</small><p>{reply}</p></div>
+        : <div className="review-tour-earlier-reply-box"><textarea aria-label={`Reply to your comment on ${where}`} value={reply} maxLength={maxReply} onChange={event => replying.onChange(thread.id, event.target.value)} /><small>Post to PR adds it to your draft review.</small></div>)}
       {resolving.errors[thread.id] !== undefined && <p className="review-tour-error" role="alert">{resolving.errors[thread.id]}</p>}
-      <div><a href={first.url} target="_blank" rel="noreferrer">View on GitHub</a>{verdict !== undefined && <button type="button" onClick={() => verdicts.onDismiss(verdict)}>Dismiss verdict</button>}{dismissed !== undefined && <button type="button" onClick={() => verdicts.onRestore(dismissed)}>Restore verdict</button>}{!thread.resolved && !resolvedHere && <WriteButton busy={busy} disabled={busy || resolving.resolve === undefined} title={resolving.resolve === undefined ? 'Add this repository as a Project to resolve threads here' : undefined} onClick={() => void resolving.resolve?.(thread.id)}><Icon name="check" />Resolve</WriteButton>}</div>
+      <div><a href={first.url} target="_blank" rel="noreferrer">View on GitHub</a>{verdict !== undefined && <button type="button" onClick={() => verdicts.onDismiss(verdict)}>Dismiss verdict</button>}{dismissed !== undefined && <button type="button" onClick={() => verdicts.onRestore(dismissed)}>Restore verdict</button>}{reply === undefined ? <button type="button" onClick={() => replying.onChange(thread.id, verdict?.body ?? '')}>Reply</button> : !replied && <button type="button" onClick={() => replying.onChange(thread.id, undefined)}>Discard reply</button>}{!thread.resolved && !resolvedHere && <WriteButton busy={busy} disabled={busy || resolving.resolve === undefined} title={resolving.resolve === undefined ? 'Add this repository as a Project to resolve threads here' : undefined} onClick={() => void resolving.resolve?.(thread.id)}><Icon name="check" />Resolve</WriteButton>}</div>
       {askFor?.(thread.id)}
     </>}
   </div>;
@@ -137,7 +149,7 @@ export function EarlierThread({ thread, resolving, verdicts, askFor, focus = fal
 
 // The first step's list of my earlier threads, as the tour started, those needing me first;
 // `focused` is the thread to open and focus.
-export function EarlierThreadsSection({ earlier, resolving, verdicts, askFor, fontSize, focused, onFocused }: { earlier: EarlierThreads; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; askFor?: (threadId: string) => ReactNode; fontSize: number; focused?: string; onFocused: () => void }): ReactNode {
+export function EarlierThreadsSection({ earlier, resolving, verdicts, replying, askFor, fontSize, focused, onFocused }: { earlier: EarlierThreads; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; replying: EarlierReplies; askFor?: (threadId: string) => ReactNode; fontSize: number; focused?: string; onFocused: () => void }): ReactNode {
   const heading = `Your earlier comments (${earlier.threads.length})`;
   const rank = (thread: PullRequestReviewThread) => verdictOrder.indexOf(shownVerdict(verdicts, thread.id)?.status);
   const ordered = [...earlier.threads].sort((left, right) => rank(left) - rank(right));
@@ -145,7 +157,7 @@ export function EarlierThreadsSection({ earlier, resolving, verdicts, askFor, fo
     <small>{heading}</small>
     {earlier.partial && <p className="review-tour-earlier-note">Some older threads may be missing: GitHub listed only the pull request’s latest threads.</p>}
     {earlier.threads.length === 0 && <p className="review-tour-earlier-note">None: you opened no threads here, or resolved each one yourself.</p>}
-    {ordered.map(thread => <EarlierThread key={thread.id} thread={thread} resolving={resolving} verdicts={verdicts} askFor={askFor} focus={focused === thread.id} onFocused={onFocused} />)}
+    {ordered.map(thread => <EarlierThread key={thread.id} thread={thread} resolving={resolving} verdicts={verdicts} replying={replying} askFor={askFor} focus={focused === thread.id} onFocused={onFocused} />)}
   </section>;
 }
 

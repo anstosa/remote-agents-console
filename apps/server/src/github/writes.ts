@@ -137,24 +137,37 @@ export async function updateDraftReview(client: GithubClient, token: string, rev
   if (typeof at(payload.data, 'updatePullRequestReview', 'pullRequestReview', 'id') !== 'string') throw graphqlError(payload, action);
 }
 
+// the mutation a batch repeats once per input, and what it creates
+type BatchMutation = { field: string; input: string; result: string; action: string; missing: string };
+const addThread: BatchMutation = { field: 'addPullRequestReviewThread', input: 'AddPullRequestReviewThreadInput', result: 'thread', action: 'GitHub could not add the comments', missing: 'GitHub did not create the comment thread.' };
+const addReply: BatchMutation = { field: 'addPullRequestReviewThreadReply', input: 'AddPullRequestReviewThreadReplyInput', result: 'comment', action: 'GitHub could not add the replies', missing: 'GitHub did not add the reply.' };
+
 /** Add Review threads (each an AddPullRequestReviewThreadInput) in one request; a refused request fails each thread, a lost or broken one is ambiguous. */
 export async function addReviewThreads(client: GithubClient, token: string, inputs: Array<Record<string, unknown>>): Promise<BatchOutcome> {
-  const action = 'GitHub could not add the comments';
-  const mutation = threadMutation(inputs);
-  let payload: GraphqlPayload;
-  try {
-    payload = await client.mutate(token, mutation.query, mutation.variables, action, batchTimeoutMs);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : `${action}.`;
-    return error instanceof GithubRequestError && error.kind !== 'transient' ? { ambiguous: false, outcomes: inputs.map(() => ({ created: false, reason, refused: false })) } : { ambiguous: true, reason };
-  }
-  return ambiguousBatch(payload) ? { ambiguous: true, reason: graphqlError(payload, action).message } : { ambiguous: false, outcomes: threadOutcomes(inputs.length, payload) };
+  return await addBatch(client, token, inputs, addThread);
 }
 
-// one GraphQL request adding every thread, aliased t0, t1, … with one input variable each
-export function threadMutation(inputs: Array<Record<string, unknown>>): { query: string; variables: Record<string, unknown> } {
-  const declarations = inputs.map((_, index) => `$i${index}:AddPullRequestReviewThreadInput!`).join(',');
-  const fields = inputs.map((_, index) => `t${index}:addPullRequestReviewThread(input:$i${index}){thread{id}}`).join(' ');
+/** Add replies to Review threads (each an AddPullRequestReviewThreadReplyInput, naming a Draft review to hold them) in one request, settled as `addReviewThreads` settles threads. */
+export async function addThreadReplies(client: GithubClient, token: string, inputs: Array<Record<string, unknown>>): Promise<BatchOutcome> {
+  return await addBatch(client, token, inputs, addReply);
+}
+
+async function addBatch(client: GithubClient, token: string, inputs: Array<Record<string, unknown>>, batch: BatchMutation): Promise<BatchOutcome> {
+  const mutation = threadMutation(inputs, batch);
+  let payload: GraphqlPayload;
+  try {
+    payload = await client.mutate(token, mutation.query, mutation.variables, batch.action, batchTimeoutMs);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : `${batch.action}.`;
+    return error instanceof GithubRequestError && error.kind !== 'transient' ? { ambiguous: false, outcomes: inputs.map(() => ({ created: false, reason, refused: false })) } : { ambiguous: true, reason };
+  }
+  return ambiguousBatch(payload) ? { ambiguous: true, reason: graphqlError(payload, batch.action).message } : { ambiguous: false, outcomes: threadOutcomes(inputs.length, payload, batch) };
+}
+
+// one GraphQL request running the mutation once per input, aliased t0, t1, … with one input variable each
+export function threadMutation(inputs: Array<Record<string, unknown>>, batch: BatchMutation = addThread): { query: string; variables: Record<string, unknown> } {
+  const declarations = inputs.map((_, index) => `$i${index}:${batch.input}!`).join(',');
+  const fields = inputs.map((_, index) => `t${index}:${batch.field}(input:$i${index}){${batch.result}{id}}`).join(' ');
   return { query: `mutation(${declarations}){${fields}}`, variables: Object.fromEntries(inputs.map((input, index) => [`i${index}`, input])) };
 }
 
@@ -164,8 +177,8 @@ export function ambiguousBatch(payload: GraphqlPayload): boolean {
   return (payload.data === null || payload.data === undefined) && errors.length > 0 && errors.every(error => !Array.isArray(at(error, 'path')));
 }
 
-// each aliased thread's outcome; GraphQL succeeds partially, naming a failed alias in an error's `path`
-export function threadOutcomes(count: number, payload: unknown): ThreadOutcome[] {
+// each alias's outcome; GraphQL succeeds partially, naming a failed alias in an error's `path`
+export function threadOutcomes(count: number, payload: unknown, batch: BatchMutation = addThread): ThreadOutcome[] {
   const value = payload !== null && typeof payload === 'object' ? payload as GraphqlPayload : {};
   const byAlias = new Map<string, { reason: string; refused: boolean }>();
   let general: string | undefined;
@@ -180,7 +193,7 @@ export function threadOutcomes(count: number, payload: unknown): ThreadOutcome[]
   }
   const data = value.data !== null && typeof value.data === 'object' ? value.data : {};
   return Array.from({ length: count }, (_, index): ThreadOutcome => {
-    if (typeof at(data[`t${index}`], 'thread', 'id') === 'string') return { created: true };
-    return { created: false, ...byAlias.get(`t${index}`) ?? { reason: general ?? 'GitHub did not create the comment thread.', refused: false } };
+    if (typeof at(data[`t${index}`], batch.result, 'id') === 'string') return { created: true };
+    return { created: false, ...byAlias.get(`t${index}`) ?? { reason: general ?? batch.missing, refused: false } };
   });
 }

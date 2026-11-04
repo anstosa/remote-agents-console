@@ -2410,8 +2410,12 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-earlier-head span { flex: none; color: var(--overlay-1); font: 700 .62rem var(--font-mono); }
 .review-tour-earlier > p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .review-tour-earlier > .review-tour-earlier-reply { padding-left: .6rem; border-left: 2px solid var(--surface-2); color: var(--subtext-1); }
-.review-tour-earlier > div:last-child { display: flex; align-items: center; justify-content: flex-end; gap: .6rem; }
+.review-tour-earlier > div:last-child { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .6rem; }
 .review-tour-earlier a { color: var(--blue); font-size: .68rem; }
+.review-tour-earlier-reply-box { display: grid; min-width: 0; gap: .25rem; }
+.review-tour-earlier-reply-box textarea { box-sizing: border-box; width: 100%; min-width: 0; min-height: 5rem; resize: vertical; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .5rem; background: var(--mantle); color: var(--text); font: inherit; }
+.review-tour-earlier-reply-box small { color: var(--subtext-0); font-size: .66rem; }
+.review-tour-earlier-reply-box p { margin: 0; padding-left: .6rem; border-left: 2px solid var(--green); white-space: pre-wrap; overflow-wrap: anywhere; }
 .review-tour-earlier button { padding: .3rem .65rem; font-size: .68rem; box-shadow: none; }
 .review-tour-earlier-threads > small { color: var(--blue); }
 .review-tour-earlier-note { margin: 0; color: var(--subtext-0); font-size: .72rem; }
