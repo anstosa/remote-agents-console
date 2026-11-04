@@ -328,6 +328,7 @@ async function setupCompactLists(page: Page, options: FixtureOptions = {}) {
       return route.fulfill({ json: { agents: [] } });
     // disable push enrollment
     if (path === "/api/push/public-key") return route.fulfill({ json: {} });
+    if (path === "/api/console/theme") return route.fulfill({ status: 204 });
     // disable server update notices
     if (path === "/api/server/update-available")
       return route.fulfill({ json: { available: false } });

@@ -1141,6 +1141,7 @@ async function setupSettings(
     if (path === "/api/agents/updates")
       return route.fulfill({ json: { agents: [] } });
     if (path === "/api/push/public-key") return route.fulfill({ json: {} });
+    if (path === "/api/console/theme") return route.fulfill({ status: 204 });
     if (path === "/api/server/update-available")
       return route.fulfill({ json: { available: false } });
     if (path === "/api/settings/status")
