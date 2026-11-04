@@ -6,7 +6,7 @@ import { askRunLabel } from '../review-runs/runner.js';
 import { parseTourGuide, ReviewTourError, type TourGuide } from '../review-tour/contracts.js';
 import type { StartedReviewJob } from '../review-tour/jobs.js';
 import { maxWorktrees, SideRecords, sideFileFor, validBranch, validWorktreeId, writeRecords } from '../review-tour/store.js';
-import { diffAskPrompt, diffSeedPrompt, guideAskPrompt, MAX_ASK_PENDING, linesAnchor, MAX_ASK_THREADS, MAX_ASK_TURNS, parseAskThread, type AskAnchor, type AskThread, type AskTurn, type ChangeAskRequest } from './contracts.js';
+import { diffAskPrompt, diffSeedPrompt, guideAskPrompt, MAX_ASK_PENDING, linesAnchor, MAX_ASK_THREADS, MAX_ASK_TURNS, onLines, parseAskThread, type AskThread, type AskTurn, type ChangeAskRequest, type LinesAnchor } from './contracts.js';
 import { acceptedEffort, type AskJobs, type AskTarget, type ResolvedAsk } from './jobs.js';
 
 // the most Comparisons of one Worktree whose threads are kept; asking about another forgets the oldest
@@ -171,13 +171,14 @@ export class ChangeAsks {
   // a follow-up on a thread, in its own conversation, run as the guide or diff conversation it is still on
   private async resolveThread(target: ChangesTarget, patch: ComparisonPatch, request: Extract<ChangeAskRequest, { threadId: string }>): Promise<ResolvedAsk> {
     const existing = (await this.threads(target)).find(candidate => candidate.id === request.threadId);
-    if (existing === undefined) throw new ReviewTourError('target_unavailable', false);
+    if (existing === undefined || !onLines(existing.anchor)) throw new ReviewTourError('target_unavailable', false);
     const { turns: _turns, ...thread } = existing;
-    const { findingId: _findingId, title: _title, excerpt: _excerpt, file: _file, ...lines } = thread.anchor;
+    const { anchor } = existing;
+    const { findingId: _findingId, title: _title, excerpt: _excerpt, file: _file, ...lines } = anchor;
     const current = currentAnchor(patch, lines);
-    const known = thread.target === 'guide' ? await target.guide(thread.anchor.file) : await this.store.started(target.worktreeId, target.branch, target.scope);
+    const known = thread.target === 'guide' ? await target.guide(anchor.file) : await this.store.started(target.worktreeId, target.branch, target.scope);
     const runs = known?.agent === thread.kind && known.conversation === thread.conversation ? known : { agent: thread.kind };
-    return this.resolved(target, thread, runs, thread.target === 'guide' ? guideAskPrompt(current ?? thread.anchor, request.question) : diffAskPrompt(current ?? thread.anchor, request.question, current !== undefined));
+    return this.resolved(target, thread, runs, thread.target === 'guide' ? guideAskPrompt(current ?? anchor, request.question) : diffAskPrompt(current ?? anchor, request.question, current !== undefined));
   }
 
   // a resolved question on a thread, run with `runs`' model and effort while its agent accepts them
@@ -198,7 +199,7 @@ export class ChangeAsks {
 }
 
 // the anchor of some lines of a Comparison's file as it is now, when its patch still holds them
-function currentAnchor(patch: ComparisonPatch, lines: Parameters<typeof linesAnchor>[0]): AskAnchor | undefined {
+function currentAnchor(patch: ComparisonPatch, lines: Parameters<typeof linesAnchor>[0]): LinesAnchor | undefined {
   const file = patch.files.find(candidate => candidate.change.path === lines.changeId);
   const anchor = file === undefined ? undefined : linesAnchor(lines, { id: file.change.path, file: file.change.path, patch: file.patch });
   return anchor?.excerpt === '' ? undefined : anchor;

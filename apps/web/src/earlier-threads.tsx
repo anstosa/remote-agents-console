@@ -94,9 +94,9 @@ const verdictLabel = (status: VerdictStatus | undefined): string => status === u
 const VerdictBadge = ({ status }: { status: VerdictStatus | undefined }) => <span className={`review-tour-verdict-badge ${status ?? 'none'}`}>{verdictLabel(status)}</span>;
 
 // One of my earlier threads: its file and lines, its state and verdict, my first comment, the latest
-// reply, the verdict's explanation, and Resolve while it is open. An addressed one starts collapsed;
-// `focus` opens and focuses it.
-export function EarlierThread({ thread, resolving, verdicts, focus = false, onFocused }: { thread: PullRequestReviewThread; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; focus?: boolean; onFocused?: () => void }) {
+// reply, the verdict's explanation, Resolve while it is open, and its questions to the reviewer
+// (`askFor`). An addressed one starts collapsed; `focus` opens and focuses it.
+export function EarlierThread({ thread, resolving, verdicts, askFor, focus = false, onFocused }: { thread: PullRequestReviewThread; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; askFor?: (threadId: string) => ReactNode; focus?: boolean; onFocused?: () => void }) {
   const [first, ...replies] = thread.comments as [PullRequestComment, ...PullRequestComment[]];
   const latest = replies.at(-1);
   const resolvedHere = resolving.resolved.has(thread.id);
@@ -130,13 +130,14 @@ export function EarlierThread({ thread, resolving, verdicts, focus = false, onFo
       {verdict !== undefined && <div className="note-markdown review-tour-verdict-body"><MarkdownBlocks text={verdict.body} /></div>}
       {resolving.errors[thread.id] !== undefined && <p className="review-tour-error" role="alert">{resolving.errors[thread.id]}</p>}
       <div><a href={first.url} target="_blank" rel="noreferrer">View on GitHub</a>{verdict !== undefined && <button type="button" onClick={() => verdicts.onDismiss(verdict)}>Dismiss verdict</button>}{dismissed !== undefined && <button type="button" onClick={() => verdicts.onRestore(dismissed)}>Restore verdict</button>}{!thread.resolved && !resolvedHere && <WriteButton busy={busy} disabled={busy || resolving.resolve === undefined} title={resolving.resolve === undefined ? 'Add this repository as a Project to resolve threads here' : undefined} onClick={() => void resolving.resolve?.(thread.id)}><Icon name="check" />Resolve</WriteButton>}</div>
+      {askFor?.(thread.id)}
     </>}
   </div>;
 }
 
 // The first step's list of my earlier threads, as the tour started, those needing me first;
 // `focused` is the thread to open and focus.
-export function EarlierThreadsSection({ earlier, resolving, verdicts, fontSize, focused, onFocused }: { earlier: EarlierThreads; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; fontSize: number; focused?: string; onFocused: () => void }): ReactNode {
+export function EarlierThreadsSection({ earlier, resolving, verdicts, askFor, fontSize, focused, onFocused }: { earlier: EarlierThreads; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; askFor?: (threadId: string) => ReactNode; fontSize: number; focused?: string; onFocused: () => void }): ReactNode {
   const heading = `Your earlier comments (${earlier.threads.length})`;
   const rank = (thread: PullRequestReviewThread) => verdictOrder.indexOf(shownVerdict(verdicts, thread.id)?.status);
   const ordered = [...earlier.threads].sort((left, right) => rank(left) - rank(right));
@@ -144,7 +145,7 @@ export function EarlierThreadsSection({ earlier, resolving, verdicts, fontSize, 
     <small>{heading}</small>
     {earlier.partial && <p className="review-tour-earlier-note">Some older threads may be missing: GitHub listed only the pull request’s latest threads.</p>}
     {earlier.threads.length === 0 && <p className="review-tour-earlier-note">None: you opened no threads here, or resolved each one yourself.</p>}
-    {ordered.map(thread => <EarlierThread key={thread.id} thread={thread} resolving={resolving} verdicts={verdicts} focus={focused === thread.id} onFocused={onFocused} />)}
+    {ordered.map(thread => <EarlierThread key={thread.id} thread={thread} resolving={resolving} verdicts={verdicts} askFor={askFor} focus={focused === thread.id} onFocused={onFocused} />)}
   </section>;
 }
 

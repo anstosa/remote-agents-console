@@ -3,7 +3,7 @@ import { type ContextType, type CSSProperties, lazy, type ReactNode, Suspense, t
 import { PanelExpandContext, PanelHeader, PanelIcon, usePanelExpand, usePhoneLayout } from './panel-header.js';
 import type { CommentAnchor, ReviewDiffComment, ReviewDiffRange, ReviewDiffSide, ReviewDiffSuggestion } from './code-panel/review-diffs.js';
 import { AskThreadView, useLineAsks } from './ask-thread.js';
-import { askLines, useAskThreads, type AskAnchor } from './asks.js';
+import { askLines, useAskThreads, type LinesAskAnchor } from './asks.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
 import { patchRowIndex, patchRows } from './code-panel/patch-rows.js';
 import { fetchComparisonFile, type ExpandedLines } from './code-panel/comparison.js';
@@ -1084,7 +1084,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   };
   // Copy a guide's answer into an inline comment on its thread's lines: the one an earlier answer of the
   // thread went into while it is still there, else a new one
-  const copyGuideAnswer = (threadId: string, anchor: AskAnchor, answer: string) => {
+  const copyGuideAnswer = (threadId: string, anchor: LinesAskAnchor, answer: string) => {
     const earlier = comments.find(comment => comment.id === guideComments[threadId]);
     if (earlier !== undefined) { appendToComment(earlier.id, answer); return; }
     const comment: ReviewDiffComment = { id: crypto.randomUUID(), changeId: anchor.changeId, startSide: anchor.startSide ?? anchor.side, startLine: anchor.startLine, endSide: anchor.side, endLine: anchor.endLine, body: answer.trim() };
@@ -1107,12 +1107,16 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
     if (findingId === undefined || finding === undefined) return null;
     return <AskThreadView key={findingId} role="reviewer" thread={askThreads.threads.get(findingId)} pending={askThreads.pending.get(findingId)} failed={askThreads.failures.get(findingId)} onAsk={question => askThreads.ask('reviewer', { target: 'reviewer', findingId }, { changeId: finding.changeId, side: finding.side, startLine: finding.startLine, endLine: finding.endLine, findingId }, question)} onUseAnswer={answer => copyAnswer(findingId, answer)} {...runLink} />;
   };
+  // the questions to the reviewer about its verdict on one of my earlier threads (or the verdict it
+  // did not give), while the review that judged them kept a conversation to ask
+  const askVerdict = (threadId: string): ReactNode => !reviewerAskable || codeReview?.verdicts === undefined ? null
+    : <AskThreadView key={threadId} role="reviewer" placeholder="Ask the reviewer about this verdict" thread={askThreads.threads.get(threadId)} pending={askThreads.pending.get(threadId)} failed={askThreads.failures.get(threadId)} onAsk={question => askThreads.ask('reviewer', { target: 'reviewer', reviewThreadId: threadId }, { reviewThreadId: threadId }, question)} {...runLink} />;
   // an earlier thread on the lines it sits on, or a verdict's evidence marker leading back to it
   const renderEarlierThread = (id: string): ReactNode => {
     const evidenceOf = evidenceThread(id);
     const thread = earlierThreads?.threads.find(candidate => candidate.id === (evidenceOf ?? id));
     if (thread === undefined) return null;
-    return evidenceOf === undefined ? <EarlierThread thread={thread} resolving={resolving} verdicts={verdicts} /> : <VerdictEvidence thread={thread} verdicts={verdicts} onOpen={showEarlierThreads} />;
+    return evidenceOf === undefined ? <EarlierThread thread={thread} resolving={resolving} verdicts={verdicts} askFor={askVerdict} /> : <VerdictEvidence thread={thread} verdicts={verdicts} onOpen={showEarlierThreads} />;
   };
   // dismiss the review, stale or never built, so a new one can start
   const dismiss = async () => {
@@ -1159,7 +1163,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   })}</section>;
   // the step's narration and feedback: a left column in a wide panel, the notes drawer in a compact one; the
   // first step leads with the general Findings
-  const narration = step && <>{current === 0 && earlierThreads !== undefined && <EarlierThreadsSection earlier={earlierThreads} resolving={resolving} verdicts={verdicts} fontSize={fontSize} focused={focusedThread} onFocused={clearFocusedThread} />}{current === 0 && generalFindings}<small>Logical change</small><h3>{step.title}</h3><div className="note-markdown review-tour-explanation" style={{ fontSize }}><MarkdownBlocks text={step.explanation} /></div><label>Feedback for this change<textarea value={stepFeedback} maxLength={maxFeedback} onChange={event => updateFeedback(step.id, event.target.value)} />{stepFeedback.length >= maxFeedback && <span role="status">{maxFeedback.toLocaleString()} character limit reached</span>}</label>{orphanFeedback !== '' && <label>Feedback from regenerated steps<textarea value={orphanFeedback} maxLength={maxFeedbackTotal} onChange={event => updateOrphanFeedback(event.target.value)} />{orphanFeedback.length >= maxFeedbackTotal && <span role="status">{maxFeedbackTotal.toLocaleString()} retained feedback character limit reached</span>}</label>}</>;
+  const narration = step && <>{current === 0 && earlierThreads !== undefined && <EarlierThreadsSection earlier={earlierThreads} resolving={resolving} verdicts={verdicts} askFor={askVerdict} fontSize={fontSize} focused={focusedThread} onFocused={clearFocusedThread} />}{current === 0 && generalFindings}<small>Logical change</small><h3>{step.title}</h3><div className="note-markdown review-tour-explanation" style={{ fontSize }}><MarkdownBlocks text={step.explanation} /></div><label>Feedback for this change<textarea value={stepFeedback} maxLength={maxFeedback} onChange={event => updateFeedback(step.id, event.target.value)} />{stepFeedback.length >= maxFeedback && <span role="status">{maxFeedback.toLocaleString()} character limit reached</span>}</label>{orphanFeedback !== '' && <label>Feedback from regenerated steps<textarea value={orphanFeedback} maxLength={maxFeedbackTotal} onChange={event => updateOrphanFeedback(event.target.value)} />{orphanFeedback.length >= maxFeedbackTotal && <span role="status">{maxFeedbackTotal.toLocaleString()} retained feedback character limit reached</span>}</label>}</>;
   // The Code review's state in the status line: running with its time (or waiting on the operator), its
   // Findings count, a failure with Retry, or "Add AI review" for a current tour with none. An
   // interactive run links to its pane.

@@ -1357,6 +1357,61 @@ test('orders my earlier threads by the AI review\'s verdict, marks where one was
   await expect(page.getByRole('dialog', { name: 'Step notes' }).getByRole('group', { name: 'Your earlier comment on src/route.ts line 5' })).toBeFocused();
 });
 
+test('asks the reviewer about its verdict on one of my earlier threads', async ({ page }) => {
+  const reviewedCommit = `a1b2c3d${'0'.repeat(33)}`;
+  const patch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -4,4 +4,4 @@\n const a = 1;\n-const x = 8;\n+const x = 9;\n const b = 2;\n const c = 3;\n';
+  const comment = (id: string, author: string, body: string) => ({ id, author, bot: false, ...(author === 'octocat' ? { mine: true } : {}), body, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/owner/repo/pull/7#discussion_${id}` });
+  const earlierThreads = { pullRequest: 7, threads: [{ id: 'T3', path: 'src/api.ts', line: 9, resolved: false, outdated: false, diffHunk: '@@ -9 +9 @@', comments: [comment('C4', 'octocat', 'Return 404 here.'), comment('C5', 'mona', 'I think 410 is right.')] }] };
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
+  const review = (conversation?: string) => ({ fingerprint: tour.fingerprint, preset: { id: 'correctness', label: 'Correctness', agent: 'claude' }, completedAt: '2026-10-04T12:00:00.000Z', findings: [], general: [], verdicts: [{ threadId: 'T3', status: 'needs_you', body: 'The author argues for 410.' }], ...(conversation === undefined ? {} : { conversation }) });
+  let codeReview = review();
+  const asked: unknown[] = [];
+  let answered = false;
+  const askThread = { id: 'T3', target: 'reviewer', kind: 'claude', conversation: 's-1', anchor: { reviewThreadId: 'T3', file: 'src/api.ts', excerpt: '@@ -9 +9 @@' } };
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour, codeReview } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/asks' && route.request().method() === 'POST') { asked.push(route.request().postDataJSON()); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('ask-1'), threadId: 'T3' } }); }
+    if (url.pathname === '/api/worktrees/owen/review-tour/asks') return route.fulfill({ json: { status: 'ready', threads: answered ? [{ ...askThread, turns: [{ id: 'ask-1', question: 'Is 410 right?', askedAt: '2026-10-04T12:00:00.000Z', answer: 'Yes, **410** fits a removed resource.' }] }] : [], pending: [] } });
+    if (url.pathname === '/api/review-tour/asks/jobs/ask-1') { answered = true; return route.fulfill({ json: { status: 'ready' } }); }
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  const open = async () => {
+    await page.goto('/');
+    await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+    await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+    const panel = page.getByRole('region', { name: 'Review fixes' });
+    const thread = panel.getByRole('group', { name: 'Your earlier comment on src/api.ts line 9' });
+    // a reload resumes the tour its draft started
+    const start = panel.getByRole('button', { name: 'Start tour' });
+    await expect(start.or(thread)).toBeVisible();
+    if (await start.isVisible()) await start.click();
+    return thread;
+  };
+
+  // a review that kept no conversation offers no question
+  let row = await open();
+  await expect(row).toContainText('The author argues for 410.');
+  await expect(row.getByRole('button', { name: 'Ask reviewer' })).toHaveCount(0);
+
+  codeReview = review('s-1');
+  row = await open();
+  await row.getByRole('button', { name: 'Ask reviewer' }).click();
+  const questions = row.getByRole('region', { name: 'Questions for the reviewer' });
+  await expect(questions.getByLabel('Question for the reviewer')).toHaveAttribute('placeholder', 'Ask the reviewer about this verdict');
+  await questions.getByLabel('Question for the reviewer').fill('Is 410 right?');
+  await questions.getByRole('button', { name: 'Ask' }).click();
+  await expect.poll(() => asked).toEqual([{ target: 'reviewer', reviewThreadId: 'T3', question: 'Is 410 right?', fingerprint: tour.fingerprint }]);
+  const answer = questions.locator('.review-ask-answer');
+  await expect(answer).toContainText('Yes, 410 fits a removed resource.');
+  await expect(answer.locator('strong')).toHaveText('410');
+});
+
 test('updates a Worktree behind its pull request to the head, then offers Since my review', async ({ page }) => {
   await installAgentWebSocket(page);
   const reviewedCommit = 'a1b2c3d'.padEnd(40, '0');

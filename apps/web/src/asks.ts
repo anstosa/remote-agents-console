@@ -13,16 +13,19 @@ export const maxAskQuestion = 4_000;
 export type AskTurn = { id: string; question: string; askedAt: string; answer?: string; error?: { code: string; retryable: boolean } };
 // Lines of one Change: a range on `side`, or, with `startSide`, from a line on that side to `endLine` on `side`
 export type AskLines = { changeId: string; startSide?: Side; side: Side; startLine: number; endLine: number };
-// where a thread points: its lines, and the Finding when it is about one
-export type AskAnchor = AskLines & { findingId?: string };
-// the questions about one anchor; a reviewer thread's id is its Finding's
+// where a thread about lines points: its lines, and the Finding when it is about one
+export type LinesAskAnchor = AskLines & { findingId?: string };
+// where a thread points: some lines, or one of my earlier Review threads (by its GitHub id) whose
+// verdict it asks about
+export type AskAnchor = LinesAskAnchor | { reviewThreadId: string };
+// the questions about one anchor; a reviewer thread's id is its Finding's, or its Review thread's
 export type AskThread = { id: string; target: AskRole; anchor: AskAnchor; turns: AskTurn[] };
 // A question still being answered: its job, what the job's latest poll said about its pane, and the
 // thread it is on, which it may be starting
 export type PendingAsk = { question: string; job: ReviewJob; target: AskRole; anchor: AskAnchor; run?: ReviewRunLink; startedAt?: string };
 // what a question is about: a Finding, new lines, or an existing thread of lines, each with the target
 // its endpoint asks it of when it asks more than one
-export type AskSubject = { target: 'reviewer'; findingId: string } | { target?: 'guide'; lines: AskLines } | { target?: 'guide'; threadId: string };
+export type AskSubject = { target: 'reviewer'; findingId: string } | { target: 'reviewer'; reviewThreadId: string } | { target?: 'guide'; lines: AskLines } | { target?: 'guide'; threadId: string };
 // Why a thread's last question has no answer when the thread does not hold it as a turn (`turnId`), and
 // where that question was asked, for a thread its failed first question left unstored
 export type AskFailure = { turnId: string; message: string; target: AskRole; anchor: AskAnchor };
@@ -39,6 +42,7 @@ const isSide = (value: unknown): value is Side => value === 'additions' || value
 const isRole = (value: unknown): value is AskRole => value === 'reviewer' || value === 'guide' || value === 'diff';
 
 function anchorFrom(value: unknown): AskAnchor | undefined {
+  if (isRecord(value) && typeof value.reviewThreadId === 'string') return { reviewThreadId: value.reviewThreadId };
   if (!isRecord(value) || typeof value.changeId !== 'string' || !isSide(value.side) || typeof value.startLine !== 'number' || typeof value.endLine !== 'number') return undefined;
   return { changeId: value.changeId, side: value.side, startLine: value.startLine, endLine: value.endLine, ...(isSide(value.startSide) ? { startSide: value.startSide } : {}), ...(typeof value.findingId === 'string' ? { findingId: value.findingId } : {}) };
 }
@@ -61,7 +65,7 @@ export type AskRole = 'reviewer' | 'guide' | 'diff';
 // how the thread names who it asks, the agent behind them, and what was asked about
 const tourStale = 'The changes moved since this tour was built. Regenerate the tour to ask about them.';
 export const askRoleCopy: Record<AskRole, { who: string; agent: string; placeholder: string; noConversation: string; gone: string; stale: string }> = {
-  reviewer: { who: 'reviewer', agent: 'review agent', placeholder: 'Ask the reviewer about this finding', noConversation: 'This AI review kept no conversation to ask. Run the AI review again to ask about its findings.', gone: 'This finding is no longer part of the stored review.', stale: tourStale },
+  reviewer: { who: 'reviewer', agent: 'review agent', placeholder: 'Ask the reviewer about this finding', noConversation: 'This AI review kept no conversation to ask. Run the AI review again to ask about its findings.', gone: 'This is no longer part of the stored review.', stale: tourStale },
   guide: { who: 'guide', agent: 'tour agent', placeholder: 'Ask the guide about these lines', noConversation: 'This tour kept no conversation to ask. Regenerate the tour to ask its guide.', gone: 'These lines are no longer part of the stored tour.', stale: tourStale },
   diff: { who: 'agent', agent: 'tour agent', placeholder: 'Ask about these lines', noConversation: 'The agent kept no conversation to follow up. Ask about the lines again.', gone: 'These lines are no longer part of the changes.', stale: 'The changes moved while these lines were picked. Pick them again.' }
 };

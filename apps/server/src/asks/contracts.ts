@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { reviewAgentKinds, validConversationId, type ReviewAgentKind } from '../review-runs/kinds.js';
 import { diffRows } from '../review-tour/diff-rows.js';
-import type { Finding } from '../code-review/contracts.js';
+import { earlierThreadForPrompt, othersClaims, type Finding, type Verdict } from '../code-review/contracts.js';
+import type { PullRequestReviewThread } from '../domain/models.js';
 import type { ComparisonPatch } from '../git/comparison.js';
 import type { ReviewChange } from '../review-tour/contracts.js';
 
@@ -26,18 +27,24 @@ type Side = Finding['side'];
 // old-file ones), or, with `startSide`, a range of a unified diff from a line on that side to
 // `endLine` on `side`.
 export type AskLines = { changeId: string; startSide?: Side; side: Side; startLine: number; endLine: number };
-// Where a question points: its lines and file, their hunk lines with a little context, and, for a
-// question about a Finding, the Finding's id and title.
-export type AskAnchor = AskLines & { file: string; excerpt: string; findingId?: string; title?: string };
+// Where a question about lines points: its lines and file, their hunk lines with a little context,
+// and, for a question about a Finding, the Finding's id and title.
+export type LinesAnchor = AskLines & { file: string; excerpt: string; findingId?: string; title?: string };
+// Where a question about one of my earlier Review threads (a Since my review tour's) points: the
+// thread's GitHub id, its file, and its hunk as GitHub had it.
+export type ReviewThreadAnchor = { reviewThreadId: string; file: string; excerpt: string };
+export type AskAnchor = LinesAnchor | ReviewThreadAnchor;
+export const onLines = (anchor: AskAnchor): anchor is LinesAnchor => !('reviewThreadId' in anchor);
 // one question and how it settled: its answer, or why it has none
 export type AskTurn = { id: string; question: string; askedAt: string; answer?: string; error?: { code: string; retryable: boolean } };
 // One Ask thread: the questions asked about one anchor, all in one agent conversation. `reviewer` threads
-// ask the Code review's own conversation about one of its Findings, `guide` threads the tour's own
+// ask the Code review's own conversation about one of its Findings or verdicts, `guide` threads the tour's own
 // conversation about some of its lines, and `diff` threads the conversation a Code panel's questions
 // about one Comparison started.
 export type AskThread = { id: string; target: 'reviewer' | 'guide' | 'diff'; kind: ReviewAgentKind; conversation: string; anchor: AskAnchor; turns: AskTurn[] };
-// one question: to the reviewer about a Finding, or to the guide about new lines or on an existing thread
-export type AskRequest = { question: string; fingerprint: string } & ({ target: 'reviewer'; findingId: string } | { target: 'guide'; lines: AskLines } | { target: 'guide'; threadId: string });
+// one question: to the reviewer about a Finding or its verdict on one of my earlier Review threads, or
+// to the guide about new lines or on an existing thread
+export type AskRequest = { question: string; fingerprint: string } & ({ target: 'reviewer'; findingId: string } | { target: 'reviewer'; reviewThreadId: string } | { target: 'guide'; lines: AskLines } | { target: 'guide'; threadId: string });
 // One question about a Code panel's Comparison: about new lines, picked in the Comparison of
 // `fingerprint`, or on an existing thread, which reads its lines in the Comparison as it is now.
 export type ChangeAskRequest = { question: string } & ({ lines: AskLines; fingerprint: string } | { threadId: string });
@@ -48,12 +55,19 @@ const id = z.string().min(1).max(64);
 const turnSchema = z.object({ id, question: text(MAX_ASK_QUESTION).refine(value => value !== ''), askedAt: z.string().refine(value => Number.isFinite(Date.parse(value))), answer: z.string().max(MAX_ASK_ANSWER_BYTES).optional(), error: z.object({ code: z.string().min(1).max(64), retryable: z.boolean() }).strict().optional() }).strict();
 const side = z.enum(['additions', 'deletions']);
 const linesShape = { changeId: z.string().min(1).max(4_096), startSide: side.optional(), side, startLine: line, endLine: line };
-const anchorSchema = z.object({ ...linesShape, findingId: id.optional(), title: z.string().min(1).max(200).optional(), file: z.string().min(1).max(4_096), excerpt: text(MAX_ASK_EXCERPT) }).strict();
-const threadSchema = z.object({ id, target: z.enum(['reviewer', 'guide', 'diff']), kind: z.enum(reviewAgentKinds), conversation: z.string().min(1).max(200), anchor: anchorSchema, turns: z.array(turnSchema).max(MAX_ASK_TURNS) }).strict()
-  .refine(thread => validConversationId(thread.kind, thread.conversation) && (thread.target !== 'reviewer' || thread.anchor.findingId !== undefined && thread.anchor.title !== undefined));
+// a GitHub Review thread's id, which an Ask thread about it is kept under
+const reviewThreadId = z.string().min(1).max(200);
+const anchorFile = { file: z.string().min(1).max(4_096), excerpt: text(MAX_ASK_EXCERPT) };
+const anchorSchema = z.union([
+  z.object({ ...linesShape, findingId: id.optional(), title: z.string().min(1).max(200).optional(), ...anchorFile }).strict(),
+  z.object({ reviewThreadId, ...anchorFile }).strict()
+]);
+const threadSchema = z.object({ id: reviewThreadId, target: z.enum(['reviewer', 'guide', 'diff']), kind: z.enum(reviewAgentKinds), conversation: z.string().min(1).max(200), anchor: anchorSchema, turns: z.array(turnSchema).max(MAX_ASK_TURNS) }).strict()
+  .refine(thread => validConversationId(thread.kind, thread.conversation) && (!onLines(thread.anchor) ? thread.target === 'reviewer' : thread.target !== 'reviewer' || thread.anchor.findingId !== undefined && thread.anchor.title !== undefined));
 const question = { question: text(MAX_ASK_QUESTION), fingerprint: z.string().min(16).max(128) };
 const requestSchema = z.union([
   z.object({ target: z.literal('reviewer'), findingId: id, ...question }).strict(),
+  z.object({ target: z.literal('reviewer'), reviewThreadId, ...question }).strict(),
   z.object({ target: z.literal('guide'), lines: z.object(linesShape).strict(), ...question }).strict(),
   z.object({ target: z.literal('guide'), threadId: id, ...question }).strict()
 ]);
@@ -102,7 +116,7 @@ export function hunkExcerpt(change: Pick<ReviewChange, 'patch'>, lines: Omit<Ask
 }
 
 // the anchor of some lines in their Change
-export function linesAnchor(lines: AskLines, change: Pick<ReviewChange, 'id' | 'file' | 'patch'>): AskAnchor {
+export function linesAnchor(lines: AskLines, change: Pick<ReviewChange, 'id' | 'file' | 'patch'>): LinesAnchor {
   const { changeId: _changeId, startSide, ...rest } = lines;
   // a range on one side names no start side
   const range = startSide === undefined || startSide === rest.side ? rest : { ...rest, startSide };
@@ -110,13 +124,13 @@ export function linesAnchor(lines: AskLines, change: Pick<ReviewChange, 'id' | '
 }
 
 // a Finding's anchor in the Change it cites
-export function findingAnchor(finding: Finding, change: ReviewChange): AskAnchor {
+export function findingAnchor(finding: Finding, change: ReviewChange): LinesAnchor {
   return { findingId: finding.id, title: finding.title, ...linesAnchor({ changeId: change.id, side: finding.side, startLine: finding.startLine, endLine: finding.endLine }, change) };
 }
 
 // One question to a reviewer about one of its own Findings. Each turn repeats the anchor, so a
 // follow-up on a long conversation still says which lines it means.
-export function reviewerAskPrompt(finding: Pick<Finding, 'title' | 'severity' | 'body'>, anchor: AskAnchor, question: string): string {
+export function reviewerAskPrompt(finding: Pick<Finding, 'title' | 'severity' | 'body'>, anchor: LinesAnchor, question: string): string {
   return [
     'The operator reviewing these changes has a question about one of the findings from your review. Answer it in Markdown, concisely. Read the repository as you need to, but do not change any files.',
     `Finding: ${finding.title} (${finding.severity})`,
@@ -126,9 +140,26 @@ export function reviewerAskPrompt(finding: Pick<Finding, 'title' | 'severity' | 
   ].join('\n\n');
 }
 
+// One question to a reviewer about its verdict on one of my earlier Review threads, or the verdict it
+// did not give: the verdict and where its evidence sits, then the thread as the reviewer read it, with
+// its hunk. Each turn repeats them, as a reviewer thread about a Finding does.
+export function verdictAskPrompt(thread: PullRequestReviewThread, verdict: { verdict: Verdict; evidenceFile?: string } | undefined, question: string): string {
+  const { diffHunk, ...read } = earlierThreadForPrompt(thread);
+  const evidence = verdict?.verdict.evidence;
+  return [
+    'I am the operator reviewing these changes, and I have a question about your verdict on one of my earlier Review threads (my comments on it are `from` "me"). Answer it in Markdown, concisely. Read the repository as you need to, but do not change any files.',
+    ...verdict === undefined ? ['You gave no verdict on this thread.'] : [`Verdict: ${verdict.verdict.status}`, verdict.verdict.body],
+    ...evidence === undefined || verdict?.evidenceFile === undefined ? [] : [`Evidence: ${verdict.evidenceFile}, ${linesLabel(evidence)}`],
+    othersClaims,
+    `Thread: ${JSON.stringify(read)}`,
+    ...diffHunk === '' ? [] : [`\`\`\`diff\n${diffHunk}\n\`\`\``],
+    `Question: ${question}`
+  ].join('\n\n');
+}
+
 // One question to the tour's guide about some of the lines it narrated. The tour's JSON contract and
 // its no-review rule were for the tour itself, so the prompt lifts them. Each turn repeats the anchor.
-export function guideAskPrompt(anchor: AskAnchor, question: string): string {
+export function guideAskPrompt(anchor: LinesAnchor, question: string): string {
   return [
     'The operator following the review tour you narrated has a question about some of the changed lines. This is a conversation, not another tour: the JSON format and the rule against reviewing no longer apply. Answer in Markdown, concisely, and assess the code if asked. Read the repository as you need to, but do not change any files.',
     ...anchorLines(anchor),
@@ -139,7 +170,7 @@ export function guideAskPrompt(anchor: AskAnchor, question: string): string {
 // One question about some lines of a Code panel's Comparison, in the conversation its first question
 // started. Each turn repeats the anchor with its current hunk, since the changes move on, or, for lines
 // the changes no longer hold (`current` false), the hunk as it was first asked about.
-export function diffAskPrompt(anchor: AskAnchor, question: string, current = true): string {
+export function diffAskPrompt(anchor: LinesAnchor, question: string, current = true): string {
   const lines = current ? 'the lines below are as they are now' : 'the lines below are as they were when first asked about, and the changes no longer hold them';
   return [
     `The operator has a question about some of the changed lines. The changes may have moved on since they were first shown to you; ${lines}. Answer in Markdown, concisely. Read the repository as you need to, but do not change any files.`,
@@ -150,7 +181,7 @@ export function diffAskPrompt(anchor: AskAnchor, question: string, current = tru
 
 // The first question about a Code panel's Comparison, which starts its conversation: what the
 // Comparison is, its Changes and as many of their patches as fit, then the question.
-export function diffSeedPrompt(comparison: { label: string; patch: ComparisonPatch }, anchor: AskAnchor, question: string): string {
+export function diffSeedPrompt(comparison: { label: string; patch: ComparisonPatch }, anchor: LinesAnchor, question: string): string {
   const { files, base } = comparison.patch;
   let budget = MAX_ASK_SEED_BYTES;
   let left = false;
@@ -171,11 +202,15 @@ export function diffSeedPrompt(comparison: { label: string; patch: ComparisonPat
   ].join('\n\n');
 }
 
-// where an anchor points, and its hunk lines
-function anchorLines(anchor: AskAnchor): string[] {
+// "new lines 11-12", "old line 5", or "old line 5 to new line 6"
+function linesLabel(lines: Omit<AskLines, 'changeId'>): string {
   const word = (side: Side) => side === 'additions' ? 'new' : 'old';
-  const startSide = anchor.startSide ?? anchor.side;
-  const lines = startSide !== anchor.side ? `${word(startSide)} line ${anchor.startLine} to ${word(anchor.side)} line ${anchor.endLine}`
-    : anchor.startLine === anchor.endLine ? `${word(anchor.side)} line ${anchor.startLine}` : `${word(anchor.side)} lines ${anchor.startLine}-${anchor.endLine}`;
-  return [`Location: ${anchor.file}, ${lines}`, ...(anchor.excerpt === '' ? [] : [`\`\`\`diff\n${anchor.excerpt}\n\`\`\``])];
+  const startSide = lines.startSide ?? lines.side;
+  return startSide !== lines.side ? `${word(startSide)} line ${lines.startLine} to ${word(lines.side)} line ${lines.endLine}`
+    : lines.startLine === lines.endLine ? `${word(lines.side)} line ${lines.startLine}` : `${word(lines.side)} lines ${lines.startLine}-${lines.endLine}`;
+}
+
+// where an anchor points, and its hunk lines
+function anchorLines(anchor: LinesAnchor): string[] {
+  return [`Location: ${anchor.file}, ${linesLabel(anchor)}`, ...(anchor.excerpt === '' ? [] : [`\`\`\`diff\n${anchor.excerpt}\n\`\`\``])];
 }
