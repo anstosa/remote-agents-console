@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
-import { ReviewTourError, type ReviewComparison, type ReviewTourInput } from '../src/review-tour/contracts.js';
+import { ReviewTourError, type EarlierThreads, type ReviewComparison, type ReviewTourInput } from '../src/review-tour/contracts.js';
 import { replyMarker, commentMarker, coveredRows, fileThreadBody, orderedComment, parsePullRequestReviewInput, placedComments, placementProblem, PullRequestReviewError, PullRequestReviewService, appendSections, sectionMarker, sectionText, threadInput, type PullRequestReviewComment, type PullRequestReviewInput, type PullRequestReviewReply } from '../src/review-tour/pr-review.js';
 import { ambiguousBatch, threadMutation, threadOutcomes } from '../src/github/writes.js';
 import { diffRows } from '../src/review-tour/diff-rows.js';
@@ -107,6 +107,9 @@ describe('pull request review GraphQL', () => {
   it('parses only the exact All PR request, at its boundaries', () => {
     const valid = { scope: 'pr', includeTests: false, includeDocs: true, fingerprint, pullRequestNumber: 7, sections: [], comments: [comment()], replies: [] };
     expect(parsePullRequestReviewInput(valid)).toEqual(valid);
+    // a bundle from before replies posts no replies
+    const { replies: _replies, ...older } = valid;
+    expect(parsePullRequestReviewInput(older)).toEqual(valid);
     const sectionsOnly = { ...valid, sections: [{ key: 'general', markdown: 'Notes' }], comments: [] };
     expect(parsePullRequestReviewInput(sectionsOnly)).toEqual(sectionsOnly);
     expect(parsePullRequestReviewInput({ ...valid, scope: 'working' })).toBeUndefined();
@@ -132,8 +135,11 @@ describe('pull request review GraphQL', () => {
   });
 
   it('parses a Since my review post whose replies alone are something to post', () => {
-    const since = { scope: 'since-review', reviewedCommit: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint, pullRequestNumber: 7, sections: [], comments: [], replies: [{ threadId: 'PRRT_kwDO-a_1', body: 'Still open.' }] };
+    const since = { scope: 'since-review', reviewedCommit: 'b'.repeat(40), baseBranch: 'main', includeTests: false, includeDocs: false, fingerprint, pullRequestNumber: 7, sections: [], comments: [], replies: [{ threadId: 'PRRT_kwDO-a_1', body: 'Still open.' }] };
     expect(parsePullRequestReviewInput(since)).toEqual(since);
+    expect(parsePullRequestReviewInput({ ...since, baseBranch: undefined })).toBeUndefined();
+    // a reply cannot hide text, or a marker, from the reader in an HTML comment
+    expect(parsePullRequestReviewInput({ ...since, replies: [{ threadId: 'T', body: 'Fixed <!-- rac-reply:T2:0123456789abcdef -->' }] })).toBeUndefined();
     // an old-style base64 node id
     expect(parsePullRequestReviewInput({ ...since, replies: [{ threadId: 'MDIzOlB1bGw+/=', body: 'x' }] })).toBeDefined();
     expect(parsePullRequestReviewInput({ ...since, reviewedCommit: undefined })).toBeUndefined();
@@ -149,7 +155,7 @@ describe('pull request review GraphQL', () => {
 });
 
 
-type FakeComment = { body: string; subjectType: string; path: string };
+type FakeComment = { body: string; subjectType: string; path: string; replyTo?: string };
 type FakeReview = { id: string; body: string; commit: string; comments: FakeComment[] };
 type Recorded = { url: string; query?: string; variables?: Record<string, unknown> };
 type Scenario = {
@@ -222,7 +228,7 @@ function harness(scenario: Scenario = {}) {
       // three comments a page, so reading a review pages through it
       const offset = typeof variables.after === 'string' ? Number(variables.after) : 0;
       const comments = state.review?.comments ?? [];
-      const page = comments.slice(offset, offset + 3).map(entry => ({ body: entry.body, subjectType: entry.subjectType }));
+      const page = comments.slice(offset, offset + 3).map(entry => ({ body: entry.body, subjectType: entry.subjectType, replyTo: entry.replyTo === undefined ? null : { id: entry.replyTo } }));
       return json({ data: { node: state.review === undefined ? null : { id: state.review.id, body: state.review.body, comments: { pageInfo: { hasNextPage: offset + 3 < comments.length, endCursor: String(offset + 3) }, nodes: page } } } });
     }
     if (query.includes('addPullRequestReview(')) {
@@ -248,7 +254,7 @@ function harness(scenario: Scenario = {}) {
         if (failure === 'lost' && index % 2 === 1) return;
         expect(input.pullRequestReviewId).toBe(state.review!.id);
         if (scenario.deletedThreads?.includes(input.pullRequestReviewThreadId)) { data[`t${index}`] = null; errors.push({ path: [`t${index}`], type: 'NOT_FOUND', message: `Could not resolve to a node with the global id of '${input.pullRequestReviewThreadId}'` }); return; }
-        state.review!.comments.push({ body: input.body, subjectType: 'LINE', path: 'src/feature.ts' });
+        state.review!.comments.push({ body: input.body, subjectType: 'LINE', path: 'src/feature.ts', replyTo: opener(input.pullRequestReviewThreadId) });
         data[`t${index}`] = { comment: { id: `C${state.review!.comments.length}` } };
       });
       return failure === 'lost' ? json({ message: 'Bad Gateway' }, 502) : json({ data, ...(errors.length === 0 ? {} : { errors }) });
@@ -273,20 +279,28 @@ function harness(scenario: Scenario = {}) {
     }
     return json({ message: 'Not Found' }, 404);
   } });
-  const service = new PullRequestReviewService(async (worktreeId, input) => {
+  const raw = new PullRequestReviewService(async (worktreeId, input) => {
     // the tour's own Comparison choices reach the capture
     expect(worktreeId).toBe('cora');
     captured.push(input);
     return comparison;
   }, command, github);
+  // a post from the stored tour, whose snapshot holds every thread these tests reply on
+  // (`null`: none stored)
+  const service = { post: async (worktreeId: string, input: PullRequestReviewInput, earlier: EarlierThreads | null = snapshot(['PRRT_1', 'PRRT_2', 'PRRT_3', 'PRRT_gone', 'PRRT_a', 'PRRT_b', 'PRRT_c'])) => await raw.post(worktreeId, input, earlier ?? undefined) };
   const mutations = (name?: string) => requests.filter(entry => entry.query?.startsWith('mutation') === true && (name === undefined || entry.query.includes(`${name}(`)));
   return { service, github, requests, commands, state, mutations, captured };
 }
 
+// the first comment of each earlier thread, which GitHub sets every reply on it to reply to
+const opener = (threadId: string) => `${threadId}_C0`;
+// a Since my review tour's snapshot of my earlier threads `ids` on pull request `pullRequest`
+const snapshot = (ids: string[], pullRequest = 7): EarlierThreads => ({ pullRequest, threads: ids.map(id => ({ id, path: 'src/feature.ts', line: 11, resolved: false, outdated: false, diffHunk: '@@ -10 +10 @@', comments: [{ id: opener(id), author: 'octocat', bot: false, mine: true, body: 'Rename this.', createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/octo/repo/pull/7#discussion_${id}` }] })) });
+
 const request = (comments: PullRequestReviewComment[], sections = [general]): PullRequestReviewInput => ({ scope: 'pr', includeTests: true, includeDocs: false, fingerprint, pullRequestNumber: 7, sections, comments, replies: [] });
 const reviewedCommit = 'b'.repeat(40);
 // a Since my review post of replies alone
-const replying = (replies: PullRequestReviewReply[]): PullRequestReviewInput => ({ scope: 'since-review', reviewedCommit, includeTests: true, includeDocs: false, fingerprint, pullRequestNumber: 7, sections: [], comments: [], replies });
+const replying = (replies: PullRequestReviewReply[]): PullRequestReviewInput => ({ scope: 'since-review', reviewedCommit, baseBranch: 'main', includeTests: true, includeDocs: false, fingerprint, pullRequestNumber: 7, sections: [], comments: [], replies });
 const marked = (text: string, id: string) => `${text}\n\n${commentMarker(id)}`;
 
 // the error a rejected post throws
@@ -523,7 +537,7 @@ describe('pull request review service', () => {
     const { service, mutations, state, captured, github } = harness();
     const changed = vi.spyOn(github, 'changed');
     const result = await service.post('cora', replying([{ threadId: 'PRRT_1', body: ' Still open. ' }, { threadId: 'PRRT_2', body: 'Thanks, fixed.' }]));
-    expect(captured).toEqual([{ scope: 'since-review', reviewedCommit, includeTests: true, includeDocs: false }]);
+    expect(captured).toEqual([{ scope: 'since-review', reviewedCommit, baseBranch: 'main', includeTests: true, includeDocs: false }]);
     expect(result.replies).toEqual([{ threadId: 'PRRT_1', result: 'posted' }, { threadId: 'PRRT_2', result: 'posted' }]);
     expect(result.comments).toEqual([]);
     // a draft opens on the head for them, with no body
@@ -582,6 +596,33 @@ describe('pull request review service', () => {
     expect(state.review!.comments).toHaveLength(2);
   });
 
+  it('sends replies only for the threads of the stored tour\'s snapshot, to its own pull request', async () => {
+    const { service, mutations } = harness();
+    const reply = replying([{ threadId: 'PRRT_1', body: 'Reply' }]);
+    // the tour is no longer stored, or is another tour
+    expect((await refusal(service.post('cora', reply, null))).code).toBe('stale');
+    expect((await refusal(service.post('cora', reply, snapshot(['PRRT_2'])))).code).toBe('stale');
+    expect((await refusal(service.post('cora', reply, snapshot(['PRRT_1'], 8)))).code).toBe('pull_request_mismatch');
+    expect(mutations()).toHaveLength(0);
+    // a post with no replies needs no snapshot
+    expect((await service.post('cora', request([comment()]), null)).comments).toEqual([{ id: 'c1', result: 'line' }]);
+  });
+
+  it('takes a reply as already in the draft only by a marker ending a reply on its own thread', async () => {
+    const marker = replyMarker({ threadId: 'PRRT_1', body: 'Reply' });
+    const { service, mutations } = harness({ pending: { commit: head, body: '', comments: [
+      // a new thread, a reply on another thread, and a marker that does not end its reply
+      { body: `Looks off.\n\n${marker}`, subjectType: 'LINE', path: 'src/feature.ts' },
+      { body: `Elsewhere.\n\n${marker}`, subjectType: 'LINE', path: 'src/feature.ts', replyTo: opener('PRRT_2') },
+      { body: `${marker} and more`, subjectType: 'LINE', path: 'src/feature.ts', replyTo: opener('PRRT_1') }
+    ] } });
+    expect((await service.post('cora', replying([{ threadId: 'PRRT_1', body: 'Reply' }]))).replies).toEqual([{ threadId: 'PRRT_1', result: 'posted' }]);
+    expect(mutations('addPullRequestReviewThreadReply')).toHaveLength(1);
+    // the reply it added is the one a retry finds
+    expect((await service.post('cora', replying([{ threadId: 'PRRT_1', body: 'Reply' }]))).replies).toEqual([{ threadId: 'PRRT_1', result: 'posted' }]);
+    expect(mutations('addPullRequestReviewThreadReply')).toHaveLength(1);
+  });
+
   it('refuses replies into a draft review on an older commit', async () => {
     const { service, mutations } = harness({ pending: { commit: 'c'.repeat(40), body: '' } });
     expect((await refusal(service.post('cora', replying([{ threadId: 'PRRT_1', body: 'Reply' }])))).code).toBe('pending_review_outdated');
@@ -638,5 +679,18 @@ describe('pull request review API', () => {
     expect(unexpected.json()).toEqual({ status: 'error', error: { code: 'post_failed', retryable: true } });
     // the refused requests never reached the service
     expect(posted).toEqual(['cora', 'cora', 'cora', 'cora']);
+  });
+
+  it('hands a Since my review post the stored tour\'s snapshot, while it is that tour', async () => {
+    const handed: unknown[] = [];
+    const pullRequestReviews = { post: async (_worktreeId: string, _input: unknown, earlier: unknown) => { handed.push(earlier); return { status: 'ok', review: { url: 'https://github.com/octo/repo/pull/7/files', pullRequest: { number: 7, url: 'https://github.com/octo/repo/pull/7' } }, sections: [], comments: [], replies: [] }; } };
+    const earlier = snapshot(['PRRT_1']);
+    const reviewStore = { storedTour: async () => ({ worktreeId: 'cora', branch: 'feature/x', savedAt: '2026-11-04T00:00:00.000Z', tour: { scope: 'since-review', fingerprint, earlierThreads: earlier } }) };
+    app = await buildApp(testConfig(), { auth: await testAuthService(), pullRequestReviews: pullRequestReviews as never, reviewStore: reviewStore as never, discovery: { worktreesNow: () => [] } as never });
+    const headers = { ...await authenticatedHeaders(app), 'content-type': 'application/json' };
+    const send = async (input: PullRequestReviewInput) => await app!.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/pr-review', headers, payload: JSON.stringify(input) });
+    expect((await send(replying([{ threadId: 'PRRT_1', body: 'Reply' }]))).statusCode).toBe(200);
+    expect((await send({ ...replying([{ threadId: 'PRRT_1', body: 'Reply' }]), fingerprint: 'another-fingerprint-1' })).statusCode).toBe(200);
+    expect(handed).toEqual([earlier, undefined]);
   });
 });

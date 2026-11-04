@@ -47,7 +47,7 @@ import { WorktreeManagementService, type AddInput, type CreatedWorktree } from '
 import { agentAttentionState, AgentNotificationCoordinator, pushNotifications, type AgentNotificationContext } from './notifications.js';
 import { ConsoleEvents } from './events.js';
 import { Watches, type CommandWindows } from './watches/service.js';
-import { GithubRequestError, originRepository, type GithubRepository, type Request as GithubRequest } from './github/github.js';
+import { githubNodeId, GithubRequestError, originRepository, type GithubRepository, type Request as GithubRequest } from './github/github.js';
 import { GithubWatchReader } from './watches/github.js';
 import { commandWindows } from './watches/commands.js';
 import { isReviewRun, paneTmuxSession, stackActions, worktreeAgents, type Agent, type Pane, type Project, type SocketRef, type StackAction, type TmuxAgent, type Worktree } from './domain/models.js';
@@ -86,7 +86,7 @@ import { ReviewTourService } from './review-tour/service.js';
 import { parsePullRequestReviewInput, PR_REVIEW_REQUEST_BODY_BYTES, PullRequestReviewError, PullRequestReviewService } from './review-tour/pr-review.js';
 import { ReviewTourJobs, startedReviewJob } from './review-tour/jobs.js';
 import { ReviewTourStore } from './review-tour/store.js';
-import { INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS, parseReviewRequestId, parseReviewTourInput, REVIEW_GENERATION_TIMEOUT_MS, REVIEW_REQUEST_BODY_BYTES, reviewScope, ReviewTourError, type ReviewErrorCode, type ReviewTourInput, type StoredReviewTourSummary } from './review-tour/contracts.js';
+import { earlierThreadsOf, INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS, parseReviewRequestId, parseReviewTourInput, REVIEW_GENERATION_TIMEOUT_MS, REVIEW_REQUEST_BODY_BYTES, reviewScope, ReviewTourError, type ReviewErrorCode, type ReviewTourInput, type StoredReviewTourSummary } from './review-tour/contracts.js';
 import { configuredWorktreeForWorkspace, projectIdOf, worktreeBranch, worktreeById, worktreeHostRoot, worktreeMatchesWorkspace, worktreePathOf, worktreePrBase, worktreeWireId } from './workspaces/resolver.js';
 import { previewFileBytes, WorkspaceFileService } from './workspace-files/service.js';
 import { ComparisonService, type ComparisonScope } from './git/comparison-service.js';
@@ -2411,14 +2411,19 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       return result === undefined ? reply.code(204).send() : result;
     });
   };
-  const threadParam = (request: FastifyRequest) => (request.params as { thread: string }).thread;
+  // a Review thread's GitHub node id
+  const threadParam = (request: FastifyRequest) => {
+    const thread = githubNodeId.safeParse((request.params as { thread: string }).thread);
+    if (!thread.success) throw new GithubRequestError('invalid thread', 400);
+    return thread.data;
+  };
   const bodyField = (request: FastifyRequest, name: string): unknown => (request.body as Record<string, unknown> | null | undefined)?.[name];
-  app.post('/api/projects/:id/github/pulls/:number/threads/:thread(^[A-Za-z0-9_=-]{1,100}$)/reply', githubItemLimit, async (request, reply) => await githubWrite(request, reply, async (repository, number) => {
+  app.post('/api/projects/:id/github/pulls/:number/threads/:thread/reply', githubItemLimit, async (request, reply) => await githubWrite(request, reply, async (repository, number) => {
     const body = bodyField(request, 'body');
     if (typeof body !== 'string') throw new GithubRequestError('invalid reply', 400);
     return await github.replyToThread(repository, number, threadParam(request), body);
   }));
-  app.post('/api/projects/:id/github/pulls/:number/threads/:thread(^[A-Za-z0-9_=-]{1,100}$)/resolve', githubItemLimit, async (request, reply) => await githubWrite(request, reply, async (repository, number) => { await github.resolveThread(repository, number, threadParam(request)); }));
+  app.post('/api/projects/:id/github/pulls/:number/threads/:thread/resolve', githubItemLimit, async (request, reply) => await githubWrite(request, reply, async (repository, number) => { await github.resolveThread(repository, number, threadParam(request)); }));
   app.post('/api/projects/:id/github/pulls/:number/rerequest', githubItemLimit, async (request, reply) => await githubWrite(request, reply, async (repository, number) => {
     const login = bodyField(request, 'login');
     if (typeof login !== 'string') throw new GithubRequestError('invalid reviewer', 400);
@@ -2688,7 +2693,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // a Since my review tour's review judges the earlier threads the tour kept, not GitHub's now,
       // so it needs that tour still stored
       const stored = add.input.scope === 'since-review' ? await reviewStore.storedTour(worktreeId) : undefined;
-      const earlierThreads = stored?.tour.fingerprint === add.fingerprint ? stored.tour.earlierThreads : undefined;
+      const earlierThreads = stored?.tour.fingerprint === add.fingerprint ? earlierThreadsOf(stored.tour) : undefined;
       if (add.input.scope === 'since-review' && earlierThreads === undefined) throw new ReviewTourError('stale_during_generation', true);
       const prepared = await reviewTours.prepare(worktreeId, add.input, earlierThreads);
       // refuse a review of a Comparison the tour no longer narrates
@@ -2719,8 +2724,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const input = parsePullRequestReviewInput(request.body);
     // reject malformed post requests, a Working tour included
     if (input === undefined) return reply.code(400).send({ status: 'error', error: { code: 'invalid_request', retryable: false } });
+    const worktreeId = (request.params as { id: string }).id;
     try {
-      return reply.code(200).send(await pullRequestReviews.post((request.params as { id: string }).id, input));
+      // replies go only to threads of the stored tour's own snapshot
+      const stored = input.scope === 'since-review' ? await reviewStore.storedTour(worktreeId) : undefined;
+      const earlier = stored?.tour.fingerprint === input.fingerprint ? earlierThreadsOf(stored.tour) : undefined;
+      return reply.code(200).send(await pullRequestReviews.post(worktreeId, input, earlier));
     } catch (error) {
       // a worktree or GitHub refusal carries its message and the details the client shows
       if (error instanceof PullRequestReviewError) return reply.code(error.httpStatus).send({ status: 'error', error: { code: error.code, retryable: error.retryable, message: error.message, ...error.details } });

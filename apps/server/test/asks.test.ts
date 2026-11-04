@@ -242,7 +242,7 @@ const earlierThread = { id: 'PRRT_kwDOabc123', path: change.file, line: 12, star
   { id: 'C1', author: 'tony', bot: false, mine: true as const, body: 'Validate the input here.', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/o/r/pull/7#discussion_C1' },
   { id: 'C2', author: 'octocat', bot: false, body: 'Done, it is validated now.', createdAt: '2026-10-02T00:00:00Z', url: 'https://github.com/o/r/pull/7#discussion_C2' }
 ] };
-const sinceTour = { ...guided, scope: 'since-review', reviewedCommit: 'a'.repeat(40), baseTree: 'b'.repeat(40), earlierThreads: { pullRequest: 7, threads: [earlierThread] } } as ReviewTour;
+const sinceTour = { ...guided, scope: 'since-review', reviewedCommit: 'a'.repeat(40), baseBranch: 'main', baseTree: 'b'.repeat(40), earlierThreads: { pullRequest: 7, threads: [earlierThread] } } as ReviewTour;
 const verdict = { threadId: earlierThread.id, status: 'partly' as const, body: 'Only **one** path validates.', evidence: { changeId: change.id, side: 'additions' as const, startLine: 11, endLine: 12 } };
 const askVerdict = (question = 'Why only partly?') => ({ target: 'reviewer' as const, reviewThreadId: earlierThread.id, question, fingerprint: tour.fingerprint });
 

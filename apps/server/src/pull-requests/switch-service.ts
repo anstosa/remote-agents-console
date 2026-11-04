@@ -6,7 +6,7 @@ import type { DiscoveryService } from '../discovery/service.js';
 import { run } from '../tmux/command.js';
 import { cleanWorkingTree, headUpdate, type GitCommand } from '../git/worktree-state.js';
 import { parseWorktreeListNul } from '../git/worktrees.js';
-import { branchCommitSummary, type BranchCommitSummary } from '../git/comparison.js';
+import { branchCommitSummary, safeBranchName, type BranchCommitSummary } from '../git/comparison.js';
 import { projectIdOf, worktreeById, worktreeMatchesWorkspace, worktreeWireId } from '../workspaces/resolver.js';
 import { agentAttentionState } from '../notifications.js';
 import { GithubService, contextualForkCheckoutBranch, forkCheckoutBranch, forkCheckoutIdentity, forkCheckoutNumber, problemError, type PullRequestChoice, type PullRequestDetail, type RepositoryPullRequests } from '../github/service.js';
@@ -1044,7 +1044,7 @@ export class PullRequestSwitchService {
     const source = pullRequest.fetchSource;
     const branchSource = source?.sourceRef.startsWith('refs/heads/') ?? headOnOrigin;
     // GitHub's head ref name is untrusted and lands in a forced refspec and a local branch name
-    if (branchSource && !await this.safeBranchName(workspace, pullRequest.branch)) return { error: `Pull request #${number} has a head branch name git cannot check out.` };
+    if (branchSource && !await safeBranchName(workspace, pullRequest.branch, this.command)) return { error: `Pull request #${number} has a head branch name git cannot check out.` };
     const remote = source?.remote ?? 'origin';
     let fetchTarget = remote;
     const startPoint = this.pinnedRef(pullRequest);
@@ -1069,13 +1069,6 @@ export class PullRequestSwitchService {
   // the ref a pull request's head is fetched into: its remote-tracking ref when it heads a branch
   private pinnedRef({ fetchSource, headOnOrigin, branch, number }: FetchablePullRequest): string {
     return fetchSource?.pinnedRef ?? (headOnOrigin ? `refs/remotes/origin/${branch}` : `refs/rac/pull/${number}`);
-  }
-
-  // a branch name git accepts as-is: not `HEAD`, not flag-shaped, and passing `check-ref-format --branch`
-  private async safeBranchName(workspace: string, branch: string): Promise<boolean> {
-    if (branch === 'HEAD' || branch.startsWith('-')) return false;
-    const checked = await this.command('/usr/bin/git', ['-C', workspace, 'check-ref-format', '--branch', branch]);
-    return checked.code === 0 && checked.stdout.trim() === branch;
   }
 
   // whether one revision resolves to the exact commit

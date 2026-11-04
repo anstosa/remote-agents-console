@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 import { PullRequestSwitchService } from '../src/pull-requests/switch-service.js';
 import type { ValidatedConfig } from '../src/config/schema.js';
 import type { AttentionState } from '../src/adapters/types.js';
+import type { GitCommand } from '../src/git/worktree-state.js';
+import { run } from '../src/tmux/command.js';
 
 const exec = promisify(execFile);
 const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen: { host: '127.0.0.1', port: 8787 }, publicOrigin: new URL('https://agents.example.com'), trustedProxyIps: new Set(), pollIntervalMs: 500, adapters: {}, projects: [] };
@@ -50,8 +52,20 @@ async function repositories() {
 
 type Detail = { number: number; branch: string; headSha: string; headOnOrigin: boolean; state?: 'open' | 'closed' | 'merged' };
 
+// git as the service runs it, recording each command's arguments; `afterFetch` runs once the fetch has
+const recorded = (afterFetch?: () => Promise<void>) => {
+  const calls: string[][] = [];
+  const command: GitCommand = async (binary, args) => {
+    calls.push(args);
+    const result = await run(binary, args);
+    if (args.includes('fetch')) await afterFetch?.();
+    return result;
+  };
+  return { calls, command };
+};
+
 // the switch service over the reviewer's Worktree, with GitHub answering `detail` for its pull request
-function updater(target: string, detail: () => Detail, attention?: AttentionState) {
+function updater(target: string, detail: () => Detail, attention?: AttentionState, command?: GitCommand) {
   const worktree = { id: `cora:${target}`, projectId: 'cora', label: 'Cora', path: target, identity: target, available: true, pinned: true, main: true, detached: false, locked: false };
   const agents = attention === undefined ? [] : [{ id: 'agent-1', pane: { paneId: '%1', sessionId: '$1', socketFingerprint: 'socket' }, home: target, branch: 'feature', title: 'Ready', attention }];
   const discovery = { worktreesNow: () => [worktree], refresh: async () => agents, dashboard: async () => ({ generation: 1, places: [], agents, projects: [] }) };
@@ -60,7 +74,7 @@ function updater(target: string, detail: () => Detail, attention?: AttentionStat
     branch: async () => ({ pullRequest: { number: detail().number, title: 'Feature', status: 'open', url: 'https://github.com/octo/repo/pull/7' } }),
     pullRequestDetail: async () => ({ pullRequest: { title: 'Feature', url: 'https://github.com/octo/repo/pull/7', draft: false, checks: 'none', state: 'open', ...detail() } })
   };
-  return { service: new PullRequestSwitchService(config, discovery as never, github as never), worktreeId: worktree.id };
+  return { service: new PullRequestSwitchService(config, discovery as never, github as never, command), worktreeId: worktree.id };
 }
 
 describe('updating a Worktree to its pull request head', () => {
@@ -182,12 +196,29 @@ describe('updating a Worktree to its pull request head', () => {
 
   it('answers a branch already at the head without touching it, and refuses a second update while one runs', async () => {
     const repo = await repositories();
-    const { service, worktreeId } = updater(repo.target, () => feature(repo.reviewed));
+    const { calls, command } = recorded();
+    const { service, worktreeId } = updater(repo.target, () => feature(repo.reviewed), undefined, command);
 
     const [first, second] = await Promise.all([service.updateToHead(worktreeId), service.updateToHead(worktreeId)]);
 
     expect(first).toBe('switched');
     expect(second).toEqual({ error: 'Another branch checkout or move is already running. Try again when it finishes.' });
+    expect(calls.filter(args => ['fetch', 'merge', 'reset'].some(verb => args.includes(verb)))).toEqual([]);
+  }, 20_000);
+
+  it.each([
+    ['an edit', async (target: string) => { await writeFile(join(target, 'notes.txt'), 'mine\n'); }],
+    ['a commit', async (target: string) => { await commit(target, 'local.txt', 'local work\n', 'local work'); }]
+  ])('refuses when %s lands while the head is fetched, and leaves HEAD as it is', async (name, change) => {
+    const repo = await repositories();
+    const head = await forcePush(repo);
+    const { command } = recorded(async () => await change(repo.target));
+    const { service, worktreeId } = updater(repo.target, () => feature(head), undefined, command);
+
+    await expect(service.updateToHead(worktreeId)).resolves.toEqual({ error: 'The worktree changed during the update. Try again.' });
+
+    expect(await git(repo.target, 'log', '--format=%s', '-1')).toBe(name === 'a commit' ? 'local work' : 'feature');
+    expect(await git(repo.target, 'rev-parse', 'HEAD')).not.toBe(head);
   }, 20_000);
 
   it('refuses a fork checkout without fetching its new head', async () => {

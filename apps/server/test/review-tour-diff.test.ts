@@ -152,23 +152,31 @@ async function commitLines(root: string, message: string, content: string, other
   return await out(root, 'rev-parse', 'HEAD');
 }
 
-// a repository whose `feature` branch holds the reviewed commit (line 2 changed) on top of main
+// a repository whose `feature` branch holds the reviewed commit (line 2 changed) on top of main; its
+// origin is itself, so a start's fetch of the pull request's base reads its own main
 async function reviewedRepository(): Promise<{ root: string; reviewed: string }> {
   const root = await mkdtemp(join(tmpdir(), 'rac-since-review-'));
   roots.push(root);
   await mkdir(join(root, 'src'));
   await out(root, 'init', '--initial-branch=main');
+  await out(root, 'remote', 'add', 'origin', root);
   await commitLines(root, 'base', lines());
   await out(root, 'switch', '-c', 'feature');
   const reviewed = await commitLines(root, 'reviewed', lines({ 2: 'feature 2' }));
+  await fetchBase(root);
   return { root, reviewed };
 }
 
-// the resolved Worktree of a checkout whose PR base is `prBase`
-const sinceReviewWorkspace = (root: string, prBase: string): ResolvedWorkspace => ({
-  workspace: root, branch: 'feature', prBase,
+// bring origin/main up to main, as a start's fetch of the pull request's base does
+const fetchBase = async (root: string) => { await out(root, 'fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'); };
+
+// the resolved Worktree of a checkout whose configured PR base is `prBase`, which Since my review ignores
+const sinceReviewWorkspace = (root: string, prBase?: string): ResolvedWorkspace => ({
+  workspace: root, branch: 'feature', ...(prBase === undefined ? {} : { prBase }),
   worktree: { id: 'cora', projectId: 'cora', label: 'Cora', path: root, identity: root, available: true, pinned: false, main: false, detached: false, locked: false }
 });
+// a Since my review of `reviewedCommit` on a pull request into main
+const since = (reviewedCommit: string) => ({ scope: 'since-review' as const, reviewedCommit, baseBranch: 'main', includeTests: false, includeDocs: false });
 
 describe('Since my review Comparison capture', () => {
   it('replays the reviewed commit onto the rebased base, so only the author\'s edits since the review show', async () => {
@@ -179,10 +187,12 @@ describe('Since my review Comparison capture', () => {
     await out(root, 'switch', 'feature');
     await out(root, 'rebase', 'main');
     await commitLines(root, 'address review', lines({ 2: 'feature 2', 5: 'fixed 5', 8: 'upstream 8' }));
+    await fetchBase(root);
 
-    const comparison = await captureReviewComparison(sinceReviewWorkspace(root, 'main'), { scope: 'since-review', reviewedCommit: reviewed, includeTests: false, includeDocs: false });
+    // the dashboard's configured base plays no part: the pull request's base on origin is the base
+    const comparison = await captureReviewComparison(sinceReviewWorkspace(root, 'feature'), since(reviewed));
 
-    expect(comparison).toMatchObject({ scope: 'since-review', reviewedCommit: reviewed, base: `${reviewed.slice(0, 7)} (rebased)` });
+    expect(comparison).toMatchObject({ scope: 'since-review', reviewedCommit: reviewed, baseBranch: 'main', base: `${reviewed.slice(0, 7)} (rebased)`, head: await out(root, 'rev-parse', 'HEAD') });
     expect(comparison.fallback).toBeUndefined();
     expect(comparison.baseTree).toMatch(/^[0-9a-f]{40}$/u);
     expect(comparison.changes.map(change => change.file)).toEqual(['src/lines.ts']);
@@ -198,8 +208,9 @@ describe('Since my review Comparison capture', () => {
     await commitLines(root, 'upstream', lines({ 2: 'upstream 2' }), { 'src/upstream.ts': 'export const upstream = 1;\n' });
     await out(root, 'switch', '-c', 'rebased');
     await commitLines(root, 'address review', lines({ 2: 'feature 2', 5: 'fixed 5' }));
+    await fetchBase(root);
 
-    const comparison = await captureReviewComparison(sinceReviewWorkspace(root, 'main'), { scope: 'since-review', reviewedCommit: reviewed, includeTests: false, includeDocs: false });
+    const comparison = await captureReviewComparison(sinceReviewWorkspace(root), since(reviewed));
 
     expect(comparison).toMatchObject({ scope: 'since-review', reviewedCommit: reviewed, base: `${reviewed.slice(0, 7)} (plain diff: replay conflicted)`, fallback: true, baseTree: await out(root, 'rev-parse', `${reviewed}^{tree}`) });
     // the plain diff carries what upstream brought in as well
@@ -213,8 +224,9 @@ describe('Since my review Comparison capture', () => {
     await out(root, 'switch', 'feature');
     await out(root, 'merge', '--no-edit', 'main');
     await commitLines(root, 'address review', lines({ 2: 'feature 2', 5: 'fixed 5', 8: 'upstream 8' }));
+    await fetchBase(root);
 
-    const comparison = await captureReviewComparison(sinceReviewWorkspace(root, 'main'), { scope: 'since-review', reviewedCommit: reviewed, includeTests: false, includeDocs: false });
+    const comparison = await captureReviewComparison(sinceReviewWorkspace(root, 'main'), since(reviewed));
 
     expect(comparison.base).toBe(`${reviewed.slice(0, 7)} (rebased)`);
     expect(comparison.changes.map(change => change.file)).toEqual(['src/lines.ts']);
@@ -222,9 +234,30 @@ describe('Since my review Comparison capture', () => {
     expect(comparison.changes[0]!.patch).not.toContain('+upstream 8');
   });
 
+  it('diffs from the reviewed commit itself when it shares no history with the base', async () => {
+    const { root } = await reviewedRepository();
+    // the reviewed commit sat on a history of its own, which the author since replaced with one on main
+    await out(root, 'switch', '--orphan', 'unrelated');
+    await mkdir(join(root, 'src'), { recursive: true });
+    const reviewed = await commitLines(root, 'reviewed, unrelated', lines({ 2: 'feature 2', 3: 'unrelated 3' }));
+    await out(root, 'switch', 'feature');
+    await commitLines(root, 'address review', lines({ 2: 'feature 2', 5: 'fixed 5' }));
+
+    const comparison = await captureReviewComparison(sinceReviewWorkspace(root), since(reviewed));
+
+    expect(comparison).toMatchObject({ base: `${reviewed.slice(0, 7)} (plain diff: no common base)`, fallback: true, baseTree: await out(root, 'rev-parse', `${reviewed}^{tree}`) });
+    expect(comparison.changes[0]!.patch).toContain('-line 5\n+fixed 5');
+  });
+
+  it('refuses without the pull request\'s base on origin', async () => {
+    const { root, reviewed } = await reviewedRepository();
+    await out(root, 'update-ref', '-d', 'refs/remotes/origin/main');
+    await expect(captureReviewComparison(sinceReviewWorkspace(root, 'main'), since(reviewed))).rejects.toMatchObject({ code: 'scope_unavailable' });
+  });
+
   it('refuses a reviewed commit that is not here, leaving the fetch to a start', async () => {
     const { root } = await reviewedRepository();
-    await expect(captureReviewComparison(sinceReviewWorkspace(root, 'main'), { scope: 'since-review', reviewedCommit: 'f'.repeat(40), includeTests: false, includeDocs: false })).rejects.toMatchObject({ code: 'reviewed_commit_unreachable' });
+    await expect(captureReviewComparison(sinceReviewWorkspace(root, 'main'), since('f'.repeat(40)))).rejects.toMatchObject({ code: 'reviewed_commit_unreachable' });
   });
 
   // A stored tour is current while its fingerprint matches a fresh capture, so a change to what the
@@ -236,9 +269,9 @@ describe('Since my review Comparison capture', () => {
     const resolved = sinceReviewWorkspace(root, 'main');
     const fingerprints = {
       commit: (await captureReviewComparison(resolved, { scope: 'commit', commit: reviewed, includeTests: false, includeDocs: false })).fingerprint,
-      sinceReview: (await captureReviewComparison(resolved, { scope: 'since-review', reviewedCommit: reviewed, includeTests: false, includeDocs: false })).fingerprint
+      sinceReview: (await captureReviewComparison(resolved, since(reviewed))).fingerprint
     };
-    expect(fingerprints).toEqual({ commit: 'aqmEVqYDMVVz4EK83GJLmf9HzRoCBN_g3FaQjO2nBFs', sinceReview: 'GWz5J25YUHBpRmav3vTWKmCfGvg2kRe06CqqxCDSTKM' });
+    expect(fingerprints).toEqual({ commit: 'aqmEVqYDMVVz4EK83GJLmf9HzRoCBN_g3FaQjO2nBFs', sinceReview: 'jWp94-H4zM8YkFdf9lDLM5pZnESSwhl1R4kV4it6CAA' });
   });
 });
 
@@ -254,7 +287,7 @@ describe('Since my review availability and start', () => {
     const github = {
       repositoryAt: async (path: string) => path === root ? repository : undefined,
       branch: async (asked: unknown, name: string) => ({ ...(pull === undefined || asked !== repository || name !== 'feature' ? {} : { pullRequest: { ...pull, title: 'Fixes', url: 'https://github.com/octo/repo/pull/7' } }) }),
-      pullRequestDetail: async (_repository: unknown, number: number, options: unknown) => { reads.push([number, options]); return { ...(detail === undefined || number !== 7 ? {} : { pullRequest: { number, threads: [], branch: 'feature', headOnOrigin: true, state: 'open', ...detail } }), ...(problem === undefined ? {} : { problem }) }; }
+      pullRequestDetail: async (_repository: unknown, number: number, options: unknown) => { reads.push([number, options]); return { ...(detail === undefined || number !== 7 ? {} : { pullRequest: { number, threads: [], branch: 'feature', baseBranch: 'main', headOnOrigin: true, state: 'open', ...detail } }), ...(problem === undefined ? {} : { problem }) }; }
     };
     return { reads, service: new ReviewTourService(discovery as never, generator as never, github as never) };
   };
@@ -263,7 +296,7 @@ describe('Since my review availability and start', () => {
     const { root, reviewed } = await reviewedRepository();
     const head = await commitLines(root, 'address review', lines({ 2: 'feature 2', 5: 'fixed 5' }));
     const { service: ready, reads } = service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed });
-    await expect(ready.sinceReview('cora')).resolves.toEqual({ reviewedCommit: reviewed, head });
+    await expect(ready.sinceReview('cora')).resolves.toEqual({ reviewedCommit: reviewed, baseBranch: 'main', head });
     expect(reads).toEqual([[7, { fresh: true }]]);
   });
 
@@ -275,6 +308,8 @@ describe('Since my review availability and start', () => {
     await expect(service(root, { number: 7, status: 'open' }, { headSha: head }).service.sinceReview('cora')).rejects.toMatchObject({ code: 'no_submitted_review' });
     await expect(service(root, { number: 7, status: 'open' }, { headSha: 'f'.repeat(40), viewerReviewCommit: reviewed }).service.sinceReview('cora')).rejects.toMatchObject({ code: 'head_diverged_from_pull_request' });
     await expect(service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed }, 'main', { kind: 'unreachable' }).service.sinceReview('cora')).rejects.toMatchObject({ code: 'scope_unavailable' });
+    // without a base branch there is nothing to tell upstream's changes apart by
+    await expect(service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed, baseBranch: undefined }).service.sinceReview('cora')).rejects.toMatchObject({ code: 'scope_unavailable' });
   });
 
   // behind is what Update to PR head can fix: HEAD under the pull request's head, or, after a
@@ -313,10 +348,21 @@ describe('Since my review availability and start', () => {
     await expect(new ReviewTourService(discovery as never, {} as never, github as never).sinceReview('cora')).rejects.toMatchObject({ code: 'no_pull_request' });
   });
 
-  it('refuses a start pinned to a review that is no longer my latest', async () => {
+  it('refuses a start pinned to a review that is no longer my latest, or to a base the pull request no longer has', async () => {
     const { root, reviewed } = await reviewedRepository();
     const head = await commitLines(root, 'address review', lines({ 2: 'feature 2', 5: 'fixed 5' }));
-    await expect(service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: head }).service.startSinceReview('cora', reviewed)).rejects.toMatchObject({ code: 'scope_unavailable' });
+    await expect(service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: head }).service.startSinceReview('cora', { reviewedCommit: reviewed, baseBranch: 'main' })).rejects.toMatchObject({ code: 'since_review_outdated' });
+    await expect(service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed, baseBranch: 'release' }).service.startSinceReview('cora', { reviewedCommit: reviewed, baseBranch: 'main' })).rejects.toMatchObject({ code: 'since_review_outdated' });
+  });
+
+  it('refuses a start that could not fetch the pull request\'s base, or one git would not take as a branch', async () => {
+    const { root, reviewed } = await reviewedRepository();
+    const head = await commitLines(root, 'address review', lines({ 2: 'feature 2', 5: 'fixed 5' }));
+    const start = (baseBranch: string) => service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed, baseBranch }).service.startSinceReview('cora', { reviewedCommit: reviewed, baseBranch });
+    await expect(start('main')).resolves.toMatchObject({ head });
+    for (const unsafe of ['main\u0001', 'main@{1}', 'main.lock', '-main']) await expect(start(unsafe)).rejects.toMatchObject({ code: 'base_branch_unavailable' });
+    await out(root, 'remote', 'set-url', 'origin', `${root}-gone`);
+    await expect(start('main')).rejects.toMatchObject({ code: 'base_branch_unavailable' });
   });
 
   it('fetches the pull request\'s base and a reviewed commit only GitHub still has, so an upstream this checkout never saw stays out', async () => {
@@ -344,8 +390,8 @@ describe('Since my review availability and start', () => {
     const head = await out(clone, 'rev-parse', 'HEAD');
     const { service: ready } = service(clone, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed, baseBranch: 'main' }, 'origin/main');
 
-    await ready.startSinceReview('cora', reviewed);
-    const comparison = await captureReviewComparison(sinceReviewWorkspace(clone, 'origin/main'), { scope: 'since-review', reviewedCommit: reviewed, includeTests: false, includeDocs: false });
+    await ready.startSinceReview('cora', { reviewedCommit: reviewed, baseBranch: 'main' });
+    const comparison = await captureReviewComparison(sinceReviewWorkspace(clone), since(reviewed));
 
     expect(comparison.base).toBe(`${reviewed.slice(0, 7)} (rebased)`);
     expect(comparison.changes[0]!.patch).toContain('-feature 2\n+amended 2');
@@ -369,11 +415,11 @@ describe('Since my review availability and start', () => {
       // someone else opened it, though I replied
       thread('theirs', false)
     ];
-    const start = async (pageFull?: { threads?: true }) => await service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed, threads, ...(pageFull === undefined ? {} : { pageFull }) }).service.startSinceReview('cora', reviewed);
+    const start = async (pageFull?: { threads?: true }) => await service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed, threads, ...(pageFull === undefined ? {} : { pageFull }) }).service.startSinceReview('cora', { reviewedCommit: reviewed, baseBranch: 'main' });
 
-    expect(await start()).toEqual({ pullRequest: 7, threads: [threads[0], threads[1], threads[3]] });
+    expect(await start()).toEqual({ earlierThreads: { pullRequest: 7, threads: [threads[0], threads[1], threads[3]] }, head });
     // GitHub gave a full page of threads, so older ones may be missing
-    expect(await start({ threads: true })).toEqual({ pullRequest: 7, threads: [threads[0], threads[1], threads[3]], partial: true });
+    expect((await start({ threads: true })).earlierThreads).toEqual({ pullRequest: 7, threads: [threads[0], threads[1], threads[3]], partial: true });
   });
 
   it('keeps a snapshot of a long, chatty thread that the stored tour loads again', async () => {
@@ -387,12 +433,13 @@ describe('Since my review availability and start', () => {
       generate: async (comparison: { changes: { id: string }[] }) => ({ title: 'Fixes', overview: 'The author answered the review.', steps: [{ id: 'fixes', title: 'The fixes', explanation: 'Line 5 is fixed.', changeIds: comparison.changes.map(change => change.id) }] })
     };
     const { service: ready } = service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed, threads: [thread] }, 'main', undefined, generator);
-    const input = { scope: 'since-review' as const, reviewedCommit: reviewed, includeTests: false, includeDocs: false };
+    const { earlierThreads } = await ready.startSinceReview('cora', { reviewedCommit: reviewed, baseBranch: 'main' });
 
-    const tour = await ready.generate(await ready.prepare('cora', input, await ready.startSinceReview('cora', reviewed)), new AbortController().signal);
+    const tour = await ready.generate(await ready.prepare('cora', since(reviewed), earlierThreads), new AbortController().signal);
 
     // the opener and the latest replies, each cut short, under the end of the hunk
-    const [kept] = tour.earlierThreads!.threads;
+    expect(tour.scope).toBe('since-review');
+    const [kept] = tour.scope === 'since-review' ? tour.earlierThreads.threads : [];
     expect(kept!.comments.map(entry => entry.id)).toEqual(['C0', 'C46', 'C47', 'C48', 'C49', 'C50']);
     expect(kept!.comments[0]!.body).toHaveLength(4_000);
     expect(kept!.diffHunk.split('\n')).toEqual(Array.from({ length: 20 }, (_, index) => `+line ${index + 280}`));
@@ -403,6 +450,6 @@ describe('Since my review availability and start', () => {
     const { root } = await reviewedRepository();
     const head = await out(root, 'rev-parse', 'HEAD');
     const missing = 'f'.repeat(40);
-    await expect(service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: missing }).service.startSinceReview('cora', missing)).rejects.toMatchObject({ code: 'reviewed_commit_unreachable' });
+    await expect(service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: missing }).service.startSinceReview('cora', { reviewedCommit: missing, baseBranch: 'main' })).rejects.toMatchObject({ code: 'reviewed_commit_unreachable' });
   });
 });

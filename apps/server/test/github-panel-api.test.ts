@@ -237,7 +237,10 @@ describe('GitHub panel API', () => {
     for (const [url, payload] of [['/api/projects/proj/github/pulls/9/threads/PRRT_1/reply', { body: '' }], ['/api/projects/proj/github/pulls/9/threads/PRRT_1/reply', {}], ['/api/projects/proj/github/pulls/9/rerequest', { login: 7 }], ['/api/projects/proj/github/pulls/0/threads/PRRT_1/resolve', undefined]] as const) {
       expect((await post(url, payload)).statusCode, url).toBe(400);
     }
-    for (const url of ['/api/projects/missing/github/pulls/9/threads/PRRT_1/resolve', '/api/projects/proj/github/pulls/9/threads/a%20b/resolve']) expect((await post(url)).statusCode, url).toBe(404);
+    // an old base64 node id is a thread id like any other, and so not on this pull request
+    for (const url of ['/api/projects/missing/github/pulls/9/threads/PRRT_1/resolve', '/api/projects/proj/github/pulls/9/threads/MDIz%2BOlB%2F%3D/resolve']) expect((await post(url)).statusCode, url).toBe(404);
+    // what is no GitHub node id never is
+    for (const url of ['/api/projects/proj/github/pulls/9/threads/a%20b/resolve', `/api/projects/proj/github/pulls/9/threads/${'T'.repeat(201)}/resolve`]) expect((await post(url)).statusCode, url).toBe(400);
     expect(mutations).toHaveLength(4);
   }, 15_000);
 

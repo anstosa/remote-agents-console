@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { z } from 'zod';
 import { run } from '../tmux/command.js';
 
 // The console's one way to talk to GitHub: which token, which repository an origin names, how a
@@ -18,6 +19,14 @@ export type GraphqlPayload = { data?: Record<string, unknown> | null; errors?: u
 // mutation response may still have been applied); `forbidden`: the token was refused or lacks
 // permission; `rejected`: GitHub refused the request itself, so repeating it will not help
 export type GithubFailureKind = 'transient' | 'forbidden' | 'rejected';
+
+// A GitHub node id, new-style (`PRRT_kwDO…`) or old base64. Its characters cannot close an HTML
+// comment, so one can sit inside a hidden marker.
+const nodeIdPattern = '[A-Za-z0-9_=+/-]{1,200}';
+export const githubNodeId = z.string().regex(new RegExp(`^${nodeIdPattern}$`, 'u'));
+// The hidden marker the console ends a reply it adds to a Draft review with: the reply's thread id
+// (group 1) and a digest of its text. Only a marker at the very end of a reply counts.
+export const replyMarkerAtEnd = new RegExp(`<!-- rac-reply:(${nodeIdPattern}):[0-9a-f]{16} -->$`, 'u');
 
 const graphqlUrl = 'https://api.github.com/graphql';
 const queryAttempts = 3;

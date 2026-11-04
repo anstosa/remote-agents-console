@@ -5,13 +5,13 @@ import type { CommentAnchor, ReviewDiffComment, ReviewDiffRange, ReviewDiffSide,
 import { AskThreadView, useLineAsks } from './ask-thread.js';
 import { askLines, useAskThreads, type LinesAskAnchor } from './asks.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
-import { patchRowIndex, patchRows } from './code-panel/patch-rows.js';
+import { MAX_INLINE_COMMENT, patchRowIndex, patchRows } from './code-panel/patch-rows.js';
 import { fetchComparisonFile, type ExpandedLines } from './code-panel/comparison.js';
 import { codeReviewCount, codeReviewErrorMessage, useCodeReviewPoll, type CodeReview, type CodeReviewCapability, type CodeReviewOptions, type CodeReviewOutcome, type GeneralFinding } from './code-review.js';
 import { failureCode, isReviewJob, reviewRunFrom, useJobElapsed, type ReviewJob, type ReviewRunLink } from './review-jobs.js';
 import { CodeReviewSheet, reviewAgentLabel, type ReviewAgentKind } from './review-start.js';
 import { MarkdownBlocks } from './note-markdown.js';
-import { dismissalKey, EarlierThread, EarlierThreadsSection, EarlierVerdictSummary, earlierThreadNotes, evidenceThread, isEarlierThreads, maxReply, shownVerdict, threadWhere, useEarlierThreadResolve, VerdictEvidence, verdictEvidenceNotes, type EarlierReplies, type EarlierThreads, type EarlierVerdicts } from './earlier-threads.js';
+import { dismissalKey, EarlierThread, EarlierThreadsSection, EarlierVerdictSummary, earlierThreadNotes, evidenceThread, hidesText, isEarlierThreads, MAX_EARLIER_THREADS, MAX_THREAD_ID, shownVerdict, threadWhere, useEarlierThreadResolve, VerdictEvidence, verdictEvidenceNotes, type EarlierReplies, type EarlierThreads, type EarlierVerdicts } from './earlier-threads.js';
 import { useTerminalFontSize } from './terminal-font-size.js';
 
 // The diff renderer pulls in `@pierre/diffs` (~177 kB), so it is loaded on demand — this panel is in
@@ -21,8 +21,8 @@ const ReviewDiffs = lazy(() => import('./code-panel/review-diffs.js'));
 
 // A Comparison's scope with the data it pins: `commit` narrates one commit of HEAD's history, named by
 // its full object id, and `since-review` what HEAD changed since `reviewedCommit`, the commit of the
-// operator's latest submitted review on the Pull request
-export type ReviewScope = { scope: 'working' } | { scope: 'pr' } | { scope: 'commit'; commit: string } | { scope: 'since-review'; reviewedCommit: string };
+// operator's latest submitted review on the Pull request, whose base branch is `baseBranch`
+export type ReviewScope = { scope: 'working' } | { scope: 'pr' } | { scope: 'commit'; commit: string } | { scope: 'since-review'; reviewedCommit: string; baseBranch: string };
 // the Worktree and default scope the Review button asks for, before the start sheet's choices
 export type ReviewTarget = ReviewScope & { worktreeId: string; commitSubject?: string };
 // one tour start: the Comparison (scope, Tests, Docs), the tour's effort and the opt-in Code review
@@ -85,6 +85,8 @@ type ReviewDraft = { tour: string; current: number; statuses: Record<string, Ste
 const reviewDraftKey = (worktreeId: string) => `remote-agent-console:review-draft:${worktreeId}`;
 const tourIdentity = (tour: ReviewTour) => JSON.stringify([tour.fingerprint, tour.title, tour.steps.map(step => step.id)]);
 const isText = (value: unknown, max: number): value is string => typeof value === 'string' && value.length <= max;
+// a dismissed verdict's key: its thread id and status
+const maxDismissalKey = MAX_THREAD_ID + 20;
 const isLine = (value: unknown): boolean => Number.isInteger(value) && (value as number) >= 0;
 const isSide = (value: unknown): boolean => value === 'additions' || value === 'deletions';
 // a plain record whose keys and entries all pass
@@ -116,8 +118,8 @@ function readReviewDraft(worktreeId: string, tour: ReviewTour): ReviewDraft | un
     && Array.isArray(draft.comments) && draft.comments.every(comment => isDraftComment(comment, changeIds))
     && isText(draft.orphanFeedback, maxDispatch) && isRecordOf(draft.triage, id => id.length <= 100, isTriage)
     && (draft.dispatch === undefined || isText(draft.dispatch, maxDispatch))
-    && [draft.resolvedThreads, draft.dismissedVerdicts].every(ids => ids === undefined || Array.isArray(ids) && ids.length <= 100 && ids.every(id => isText(id, 300)))
-    && (draft.replies === undefined || isRecordOf(draft.replies, id => id.length <= 200, reply => isText(reply, maxReply)));
+    && [draft.resolvedThreads, draft.dismissedVerdicts].every(ids => ids === undefined || Array.isArray(ids) && ids.length <= MAX_EARLIER_THREADS && ids.every(id => isText(id, maxDismissalKey)))
+    && (draft.replies === undefined || isRecordOf(draft.replies, id => id.length <= MAX_THREAD_ID, reply => isText(reply, MAX_INLINE_COMMENT)));
   return valid ? draft as ReviewDraft : undefined;
 }
 
@@ -130,22 +132,23 @@ function saveReviewDraft(worktreeId: string, draft: ReviewDraft | undefined): vo
 }
 
 // a scope and exactly the data that scope pins
-export function isReviewScope(value: { scope?: unknown; commit?: unknown; reviewedCommit?: unknown }): boolean {
-  if (value.scope === 'commit') return typeof value.commit === 'string' && value.reviewedCommit === undefined;
-  if (value.scope === 'since-review') return typeof value.reviewedCommit === 'string' && value.commit === undefined;
-  return (value.scope === 'working' || value.scope === 'pr') && value.commit === undefined && value.reviewedCommit === undefined;
+export function isReviewScope(value: { scope?: unknown; commit?: unknown; reviewedCommit?: unknown; baseBranch?: unknown }): boolean {
+  if (value.scope === 'since-review') return typeof value.reviewedCommit === 'string' && typeof value.baseBranch === 'string' && value.commit === undefined;
+  if (value.reviewedCommit !== undefined || value.baseBranch !== undefined) return false;
+  if (value.scope === 'commit') return typeof value.commit === 'string';
+  return (value.scope === 'working' || value.scope === 'pr') && value.commit === undefined;
 }
 
 // only a value's scope and the data that scope pins, as a request sends them
 export function reviewScope(value: ReviewScope): ReviewScope {
   if (value.scope === 'commit') return { scope: 'commit', commit: value.commit };
-  return value.scope === 'since-review' ? { scope: 'since-review', reviewedCommit: value.reviewedCommit } : { scope: value.scope };
+  return value.scope === 'since-review' ? { scope: 'since-review', reviewedCommit: value.reviewedCommit, baseBranch: value.baseBranch } : { scope: value.scope };
 }
 
 // whether two values name the same scope with the same pinned data
 function sameReviewScope(left: ReviewScope, right: ReviewScope): boolean {
   if (left.scope === 'commit') return right.scope === 'commit' && left.commit === right.commit;
-  if (left.scope === 'since-review') return right.scope === 'since-review' && left.reviewedCommit === right.reviewedCommit;
+  if (left.scope === 'since-review') return right.scope === 'since-review' && left.reviewedCommit === right.reviewedCommit && left.baseBranch === right.baseBranch;
   return left.scope === right.scope;
 }
 
@@ -234,6 +237,8 @@ function errorMessage(failure: ReviewFailure, status: number, agent: string): st
   if (code === 'reviewed_commit_unreachable') return 'The commit you reviewed could not be fetched from origin.';
   if (code === 'head_behind_pull_request') return sinceReviewHeadText;
   if (code === 'head_diverged_from_pull_request') return sinceReviewDivergedText;
+  if (code === 'since_review_outdated') return 'You submitted a newer review, or the pull request’s base branch changed, since this tour began. Start a new guided review and pick Since my review again.';
+  if (code === 'base_branch_unavailable') return 'The pull request’s base branch could not be fetched from origin, so the changes since your review cannot be told apart from upstream’s. Check the connection, then try again.';
   if (code === 'too_large') return 'This change is too large for a complete guided tour.';
   if (code === 'timed_out') return 'Tour generation timed out.';
   if (code === 'stale_during_generation') return 'The change moved while the tour was being generated.';
@@ -398,11 +403,12 @@ function isPostedResponse(body: Record<string, unknown>): body is Record<string,
 // Translate a refused post to the pull request. The server words its own refusals (`message`); the
 // copy here covers only a response without one: a rejected request, an unexpected failure, a failed
 // capture of the Comparison, and untyped status failures.
-function pullRequestErrorMessage(body: Record<string, unknown>, status: number): string {
+function pullRequestErrorMessage(body: Record<string, unknown>, status: number, scope: ReviewScope): string {
   const { code, message } = responseFailure(body);
   if (code !== undefined && message !== undefined) return message;
   if (code === 'invalid_request') return 'The console rejected the review request. Refresh the console and try again.';
-  if (code === 'scope_unavailable') return 'The All PR comparison is unavailable, so the review cannot be posted.';
+  if (code === 'scope_unavailable') return `The ${reviewScopeLabel(scope)} comparison is unavailable, so the review cannot be posted.`;
+  if (code === 'reviewed_commit_unreachable') return 'The commit you reviewed is no longer here, so the review cannot be posted. Start a new guided review and pick Since my review again.';
   if (code === 'target_unavailable') return 'The reviewed agent changed or closed. Reopen the review and try again.';
   if (code === 'conflicted_unavailable') return 'Resolve merge conflicts before posting the review.';
   if (code === 'too_large') return 'This change is too large to post as a review.';
@@ -1069,6 +1075,8 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
     const sections = retry ? [] : sectionBatch(unpostedSections);
     const outgoingReplies = retry ? failedReplies : unpostedReplies;
     if (posting || !canPost || tour === undefined || (sections.length === 0 && outgoing.length === 0 && outgoingReplies.length === 0)) return;
+    // the server refuses a reply that hides text; its box says why
+    if (outgoingReplies.some(reply => hidesText(reply.body))) { setPostError({ message: 'A reply contains “<!--”, which GitHub hides from readers. Remove it from the reply, then post again.', retryable: false, retry }); return; }
     setPosting(true);
     setPostError(undefined);
     try {
@@ -1089,7 +1097,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
       // a moved Comparison freezes the tour, as a stale send does
       if (responseFailure(responseJson).code === 'stale') { setStale(true); setState('tour'); return; }
       const retryable = (responseJson.error !== null && typeof responseJson.error === 'object' ? (responseJson.error as { retryable?: unknown }).retryable : undefined);
-      setPostError({ message: pullRequestErrorMessage(responseJson, response.status), retryable: typeof retryable === 'boolean' ? retryable : response.status >= 500, retry });
+      setPostError({ message: pullRequestErrorMessage(responseJson, response.status, launch), retryable: typeof retryable === 'boolean' ? retryable : response.status >= 500, retry });
     } catch {
       setPostError({ message: 'The console connection was interrupted while posting the review. Check the connection, then try again.', retryable: true, retry });
     } finally {
@@ -1133,7 +1141,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   // the questions to the reviewer about its verdict on one of my earlier threads (or the verdict it
   // did not give), while the review that judged them kept a conversation to ask; an answer copies
   // into my reply on the thread (started from the verdict, as Reply starts it) until that reply is posted
-  const copyToReply = (threadId: string, answer: string) => earlierReplies.onChange(threadId, [(replies[threadId] ?? shownVerdict(verdicts, threadId)?.body ?? '').trimEnd(), answer.trim()].filter(text => text !== '').join('\n\n').slice(0, maxReply));
+  const copyToReply = (threadId: string, answer: string) => earlierReplies.onChange(threadId, [(replies[threadId] ?? shownVerdict(verdicts, threadId)?.body ?? '').trimEnd(), answer.trim()].filter(text => text !== '').join('\n\n').slice(0, MAX_INLINE_COMMENT));
   const askVerdict = (threadId: string): ReactNode => !reviewerAskable || codeReview?.verdicts === undefined ? null
     : <AskThreadView key={threadId} role="reviewer" placeholder="Ask the reviewer about this verdict" thread={askThreads.threads.get(threadId)} pending={askThreads.pending.get(threadId)} failed={askThreads.failures.get(threadId)} onAsk={question => askThreads.ask('reviewer', { target: 'reviewer', reviewThreadId: threadId }, { reviewThreadId: threadId }, question)} {...(earlierReplies.posted.has(threadId) ? {} : { onUseAnswer: (answer: string) => copyToReply(threadId, answer), useLabel: 'Copy to reply' })} {...runLink} />;
   // an earlier thread on the lines it sits on, or a verdict's evidence marker leading back to it

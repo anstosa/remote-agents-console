@@ -85,8 +85,10 @@ export class ReviewTourJobs {
     }
     // a Since my review tour starts only on a Pull request I reviewed whose head is HEAD, and keeps
     // my earlier threads as they are now
-    const earlierThreads = input.scope === 'since-review' ? await this.service.startSinceReview(worktreeId, input.reviewedCommit) : undefined;
-    const prepared = await this.service.prepare(worktreeId, input, earlierThreads);
+    const since = input.scope === 'since-review' ? await this.service.startSinceReview(worktreeId, { reviewedCommit: input.reviewedCommit, baseBranch: input.baseBranch }) : undefined;
+    const prepared = await this.service.prepare(worktreeId, input, since?.earlierThreads);
+    // HEAD must still be the Pull request's head the start checked
+    if (since !== undefined && (prepared.comparison.scope !== 'since-review' || prepared.comparison.head !== since.head)) throw new ReviewTourError('stale_during_generation', true);
     return await this.createPrepared(owner, prepared, codeReview);
   }
 

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { ReviewPreset } from '../review-runs/config.js';
 import { acceptsReviewEffort, validConversationId, type ReviewAgentKind } from '../review-runs/kinds.js';
 import { askRunLabel, type ReviewRunInfo, type ReviewRunner } from '../review-runs/runner.js';
-import { ReviewTourError, type ReviewErrorCode, type StoredReviewTour } from '../review-tour/contracts.js';
+import { earlierThreadsOf, ReviewTourError, type ReviewErrorCode, type StoredReviewTour } from '../review-tour/contracts.js';
 import { pendingRunProgress, startedReviewJob, type StartedReviewJob } from '../review-tour/jobs.js';
 import type { ReviewTourStore } from '../review-tour/store.js';
 import type { CodeReview } from '../code-review/contracts.js';
@@ -48,7 +48,7 @@ function askedFinding(stored: StoredReviewTour, review: CodeReview, findingId: s
 // a question about the review's verdict on one of the tour's earlier threads, or the verdict it did
 // not give, when the review judged them
 function askedVerdict(stored: StoredReviewTour, review: CodeReview, reviewThreadId: string, question: string): ReviewerAsk | undefined {
-  const thread = stored.tour.earlierThreads?.threads.find(candidate => candidate.id === reviewThreadId);
+  const thread = earlierThreadsOf(stored.tour)?.threads.find(candidate => candidate.id === reviewThreadId);
   if (thread === undefined || review.verdicts === undefined) return undefined;
   const verdict = review.verdicts.find(candidate => candidate.threadId === thread.id);
   const evidenceFile = verdict?.evidence === undefined ? undefined : stored.tour.changes.find(change => change.id === verdict.evidence!.changeId)?.file;

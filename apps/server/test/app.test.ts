@@ -1553,7 +1553,7 @@ describe('guided review API boundary', () => {
       capability: async () => ({ available: true }),
       prepare: async () => { prepares += 1; return { comparison, resolved: {} }; },
       fingerprint: async (_worktreeId: string, input: unknown) => { fingerprinted.push(input); return { comparison: { scope: 'working', base: 'HEAD', fingerprint: 'empty-fingerprint', includeTests: false, includeDocs: false }, empty: true }; },
-      sinceReview: async () => { if (behind) throw new ReviewTourError('head_behind_pull_request', true); return { reviewedCommit: 'a'.repeat(40), head: 'b'.repeat(40) }; }
+      sinceReview: async () => { if (behind) throw new ReviewTourError('head_behind_pull_request', true); return { reviewedCommit: 'a'.repeat(40), baseBranch: 'main', head: 'b'.repeat(40) }; }
     };
     let behind = false;
     const fingerprinted: unknown[] = [];
@@ -1580,7 +1580,7 @@ describe('guided review API boundary', () => {
       const invalidFingerprint = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/fingerprint?scope=working&includeTests=maybe&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
       const fingerprint = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/fingerprint?scope=working&includeTests=false&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
       const reviewedCommit = 'a'.repeat(40);
-      const sinceReviewFingerprint = await reviewApp.inject({ method: 'GET', url: `/api/worktrees/cora/review-tour/fingerprint?scope=since-review&reviewedCommit=${reviewedCommit}&includeTests=false&includeDocs=false`, headers: { host: headers.host, cookie: headers.cookie } });
+      const sinceReviewFingerprint = await reviewApp.inject({ method: 'GET', url: `/api/worktrees/cora/review-tour/fingerprint?scope=since-review&reviewedCommit=${reviewedCommit}&baseBranch=main&includeTests=false&includeDocs=false`, headers: { host: headers.host, cookie: headers.cookie } });
       const effortFingerprint = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/fingerprint?scope=working&effort=high&includeTests=false&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
       const sinceReview = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/since-review', headers: { host: headers.host, cookie: headers.cookie } });
       behind = true;
@@ -1604,11 +1604,11 @@ describe('guided review API boundary', () => {
       expect(invalidFingerprint.json()).toEqual({ status: 'error', error: { code: 'invalid_request', retryable: false } });
       expect(fingerprint.statusCode).toBe(200);
       expect(fingerprint.json()).toEqual({ status: 'empty', comparison: { scope: 'working', base: 'HEAD', fingerprint: 'empty-fingerprint', includeTests: false, includeDocs: false } });
-      // a Since my review query pins its reviewed commit; an effort is no part of a Comparison
+      // a Since my review query pins its reviewed commit and base branch; an effort is no part of a Comparison
       expect(sinceReviewFingerprint.statusCode).toBe(200);
       expect(effortFingerprint.statusCode).toBe(400);
-      expect(fingerprinted.slice(-1)).toEqual([{ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false }]);
-      expect(sinceReview.json()).toEqual({ status: 'available', reviewedCommit: 'a'.repeat(40), head: 'b'.repeat(40) });
+      expect(fingerprinted.slice(-1)).toEqual([{ scope: 'since-review', reviewedCommit, baseBranch: 'main', includeTests: false, includeDocs: false }]);
+      expect(sinceReview.json()).toEqual({ status: 'available', reviewedCommit: 'a'.repeat(40), baseBranch: 'main', head: 'b'.repeat(40) });
       expect(sinceReviewBehind.statusCode).toBe(409);
       expect(sinceReviewBehind.json()).toEqual({ status: 'error', error: { code: 'head_behind_pull_request', retryable: true } });
       expect(maximumPrompt.statusCode).toBe(204);
@@ -1885,8 +1885,8 @@ describe('code review API', () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const worktree = { id: 'cora', projectId: 'cora', label: 'Cora', path: '/worktrees/cora', identity: '/worktrees/cora', available: true, pinned: false };
     const change = { id: 'chg_route0001', file: 'src/route.ts', category: 'implementation' as const, kind: 'hunk' as const, oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, patch: '@@ -1 +1,2 @@\n-old\n+new\n+more' };
-    const since = { scope: 'since-review' as const, reviewedCommit: 'a'.repeat(40), baseTree: 'b'.repeat(40) };
-    const comparison = { worktreeId: 'cora', workspace: '/worktrees/cora', branch: 'feature/review', ...since, base: 'aaaaaaa (rebased)', includeTests: false, includeDocs: false, fingerprint: 'review-fingerprint-1234', changes: [change] };
+    const since = { scope: 'since-review' as const, reviewedCommit: 'a'.repeat(40), baseBranch: 'main', baseTree: 'b'.repeat(40) };
+    const comparison = { worktreeId: 'cora', workspace: '/worktrees/cora', branch: 'feature/review', ...since, head: 'c'.repeat(40), base: 'aaaaaaa (rebased)', includeTests: false, includeDocs: false, fingerprint: 'review-fingerprint-1234', changes: [change] };
     const earlierThreads = { pullRequest: 7, threads: [{ id: 'PRRT_1', path: 'src/route.ts', line: 2, resolved: false, outdated: false, diffHunk: '@@ -1 +1 @@', comments: [{ id: 'C1', author: 'octocat', bot: false, mine: true as const, body: 'Validate the new line.', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/7#discussion_C1' }] }] };
     const tour: ReviewTour = { title: 'Route tour', overview: 'Follow the route.', steps: [{ id: 'route', title: 'Route', explanation: 'The route changes.', changeIds: [change.id] }], ...since, base: comparison.base, includeTests: false, includeDocs: false, fingerprint: comparison.fingerprint, changes: [change], earlierThreads };
     // a recapture never reads GitHub again: it carries only the threads it is handed
@@ -1901,7 +1901,7 @@ describe('code review API', () => {
       const boot = await reviewApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await reviewApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
       const headers = { host: 'agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], origin: 'https://agents.example.com', 'x-csrf-token': login.json().csrfToken, 'content-type': 'application/json' };
-      const add = async () => await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/code-review/jobs', headers, payload: JSON.stringify({ scope: 'since-review', reviewedCommit: since.reviewedCommit, includeTests: false, includeDocs: false, fingerprint: comparison.fingerprint, preset: 'correctness' }) });
+      const add = async () => await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/code-review/jobs', headers, payload: JSON.stringify({ scope: 'since-review', reviewedCommit: since.reviewedCommit, baseBranch: 'main', includeTests: false, includeDocs: false, fingerprint: comparison.fingerprint, preset: 'correctness' }) });
       // without the tour's threads there is nothing to judge them by, nor with another tour's
       expect((await add()).json()).toEqual({ status: 'error', error: { code: 'stale_during_generation', retryable: true } });
       await reviewStore.save('cora', 'feature/review', { ...tour, fingerprint: 'older-fingerprint-1234' });

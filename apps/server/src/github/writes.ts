@@ -21,7 +21,7 @@ export type ThreadOutcome = { created: true } | { created: false; reason: string
 export type BatchOutcome = { ambiguous: false; outcomes: ThreadOutcome[] } | { ambiguous: true; reason: string };
 
 const draftTargetQuery = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){id number url state headRefName headRefOid headRepositoryOwner{login} reviews(states:[PENDING],first:1){nodes{id body commit{oid}}}}}}';
-const draftContentQuery = 'query($id:ID!,$after:String){node(id:$id){...on PullRequestReview{id body comments(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{body subjectType}}}}}';
+const draftContentQuery = 'query($id:ID!,$after:String){node(id:$id){...on PullRequestReview{id body comments(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{body subjectType replyTo{id}}}}}}';
 
 // a mutation's lost answer (not a rate limit's hold, which sent nothing) may hide a write that applied
 function mayHaveApplied(error: unknown, note: string): unknown {
@@ -98,10 +98,10 @@ export async function draftReviewTarget(client: GithubClient, token: string, rep
   };
 }
 
-/** A Draft review's body and every comment it holds, page by page. */
-export async function draftReviewContent(client: GithubClient, token: string, reviewId: string): Promise<{ body: string; comments: Array<{ body: string; subjectType?: string }> }> {
+/** A Draft review's body and every comment it holds, page by page, with the comment a reply replies to. */
+export async function draftReviewContent(client: GithubClient, token: string, reviewId: string): Promise<{ body: string; comments: Array<{ body: string; subjectType?: string; replyTo?: string }> }> {
   const action = 'GitHub could not read the draft review';
-  const comments: Array<{ body: string; subjectType?: string }> = [];
+  const comments: Array<{ body: string; subjectType?: string; replyTo?: string }> = [];
   let body = '';
   let after: string | undefined;
   for (let page = 0; page < maxCommentPages; page += 1) {
@@ -111,8 +111,8 @@ export async function draftReviewContent(client: GithubClient, token: string, re
     if (!Array.isArray(nodes)) throw graphqlError(payload, action);
     body = typeof at(node, 'body') === 'string' ? at(node, 'body') as string : '';
     for (const comment of nodes) {
-      const [text, subjectType] = [at(comment, 'body'), at(comment, 'subjectType')];
-      if (typeof text === 'string') comments.push({ body: text, ...(typeof subjectType === 'string' ? { subjectType } : {}) });
+      const [text, subjectType, replyTo] = [at(comment, 'body'), at(comment, 'subjectType'), at(comment, 'replyTo', 'id')];
+      if (typeof text === 'string') comments.push({ body: text, ...(typeof subjectType === 'string' ? { subjectType } : {}), ...(typeof replyTo === 'string' ? { replyTo } : {}) });
     }
     const cursor = at(node, 'comments', 'pageInfo', 'endCursor');
     if (at(node, 'comments', 'pageInfo', 'hasNextPage') !== true || typeof cursor !== 'string') break;

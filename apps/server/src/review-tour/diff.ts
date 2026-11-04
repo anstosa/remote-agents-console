@@ -30,17 +30,19 @@ function atomicPatches(patch: string, fallbackKind: ReviewChangeKind): Array<{ p
 const unavailable = (reason: ComparisonFailure | 'unreachable') => new ReviewTourError(reason === 'conflicted' ? 'conflicted_unavailable' : reason === 'unreachable' ? 'reviewed_commit_unreachable' : 'scope_unavailable', true);
 
 // resolve a fresh comparison summary through the shared git comparison module
-async function comparison(resolved: ResolvedWorkspace, input: ReviewTourInput): Promise<{ base: string; gitBase: string; head?: string; changes: GitStatusChange[]; since?: SinceReviewBase }> {
+async function comparison(resolved: ResolvedWorkspace, input: ReviewTourInput): Promise<{ base: string; gitBase: string; head?: string; changes: GitStatusChange[]; since?: SinceReviewBase & { head: string } }> {
   const kind: ComparisonKind = input.scope === 'working' ? 'working' : 'pr';
+  if (input.scope === 'since-review') {
+    // the Pull request's base on origin as its start fetched it, never the dashboard's merge target,
+    // which may be another branch or a stale local one
+    const result = await resolveSinceReviewComparison(resolved.workspace, input.reviewedCommit, [`origin/${input.baseBranch}`]);
+    if (!result.ok) throw unavailable(result.reason);
+    const { base, gitBase, head, changes } = result.comparison;
+    return { base, gitBase, head, changes, since: { baseTree: result.baseTree, ...(result.fallback ? { fallback: true } : {}), head: head! } };
+  }
   // the dashboard's resolved merge target is the only PR base; a working snapshot needs none
   const preferred = resolved.prBase;
   const candidates = input.scope !== 'working' && preferred !== undefined ? [preferred] : [];
-  if (input.scope === 'since-review') {
-    const result = await resolveSinceReviewComparison(resolved.workspace, input.reviewedCommit, candidates);
-    if (!result.ok) throw unavailable(result.reason);
-    const { base, gitBase, head, changes } = result.comparison;
-    return { base, gitBase, ...(head === undefined ? {} : { head }), changes, since: { baseTree: result.baseTree, ...(result.fallback ? { fallback: true } : {}) } };
-  }
   const result = input.scope === 'commit' ? await resolveCommitComparison(resolved.workspace, input.commit) : await resolveComparison(resolved.workspace, kind, candidates);
   if (!result.ok) throw unavailable(result.reason);
   const { base, gitBase, head, changes } = result.comparison;
@@ -88,7 +90,7 @@ export async function captureReviewComparison(resolved: ResolvedWorkspace, input
     }
   }
   // a Since my review Comparison is a fixed pair: its base tree and head are part of what it is
-  const pair = current.since === undefined ? {} : { ...current.since, head: current.head };
-  const fingerprint = digest(JSON.stringify({ ...reviewScope(input), base: current.base, gitBase: current.gitBase, includeTests: input.includeTests, includeDocs: input.includeDocs, changes, ...pair }));
-  return { worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.branch === undefined ? {} : { branch: resolved.branch }), ...reviewScope(input), base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes, ...current.since };
+  const fingerprint = digest(JSON.stringify({ ...reviewScope(input), base: current.base, gitBase: current.gitBase, includeTests: input.includeTests, includeDocs: input.includeDocs, changes, ...current.since }));
+  const fields = { worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.branch === undefined ? {} : { branch: resolved.branch }), base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes };
+  return input.scope === 'since-review' && current.since !== undefined ? { ...fields, ...reviewScope(input), ...current.since } : { ...fields, ...reviewScope(input) } as ReviewComparison;
 }

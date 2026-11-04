@@ -22,8 +22,9 @@ export type PullRequestIssues = { mergeConflicts?: boolean; failingChecks?: bool
 export type PullRequestCheckStatus = 'passed' | 'pending' | 'failed';
 export type PullRequestSummary = { number: number; title: string; status: 'draft' | 'open' | 'merged'; url: string; baseBranch?: string; checks?: PullRequestCheckStatus; issues?: PullRequestIssues; unresolvedThreads?: number };
 // One comment on a Pull request as the console reads it from GitHub; `bot` is a GitHub App author,
-// `mine` the viewer
-export type PullRequestComment = { id: string; author: string; bot: boolean; mine?: true; body: string; createdAt: string; url: string };
+// `mine` the viewer, `editedBy` whoever other than its author edited it last, and a `pending` one
+// (a Review thread's only) sits in the viewer's unsubmitted Draft review
+export type PullRequestComment = { id: string; author: string; bot: boolean; mine?: true; editedBy?: string; pending?: true; body: string; createdAt: string; url: string };
 // A Review thread: comments anchored to lines of one file; `line`/`startLine` fall back to the
 // original lines once the thread is outdated, and count on the base (removed lines) with `leftSide`.
 // `comments` opens with the thread's first comment, then its latest (a long thread's middle is not

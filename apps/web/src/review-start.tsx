@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { PanelIcon, panelIcons } from './panel-header.js';
 import { sinceReviewHeadText, sinceReviewDivergedText, type ReviewLaunch, type ReviewTarget } from './review-tour.js';
 import { initialEffort, initialPreset, maxCodeReviewFocus, saveCodeReviewChoice, type CodeReviewCapability, type CodeReviewOptions } from './code-review.js';
+import { WriteButton } from './github-panel.js';
 
 // The dashboard's `reviewTour`: whether the tour's agent can run, which agent narrates, and the
 // efforts it accepts. An older server sends only `available` (and `reason`), so the rest is optional.
@@ -117,10 +118,10 @@ const saveStartChecks = (checks: StartChecks): void => {
 // the Worktree branch's saved All PR base and the origin branches it may name; `branch` is absent
 // when HEAD is detached
 type MergeBaseChoices = { branch?: string; configured?: string; branches: string[] };
-// Since my review as the server last read it: the commit of my latest submitted review and HEAD, or
-// HEAD is behind the pull request's head, or cannot be moved there for the operator; absent while loading or when
-// there is nothing to offer
-type SinceReview = { reviewedCommit: string; head: string } | 'head_behind' | 'diverged';
+// Since my review as the server last read it: the commit of my latest submitted review, the pull
+// request's base branch and HEAD, or HEAD is behind the pull request's head, or cannot be moved there
+// for the operator; absent while loading or when there is nothing to offer
+type SinceReview = { reviewedCommit: string; baseBranch: string; head: string } | 'head_behind' | 'diverged';
 
 // whether the Worktree can start a Since my review tour, read fresh from GitHub on open and again
 // after Update to PR head; `update` resolves to the server's refusal, or undefined once updated
@@ -131,9 +132,9 @@ function useSinceReview(request: (url: string, init?: RequestInit) => Promise<Re
     if (!enabled) return;
     let live = true;
     void request(`/api/worktrees/${encodeURIComponent(worktreeId)}/review-tour/since-review`).then(async response => {
-      const payload = await response.json().catch(() => undefined) as { reviewedCommit?: unknown; head?: unknown; error?: { code?: unknown } } | undefined;
+      const payload = await response.json().catch(() => undefined) as { reviewedCommit?: unknown; baseBranch?: unknown; head?: unknown; error?: { code?: unknown } } | undefined;
       if (!live) return;
-      if (response.ok && typeof payload?.reviewedCommit === 'string' && typeof payload.head === 'string') setSinceReview({ reviewedCommit: payload.reviewedCommit, head: payload.head });
+      if (response.ok && typeof payload?.reviewedCommit === 'string' && typeof payload.baseBranch === 'string' && typeof payload.head === 'string') setSinceReview({ reviewedCommit: payload.reviewedCommit, baseBranch: payload.baseBranch, head: payload.head });
       else setSinceReview(payload?.error?.code === 'head_behind_pull_request' ? 'head_behind' : payload?.error?.code === 'head_diverged_from_pull_request' ? 'diverged' : undefined);
     }).catch(() => undefined);
     return () => { live = false; };
@@ -175,7 +176,7 @@ export function ReviewStartSheet({ target, prBase, request, tour, codeReview, on
     setUpdating(false);
   };
   // offered once I have a submitted review on a commit other than HEAD
-  const reviewed = typeof sinceReview === 'object' && sinceReview.reviewedCommit !== sinceReview.head ? sinceReview.reviewedCommit : undefined;
+  const reviewed = typeof sinceReview === 'object' && sinceReview.reviewedCommit !== sinceReview.head ? sinceReview : undefined;
   const [includeTests, setIncludeTests] = useState(remembered.tests);
   const [includeDocs, setIncludeDocs] = useState(remembered.docs);
   const tourEfforts = effortList(tour?.efforts);
@@ -238,11 +239,11 @@ export function ReviewStartSheet({ target, prBase, request, tour, codeReview, on
     if (reviewOptions !== undefined) choice.remember();
     // a hidden review box, or one Since my review checked, keeps its remembered state
     saveStartChecks({ tests: includeTests, docs: includeDocs, codeReview: codeReview === undefined || scope === 'since-review' ? remembered.codeReview : reviewEnabled });
-    onStart({ worktreeId: target.worktreeId, ...(target.scope === 'commit' ? { scope: 'commit', commit: target.commit } : scope === 'since-review' ? { scope, reviewedCommit: reviewed! } : { scope }), includeTests, includeDocs, ...(tourEffort === '' ? {} : { effort: tourEffort }), ...(reviewOptions === undefined ? {} : { codeReview: reviewOptions }) });
+    onStart({ worktreeId: target.worktreeId, ...(target.scope === 'commit' ? { scope: 'commit', commit: target.commit } : scope === 'since-review' ? { scope, reviewedCommit: reviewed!.reviewedCommit, baseBranch: reviewed!.baseBranch } : { scope }), includeTests, includeDocs, ...(tourEffort === '' ? {} : { effort: tourEffort }), ...(reviewOptions === undefined ? {} : { codeReview: reviewOptions }) });
   };
   return <StartSheetFrame title="Start guided review" eyebrow="Guided review" submitLabel="Start" submitDisabled={(reviewEnabled && reviewOptions === undefined) || (scope === 'pr' && !prReady) || (scope === 'since-review' && reviewed === undefined)} pending={saving} {...(saveError === undefined ? {} : { error: saveError })} onSubmit={() => void start()} onCancel={onCancel}>
-    {target.scope === 'commit' ? <div className="review-start-row"><span>Commit</span><span className="review-start-commit" title={target.commit}><code>{target.commit.slice(0, 7)}</code>{target.commitSubject}</span></div> : <div className="review-start-row"><span id="review-start-scope">Scope</span><span className="git-status-mode" role="group" aria-labelledby="review-start-scope"><button type="button" aria-pressed={scope === 'working'} onClick={() => chooseScope('working')}>Working</button><button type="button" aria-pressed={scope === 'pr'} disabled={prBase === undefined && !pickable} title={prBase === undefined ? pickable ? 'Pick a base to compare with' : 'Merge target unavailable' : `Compare with ${prBase}`} onClick={() => chooseScope('pr')}>All PR</button>{(reviewed !== undefined || sinceReview === 'head_behind' || sinceReview === 'diverged') && <button type="button" aria-pressed={scope === 'since-review'} disabled={reviewed === undefined} title={reviewed === undefined ? undefined : `What changed since your review of ${reviewed.slice(0, 7)}`} onClick={() => chooseScope('since-review')}>Since my review{reviewed === undefined ? '' : ` (${reviewed.slice(0, 7)})`}</button>}</span></div>}
-    {target.scope !== 'commit' && sinceReview === 'head_behind' && <div className="review-start-update"><p className="review-start-base-note">{sinceReviewHeadText}</p><button type="button" className={`github-button${updating ? ' progress-border progress-blue' : ''}`} disabled={updating} aria-busy={updating || undefined} onClick={() => void updateToHead()}>{updating && <span className="update-progress-ring" aria-hidden="true" />}Update to PR head</button>{updateError !== undefined && <p className="review-start-error" role="alert">{updateError}</p>}</div>}
+    {target.scope === 'commit' ? <div className="review-start-row"><span>Commit</span><span className="review-start-commit" title={target.commit}><code>{target.commit.slice(0, 7)}</code>{target.commitSubject}</span></div> : <div className="review-start-row"><span id="review-start-scope">Scope</span><span className="git-status-mode" role="group" aria-labelledby="review-start-scope"><button type="button" aria-pressed={scope === 'working'} onClick={() => chooseScope('working')}>Working</button><button type="button" aria-pressed={scope === 'pr'} disabled={prBase === undefined && !pickable} title={prBase === undefined ? pickable ? 'Pick a base to compare with' : 'Merge target unavailable' : `Compare with ${prBase}`} onClick={() => chooseScope('pr')}>All PR</button>{(reviewed !== undefined || sinceReview === 'head_behind' || sinceReview === 'diverged') && <button type="button" aria-pressed={scope === 'since-review'} disabled={reviewed === undefined} title={reviewed === undefined ? undefined : `What changed since your review of ${reviewed.reviewedCommit.slice(0, 7)}`} onClick={() => chooseScope('since-review')}>Since my review{reviewed === undefined ? '' : ` (${reviewed.reviewedCommit.slice(0, 7)})`}</button>}</span></div>}
+    {target.scope !== 'commit' && sinceReview === 'head_behind' && <div className="review-start-update"><p className="review-start-base-note">{sinceReviewHeadText}</p><WriteButton busy={updating} disabled={updating} onClick={() => void updateToHead()}>Update to PR head</WriteButton>{updateError !== undefined && <p className="review-start-error" role="alert">{updateError}</p>}</div>}
     {target.scope !== 'commit' && sinceReview === 'diverged' && <p className="review-start-base-note">{sinceReviewDivergedText}</p>}
     {scope === 'pr' && <div className={`review-start-base${choices === undefined ? ' progress-border progress-blue progress-loading' : ''}`} aria-busy={choices === undefined || undefined}>{choices === undefined && <span className="update-progress-ring" aria-hidden="true" />}<label htmlFor="review-start-base">Compare with</label>{pickable
       ? <select id="review-start-base" value={base} aria-describedby={baseNote === undefined ? undefined : 'review-start-base-note'} onChange={event => setBase(event.target.value)}><option value="">{loaded?.configured === undefined && prBase !== undefined ? `Default (${prBase})` : 'Default'}</option>{baseOptions.map(name => <option key={name} value={name}>origin/{name}</option>)}</select>

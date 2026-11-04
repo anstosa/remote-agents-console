@@ -3,6 +3,10 @@
 // comment covers) and the diff renderers (which order a range picked across both sides).
 // Imports nothing, so the eager review-tour.tsx can use it without pulling in the diff library.
 
+// the longest one inline comment, or one reply to an earlier Review thread, may grow (the server's
+// cap); the caller enforces the shared aggregate cap on top
+export const MAX_INLINE_COMMENT = 4_000;
+
 // one removed (old only), added (new only) or context (both) line, with its +/-/space prefix
 export type PatchRow = { old?: number; new?: number; text: string };
 

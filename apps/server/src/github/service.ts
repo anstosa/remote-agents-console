@@ -4,7 +4,7 @@ import { objectId } from '../git/comparison.js';
 import type { Project, PullRequestCheckStatus, PullRequestComment, PullRequestComments, PullRequestIssues, PullRequestReviewThread, PullRequestSummary, Worktree } from '../domain/models.js';
 import { SeenRecord } from './seen.js';
 import { createPullRequest, replyToThread, rerequestReviews, resolveThread } from './writes.js';
-import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, repositoryPath, type Command, type GithubRepository, type GraphqlPayload, type Request, type Token } from './github.js';
+import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, replyMarkerAtEnd, repositoryPath, type Command, type GithubRepository, type GraphqlPayload, type Request, type Token } from './github.js';
 
 export type PullRequestCleanupStatus = 'merged' | 'closed';
 export type PullRequestChoice = { number: number; title: string; branch: string; headSha: string; headOnOrigin: boolean; headRepository?: string; draft: boolean; url: string; checks?: PullRequestCheckStatus; issues?: PullRequestIssues };
@@ -232,7 +232,7 @@ const pullFields = 'number title url updatedAt author{login} state isDraft baseR
 const fullPullFields = `${pullFields} reviewThreads(first:100){nodes{isResolved isOutdated}} closingIssuesReferences(first:10){nodes{number}}`;
 // one pull request's detail, with `pullFields` so its version compares with the lists'; the newest
 // threads and comments, so the last speaker is right on a long thread
-const commentFields = 'id author{login __typename} body createdAt url viewerDidAuthor';
+const commentFields = 'id author{login __typename} editor{login} body createdAt url viewerDidAuthor';
 /** How many of each a pull request's detail reads; a list this long may be missing some (the oldest, for threads, comments and reviews). */
 export const detailPageLimits = { threads: 100, threadComments: 50, reviews: 100, comments: 100, checks: 100, reviewers: 20 } as const;
 const detailQuery = `query PullRequestDetail($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){
@@ -241,8 +241,8 @@ const detailQuery = `query PullRequestDetail($owner:String!,$name:String!,$numbe
   reviewRequests(first:${detailPageLimits.reviewers}){nodes{requestedReviewer{__typename ...on User{login id} ...on Bot{login id} ...on Mannequin{login} ...on Team{slug id}}}}
   latestReviews(first:${detailPageLimits.reviewers}){nodes{author{login __typename ...on User{id} ...on Bot{id}} state commit{oid}}}
   closingIssuesReferences(first:10){nodes{number title url state repository{nameWithOwner}}}
-  reviewThreads(last:${detailPageLimits.threads}){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine diffSide resolvedBy{login isViewer} opener:comments(first:1){nodes{${commentFields} diffHunk state}} comments(last:${detailPageLimits.threadComments}){nodes{${commentFields} diffHunk}}}}
-  reviews(last:${detailPageLimits.reviews}){nodes{id author{login __typename} state body submittedAt url viewerDidAuthor commit{oid} comments(first:1){totalCount nodes{replyTo{id}}}}}
+  reviewThreads(last:${detailPageLimits.threads}){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine diffSide resolvedBy{login isViewer} opener:comments(first:1){nodes{${commentFields} diffHunk state}} comments(last:${detailPageLimits.threadComments}){nodes{${commentFields} diffHunk state}}}}
+  reviews(last:${detailPageLimits.reviews}){nodes{id author{login __typename} state body submittedAt url viewerDidAuthor commit{oid} comments(first:1){totalCount nodes{replyTo{id} body}}}}
   comments(last:${detailPageLimits.comments}){nodes{${commentFields}}}
 }}}`;
 const issueQuery = `query IssueDetail($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){
@@ -1562,7 +1562,10 @@ function prComment(value: unknown): PullRequestComment[] {
   const [id, body, createdAt, url] = [at(value, 'id'), at(value, 'body'), at(value, 'createdAt'), at(value, 'url')];
   if (typeof id !== 'string' || typeof body !== 'string' || typeof createdAt !== 'string' || typeof url !== 'string' || !url.startsWith('https://github.com/')) return [];
   const login = at(value, 'author', 'login');
-  return [{ id, author: typeof login === 'string' ? login : 'ghost', bot: at(value, 'author', '__typename') === 'Bot', ...(at(value, 'viewerDidAuthor') === true ? { mine: true as const } : {}), body, createdAt, url }];
+  const author = typeof login === 'string' ? login : 'ghost';
+  // the last edit by someone else makes the text theirs too
+  const editor = at(value, 'editor', 'login');
+  return [{ id, author, bot: at(value, 'author', '__typename') === 'Bot', ...(at(value, 'viewerDidAuthor') === true ? { mine: true as const } : {}), ...(typeof editor === 'string' && editor !== author ? { editedBy: editor } : {}), body, createdAt, url }];
 }
 
 // what a detail was read at: a list or branch lookup reading the pull request otherwise means it changed
@@ -1620,8 +1623,10 @@ function readDetail(repository: GithubRepository, node: unknown): { data: PullRe
   const threads = nodes(at(node, 'reviewThreads')).flatMap((thread): PullRequestReviewThread[] => {
     // a thread longer than the page of its latest comments still opens with its first
     const [openerNode] = nodes(at(thread, 'opener'));
-    const [opener] = prComment(openerNode);
-    const latest = nodes(at(thread, 'comments')).flatMap(prComment);
+    // a comment in the viewer's unsubmitted Draft review is `pending`
+    const read = (node: unknown) => prComment(node).map(comment => at(node, 'state') === 'PENDING' ? { ...comment, pending: true as const } : comment);
+    const [opener] = read(openerNode);
+    const latest = nodes(at(thread, 'comments')).flatMap(read);
     const comments = opener === undefined || latest.some(comment => comment.id === opener.id) ? latest : [opener, ...latest];
     const [id, path] = [at(thread, 'id'), at(thread, 'path')];
     if (typeof id !== 'string' || typeof path !== 'string' || comments.length === 0) return [];
@@ -1638,8 +1643,12 @@ function readDetail(repository: GithubRepository, node: unknown): { data: PullRe
     if (typeof state !== 'string' || state === 'PENDING') return [];
     return prComment({ ...review as object, createdAt: at(review, 'submittedAt') }).filter(comment => comment.body.trim() !== '').map(comment => ({ ...comment, state }));
   });
-  // GitHub records a lone reply to a thread as a review of its own, which is not a re-review
-  const lonelyReply = (review: unknown) => at(review, 'state') === 'COMMENTED' && String(at(review, 'body') ?? '').trim() === '' && at(review, 'comments', 'totalCount') === 1 && typeof at(nodes(at(review, 'comments'))[0], 'replyTo', 'id') === 'string';
+  // GitHub records a lone reply to a thread as a review of its own, which is not a re-review,
+  // unless Post to PR added it to a Draft review the viewer then submitted
+  const lonelyReply = (review: unknown) => {
+    const [reply] = nodes(at(review, 'comments'));
+    return at(review, 'state') === 'COMMENTED' && String(at(review, 'body') ?? '').trim() === '' && at(review, 'comments', 'totalCount') === 1 && typeof at(reply, 'replyTo', 'id') === 'string' && !replyMarkerAtEnd.test(String(at(reply, 'body') ?? '').trimEnd());
+  };
   const viewerReviewCommit = nodes(at(node, 'reviews')).filter(review => at(review, 'viewerDidAuthor') === true && typeof at(review, 'state') === 'string' && at(review, 'state') !== 'PENDING' && !lonelyReply(review)).map(review => at(review, 'commit', 'oid')).filter((oid): oid is string => typeof oid === 'string' && objectId.test(oid)).at(-1);
   // the submitter's opening comment, left out when they wrote none
   const [description] = prComment(node).filter(comment => comment.body.trim() !== '');

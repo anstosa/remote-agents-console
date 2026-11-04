@@ -8,13 +8,15 @@ import { resolveConfiguredWorkspace, sameConfiguredWorkspace, type ResolvedWorks
 import { captureReviewComparison } from './diff.js';
 import type { ReviewRunProgress } from '../review-runs/runner.js';
 import type { ReviewTourGenerator } from './generator.js';
-import { earlierThreadsSnapshot, publicReviewComparison, reviewScope, ReviewTourError, sinceReviewBase, type EarlierThreads, type PublicReviewComparison, type ReviewComparison, type ReviewTour, type ReviewTourCapability, type ReviewTourInput } from './contracts.js';
+import { earlierThreadsSnapshot, publicReviewComparison, reviewScope, ReviewTourError, sinceReviewBase, type EarlierThreads, type PublicReviewComparison, type ReviewComparison, type ReviewTour, type ReviewTourCapability, type ReviewTourInput, type SinceReviewScope } from './contracts.js';
 
 // `effort` is the run's requested effort, absent for the configured one; `earlierThreads` is the
 // snapshot a Since my review start took, which recaptures never read again
 export type PreparedReviewTour = { resolved: ResolvedWorkspace; comparison: ReviewComparison; effort?: string; earlierThreads?: EarlierThreads };
 // what the Since my review scope reads of GitHub: the Worktree branch's Pull request and its detail
 export type SinceReviewGithub = Pick<GithubService, 'repositoryAt' | 'branch' | 'pullRequestDetail'>;
+// what a Since my review start pins, read from GitHub by the start sheet
+export type SinceReviewPin = Omit<SinceReviewScope, 'scope'>;
 
 // a Review thread I opened and submitted, resolved or not, unless I resolved it myself: an author's
 // resolve may have come without a fix
@@ -45,41 +47,51 @@ export class ReviewTourService {
     const generated = await this.generator.generate(prepared.comparison, signal, prepared.effort, progress);
     // preserve caller cancellation
     if (signal.aborted) throw new ReviewTourError('cancelled', true);
-    const current = await captureReviewComparison(prepared.resolved, { ...reviewScope(prepared.comparison), includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs });
+    const { comparison } = prepared;
+    const current = await captureReviewComparison(prepared.resolved, { ...reviewScope(comparison), includeTests: comparison.includeTests, includeDocs: comparison.includeDocs });
     // reject stale narration before publication
-    if (current.fingerprint !== prepared.comparison.fingerprint || current.branch !== prepared.comparison.branch) throw new ReviewTourError('stale_during_generation', true);
+    if (current.fingerprint !== comparison.fingerprint || current.branch !== comparison.branch) throw new ReviewTourError('stale_during_generation', true);
     // reject a moved or removed Worktree before publication
     if (!sameConfiguredWorkspace(this.discovery, prepared.resolved)) throw new ReviewTourError('target_unavailable', true);
-    return { ...generated, ...reviewScope(prepared.comparison), base: prepared.comparison.base, includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs, fingerprint: prepared.comparison.fingerprint, changes: prepared.comparison.changes, ...sinceReviewBase(prepared.comparison), ...(prepared.earlierThreads === undefined ? {} : { earlierThreads: prepared.earlierThreads }) };
+    const fields = { ...generated, base: comparison.base, includeTests: comparison.includeTests, includeDocs: comparison.includeDocs, fingerprint: comparison.fingerprint, changes: comparison.changes };
+    if (comparison.scope !== 'since-review') return { ...fields, ...reviewScope(comparison) } as ReviewTour;
+    // a Since my review tour keeps the snapshot its start took
+    if (prepared.earlierThreads === undefined) throw new ReviewTourError('stale_during_generation', true);
+    return { ...fields, ...reviewScope(comparison), ...sinceReviewBase(comparison), earlierThreads: prepared.earlierThreads };
   }
 
-  // The commit of the operator's latest submitted review on the Worktree branch's open Pull request,
-  // read fresh from GitHub, and HEAD, which must be that Pull request's head. Only the start sheet
-  // and a start read GitHub: every recapture works from the reviewed commit the scope pins.
-  async sinceReview(worktreeId: string): Promise<{ reviewedCommit: string; head: string }> {
+  // The commit of the operator's latest submitted review on the Worktree branch's open Pull request
+  // and that Pull request's base branch, read fresh from GitHub, and HEAD, which must be that Pull
+  // request's head. Only the start sheet and a start read GitHub: every recapture works from the
+  // reviewed commit and base branch the scope pins.
+  async sinceReview(worktreeId: string): Promise<SinceReviewPin & { head: string }> {
     return (await this.pullRequestReview(worktreeId)).review;
   }
 
-  // Ready a start of a Since my review tour pinned to `reviewedCommit`, which must still be my latest
-  // submitted review. The PR's base branch is fetched so a rebase onto an upstream newer than this
-  // checkout has seen does not bring that upstream into the tour, and the reviewed commit is
-  // fetched when an amend or force-push left it only on GitHub.
-  // It returns the snapshot of my earlier Review threads the tour keeps, from the same read.
-  async startSinceReview(worktreeId: string, reviewedCommit: string): Promise<EarlierThreads> {
-    const { workspace, review, baseBranch, earlierThreads } = await this.pullRequestReview(worktreeId);
-    // a review submitted since the sheet read it
-    if (review.reviewedCommit !== reviewedCommit) throw new ReviewTourError('scope_unavailable', true);
-    if (baseBranch !== undefined) await fetchOriginBranch(workspace, baseBranch);
-    if (!await fetchCommit(workspace, reviewedCommit)) throw new ReviewTourError('reviewed_commit_unreachable', true);
-    return earlierThreads;
+  // Ready a start of a Since my review tour pinned to `pin`, which must still be my latest submitted
+  // review and the Pull request's base branch. That base is fetched into `origin/<base>`, the only
+  // base the tour replays onto, so a rebase onto an upstream newer than this checkout has seen does
+  // not bring that upstream into the tour; a start that cannot fetch it is refused. The reviewed
+  // commit is fetched when an amend or force-push left it only on GitHub.
+  // It returns the snapshot of my earlier Review threads the tour keeps, from the same read, and
+  // the HEAD it checked was the Pull request's head.
+  async startSinceReview(worktreeId: string, pin: SinceReviewPin): Promise<{ earlierThreads: EarlierThreads; head: string }> {
+    const { workspace, review, earlierThreads } = await this.pullRequestReview(worktreeId);
+    // a review submitted, or the Pull request retargeted, since the tour was set up
+    if (review.reviewedCommit !== pin.reviewedCommit || review.baseBranch !== pin.baseBranch) throw new ReviewTourError('since_review_outdated', true);
+    if (!await fetchOriginBranch(workspace, pin.baseBranch)) throw new ReviewTourError('base_branch_unavailable', true);
+    if (!await fetchCommit(workspace, pin.reviewedCommit)) throw new ReviewTourError('reviewed_commit_unreachable', true);
+    return { earlierThreads, head: review.head };
   }
 
-  private async pullRequestReview(worktreeId: string): Promise<{ workspace: string; review: { reviewedCommit: string; head: string }; baseBranch?: string; earlierThreads: EarlierThreads }> {
+  private async pullRequestReview(worktreeId: string): Promise<{ workspace: string; review: SinceReviewPin & { head: string }; earlierThreads: EarlierThreads }> {
     const { workspace, branch } = await this.resolve(worktreeId);
     const pullRequest = branch === undefined ? undefined : await branchPullRequest(this.github, workspace, branch);
     if (pullRequest === undefined) throw new ReviewTourError('no_pull_request', true);
     if (pullRequest === 'unreadable') throw new ReviewTourError('scope_unavailable', true);
     if (pullRequest.viewerReviewCommit === undefined) throw new ReviewTourError('no_submitted_review', true);
+    // the base is what tells upstream's changes from the author's
+    if (pullRequest.baseBranch === undefined) throw new ReviewTourError('scope_unavailable', true);
     const head = (await resolveHead(workspace)).gitBase;
     if (head !== pullRequest.headSha) {
       // behind is what Update to PR head can fix; anything else is the operator's to sort out
@@ -87,8 +99,11 @@ export class ReviewTourService {
       const update = remoteRef === undefined ? 'local-commits' : await headUpdate(workspace, head, pullRequest.headSha, remoteRef);
       throw new ReviewTourError(update === 'local-commits' ? 'head_diverged_from_pull_request' : 'head_behind_pull_request', true);
     }
-    const earlierThreads = { pullRequest: pullRequest.number, threads: earlierThreadsSnapshot(pullRequest.threads.filter(isEarlierThread)), ...(pullRequest.pageFull?.threads ? { partial: true as const } : {}) };
-    return { workspace, review: { reviewedCommit: pullRequest.viewerReviewCommit, head }, ...(pullRequest.baseBranch === undefined ? {} : { baseBranch: pullRequest.baseBranch }), earlierThreads };
+    const mine = pullRequest.threads.filter(isEarlierThread);
+    const threads = earlierThreadsSnapshot(mine);
+    // older threads may be missing when GitHub's page was full or the snapshot's budget dropped some
+    const earlierThreads = { pullRequest: pullRequest.number, threads, ...(pullRequest.pageFull?.threads || threads.length < mine.length ? { partial: true as const } : {}) };
+    return { workspace, review: { reviewedCommit: pullRequest.viewerReviewCommit, baseBranch: pullRequest.baseBranch, head }, earlierThreads };
   }
 
   // capture the Worktree's current Comparison without generation

@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { gitStatusSummary, objectId } from '../git/comparison.js';
-import { at, GithubRequestError, repositoryPath, type Command, type GithubRepository } from '../github/github.js';
+import { at, githubNodeId, GithubRequestError, replyMarkerAtEnd, repositoryPath, type Command, type GithubRepository } from '../github/github.js';
 import { GithubService } from '../github/service.js';
 import { addReviewThreads, addThreadReplies, draftReviewContent, draftReviewTarget, startDraftReview, updateDraftReview, type DraftReview, type DraftReviewTarget } from '../github/writes.js';
 import { run } from '../tmux/command.js';
-import { MAX_EARLIER_THREADS, reviewScope, ReviewTourError, type ReviewComparison, type ReviewTourInput } from './contracts.js';
+import { MAX_EARLIER_THREADS, reviewScope, ReviewTourError, type EarlierThreads, type ReviewComparison, type ReviewTourInput, type SinceReviewScope } from './contracts.js';
 import { diffRows, type DiffRow } from './diff-rows.js';
 
 // Posts a Review tour's feedback to one GitHub pull request of the branch as the operator's draft
@@ -15,9 +15,10 @@ import { diffRows, type DiffRow } from './diff-rows.js';
 // or where GitHub refuses the line range. Line numbers must name committed, pushed content: a
 // commented file must be clean, local HEAD must be the PR's head, and an existing draft must sit on
 // that same commit. A Since my review tour's replies to my earlier threads go into the same draft,
-// each on its thread. Every thread, reply and note section carries a hidden marker that is checked
-// against the draft before posting and read back after a lost response, so a retry or a second
-// submit skips what the draft already holds instead of adding it again.
+// each on its thread, sent only for threads of the stored tour's snapshot. Every thread, reply and note
+// section carries a hidden marker that is checked against the draft before posting and read back
+// after a lost response, so a retry or a second submit skips what the draft already holds instead
+// of adding it again.
 
 type Capture = (worktreeId: string, input: ReviewTourInput) => Promise<ReviewComparison>;
 
@@ -38,9 +39,6 @@ const maxFilePages = 30;
 const threadBatch = 10;
 const maxQuotedRows = 8;
 const markerPattern = /<!-- rac:([A-Za-z0-9_-]+) -->/gu;
-// a GitHub node id, new-style (`PRRT_kwDO…`) or old base64; no `>`, so it cannot close a marker
-const nodeIdCharacters = 'A-Za-z0-9_=+/-';
-const replyMarkerPattern = new RegExp(`<!-- rac-reply:[${nodeIdCharacters}]+:[0-9a-f]{16} -->`, 'gu');
 
 export type ReviewDiffSide = 'deletions' | 'additions';
 export type PullRequestReviewComment = { id: string; changeId: string; startSide: ReviewDiffSide; startLine: number; endSide: ReviewDiffSide; endLine: number; body: string };
@@ -51,7 +49,7 @@ export type PullRequestReviewSection = { key: string; markdown: string };
 export type PullRequestReviewReply = { threadId: string; body: string };
 // `pullRequestNumber` pins the pull request the operator chose; an All PR or a Since my review tour
 // posts, the latter with its replies
-export type PullRequestReviewInput = ({ scope: 'pr' } | { scope: 'since-review'; reviewedCommit: string }) & { includeTests: boolean; includeDocs: boolean; fingerprint: string; pullRequestNumber: number; sections: PullRequestReviewSection[]; comments: PullRequestReviewComment[]; replies: PullRequestReviewReply[] };
+export type PullRequestReviewInput = ({ scope: 'pr' } | SinceReviewScope) & { includeTests: boolean; includeDocs: boolean; fingerprint: string; pullRequestNumber: number; sections: PullRequestReviewSection[]; comments: PullRequestReviewComment[]; replies: PullRequestReviewReply[] };
 // `file` is a comment posted as a file-level thread, `reason` saying why it could not sit on its lines
 export type PullRequestReviewCommentResult = { id: string; result: 'line' | 'file' | 'failed'; reason?: string };
 // a reply is `posted` when the draft holds it, added now or already there
@@ -81,9 +79,11 @@ const sideSchema = z.enum(['deletions', 'additions']);
 // ids and keys travel inside HTML comment markers, so they are held to charsets that cannot close one
 const commentSchema = z.object({ id: z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/u), changeId: z.string().min(8).max(100), startSide: sideSchema, startLine: z.number().int().positive(), endSide: sideSchema, endLine: z.number().int().positive(), body: z.string().max(maxComment).refine(body => body.trim() !== '') }).strict();
 const sectionSchema = z.object({ key: z.string().min(1).max(120).regex(/^[A-Za-z0-9_:-]+$/u), markdown: z.string().max(maxSectionCharacters).refine(markdown => markdown.trim() !== '') }).strict();
-const replySchema = z.object({ threadId: z.string().min(1).max(200).regex(new RegExp(`^[${nodeIdCharacters}]+$`, 'u')), body: z.string().max(maxComment).refine(body => body.trim() !== '') }).strict();
-const postShape = z.object({ includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), pullRequestNumber: z.number().int().positive(), sections: z.array(sectionSchema).max(maxSections), comments: z.array(commentSchema).max(maxComments), replies: z.array(replySchema).max(maxReplies) }).strict();
-const inputSchema = z.discriminatedUnion('scope', [postShape.extend({ scope: z.literal('pr') }), postShape.extend({ scope: z.literal('since-review'), reviewedCommit: z.string().regex(objectId) })])
+// a reply hides nothing in an HTML comment, so neither text nor a marker the reader cannot see
+const replySchema = z.object({ threadId: githubNodeId, body: z.string().max(maxComment).refine(body => body.trim() !== '' && !body.includes('<!--')) }).strict();
+// a post from before replies existed has none
+const postShape = z.object({ includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), pullRequestNumber: z.number().int().positive(), sections: z.array(sectionSchema).max(maxSections), comments: z.array(commentSchema).max(maxComments), replies: z.array(replySchema).max(maxReplies).default([]) }).strict();
+const inputSchema = z.discriminatedUnion('scope', [postShape.extend({ scope: z.literal('pr') }), postShape.extend({ scope: z.literal('since-review'), reviewedCommit: z.string().regex(objectId), baseBranch: z.string().min(1).max(255) })])
   // require something to post, ids and keys the results can be keyed by, and bounded notes
   .refine(input => input.sections.length > 0 || input.comments.length > 0 || input.replies.length > 0)
   .refine(input => new Set(input.comments.map(comment => comment.id)).size === input.comments.length)
@@ -194,8 +194,8 @@ export function threadInput(reviewId: string, path: string, comment: PullRequest
 // ---- Service ------------------------------------------------------------------------------------
 
 // a draft review as it stands: its body, the tour comments its threads already post, and the
-// markers of the replies it holds
-type ReviewState = { id: string; body: string; placed: Map<string, 'line' | 'file'>; replies: Set<string> };
+// replies it holds, each its ending marker and the comment it replies to
+type ReviewState = { id: string; body: string; placed: Map<string, 'line' | 'file'>; replies: Array<{ marker: string; replyTo: string }> };
 type PlannedThread = { comment: PullRequestReviewComment; path: string; patch: string; placement: 'line' | 'file'; reason?: string; body: string };
 
 const git = '/usr/bin/git';
@@ -218,13 +218,15 @@ export class PullRequestReviewService {
 
   constructor(private readonly capture: Capture, private readonly command: Command = run, private readonly github: Pick<GithubService, 'client' | 'token' | 'repositoryAt' | 'changed'> = new GithubService()) {}
 
-  // post a tour's feedback as the operator's draft review on the chosen pull request
-  async post(worktreeId: string, input: PullRequestReviewInput): Promise<PullRequestReviewResult> {
+  // Post a tour's feedback as the operator's draft review on the chosen pull request. `earlier` is the
+  // stored tour's snapshot of my earlier threads, which replies must belong to.
+  async post(worktreeId: string, input: PullRequestReviewInput, earlier?: EarlierThreads): Promise<PullRequestReviewResult> {
     const comparison = await this.capture(worktreeId, { ...reviewScope(input), includeTests: input.includeTests, includeDocs: input.includeDocs });
     // the comments' change ids and line numbers belong to the tour's Comparison
     if (comparison.fingerprint !== input.fingerprint) throw new PullRequestReviewError('stale', false, 'The worktree has changed since this tour was built. Rebuild the tour, then post again.');
+    const threads = this.replyThreads(input, earlier);
     const previous = this.posting.get(comparison.workspace) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(async () => await this.postTo(comparison, input));
+    const current = previous.catch(() => undefined).then(async () => await this.postTo(comparison, input, threads));
     this.posting.set(comparison.workspace, current);
     try { return await current; } catch (error) { throw reviewError(error); } finally {
       // forget a settled post unless another queued behind it
@@ -232,7 +234,17 @@ export class PullRequestReviewService {
     }
   }
 
-  private async postTo(comparison: ReviewComparison, input: PullRequestReviewInput): Promise<PullRequestReviewResult> {
+  // each reply's thread, by id, with the ids of its comments; a reply only goes to a thread of the
+  // stored tour's snapshot, on that snapshot's pull request
+  private replyThreads(input: PullRequestReviewInput, earlier: EarlierThreads | undefined): Map<string, Set<string>> {
+    const threads = new Map(earlier?.threads.map(thread => [thread.id, new Set(thread.comments.map(comment => comment.id))]));
+    if (input.replies.length === 0) return threads;
+    if (earlier === undefined || input.replies.some(reply => !threads.has(reply.threadId))) throw new PullRequestReviewError('stale', false, 'This tour\'s earlier threads are no longer stored here. Reopen the tour, then post again.');
+    if (earlier.pullRequest !== input.pullRequestNumber) throw new PullRequestReviewError('pull_request_mismatch', false, `Replies to your earlier threads go only to pull request #${earlier.pullRequest}.`, { pullRequestNumber: input.pullRequestNumber });
+    return threads;
+  }
+
+  private async postTo(comparison: ReviewComparison, input: PullRequestReviewInput, threads: Map<string, Set<string>>): Promise<PullRequestReviewResult> {
     const changes = new Map(comparison.changes.map(change => [change.id, change]));
     const results = new Map<string, PullRequestReviewCommentResult>();
     const replies = new Map<string, PullRequestReviewReplyResult>();
@@ -285,7 +297,7 @@ export class PullRequestReviewService {
         const refused = await this.addThreads(token, review.id, fresh, results);
         // a line range GitHub refuses goes on the file instead, a different mutation the markers guard
         await this.addThreads(token, review.id, refused.map(({ thread, reason }) => fileThread(thread, `GitHub refused the line range: ${reason}`)), results);
-        await this.addReplies(token, review, input.replies, replies);
+        await this.addReplies(token, review, input.replies, threads, replies);
       }
     } finally {
       // anything written, even by a post that then failed, changes what the console shows of the pull request
@@ -326,10 +338,13 @@ export class PullRequestReviewService {
     return found;
   }
 
-  // a draft review's body and the tour comments it already holds
+  // a draft review's body, the tour comments it already holds, and its replies that end with a marker
   private async reviewState(token: string, id: string): Promise<ReviewState> {
     const { body, comments } = await draftReviewContent(this.github.client, token, id);
-    return { id, body, placed: placedComments(comments), replies: new Set(comments.flatMap(comment => comment.body.match(replyMarkerPattern) ?? [])) };
+    return { id, body, placed: placedComments(comments), replies: comments.flatMap(comment => {
+      const marker = replyMarkerAtEnd.exec(comment.body.trimEnd())?.[0];
+      return marker === undefined || comment.replyTo === undefined ? [] : [{ marker, replyTo: comment.replyTo }];
+    }) };
   }
 
   // the PR's files that carry comments, each with GitHub's patch when it shows one
@@ -353,7 +368,7 @@ export class PullRequestReviewService {
   // on the head is the one this opened
   private async openReview(token: string, repository: GithubRepository, number: number, branch: string, pullRequestId: string, head: string, body: string): Promise<ReviewState> {
     try {
-      return { id: await startDraftReview(this.github.client, token, pullRequestId, head, body), body, placed: new Map(), replies: new Set() };
+      return { id: await startDraftReview(this.github.client, token, pullRequestId, head, body), body, placed: new Map(), replies: [] };
     } catch (error) {
       if (!(error instanceof GithubRequestError) || error.kind !== 'transient') throw error;
       const draft = (await this.pullRequest(token, repository, number, branch)).draft;
@@ -400,13 +415,15 @@ export class PullRequestReviewService {
     return refused;
   }
 
-  // add each reply the draft does not hold yet, in batches; a thread deleted since the tour read it
-  // fails its own reply, and a batch with a lost response is read back from the draft
-  private async addReplies(token: string, review: ReviewState, requested: PullRequestReviewReply[], results: Map<string, PullRequestReviewReplyResult>): Promise<void> {
+  // Add each reply the draft does not hold yet, in batches; a thread deleted since the tour read it
+  // fails its own reply, and a batch with a lost response is read back from the draft. The draft
+  // holds a reply when one of its replies on that thread (`threads`' comment ids) ends with its marker.
+  private async addReplies(token: string, review: ReviewState, requested: PullRequestReviewReply[], threads: Map<string, Set<string>>, results: Map<string, PullRequestReviewReplyResult>): Promise<void> {
     const posted = (reply: PullRequestReviewReply) => results.set(reply.threadId, { threadId: reply.threadId, result: 'posted' });
     const failed = (reply: PullRequestReviewReply, reason: string) => results.set(reply.threadId, { threadId: reply.threadId, result: 'failed', reason });
+    const holds = (state: ReviewState | undefined, reply: PullRequestReviewReply) => state?.replies.some(held => held.marker === replyMarker(reply) && threads.get(reply.threadId)?.has(held.replyTo) === true) === true;
     const fresh = requested.filter(reply => {
-      const held = review.replies.has(replyMarker(reply));
+      const held = holds(review, reply);
       if (held) posted(reply);
       return !held;
     });
@@ -418,7 +435,7 @@ export class PullRequestReviewService {
         continue;
       }
       const reread = await this.reviewState(token, review.id).catch(() => undefined);
-      batch.forEach(reply => { if (reread?.replies.has(replyMarker(reply)) === true) posted(reply); else failed(reply, outcome.reason); });
+      batch.forEach(reply => { if (holds(reread, reply)) posted(reply); else failed(reply, outcome.reason); });
     }
   }
 }

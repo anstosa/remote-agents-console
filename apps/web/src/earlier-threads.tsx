@@ -6,10 +6,14 @@ import { refusal, WriteButton } from './github-panel.js';
 import { MarkdownBlocks } from './note-markdown.js';
 import type { PullRequestComment, PullRequestReviewThread } from './pull-request-comments.js';
 import { threadLines } from './review-thread-prompt.js';
+import { MAX_INLINE_COMMENT } from './code-panel/patch-rows.js';
 
 // The Review threads I opened on a Since my review tour's Pull request `pullRequest`, as GitHub had
 // them when the tour started; `partial` when GitHub's page of threads was full, so older ones may be
-// missing.
+// missing. A snapshot holds at most MAX_EARLIER_THREADS threads, each id a GitHub node id of at most
+// MAX_THREAD_ID characters.
+export const MAX_EARLIER_THREADS = 100;
+export const MAX_THREAD_ID = 200;
 export type EarlierThreads = { pullRequest: number; threads: PullRequestReviewThread[]; partial?: true };
 type Request = (url: string, init?: RequestInit, observeReachability?: boolean) => Promise<Response>;
 
@@ -85,8 +89,8 @@ export const shownVerdict = (view: EarlierVerdicts, threadId: string): Verdict |
 // by Post to PR, into my draft review; `posted` the threads whose reply that draft now holds. A reply
 // starts from the shown verdict's body, and `onChange` with no text discards it.
 export type EarlierReplies = { text: Readonly<Record<string, string>>; posted: ReadonlySet<string>; onChange: (threadId: string, text: string | undefined) => void };
-// the server's cap on one reply, as on an inline comment
-export const maxReply = 4_000;
+// a reply hides nothing from its readers: GitHub does not show an HTML comment, so the server refuses one
+export const hidesText = (reply: string): boolean => reply.includes('<!--');
 
 // each verdict's badge and what its evidence lines show about its thread
 const verdictText: Record<VerdictStatus, { label: string; evidence: string }> = {
@@ -139,7 +143,7 @@ export function EarlierThread({ thread, resolving, verdicts, replying, askFor, f
       {verdict !== undefined && <div className="note-markdown review-tour-verdict-body"><MarkdownBlocks text={verdict.body} /></div>}
       {reply !== undefined && (replied
         ? <div className="review-tour-earlier-reply-box"><small>In your draft review on GitHub</small><p>{reply}</p></div>
-        : <div className="review-tour-earlier-reply-box"><textarea aria-label={`Reply to your comment on ${where}`} value={reply} maxLength={maxReply} onChange={event => replying.onChange(thread.id, event.target.value)} /><small>Post to PR adds it to your draft review.</small></div>)}
+        : <div className="review-tour-earlier-reply-box"><textarea aria-label={`Reply to your comment on ${where}`} value={reply} maxLength={MAX_INLINE_COMMENT} onChange={event => replying.onChange(thread.id, event.target.value)} />{hidesText(reply) ? <small role="alert">GitHub hides anything after “&lt;!--”, so a reply cannot contain it. Remove it to post.</small> : <small>Post to PR adds it to your draft review.</small>}</div>)}
       {resolving.errors[thread.id] !== undefined && <p className="review-tour-error" role="alert">{resolving.errors[thread.id]}</p>}
       <div><a href={first.url} target="_blank" rel="noreferrer">View on GitHub</a>{verdict !== undefined && <button type="button" onClick={() => verdicts.onDismiss(verdict)}>Dismiss verdict</button>}{dismissed !== undefined && <button type="button" onClick={() => verdicts.onRestore(dismissed)}>Restore verdict</button>}{reply === undefined ? <button type="button" onClick={() => replying.onChange(thread.id, verdict?.body ?? '')}>Reply</button> : !replied && <button type="button" onClick={() => replying.onChange(thread.id, undefined)}>Discard reply</button>}{!thread.resolved && !resolvedHere && <WriteButton busy={busy} disabled={busy || resolving.resolve === undefined} title={resolving.resolve === undefined ? 'Add this repository as a Project to resolve threads here' : undefined} onClick={() => void resolving.resolve?.(thread.id)}><Icon name="check" />Resolve</WriteButton>}</div>
       {askFor?.(thread.id)}

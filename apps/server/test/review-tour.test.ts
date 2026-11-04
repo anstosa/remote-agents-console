@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classifyReviewPath } from '../src/git/change-classification.js';
-import { parseGeneratedReviewTour, parseReviewRequestId, parseReviewTour, ReviewTourError, parseReviewTourInput, prohibitedNarration, type ReviewComparison, type ReviewTour } from '../src/review-tour/contracts.js';
+import { earlierThreadsSnapshot, MAX_EARLIER_CHARACTERS, parseGeneratedReviewTour, parseReviewRequestId, parseReviewTour, ReviewTourError, parseReviewTourInput, prohibitedNarration, type ReviewComparison, type ReviewTour } from '../src/review-tour/contracts.js';
 import { ReviewTourJobs } from '../src/review-tour/jobs.js';
 import { ReviewTourService, type PreparedReviewTour } from '../src/review-tour/service.js';
 import type { ReviewTourGenerator } from '../src/review-tour/generator.js';
@@ -76,27 +76,55 @@ describe('review tour contracts', () => {
     expect(parseReviewTour({ ...tour, scope: 'working', commit })).toBeUndefined();
   });
 
-  it('loads a Since my review tour with its reviewed commit and base tree, and no other tour with a base tree', () => {
+  it('loads a Since my review tour with its reviewed commit, base branch, base tree and earlier threads, and no other tour with them', () => {
     const tour = { title: 'Since my review', overview: 'Walk through the fixes.', steps: [{ id: 'fixes', title: 'The fixes', explanation: 'It answers the review.', changeIds: [implementationChange.id] }], base: 'aaaaaaa (rebased)', includeTests: false, includeDocs: false, fingerprint: 'fingerprint-1234567890', changes: [implementationChange] };
-    const [reviewedCommit, baseTree] = ['a'.repeat(40), 'b'.repeat(40)];
-    expect(parseReviewTourInput({ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false })).toEqual({ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false });
-    expect(parseReviewTourInput({ scope: 'since-review', includeTests: false, includeDocs: false })).toBeUndefined();
-    expect(parseReviewTourInput({ scope: 'since-review', reviewedCommit, baseTree, includeTests: false, includeDocs: false })).toBeUndefined();
-    expect(parseReviewTour({ ...tour, scope: 'since-review', reviewedCommit, baseTree })).toEqual({ ...tour, scope: 'since-review', reviewedCommit, baseTree });
-    expect(parseReviewTour({ ...tour, scope: 'since-review', reviewedCommit, baseTree, fallback: true })).toEqual({ ...tour, scope: 'since-review', reviewedCommit, baseTree, fallback: true });
-    expect(parseReviewTour({ ...tour, scope: 'since-review', reviewedCommit })).toBeUndefined();
+    const [reviewedCommit, baseTree, baseBranch] = ['a'.repeat(40), 'b'.repeat(40), 'main'];
+    const earlierThreads = { pullRequest: 7, threads: [] };
+    expect(parseReviewTourInput({ scope: 'since-review', reviewedCommit, baseBranch, includeTests: false, includeDocs: false })).toEqual({ scope: 'since-review', reviewedCommit, baseBranch, includeTests: false, includeDocs: false });
+    expect(parseReviewTourInput({ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false })).toBeUndefined();
+    expect(parseReviewTourInput({ scope: 'since-review', baseBranch, includeTests: false, includeDocs: false })).toBeUndefined();
+    expect(parseReviewTourInput({ scope: 'since-review', reviewedCommit, baseBranch, baseTree, includeTests: false, includeDocs: false })).toBeUndefined();
+    expect(parseReviewTourInput({ scope: 'pr', baseBranch, includeTests: false, includeDocs: false })).toBeUndefined();
+    const since = { ...tour, scope: 'since-review', reviewedCommit, baseBranch, baseTree, earlierThreads };
+    expect(parseReviewTour(since)).toEqual(since);
+    expect(parseReviewTour({ ...since, fallback: true })).toEqual({ ...since, fallback: true });
+    for (const missing of ['baseBranch', 'baseTree', 'earlierThreads']) expect(parseReviewTour({ ...since, [missing]: undefined })).toBeUndefined();
     expect(parseReviewTour({ ...tour, scope: 'pr', baseTree })).toBeUndefined();
     expect(parseReviewTour({ ...tour, scope: 'pr', fallback: true })).toBeUndefined();
+    expect(parseReviewTour({ ...tour, scope: 'pr', earlierThreads })).toBeUndefined();
   });
 
-  it('loads a Since my review tour\'s snapshot of my earlier threads, and no other tour with one', () => {
+  it('loads a Since my review tour\'s snapshot of my earlier threads, held to GitHub node ids', () => {
     const tour = { title: 'Since my review', overview: 'Walk through the fixes.', steps: [{ id: 'fixes', title: 'The fixes', explanation: 'It answers the review.', changeIds: [implementationChange.id] }], base: 'aaaaaaa (rebased)', includeTests: false, includeDocs: false, fingerprint: 'fingerprint-1234567890', changes: [implementationChange] };
-    const comment = { id: 'C1', author: 'octocat', bot: false, mine: true, body: 'Back off first', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/7#discussion_r1' };
+    const comment = { id: 'C1', author: 'octocat', bot: false, mine: true, editedBy: 'mona', body: 'Back off first', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/7#discussion_r1' };
     const earlierThreads = { pullRequest: 7, partial: true, threads: [{ id: 'T1', path: 'src/feature.ts', line: 3, startLine: 1, resolved: true, resolvedBy: { login: 'mona' }, outdated: false, diffHunk: '@@ -1 +1 @@', comments: [comment] }] };
-    const since = { ...tour, scope: 'since-review', reviewedCommit: 'a'.repeat(40), baseTree: 'b'.repeat(40) };
+    const since = { ...tour, scope: 'since-review', reviewedCommit: 'a'.repeat(40), baseBranch: 'main', baseTree: 'b'.repeat(40) };
     expect(parseReviewTour({ ...since, earlierThreads })).toEqual({ ...since, earlierThreads });
-    expect(parseReviewTour({ ...tour, scope: 'pr', earlierThreads })).toBeUndefined();
     expect(parseReviewTour({ ...since, earlierThreads: { ...earlierThreads, threads: [{ ...earlierThreads.threads[0], comments: [] }] } })).toBeUndefined();
+    expect(parseReviewTour({ ...since, earlierThreads: { ...earlierThreads, threads: [{ ...earlierThreads.threads[0], id: 'T1 -->' }] } })).toBeUndefined();
+    expect(parseReviewTour({ ...since, earlierThreads: { ...earlierThreads, threads: [{ ...earlierThreads.threads[0], comments: [{ ...comment, id: 'C 1' }] }] } })).toBeUndefined();
+  });
+
+  it('keeps a snapshot within its total budget, dropping my unsent replies, then the oldest replies, then the oldest threads', () => {
+    const comment = (id: string, minute: number, extra: object = {}) => ({ id, author: 'mona', bot: false, body: `${id} ${'x'.repeat(3_990)}`, createdAt: `2026-10-01T00:${String(minute).padStart(2, '0')}:00Z`, url: `https://github.com/octo/repo/pull/7#discussion_${id}`, ...extra });
+    const thread = (index: number, comments: ReturnType<typeof comment>[]) => ({ id: `T${index}`, path: 'src/feature.ts', line: 3, resolved: false, outdated: false, diffHunk: '@@ -1 +1 @@', comments });
+    // a reply still in my Draft review never enters the snapshot
+    expect(earlierThreadsSnapshot([thread(0, [comment('C0', 0, { mine: true }), comment('C1', 1, { mine: true, pending: true })])])[0]!.comments.map(entry => entry.id)).toEqual(['C0']);
+    // 60 threads of an opener and five replies is about 1.4M characters
+    const threads = Array.from({ length: 60 }, (_, index) => thread(index, [comment(`O${index}`, 0, { mine: true }), ...Array.from({ length: 5 }, (_, reply) => comment(`R${index}-${reply}`, (index + reply * 7) % 60))]));
+    const kept = earlierThreadsSnapshot(threads);
+    const size = kept.reduce((total, entry) => total + entry.diffHunk.length + entry.comments.reduce((sum, item) => sum + item.body.length, 0), 0);
+    expect(size).toBeLessThanOrEqual(MAX_EARLIER_CHARACTERS);
+    // every reply went before any thread did, and the newest threads stay
+    expect(kept.every(entry => entry.comments.length === 1)).toBe(true);
+    expect(kept.at(-1)!.id).toBe('T59');
+    expect(kept.length).toBeLessThan(60);
+    // within budget, the oldest replies go first
+    const few = earlierThreadsSnapshot(threads.slice(0, 9));
+    const replies = few.flatMap(entry => entry.comments.slice(1));
+    const dropped = threads.slice(0, 9).flatMap(entry => entry.comments.slice(1)).filter(entry => !replies.some(kept => kept.id === entry.id));
+    expect(dropped.length).toBeGreaterThan(0);
+    expect(Math.max(...dropped.map(entry => Date.parse(entry.createdAt)))).toBeLessThanOrEqual(Math.min(...replies.map(entry => Date.parse(entry.createdAt))));
   });
 });
 
@@ -180,24 +208,41 @@ describe('review tour jobs', () => {
 });
 
 describe('a Since my review start', () => {
+  const input = { scope: 'since-review' as const, reviewedCommit: 'a'.repeat(40), baseBranch: 'main', includeTests: false, includeDocs: false };
+  // a prepared Since my review Comparison ending at `head`
+  const preparedSince = (head: string): PreparedReviewTour => {
+    const { comparison, resolved } = prepared();
+    return { resolved, comparison: { ...comparison, scope: 'since-review', reviewedCommit: input.reviewedCommit, baseBranch: 'main', baseTree: 'b'.repeat(40), head } };
+  };
+
   it('refuses before capturing when the Pull request check refuses', async () => {
     let prepared = 0;
     const service = { startSinceReview: async () => { throw new ReviewTourError('head_behind_pull_request', true); }, prepare: async () => { prepared += 1; return prepared; } } as unknown as ReviewTourService;
     const jobs = new ReviewTourJobs(service);
     try {
-      await expect(jobs.start('owner-a', 'cora', { scope: 'since-review', reviewedCommit: 'a'.repeat(40), includeTests: false, includeDocs: false })).rejects.toMatchObject({ code: 'head_behind_pull_request' });
+      await expect(jobs.start('owner-a', 'cora', input)).rejects.toMatchObject({ code: 'head_behind_pull_request' });
       expect(prepared).toBe(0);
     } finally { jobs.close(); }
   });
 
-  it('prepares the tour with the thread snapshot the start took', async () => {
+  it('prepares the tour with the thread snapshot the start took, on the head the start checked', async () => {
     const earlierThreads = { pullRequest: 7, threads: [] };
     const handed: unknown[] = [];
-    const service = { startSinceReview: async () => earlierThreads, prepare: async (_worktreeId: string, _input: unknown, snapshot: unknown) => { handed.push(snapshot); return prepared(); }, generate: async () => await new Promise<ReviewTour>(() => {}) } as unknown as ReviewTourService;
+    const started: unknown[] = [];
+    const service = { startSinceReview: async (_worktreeId: string, scope: unknown) => { started.push(scope); return { earlierThreads, head: 'c'.repeat(40) }; }, prepare: async (_worktreeId: string, _input: unknown, snapshot: unknown) => { handed.push(snapshot); return preparedSince('c'.repeat(40)); }, generate: async () => await new Promise<ReviewTour>(() => {}) } as unknown as ReviewTourService;
     const jobs = new ReviewTourJobs(service);
     try {
-      await jobs.start('owner-a', 'cora', { scope: 'since-review', reviewedCommit: 'a'.repeat(40), includeTests: false, includeDocs: false });
+      await jobs.start('owner-a', 'cora', input);
+      expect(started).toEqual([{ reviewedCommit: input.reviewedCommit, baseBranch: 'main' }]);
       expect(handed).toEqual([earlierThreads]);
+    } finally { jobs.close(); }
+  });
+
+  it('refuses a start whose HEAD moved off the pull request\'s head while it captured', async () => {
+    const service = { startSinceReview: async () => ({ earlierThreads: { pullRequest: 7, threads: [] }, head: 'c'.repeat(40) }), prepare: async () => preparedSince('d'.repeat(40)), generate: async () => await new Promise<ReviewTour>(() => {}) } as unknown as ReviewTourService;
+    const jobs = new ReviewTourJobs(service);
+    try {
+      await expect(jobs.start('owner-a', 'cora', input)).rejects.toMatchObject({ code: 'stale_during_generation' });
     } finally { jobs.close(); }
   });
 });

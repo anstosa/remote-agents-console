@@ -3,6 +3,7 @@ import { reviewAgentKinds, validConversationId, type ReviewAgentKind } from '../
 import { diffRows } from '../review-tour/diff-rows.js';
 import { earlierThreadForPrompt, othersClaims, type Finding, type Verdict } from '../code-review/contracts.js';
 import type { PullRequestReviewThread } from '../domain/models.js';
+import { githubNodeId } from '../github/github.js';
 import type { ComparisonPatch } from '../git/comparison.js';
 import type { ReviewChange } from '../review-tour/contracts.js';
 
@@ -56,13 +57,13 @@ const turnSchema = z.object({ id, question: text(MAX_ASK_QUESTION).refine(value 
 const side = z.enum(['additions', 'deletions']);
 const linesShape = { changeId: z.string().min(1).max(4_096), startSide: side.optional(), side, startLine: line, endLine: line };
 // a GitHub Review thread's id, which an Ask thread about it is kept under
-const reviewThreadId = z.string().min(1).max(200);
+const reviewThreadId = githubNodeId;
 const anchorFile = { file: z.string().min(1).max(4_096), excerpt: text(MAX_ASK_EXCERPT) };
 const anchorSchema = z.union([
   z.object({ ...linesShape, findingId: id.optional(), title: z.string().min(1).max(200).optional(), ...anchorFile }).strict(),
   z.object({ reviewThreadId, ...anchorFile }).strict()
 ]);
-const threadSchema = z.object({ id: reviewThreadId, target: z.enum(['reviewer', 'guide', 'diff']), kind: z.enum(reviewAgentKinds), conversation: z.string().min(1).max(200), anchor: anchorSchema, turns: z.array(turnSchema).max(MAX_ASK_TURNS) }).strict()
+const threadSchema = z.object({ id: z.string().min(1).max(200), target: z.enum(['reviewer', 'guide', 'diff']), kind: z.enum(reviewAgentKinds), conversation: z.string().min(1).max(200), anchor: anchorSchema, turns: z.array(turnSchema).max(MAX_ASK_TURNS) }).strict()
   .refine(thread => validConversationId(thread.kind, thread.conversation) && (!onLines(thread.anchor) ? thread.target === 'reviewer' : thread.target !== 'reviewer' || thread.anchor.findingId !== undefined && thread.anchor.title !== undefined));
 const question = { question: text(MAX_ASK_QUESTION), fingerprint: z.string().min(16).max(128) };
 const requestSchema = z.union([

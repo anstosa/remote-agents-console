@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { ReviewTourError, type ReviewErrorCode } from '../review-tour/contracts.js';
+import { earlierThreadsOf, ReviewTourError, type ReviewErrorCode } from '../review-tour/contracts.js';
 import { pendingRunProgress, startedReviewJob, type StartedReviewJob } from '../review-tour/jobs.js';
 import type { OrphanRecovery } from '../review-runs/interactive.js';
 import type { ReviewRunInfo } from '../review-runs/runner.js';
@@ -94,7 +94,7 @@ export class CodeReviewJobs {
     const { kind: _kind, worktreeId, branch, ...reviewed } = run;
     return {
       // a Since my review tour's earlier threads are the ones the run judged
-      validate: value => codeReviewReplyError(value, stored.tour.earlierThreads?.threads),
+      validate: value => codeReviewReplyError(value, earlierThreadsOf(stored.tour)?.threads),
       save: async (output, conversation) => {
         const review = codeReviewFrom(output, stored.tour, reviewed, conversation);
         if (review === undefined || !await store.saveCodeReviewIfCurrent(worktreeId, branch, review, 0)) return false;

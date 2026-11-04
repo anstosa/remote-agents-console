@@ -77,6 +77,13 @@ describe('code review verdicts', () => {
     ]);
   });
 
+  it('takes a verdict without evidence, as a model may leave the field out', () => {
+    const { evidence: _evidence, ...bare } = verdict('PRRT_open', 'needs_you');
+    expect(parseGeneratedCodeReview({ findings: [], general: [], verdicts: [bare] }, changes, threads)?.verdicts).toEqual([{ threadId: 'PRRT_open', status: 'needs_you', body: 'The retry now backs off.' }]);
+    // a stored verdict's thread id is a GitHub node id
+    expect(parseGeneratedCodeReview({ findings: [], general: [], verdicts: [verdict('PRRT open')] }, changes, [{ id: 'PRRT open' }])).toBeUndefined();
+  });
+
   it('drops a verdict on an unknown thread and evidence outside its hunk, keeping that verdict', () => {
     const parsed = parseGeneratedCodeReview({ findings: [], general: [], verdicts: [verdict('PRRT_other'), verdict('PRRT_open', 'addressed', { changeId: hunk.id, side: 'additions', startLine: 23, endLine: 24 }), verdict('PRRT_resolved', 'not_addressed', { changeId: 'chg_unknown1', side: 'additions', startLine: 1, endLine: 1 })] }, changes, threads);
     expect(parsed?.verdicts).toEqual([
@@ -162,7 +169,7 @@ describe('code review prompt', () => {
 });
 
 describe('code review prompt on a Since my review tour', () => {
-  const since: ReviewComparison = { ...comparison, scope: 'since-review', reviewedCommit: 'a'.repeat(40), baseTree: 'b'.repeat(40), base: 'aaaaaaa (rebased)' };
+  const since: ReviewComparison = { ...comparison, scope: 'since-review', reviewedCommit: 'a'.repeat(40), baseBranch: 'main', baseTree: 'b'.repeat(40), head: 'c'.repeat(40), base: 'aaaaaaa (rebased)' };
   const comment = (id: string, author: string, body: string, mine = false) => ({ id, author, bot: false, ...(mine ? { mine: true as const } : {}), body, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/octo/repo/pull/7#discussion_${id}` });
   const earlierThreads: EarlierThreads = { pullRequest: 7, threads: [
     { id: 'PRRT_open', path: 'src/route.ts', line: 22, startLine: 20, resolved: false, outdated: false, diffHunk: '@@ -18,3 +18,5 @@\n+retry()', comments: [comment('C1', 'octocat', 'Back off between retries.', true), comment('C2', 'mona', 'Done, see the new delay.')] },
@@ -182,6 +189,12 @@ describe('code review prompt on a Since my review tour', () => {
       { id: 'PRRT_open', path: 'src/route.ts', side: 'new', startLine: 20, endLine: 22, resolved: false, outdated: false, diffHunk: '@@ -18,3 +18,5 @@\n+retry()', comments: [{ from: 'me', body: 'Back off between retries.' }, { from: '@mona', body: 'Done, see the new delay.' }] },
       { id: 'PRRT_old', path: 'src/old.ts', side: 'old', startLine: 4, endLine: 4, resolved: true, resolvedBy: '@mona', outdated: true, diffHunk: '@@ -4 +4 @@\n-guard()', comments: [{ from: 'me', body: 'Keep the guard.' }] }
     ] });
+  });
+
+  it('reads a comment someone else edited last as theirs, not mine', () => {
+    const edited: EarlierThreads = { pullRequest: 7, threads: [{ ...earlierThreads.threads[0]!, comments: [{ ...comment('C1', 'octocat', 'Ship it as is.', true), editedBy: 'mona' }, { ...comment('C2', 'mona', 'Done.'), editedBy: 'kai' }] }] };
+    const block = JSON.parse(codeReviewPrompt(preset.prompt, undefined, since, edited).split('\n\n').at(-1)!) as { earlierThreads: Array<{ comments: unknown[] }> };
+    expect(block.earlierThreads[0]!.comments).toEqual([{ from: 'me, edited by @mona', body: 'Ship it as is.' }, { from: '@mona, edited by @kai', body: 'Done.' }]);
   });
 
   it('says what the stored threads leave out', () => {

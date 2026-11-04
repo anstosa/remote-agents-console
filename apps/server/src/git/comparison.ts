@@ -648,12 +648,18 @@ async function rangeComparison(workspace: string, kind: Comparison['kind'], base
 // a fetch waits on the network, and a replay may write tree objects
 const fetchTimeoutMs = 120_000;
 const replayTimeoutMs = 30_000;
-// a branch name git accepts that cannot be read as an option or a refspec
-const plainBranch = /^(?!-)(?!.*\.\.)[^\s:~^?*[\\]+$/u;
 
-// update origin's `branch` into its remote-tracking ref; false when it could not
+// a branch name git accepts as-is: not `HEAD`, not flag-shaped, and passing `check-ref-format --branch`
+export async function safeBranchName(workspace: string, branch: string, command: (binary: string, args: string[]) => Promise<{ code: number; stdout: string }> = run): Promise<boolean> {
+  if (branch === 'HEAD' || branch.startsWith('-')) return false;
+  const checked = await command(git, ['-C', workspace, 'check-ref-format', '--branch', branch]);
+  return checked.code === 0 && checked.stdout.trim() === branch;
+}
+
+// update origin's `branch` into its remote-tracking ref; false when it could not, or `branch` (a
+// name GitHub gave) is not one git takes as-is
 export async function fetchOriginBranch(workspace: string, branch: string): Promise<boolean> {
-  if (!plainBranch.test(branch)) return false;
+  if (!await safeBranchName(workspace, branch)) return false;
   return (await run(git, ['-C', workspace, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], undefined, fetchTimeoutMs)).code === 0;
 }
 

@@ -136,6 +136,33 @@ describe('a pull request\'s detail', () => {
     ]);
   });
 
+  it('marks my unsent replies and a comment someone else edited last, and counts a lone reply Post to PR added as a review', async () => {
+    const comment = (id: string, login: string, extra: object = {}) => ({ id, author: author(login), body: `${id} text`, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/octo/repo/pull/9#discussion_${id}`, diffHunk: '@@ -1 +1 @@', viewerDidAuthor: login === 'octocat', ...extra });
+    const threads = { nodes: [{ id: 'T1', isResolved: false, isOutdated: false, path: 'src/a.ts', line: 5, comments: { nodes: [
+      // my opener, edited since by another participant; their own edit of their reply is theirs
+      comment('C1', 'octocat', { editor: { login: 'mona' } }),
+      comment('C2', 'mona', { editor: { login: 'mona' } }),
+      // my reply still in my unsent Draft review
+      comment('C3', 'octocat', { state: 'PENDING' })
+    ] } }] };
+    const review = (id: string, oid: string, body: string) => ({ id, author: author('octocat'), state: 'COMMENTED', body: '', submittedAt: '2026-10-02T00:00:00Z', url: `https://github.com/octo/repo/pull/9#pullrequestreview-${id}`, viewerDidAuthor: true, commit: { oid }, comments: { totalCount: 1, nodes: [{ replyTo: { id: 'C1' }, body }] } });
+    const marker = '<!-- rac-reply:T1:0123456789abcdef -->';
+    const read = async (reviews: unknown[]) => {
+      const queries: string[] = [];
+      const { service } = polled({}, { request: async (_url, init) => { queries.push(String(init?.body)); return reply({ data: { repository: { pullRequest: { ...detailPayload.data.repository.pullRequest, reviewThreads: threads, reviews: { nodes: reviews } } } } }); } });
+      return { queries, pullRequest: (await service.pullRequestDetail(repo, 9)).pullRequest };
+    };
+
+    const { queries, pullRequest } = await read([review('R1', sha('c'), `Fixed, thanks.\n\n${marker}`), review('R2', sha('d'), 'A reply on GitHub.')]);
+
+    for (const field of ['editor{login}', 'diffHunk state}', 'replyTo{id} body']) expect(queries[0]).toContain(field);
+    expect(pullRequest?.threads[0]?.comments.map(({ id, editedBy, pending }) => ({ id, editedBy, pending }))).toEqual([{ id: 'C1', editedBy: 'mona', pending: undefined }, { id: 'C2', editedBy: undefined, pending: undefined }, { id: 'C3', editedBy: undefined, pending: true }]);
+    // the one reply Post to PR put in a draft I then submitted is a re-review; a lone reply posted at once is not
+    expect(pullRequest?.viewerReviewCommit).toBe(sha('c'));
+    // only a marker ending the reply counts
+    expect((await read([review('R1', sha('c'), `${marker} and more`)])).pullRequest?.viewerReviewCommit).toBeUndefined();
+  });
+
   it('reuses the detail while a fresh list shows the pull request unchanged, and reads it again once it moves', async () => {
     const pull = { number: 1, branch: 'feature', mine: true, updatedAt: '2026-10-30T10:00:00Z', sha: sha('a'), checks: 'SUCCESS' as 'SUCCESS' | 'FAILURE' | 'PENDING', threads: [{ isResolved: false, isOutdated: false }] };
     const { service, calls, clock } = polled(() => ({ 'octo/repo': { pulls: [{ ...pull }] } }));

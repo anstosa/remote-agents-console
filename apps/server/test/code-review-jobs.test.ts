@@ -225,8 +225,8 @@ describe('tour starts with a code review', () => {
     const reviewer = new CodeReviewer(runner, { presets: [preset], defaultPreset: preset.id });
     const base = prepared();
     const earlierThreads = { pullRequest: 7, threads: [{ id: 'PRRT_1', path: change.file, line: 2, resolved: false, outdated: false, diffHunk: '@@ -1 +1 @@', comments: [{ id: 'C1', author: 'octocat', bot: false, mine: true as const, body: 'Validate the new line.', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/7#discussion_C1' }] }] };
-    const comparison: ReviewComparison = { ...base.comparison, scope: 'since-review', reviewedCommit: 'a'.repeat(40), baseTree: 'b'.repeat(40) };
-    const tour = { ...tourOf(comparison), reviewedCommit: 'a'.repeat(40), baseTree: 'b'.repeat(40), earlierThreads } as ReviewTour;
+    const comparison: ReviewComparison = { ...base.comparison, scope: 'since-review', reviewedCommit: 'a'.repeat(40), baseBranch: 'main', baseTree: 'b'.repeat(40), head: 'c'.repeat(40) };
+    const tour = { ...tourOf(comparison), reviewedCommit: 'a'.repeat(40), baseBranch: 'main', baseTree: 'b'.repeat(40), earlierThreads } as ReviewTour;
     await reviewStore.save('cora', 'feature/review', tour);
     const withVerdicts = { ...output, verdicts: [{ threadId: 'PRRT_1', status: 'partly', body: 'Only one path validates.', evidence: { changeId: change.id, side: 'additions', startLine: 2, endLine: 2 } }] };
     const jobs = new CodeReviewJobs(reviewer, reviewStore);

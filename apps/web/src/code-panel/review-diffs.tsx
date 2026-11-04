@@ -19,7 +19,7 @@ import { diffJumpLine, EditorJumpButton, type EditorTarget } from './editor-jump
 import { annotatedItem, codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch, hunkLinesOnlyCSS, rememberExpandedLines, withoutWhitespaceChanges } from './items.js';
 import type { ExpandedLines } from './comparison.js';
 import { useMovedLines } from './moved-lines.js';
-import { orderedRange } from './patch-rows.js';
+import { MAX_INLINE_COMMENT, orderedRange } from './patch-rows.js';
 
 // what a thread can sit under: an inline comment, a suggested comment (an untriaged or dismissed
 // Finding), or lines asked about on their own (`askId`, a ReviewDiffAsk)
@@ -58,8 +58,6 @@ export type ReviewDiffAsk = { id: string; changeId: string; side: ReviewDiffSide
 // Something of the caller's that sits under a line of one Change, rendered through `renderNote`.
 export type ReviewDiffNote = { id: string; changeId: string; side: ReviewDiffSide; endLine: number };
 
-// The longest one inline comment may grow; the caller enforces the shared aggregate cap on top.
-export const MAX_INLINE_COMMENT = 4_000;
 
 type ReviewDiffsProps = {
   changes: ReviewDiffChange[];

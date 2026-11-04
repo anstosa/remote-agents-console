@@ -1144,7 +1144,7 @@ test('offers Since my review once I have reviewed the pull request, and names th
   const fingerprints: string[] = [];
   let availabilityReads = 0;
   const patch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -1 +1 @@\n-old route\n+fixed route\n';
-  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }] };
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, baseBranch: 'main', base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }] };
   await installAgentWebSocket(page);
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -1152,7 +1152,7 @@ test('offers Since my review once I have reviewed the pull request, and names th
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [startSheetAgent], projects: [] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
-    if (url.pathname === '/api/worktrees/owen/review-tour/since-review') { availabilityReads += 1; return route.fulfill({ json: { status: 'available', reviewedCommit, head: 'f'.repeat(40) } }); }
+    if (url.pathname === '/api/worktrees/owen/review-tour/since-review') { availabilityReads += 1; return route.fulfill({ json: { status: 'available', reviewedCommit, baseBranch: 'main', head: 'f'.repeat(40) } }); }
     if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') {
       jobRequests.push(request.postDataJSON());
       return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-1', expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 10 }, codeReview: { job: { id: 'review-1', expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 1_000 } } } });
@@ -1161,7 +1161,7 @@ test('offers Since my review once I have reviewed the pull request, and names th
     if (url.pathname === '/api/code-review/jobs/review-1') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'review-1', expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 1_000 } } });
     if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') {
       fingerprints.push(url.search);
-      return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+      return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, baseBranch: 'main', base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -1181,7 +1181,7 @@ test('offers Since my review once I have reviewed the pull request, and names th
   await expect(sheet.getByRole('button', { name: 'Since my review (a1b2c3d)' })).toHaveAttribute('aria-pressed', 'true');
   await sheet.getByRole('button', { name: 'Start', exact: true }).click();
   await expect(sheet).toHaveCount(0);
-  await expect.poll(() => jobRequests).toEqual([expect.objectContaining({ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, codeReview: expect.objectContaining({ preset: 'correctness' }) })]);
+  await expect.poll(() => jobRequests).toEqual([expect.objectContaining({ scope: 'since-review', reviewedCommit, baseBranch: 'main', includeTests: false, includeDocs: false, codeReview: expect.objectContaining({ preset: 'correctness' }) })]);
   // the checked box is not remembered for the other scopes
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('rac.review-start-checks') ?? 'null'))).toEqual({ tests: false, docs: false, codeReview: false });
 
@@ -1193,6 +1193,7 @@ test('offers Since my review once I have reviewed the pull request, and names th
   await expect(panel.locator('.review-tour-comparison > span').first()).toHaveText('Since my review · tests excluded · docs excluded · since a1b2c3d (rebased)');
   // the freshness poll recaptures the pinned pair; only the sheet asked whether the scope is available
   await expect.poll(() => fingerprints[0]).toContain(`reviewedCommit=${reviewedCommit}`);
+  expect(fingerprints[0]).toContain('baseBranch=main');
   expect(availabilityReads).toBe(1);
 });
 
@@ -1207,19 +1208,22 @@ test('shows my earlier threads on the first step and beside the lines they sit o
     { id: 'T3', path: 'src/route.ts', line: 40, startLine: 38, resolved: true, resolvedBy: { login: 'mona' }, outdated: false, diffHunk: '@@ -38 +38 @@', comments: [comment('C4', 'octocat', 'Rename these.')] },
     // on line 5 too, but of the removed side, or of code since changed: neither sits on the new line 5
     { id: 'T4', path: 'src/route.ts', line: 5, leftSide: true, resolved: false, outdated: false, diffHunk: '@@ -5 +5 @@', comments: [comment('C5', 'octocat', 'Removed-side note.')] },
-    { id: 'T5', path: 'src/route.ts', line: 5, resolved: false, outdated: true, diffHunk: '@@ -5 +5 @@', comments: [comment('C6', 'octocat', 'Outdated note.')] }
+    { id: 'T5', path: 'src/route.ts', line: 5, resolved: false, outdated: true, diffHunk: '@@ -5 +5 @@', comments: [comment('C6', 'octocat', 'Outdated note.')] },
+    // current, but starting above the hunk, or just below it: neither lies inside it
+    { id: 'T6', path: 'src/route.ts', line: 5, startLine: 3, resolved: false, outdated: false, diffHunk: '@@ -3 +3 @@', comments: [comment('C7', 'octocat', 'Straddles the hunk.')] },
+    { id: 'T7', path: 'src/route.ts', line: 8, resolved: false, outdated: false, diffHunk: '@@ -8 +8 @@', comments: [comment('C8', 'octocat', 'Below the hunk.')] }
   ] };
-  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, baseBranch: 'main', base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
   const resolves: string[] = [];
   await installAgentWebSocket(page);
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, baseBranch: 'main', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour } } });
-    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, baseBranch: 'main', base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
     // GitHub refuses the first resolve
     if (url.pathname.startsWith('/api/projects/repo/github/pulls/7/threads/') && request.method() === 'POST') { resolves.push(url.pathname); return resolves.length === 1 ? route.fulfill({ status: 502, json: { error: 'GitHub is unavailable.' } }) : route.fulfill({ status: 204 }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -1231,7 +1235,7 @@ test('shows my earlier threads on the first step and beside the lines they sit o
   await panel.getByRole('button', { name: 'Start tour' }).click();
 
   // every thread I opened, as the tour started, with my first comment and the latest reply
-  const earlier = panel.getByRole('region', { name: 'Your earlier comments (5)' });
+  const earlier = panel.getByRole('region', { name: 'Your earlier comments (7)' });
   await expect(earlier.getByText('Some older threads may be missing')).toBeVisible();
   const first = earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts line 5' }).filter({ hasText: 'Why eight?' });
   await expect(earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts old line 5' })).toContainText('Removed-side note.');
@@ -1282,7 +1286,7 @@ test('orders my earlier threads by the AI review\'s verdict, marks where one was
     { id: 'T4', path: 'src/route.ts', line: 7, resolved: false, outdated: false, diffHunk: '@@ -7 +7 @@', comments: [comment('C6', 'octocat', 'Name both constants.')] },
     { id: 'T5', path: 'src/docs.ts', line: 2, resolved: false, outdated: false, diffHunk: '@@ -2 +2 @@', comments: [comment('C7', 'octocat', 'Typo.')] }
   ] };
-  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, baseBranch: 'main', base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
   const verdicts = [
     { threadId: 'T1', status: 'addressed', body: 'Now **nine**, as asked.', evidence: { changeId: 'chg_route0001', side: 'additions', startLine: 5, endLine: 5 } },
     { threadId: 'T2', status: 'not_addressed', body: 'The file is still there.' },
@@ -1294,10 +1298,10 @@ test('orders my earlier threads by the AI review\'s verdict, marks where one was
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, baseBranch: 'main', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour, codeReview } } });
-    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, baseBranch: 'main', base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
   await page.goto('/');
@@ -1362,7 +1366,7 @@ test('asks the reviewer about its verdict on one of my earlier threads', async (
   const patch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -4,4 +4,4 @@\n const a = 1;\n-const x = 8;\n+const x = 9;\n const b = 2;\n const c = 3;\n';
   const comment = (id: string, author: string, body: string) => ({ id, author, bot: false, ...(author === 'octocat' ? { mine: true } : {}), body, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/owner/repo/pull/7#discussion_${id}` });
   const earlierThreads = { pullRequest: 7, threads: [{ id: 'T3', path: 'src/api.ts', line: 9, resolved: false, outdated: false, diffHunk: '@@ -9 +9 @@', comments: [comment('C4', 'octocat', 'Return 404 here.'), comment('C5', 'mona', 'I think 410 is right.')] }] };
-  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, baseBranch: 'main', base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
   const review = (conversation?: string) => ({ fingerprint: tour.fingerprint, preset: { id: 'correctness', label: 'Correctness', agent: 'claude' }, completedAt: '2026-10-04T12:00:00.000Z', findings: [], general: [], verdicts: [{ threadId: 'T3', status: 'needs_you', body: 'The author argues for 410.' }], ...(conversation === undefined ? {} : { conversation }) });
   let codeReview = review();
   const asked: unknown[] = [];
@@ -1372,10 +1376,10 @@ test('asks the reviewer about its verdict on one of my earlier threads', async (
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, baseBranch: 'main', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour, codeReview } } });
-    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, baseBranch: 'main', base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
     if (url.pathname === '/api/worktrees/owen/review-tour/asks' && route.request().method() === 'POST') { asked.push(route.request().postDataJSON()); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('ask-1'), threadId: 'T3' } }); }
     if (url.pathname === '/api/worktrees/owen/review-tour/asks') return route.fulfill({ json: { status: 'ready', threads: answered ? [{ ...askThread, turns: [{ id: 'ask-1', question: 'Is 410 right?', askedAt: '2026-10-04T12:00:00.000Z', answer: 'Yes, **410** fits a removed resource.' }] }] : [], pending: [] } });
     if (url.pathname === '/api/review-tour/asks/jobs/ask-1') { answered = true; return route.fulfill({ json: { status: 'ready' } }); }
@@ -1424,7 +1428,7 @@ test('replies to my earlier threads from the tour, pre-filled from the verdict, 
     { id: 'T2', path: 'src/old.ts', line: 3, resolved: false, outdated: true, diffHunk: '@@ -3 +3 @@', comments: [comment('C3', 'octocat', 'Drop this file.')] },
     { id: 'T3', path: 'src/docs.ts', line: 2, resolved: false, outdated: false, diffHunk: '@@ -2 +2 @@', comments: [comment('C7', 'octocat', 'Typo.')] }
   ] };
-  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, baseBranch: 'main', base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
   const verdicts = [{ threadId: 'T1', status: 'addressed', body: 'Now nine.' }, { threadId: 'T2', status: 'not_addressed', body: 'The file is still there.' }];
   const codeReview = { fingerprint: tour.fingerprint, preset: { id: 'correctness', label: 'Correctness', agent: 'claude' }, completedAt: '2026-10-04T12:00:00.000Z', findings: [], general: [], verdicts };
   const posts: PrReviewPost[] = [];
@@ -1434,10 +1438,10 @@ test('replies to my earlier threads from the tour, pre-filled from the verdict, 
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, baseBranch: 'main', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour, codeReview } } });
-    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, baseBranch: 'main', base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
     if (url.pathname === '/api/worktrees/owen/review-tour/pr-review' && request.method() === 'POST') {
       const post = request.postDataJSON() as PrReviewPost;
       posts.push(post);
@@ -1463,7 +1467,11 @@ test('replies to my earlier threads from the tour, pre-filled from the verdict, 
   const noVerdict = earlier.getByRole('group', { name: 'Your earlier comment on src/docs.ts line 2' });
   await noVerdict.getByRole('button', { name: 'Reply' }).click();
   await expect(noVerdict.getByLabel('Reply to your comment on src/docs.ts line 2')).toHaveValue('');
+  // GitHub would hide an HTML comment from readers, so a reply cannot carry one
+  await noVerdict.getByLabel('Reply to your comment on src/docs.ts line 2').fill('Thanks. <!-- hidden -->');
+  await expect(noVerdict.getByRole('alert')).toContainText('so a reply cannot contain it');
   await noVerdict.getByLabel('Reply to your comment on src/docs.ts line 2').fill('Thanks.');
+  await expect(noVerdict.getByRole('alert')).toHaveCount(0);
   // a discarded reply is gone
   const addressed = earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts line 5' });
   await addressed.getByRole('button', { name: 'Show' }).click();
@@ -1490,7 +1498,7 @@ test('replies to my earlier threads from the tour, pre-filled from the verdict, 
   // Post to PR sends the replies with the notes; a deleted thread fails only its own reply
   await panel.getByRole('button', { name: 'Post to PR #7' }).click();
   await expect.poll(() => posts.length).toBe(1);
-  expect(posts[0]).toEqual({ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint, pullRequestNumber: 7, sections: [{ key: 'step:route', markdown: '## Fix the route\n\nRoute reads well.' }], comments: [], replies: [{ threadId: 'T2', body: 'The file is still there. Please drop it.' }, { threadId: 'T3', body: 'Thanks.' }] });
+  expect(posts[0]).toEqual({ scope: 'since-review', reviewedCommit, baseBranch: 'main', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint, pullRequestNumber: 7, sections: [{ key: 'step:route', markdown: '## Fix the route\n\nRoute reads well.' }], comments: [], replies: [{ threadId: 'T2', body: 'The file is still there. Please drop it.' }, { threadId: 'T3', body: 'Thanks.' }] });
   const posted = panel.getByRole('region', { name: 'Draft review on GitHub' });
   await expect(posted).toContainText('1 reply');
   await expect(posted.getByRole('list', { name: 'Failed replies' })).toContainText('src/docs.ts line 2Could not resolve to a node with the global id of \'T3\'');
@@ -1519,7 +1527,7 @@ test('updates a Worktree behind its pull request to the head, then offers Since 
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/review-tour/since-review') return behind
       ? route.fulfill({ status: 409, json: { status: 'error', error: { code: 'head_behind_pull_request', retryable: true } } })
-      : route.fulfill({ json: { status: 'available', reviewedCommit, head: 'f'.repeat(40) } });
+      : route.fulfill({ json: { status: 'available', reviewedCommit, baseBranch: 'main', head: 'f'.repeat(40) } });
     if (url.pathname === '/api/worktrees/owen/update-pr-head' && request.method() === 'POST') {
       updates.push(request.headers()['x-csrf-token'] ?? '');
       // the first try finds an untracked file; the second updates
@@ -2255,7 +2263,7 @@ test('starts the Worktree\'s guided review from a Review run\'s pane', async ({ 
 const postRoutePatch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -4,4 +4,4 @@\n const a = 1;\n+const x = 9;\n const b = 2;\n const c = 3;\n-const y = 8;\n';
 const postTour = { title: 'Post tour', overview: 'Review the route constants.', scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'post-fingerprint-123456', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: postRoutePatch }, { id: 'chg_service01', file: 'src/service.ts', category: 'implementation', kind: 'hunk', patch: 'diff --git a/src/service.ts b/src/service.ts\nindex 3333333..4444444 100644\n--- a/src/service.ts\n+++ b/src/service.ts\n@@ -4 +4 @@\n-old service\n+new service\n' }], steps: [{ id: 'route', title: 'Accept the request', explanation: 'The route renames its constants.', changeIds: ['chg_route0001'] }, { id: 'service', title: 'Apply the operation', explanation: 'The service performs the transition.', changeIds: ['chg_service01'] }] };
 const openPullRequest = { number: 123, title: 'Review tour', status: 'open', url: 'https://github.com/owner/repo/pull/123' };
-type PrReviewPost = { scope: string; reviewedCommit?: string; includeTests: boolean; includeDocs: boolean; fingerprint: string; pullRequestNumber: number; sections: { key: string; markdown: string }[]; comments: { id: string; changeId: string; startSide: string; startLine: number; endSide: string; endLine: number; body: string }[]; replies: { threadId: string; body: string }[] };
+type PrReviewPost = { scope: string; reviewedCommit?: string; baseBranch?: string; includeTests: boolean; includeDocs: boolean; fingerprint: string; pullRequestNumber: number; sections: { key: string; markdown: string }[]; comments: { id: string; changeId: string; startSide: string; startLine: number; endSide: string; endLine: number; body: string }[]; replies: { threadId: string; body: string }[] };
 const draftReview = { url: 'https://github.com/owner/repo/pull/123/files', pullRequest: { number: 123, url: openPullRequest.url } };
 // a post GitHub takes whole: every section, and every comment on its lines
 const postedWhole = (post: PrReviewPost, route: Route) => route.fulfill({ json: { status: 'ok', review: draftReview, sections: post.sections.map(({ key }) => ({ key, posted: true })), comments: post.comments.map(comment => ({ id: comment.id, result: 'line' })), replies: post.replies.map(({ threadId }) => ({ threadId, result: 'posted' })) } });
