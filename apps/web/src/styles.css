@@ -2139,7 +2139,9 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .server-update-progress { display: flex; min-height: 6rem; align-items: center; justify-content: center; gap: .65rem; padding: 1rem; color: var(--subtext-0); }
 .server-update-progress > button { margin-left: auto; }
 /* server update review */
-.server-update-dialog > div { display: grid; width: min(68rem, 100%); max-height: min(94vh, 62rem); min-height: min(42rem, 90vh); grid-template-rows: auto minmax(0, 1fr) auto auto auto; overflow: hidden; border-color: color-mix(in srgb, var(--blue) 48%, var(--surface-1)); padding: 0; }
+/* follow the visible viewport instead of centering behind the keyboard */
+.server-update-dialog { top: var(--visual-viewport-top, 0px); bottom: auto; height: var(--app-height, 100dvh); }
+.server-update-dialog > div { display: grid; width: min(68rem, 100%); max-height: min(calc(var(--app-height, 100dvh) * .94), 62rem); min-height: min(42rem, calc(var(--app-height, 100dvh) * .9)); grid-template-rows: auto minmax(0, 1fr) auto auto auto; overflow: hidden; border-color: color-mix(in srgb, var(--blue) 48%, var(--surface-1)); padding: 0; }
 .server-update-dialog > div > header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem 1rem; border-bottom: 1px solid var(--surface-1); }
 .server-update-dialog > div > header small { color: var(--blue); font: 750 .6rem var(--font-mono); letter-spacing: .14em; }
 .server-update-dialog > div > header h2 { margin: .15rem 0 0; font-size: 1.08rem; }
@@ -2161,7 +2163,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .update-commit-list strong { overflow-wrap: anywhere; color: var(--text); font-size: .78rem; }
 .update-commit-list small { color: var(--overlay-1); font: 600 .62rem var(--font-mono); }
 .update-review-warning { margin: 0 0 .75rem; color: var(--yellow); font: 650 .68rem/1.4 var(--font-mono); }
-.update-advisor { display: grid; gap: .65rem; margin-top: .85rem; border: 1px solid color-mix(in srgb, var(--yellow) 48%, var(--surface-1)); border-radius: var(--control-radius); padding: .75rem; background: color-mix(in srgb, var(--yellow) 5%, var(--mantle)); }
+/* keep long changed paths from widening the advisor column */
+.update-advisor { display: grid; grid-template-columns: minmax(0, 1fr); gap: .65rem; margin-top: .85rem; border: 1px solid color-mix(in srgb, var(--yellow) 48%, var(--surface-1)); border-radius: var(--control-radius); padding: .75rem; background: color-mix(in srgb, var(--yellow) 5%, var(--mantle)); }
 .update-advisor > header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
 .update-advisor > header small { color: var(--yellow); font: 750 .58rem var(--font-mono); letter-spacing: .12em; }
 .update-advisor > header h3 { margin: .12rem 0 0; color: var(--text); font-size: .92rem; }

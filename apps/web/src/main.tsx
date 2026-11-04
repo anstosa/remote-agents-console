@@ -11569,6 +11569,7 @@ function App() {
     setState('checking');
     void refreshSession();
   }, [refreshSession]);
+  // track the visible viewport for keyboard-aware layouts
   useEffect(() => {
     const viewport = window.visualViewport;
     const root = document.documentElement;
@@ -11579,6 +11580,7 @@ function App() {
       if (element instanceof HTMLInputElement) return !element.disabled && !element.readOnly && !['button', 'checkbox', 'file', 'hidden', 'radio', 'range', 'reset', 'submit'].includes(element.type);
       return element instanceof HTMLElement && element.isContentEditable;
     };
+    // publish height and browser panning separately
     const updateHeight = () => {
       const visibleHeight = viewport?.height ?? window.innerHeight;
       const focused = editableFocused();
@@ -11588,6 +11590,7 @@ function App() {
       const layoutHeight = Math.max(currentLayoutHeight, touchDevice ? unobstructedHeight : 0);
       const keyboardInset = layoutHeight - visibleHeight;
       root.style.setProperty('--app-height', `${visibleHeight}px`);
+      root.style.setProperty('--visual-viewport-top', `${viewport?.offsetTop ?? 0}px`);
       root.classList.toggle('software-keyboard-open', focused && keyboardInset >= Math.max(120, layoutHeight * .15));
     };
     const updateAfterFocus = () => window.requestAnimationFrame(updateHeight);
@@ -11603,6 +11606,7 @@ function App() {
     viewport?.addEventListener('scroll', updateHeight);
     document.addEventListener('focusin', updateAfterFocus);
     document.addEventListener('focusout', updateAfterFocus);
+    // release viewport listeners and portal positioning
     return () => {
       window.removeEventListener('resize', updateHeight);
       viewport?.removeEventListener('resize', updateHeight);
@@ -11610,6 +11614,7 @@ function App() {
       document.removeEventListener('focusin', updateAfterFocus);
       document.removeEventListener('focusout', updateAfterFocus);
       window.removeEventListener('keydown', notePhysicalKeyboard, true);
+      root.style.removeProperty('--visual-viewport-top');
       root.classList.remove('software-keyboard-open', 'physical-keyboard');
     };
   }, []);
