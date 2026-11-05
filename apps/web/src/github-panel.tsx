@@ -4,7 +4,7 @@ import { FlyoutPortal } from './flyout-portal.js';
 import { githubItemIdentity, githubItemKey, githubNewWorktreeContext, githubPullMutationContext, normalizeGithubRepository, resolveGithubItemContext, sameGithubItem, type GithubDashboardProject, type GithubItemContext, type GithubItemIdentity, type GithubNewWorktreeContext, type GithubTarget } from './github-client.js';
 import { age, freshness, Icon, newWorktreeChoices, NoTokenCard, reasonChips, RepositoryGroups, staleNotice, unseen, useSeenRows, type ColumnKey, type Item, type NewWorktreeAction, type Overview, type Problem, type Request } from './github-overview.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand, usePhoneLayout } from './panel-header.js';
-import { hunkClass, unresolvedThreadCount, type PullRequestComment, type PullRequestComments, type PullRequestReviewThread } from './pull-request-comments.js';
+import { hunkClass, shownBody, unresolvedThreadCount, type PullRequestComment, type PullRequestComments, type PullRequestReviewThread } from './pull-request-comments.js';
 import { feedbackPrompt, hunkLines, reviewThreadBlock, threadLines } from './review-thread-prompt.js';
 import { Skeleton } from './skeleton.js';
 import { useViewportFlyout } from './viewport-flyout.js';
@@ -88,7 +88,7 @@ const ago = (iso: string | undefined, now: number) => {
 const Author = ({ comment, now, extra }: { comment: PullRequestComment; now: number; extra?: ReactNode }) => <span className="github-detail-who">
   <b className={comment.mine ? 'mine' : undefined}>@{comment.author}</b>{comment.bot && <span className="github-bot">bot</span>}<span>{ago(comment.createdAt, now)}</span>{extra}
 </span>;
-const Comment = ({ comment, now, extra }: { comment: PullRequestComment; now: number; extra?: ReactNode }) => <div className="github-comment"><Author comment={comment} now={now} extra={extra} /><p>{comment.body}</p></div>;
+const Comment = ({ comment, now, extra }: { comment: PullRequestComment; now: number; extra?: ReactNode }) => <div className="github-comment"><Author comment={comment} now={now} extra={extra} /><p>{shownBody(comment.body)}</p></div>;
 const Empty = ({ children }: { children: ReactNode }) => <p className="overview-none">{children}</p>;
 
 // one detail section, open until its heading is tapped

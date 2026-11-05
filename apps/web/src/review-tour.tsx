@@ -530,6 +530,9 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
     onChange: (threadId, text) => setReplies(({ [threadId]: _previous, ...rest }) => text === undefined ? rest : { ...rest, [threadId]: text })
   }), [replies, pullRequestPost]);
   const clearFocusedThread = useCallback(() => setFocusedThread(undefined), []);
+  // the earlier thread to focus on the tour's lines, from its card's Show in diff
+  const [focusedInDiff, setFocusedInDiff] = useState<string>();
+  const clearFocusedInDiff = useCallback(() => setFocusedInDiff(undefined), []);
   const verdicts = useMemo((): EarlierVerdicts => ({
     judged: codeReview !== undefined,
     verdicts: new Map(codeReview?.verdicts?.map(verdict => [verdict.threadId, verdict])),
@@ -1007,6 +1010,17 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
     if (compact) setNotesOpen(true);
     setFocusedThread(threadId);
   };
+  // move to the first step whose lines hold an earlier thread, and focus it there
+  const showInDiff = (threadId: string) => {
+    const changeId = earlierNotes.find(note => note.id === threadId)?.changeId;
+    const index = tour?.steps.findIndex(candidate => changeId !== undefined && candidate.changeIds.includes(changeId)) ?? -1;
+    if (index < 0) return;
+    setCurrent(index);
+    setState('tour');
+    if (compact) setNotesOpen(false);
+    setFocusedInDiff(threadId);
+  };
+  const inDiff = useMemo(() => new Set(earlierNotes.filter(note => tour?.steps.some(candidate => candidate.changeIds.includes(note.changeId))).map(note => note.id)), [earlierNotes, tour]);
   // move to the previous step, or from the first back to the overview
   const back = () => {
     if (current === 0) { setState('overview'); return; }
@@ -1152,7 +1166,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
     const evidenceOf = evidenceThread(id);
     const thread = earlierThreads?.threads.find(candidate => candidate.id === (evidenceOf ?? id));
     if (thread === undefined) return null;
-    return evidenceOf === undefined ? <EarlierThread thread={thread} resolving={resolving} verdicts={verdicts} replying={earlierReplies} askFor={askVerdict} /> : <VerdictEvidence thread={thread} verdicts={verdicts} onOpen={showEarlierThreads} />;
+    return evidenceOf === undefined ? <EarlierThread thread={thread} resolving={resolving} verdicts={verdicts} replying={earlierReplies} askFor={askVerdict} focus={focusedInDiff === id} onFocused={clearFocusedInDiff} /> : <VerdictEvidence thread={thread} verdicts={verdicts} onOpen={showEarlierThreads} />;
   };
   // dismiss the review, stale or never built, so a new one can start
   const dismiss = async () => {
@@ -1199,7 +1213,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   })}</section>;
   // the step's narration and feedback: a left column in a wide panel, the notes drawer in a compact one; the
   // first step leads with the general Findings
-  const narration = step && <>{current === 0 && earlierThreads !== undefined && <EarlierThreadsSection earlier={earlierThreads} resolving={resolving} verdicts={verdicts} replying={earlierReplies} askFor={askVerdict} fontSize={fontSize} focused={focusedThread} onFocused={clearFocusedThread} />}{current === 0 && generalFindings}<small>Logical change</small><h3>{step.title}</h3><div className="note-markdown review-tour-explanation" style={{ fontSize }}><MarkdownBlocks text={step.explanation} /></div><label>Feedback for this change<textarea value={stepFeedback} maxLength={maxFeedback} onChange={event => updateFeedback(step.id, event.target.value)} />{stepFeedback.length >= maxFeedback && <span role="status">{maxFeedback.toLocaleString()} character limit reached</span>}</label>{orphanFeedback !== '' && <label>Feedback from regenerated steps<textarea value={orphanFeedback} maxLength={maxFeedbackTotal} onChange={event => updateOrphanFeedback(event.target.value)} />{orphanFeedback.length >= maxFeedbackTotal && <span role="status">{maxFeedbackTotal.toLocaleString()} retained feedback character limit reached</span>}</label>}</>;
+  const narration = step && <>{current === 0 && earlierThreads !== undefined && <EarlierThreadsSection earlier={earlierThreads} resolving={resolving} verdicts={verdicts} replying={earlierReplies} askFor={askVerdict} fontSize={fontSize} focused={focusedThread} onFocused={clearFocusedThread} inDiff={inDiff} onShowInDiff={showInDiff} />}{current === 0 && generalFindings}<small>Logical change</small><h3>{step.title}</h3><div className="note-markdown review-tour-explanation" style={{ fontSize }}><MarkdownBlocks text={step.explanation} /></div><label>Feedback for this change<textarea value={stepFeedback} maxLength={maxFeedback} onChange={event => updateFeedback(step.id, event.target.value)} />{stepFeedback.length >= maxFeedback && <span role="status">{maxFeedback.toLocaleString()} character limit reached</span>}</label>{orphanFeedback !== '' && <label>Feedback from regenerated steps<textarea value={orphanFeedback} maxLength={maxFeedbackTotal} onChange={event => updateOrphanFeedback(event.target.value)} />{orphanFeedback.length >= maxFeedbackTotal && <span role="status">{maxFeedbackTotal.toLocaleString()} retained feedback character limit reached</span>}</label>}</>;
   // The Code review's state in the status line: running with its time (or waiting on the operator), its
   // Findings count, a failure with Retry, or "Add AI review" for a current tour with none. An
   // interactive run links to its pane.

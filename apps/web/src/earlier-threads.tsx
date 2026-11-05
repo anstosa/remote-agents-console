@@ -4,9 +4,9 @@ import type { Verdict, VerdictStatus } from './code-review.js';
 import { Icon } from './github-overview.js';
 import { refusal, WriteButton } from './github-panel.js';
 import { MarkdownBlocks } from './note-markdown.js';
-import type { PullRequestComment, PullRequestReviewThread } from './pull-request-comments.js';
+import { shownBody, type PullRequestComment, type PullRequestReviewThread } from './pull-request-comments.js';
 import { threadLines } from './review-thread-prompt.js';
-import { MAX_INLINE_COMMENT } from './code-panel/patch-rows.js';
+import { MAX_INLINE_COMMENT, patchRows } from './code-panel/patch-rows.js';
 
 // The Review threads I opened on a Since my review tour's Pull request `pullRequest`, as GitHub had
 // them when the tour started; `partial` when GitHub's page of threads was full, so older ones may be
@@ -34,15 +34,34 @@ export function isEarlierThreads(value: unknown): value is EarlierThreads {
   return earlier !== null && typeof earlier === 'object' && Number.isInteger(earlier.pullRequest) && Array.isArray(earlier.threads) && earlier.threads.every(isThread);
 }
 
-// Where each thread sits in the tour's Changes: a current thread on the changed side whose lines lie
-// inside one hunk. Local HEAD is the PR head, so GitHub's line numbers are the hunk's new-side ones.
-export function earlierThreadNotes(threads: readonly PullRequestReviewThread[], changes: readonly { id: string; file: string; kind: string; newStart?: number; newLines?: number }[]): ReviewDiffNote[] {
+// The lines a thread was written on, as its diff hunk ends with them: the hunk's lines on the side
+// that was then the new one, without their +/space prefix.
+const writtenLines = (diffHunk: string): string[] => diffHunk.split('\n').filter(line => line.startsWith('+') || line.startsWith(' ')).map(line => line.slice(1));
+
+// Where each thread sits in the tour's Changes. Local HEAD is the PR head, so a current thread's
+// GitHub lines are the new side's lines of a hunk covering them. An outdated thread keeps the lines
+// of the commit it was written on, which for one from the reviewed commit are the old side's: it sits
+// on its removed or context line only where that line and up to two before it read as its diff hunk
+// ends, so a thread from an older commit, or one a rebase shifted, stays off the diff.
+export function earlierThreadNotes(threads: readonly PullRequestReviewThread[], changes: readonly { id: string; file: string; kind: string; newStart?: number; newLines?: number; patch: string }[]): ReviewDiffNote[] {
   return threads.flatMap((thread): ReviewDiffNote[] => {
     const end = thread.line;
-    if (thread.outdated || thread.leftSide || end === undefined) return [];
-    const start = thread.startLine ?? end;
-    const change = changes.find(candidate => candidate.kind === 'hunk' && candidate.file === thread.path && candidate.newStart !== undefined && candidate.newLines !== undefined && start >= candidate.newStart && end < candidate.newStart + candidate.newLines);
-    return change === undefined ? [] : [{ id: thread.id, changeId: change.id, side: 'additions', endLine: end }];
+    if (thread.leftSide || end === undefined) return [];
+    const hunks = changes.filter(candidate => candidate.kind === 'hunk' && candidate.file === thread.path);
+    if (!thread.outdated) {
+      const start = thread.startLine ?? end;
+      const change = hunks.find(candidate => candidate.newStart !== undefined && candidate.newLines !== undefined && start >= candidate.newStart && end < candidate.newStart + candidate.newLines);
+      return change === undefined ? [] : [{ id: thread.id, changeId: change.id, side: 'additions', endLine: end }];
+    }
+    const written = writtenLines(thread.diffHunk).slice(-3);
+    if (written.length === 0) return [];
+    const change = hunks.find(candidate => {
+      const old = patchRows(candidate.patch).filter(row => row.old !== undefined);
+      const at = old.findIndex(row => row.old === end);
+      const compared = Math.min(written.length, at + 1);
+      return at >= 0 && old.slice(at + 1 - compared, at + 1).every((row, index) => row.text.slice(1) === written[written.length - compared + index]);
+    });
+    return change === undefined ? [] : [{ id: thread.id, changeId: change.id, side: 'deletions', endLine: end }];
   });
 }
 
@@ -106,8 +125,9 @@ const VerdictBadge = ({ status }: { status: VerdictStatus | undefined }) => <spa
 
 // One of my earlier threads: its file and lines, its state and verdict, my first comment, the latest
 // reply, the verdict's explanation, my reply to it, Resolve while it is open, and its questions to
-// the reviewer (`askFor`). An addressed one starts collapsed; `focus` opens and focuses it.
-export function EarlierThread({ thread, resolving, verdicts, replying, askFor, focus = false, onFocused }: { thread: PullRequestReviewThread; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; replying: EarlierReplies; askFor?: (threadId: string) => ReactNode; focus?: boolean; onFocused?: () => void }) {
+// the reviewer (`askFor`). Any one collapses, and an addressed one starts so; `focus` opens and
+// focuses it. `onShowInDiff` leads to its copy on the tour's lines.
+export function EarlierThread({ thread, resolving, verdicts, replying, askFor, focus = false, onFocused, onShowInDiff }: { thread: PullRequestReviewThread; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; replying: EarlierReplies; askFor?: (threadId: string) => ReactNode; focus?: boolean; onFocused?: () => void; onShowInDiff?: () => void }) {
   const [first, ...replies] = thread.comments as [PullRequestComment, ...PullRequestComment[]];
   const latest = replies.at(-1);
   const resolvedHere = resolving.resolved.has(thread.id);
@@ -118,8 +138,7 @@ export function EarlierThread({ thread, resolving, verdicts, replying, askFor, f
   const replied = replying.posted.has(thread.id);
   // undefined until toggled, so a verdict arriving later still collapses an addressed thread
   const [expanded, setExpanded] = useState<boolean>();
-  const collapsible = verdict?.status === 'addressed';
-  const open = !collapsible || expanded === true;
+  const open = expanded ?? verdict?.status !== 'addressed';
   const row = useRef<HTMLDivElement>(null);
   // focus after the panel's own step-change effects, which reset the narration's scroll and focus
   // the compact notes drawer
@@ -136,24 +155,24 @@ export function EarlierThread({ thread, resolving, verdicts, replying, askFor, f
   ].join(' · ');
   const where = threadWhere(thread);
   return <div ref={row} className="review-tour-earlier" role="group" aria-label={`Your earlier comment on ${where}`} data-thread={thread.id} tabIndex={-1}>
-    <div className="review-tour-earlier-head"><strong title={thread.path}>{where}</strong><span>{state}</span>{verdicts.judged && <VerdictBadge status={verdict?.status} />}{collapsible && <button type="button" className="review-tour-earlier-toggle" aria-expanded={open} onClick={() => setExpanded(!open)}>{open ? 'Hide' : 'Show'}</button>}</div>
+    <div className="review-tour-earlier-head"><strong title={thread.path}>{where}</strong><span>{state}</span>{verdicts.judged && <VerdictBadge status={verdict?.status} />}<button type="button" className="review-tour-earlier-toggle" aria-expanded={open} onClick={() => setExpanded(!open)}>{open ? 'Hide' : 'Show'}</button></div>
     {open && <>
-      <p>{first.body}</p>
-      {latest !== undefined && <p className="review-tour-earlier-reply">@{latest.author}: {latest.body}</p>}
+      <p>{shownBody(first.body)}</p>
+      {latest !== undefined && <p className="review-tour-earlier-reply">@{latest.author}: {shownBody(latest.body)}</p>}
       {verdict !== undefined && <div className="note-markdown review-tour-verdict-body"><MarkdownBlocks text={verdict.body} /></div>}
       {reply !== undefined && (replied
         ? <div className="review-tour-earlier-reply-box"><small>In your draft review on GitHub</small><p>{reply}</p></div>
         : <div className="review-tour-earlier-reply-box"><textarea aria-label={`Reply to your comment on ${where}`} value={reply} maxLength={MAX_INLINE_COMMENT} onChange={event => replying.onChange(thread.id, event.target.value)} />{hidesText(reply) ? <small role="alert">GitHub hides anything after “&lt;!--”, so a reply cannot contain it. Remove it to post.</small> : <small>Post to PR adds it to your draft review.</small>}</div>)}
       {resolving.errors[thread.id] !== undefined && <p className="review-tour-error" role="alert">{resolving.errors[thread.id]}</p>}
-      <div><a href={first.url} target="_blank" rel="noreferrer">View on GitHub</a>{verdict !== undefined && <button type="button" onClick={() => verdicts.onDismiss(verdict)}>Dismiss verdict</button>}{dismissed !== undefined && <button type="button" onClick={() => verdicts.onRestore(dismissed)}>Restore verdict</button>}{reply === undefined ? <button type="button" onClick={() => replying.onChange(thread.id, verdict?.body ?? '')}>Reply</button> : !replied && <button type="button" onClick={() => replying.onChange(thread.id, undefined)}>Discard reply</button>}{!thread.resolved && !resolvedHere && <WriteButton busy={busy} disabled={busy || resolving.resolve === undefined} title={resolving.resolve === undefined ? 'Add this repository as a Project to resolve threads here' : undefined} onClick={() => void resolving.resolve?.(thread.id)}><Icon name="check" />Resolve</WriteButton>}</div>
+      <div><a href={first.url} target="_blank" rel="noreferrer">View on GitHub</a>{onShowInDiff !== undefined && <button type="button" onClick={onShowInDiff}>Show in diff</button>}{verdict !== undefined && <button type="button" onClick={() => verdicts.onDismiss(verdict)}>Dismiss verdict</button>}{dismissed !== undefined && <button type="button" onClick={() => verdicts.onRestore(dismissed)}>Restore verdict</button>}{reply === undefined ? <button type="button" onClick={() => replying.onChange(thread.id, verdict?.body ?? '')}>Reply</button> : !replied && <button type="button" onClick={() => replying.onChange(thread.id, undefined)}>Discard reply</button>}{!thread.resolved && !resolvedHere && <WriteButton busy={busy} disabled={busy || resolving.resolve === undefined} title={resolving.resolve === undefined ? 'Add this repository as a Project to resolve threads here' : undefined} onClick={() => void resolving.resolve?.(thread.id)}><Icon name="check" />Resolve</WriteButton>}</div>
       {askFor?.(thread.id)}
     </>}
   </div>;
 }
 
 // The first step's list of my earlier threads, as the tour started, those needing me first;
-// `focused` is the thread to open and focus.
-export function EarlierThreadsSection({ earlier, resolving, verdicts, replying, askFor, fontSize, focused, onFocused }: { earlier: EarlierThreads; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; replying: EarlierReplies; askFor?: (threadId: string) => ReactNode; fontSize: number; focused?: string; onFocused: () => void }): ReactNode {
+// `focused` is the thread to open and focus, and `inDiff` those also on the tour's lines.
+export function EarlierThreadsSection({ earlier, resolving, verdicts, replying, askFor, fontSize, focused, onFocused, inDiff, onShowInDiff }: { earlier: EarlierThreads; resolving: EarlierThreadResolve; verdicts: EarlierVerdicts; replying: EarlierReplies; askFor?: (threadId: string) => ReactNode; fontSize: number; focused?: string; onFocused: () => void; inDiff: ReadonlySet<string>; onShowInDiff: (threadId: string) => void }): ReactNode {
   const heading = `Your earlier comments (${earlier.threads.length})`;
   const rank = (thread: PullRequestReviewThread) => verdictOrder.indexOf(shownVerdict(verdicts, thread.id)?.status);
   const ordered = [...earlier.threads].sort((left, right) => rank(left) - rank(right));
@@ -161,7 +180,7 @@ export function EarlierThreadsSection({ earlier, resolving, verdicts, replying, 
     <small>{heading}</small>
     {earlier.partial && <p className="review-tour-earlier-note">Some older threads may be missing: GitHub listed only the pull request’s latest threads.</p>}
     {earlier.threads.length === 0 && <p className="review-tour-earlier-note">None: you opened no threads here, or resolved each one yourself.</p>}
-    {ordered.map(thread => <EarlierThread key={thread.id} thread={thread} resolving={resolving} verdicts={verdicts} replying={replying} askFor={askFor} focus={focused === thread.id} onFocused={onFocused} />)}
+    {ordered.map(thread => <EarlierThread key={thread.id} thread={thread} resolving={resolving} verdicts={verdicts} replying={replying} askFor={askFor} focus={focused === thread.id} onFocused={onFocused} {...(inDiff.has(thread.id) ? { onShowInDiff: () => onShowInDiff(thread.id) } : {})} />)}
   </section>;
 }
 

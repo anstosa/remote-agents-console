@@ -1211,7 +1211,11 @@ test('shows my earlier threads on the first step and beside the lines they sit o
     { id: 'T5', path: 'src/route.ts', line: 5, resolved: false, outdated: true, diffHunk: '@@ -5 +5 @@', comments: [comment('C6', 'octocat', 'Outdated note.')] },
     // current, but starting above the hunk, or just below it: neither lies inside it
     { id: 'T6', path: 'src/route.ts', line: 5, startLine: 3, resolved: false, outdated: false, diffHunk: '@@ -3 +3 @@', comments: [comment('C7', 'octocat', 'Straddles the hunk.')] },
-    { id: 'T7', path: 'src/route.ts', line: 8, resolved: false, outdated: false, diffHunk: '@@ -8 +8 @@', comments: [comment('C8', 'octocat', 'Below the hunk.')] }
+    { id: 'T7', path: 'src/route.ts', line: 8, resolved: false, outdated: false, diffHunk: '@@ -8 +8 @@', comments: [comment('C8', 'octocat', 'Below the hunk.')] },
+    // outdated, written on the reviewed commit's line 5, which the hunk removes: it sits on that removed line
+    { id: 'T8', path: 'src/route.ts', line: 5, resolved: false, outdated: true, diffHunk: '@@ -3,2 +3,3 @@\n const z = 0;\n const a = 1;\n+const x = 8;', comments: [comment('C9', 'octocat', 'Name the eight. <!-- rac:0b6f2a1c-1d2e-4f5a-8b9c-0d1e2f3a4b5c -->')] },
+    // outdated on a line 5 whose text was not the old side's: written on another commit, so it stays off
+    { id: 'T9', path: 'src/route.ts', line: 5, resolved: false, outdated: true, diffHunk: '@@ -4,1 +4,2 @@\n const a = 1;\n+const y = 8;', comments: [comment('C10', 'octocat', 'Another commit.')] }
   ] };
   const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, baseBranch: 'main', base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
   const resolves: string[] = [];
@@ -1235,7 +1239,7 @@ test('shows my earlier threads on the first step and beside the lines they sit o
   await panel.getByRole('button', { name: 'Start tour' }).click();
 
   // every thread I opened, as the tour started, with my first comment and the latest reply
-  const earlier = panel.getByRole('region', { name: 'Your earlier comments (7)' });
+  const earlier = panel.getByRole('region', { name: 'Your earlier comments (9)' });
   await expect(earlier.getByText('Some older threads may be missing')).toBeVisible();
   const first = earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts line 5' }).filter({ hasText: 'Why eight?' });
   await expect(earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts old line 5' })).toContainText('Removed-side note.');
@@ -1246,10 +1250,19 @@ test('shows my earlier threads on the first step and beside the lines they sit o
   await expect(resolved).toContainText('resolved by @mona');
   await expect(resolved.getByRole('button', { name: 'Resolve' })).toHaveCount(0);
 
-  // only the current thread inside the step's hunk also sits on its lines
+  // the current thread inside the step's hunk sits on its lines, and the outdated one written on the
+  // removed line on that, without Post to PR's marker
   const diffs = panel.getByLabel('Relevant changes');
-  await expect(diffs.locator('.review-tour-earlier')).toHaveCount(1);
-  await expect(diffs.locator('.review-tour-earlier')).toContainText('Why eight?');
+  await expect(diffs.locator('.review-tour-earlier')).toHaveCount(2);
+  const inline = diffs.locator('.review-tour-earlier[data-thread="T1"]');
+  await expect(inline).toContainText('Why eight?');
+  await expect(diffs.locator('.review-tour-earlier[data-thread="T8"]')).toHaveText(/Name the eight\./);
+  await expect(panel).not.toContainText('rac:');
+  // a card on the lines leads there
+  const outdated = earlier.locator('[data-thread="T8"]');
+  await expect(earlier.locator('[data-thread="T9"]').getByRole('button', { name: 'Show in diff' })).toHaveCount(0);
+  await outdated.getByRole('button', { name: 'Show in diff' }).click();
+  await expect(diffs.locator('.review-tour-earlier[data-thread="T8"]')).toBeFocused();
 
   // Resolve asks first; declining sends nothing
   page.once('dialog', dialog => void dialog.dismiss());
@@ -1265,7 +1278,7 @@ test('shows my earlier threads on the first step and beside the lines they sit o
   await first.getByRole('button', { name: 'Resolve' }).click();
   await expect(first).toContainText('resolved by you');
   await expect(first.getByRole('button', { name: 'Resolve' })).toHaveCount(0);
-  await expect(diffs.locator('.review-tour-earlier')).toContainText('resolved by you');
+  await expect(inline).toContainText('resolved by you');
   expect(resolves).toEqual(['/api/projects/repo/github/pulls/7/threads/T1/resolve', '/api/projects/repo/github/pulls/7/threads/T1/resolve']);
 
   // the tour's draft keeps it resolved across a reload
@@ -1273,6 +1286,12 @@ test('shows my earlier threads on the first step and beside the lines they sit o
   await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
   await expect(first).toContainText('resolved by you');
+  // one with no verdict collapses once I am done with it
+  const card = earlier.locator('[data-thread="T1"]');
+  await card.getByRole('button', { name: 'Hide' }).click();
+  await expect(card).not.toContainText('Why eight?');
+  await card.getByRole('button', { name: 'Show' }).click();
+  await expect(card).toContainText('Why eight?');
 });
 
 test('orders my earlier threads by the AI review\'s verdict, marks where one was fixed, and counts them in the summary', async ({ page }) => {
