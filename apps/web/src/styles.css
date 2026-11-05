@@ -2123,6 +2123,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-start-dialog header > div { display: grid; min-width: 0; }
 .review-start-dialog header svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 2; }
 .review-start-row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: var(--subtext-0); font: 700 .68rem var(--font-mono); }
+.review-start-scope { grid-auto-flow: column; grid-template-columns: none; }
 .review-start-checks { display: inline-flex; gap: 1rem; }
 .review-start-commit { min-width: 0; overflow: hidden; color: var(--text); font-weight: 400; white-space: nowrap; text-overflow: ellipsis; }
 .review-start-commit code { margin-right: .5rem; color: var(--peach); }
