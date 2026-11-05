@@ -8249,6 +8249,14 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
       anchor.current = undefined;
     } else if (following.current) list.scrollTop = list.scrollHeight;
   }, [transcript]);
+  // stay at the bottom when the log shrinks, as it does when a question opens in the composer
+  useEffect(() => {
+    const list = log.current;
+    if (list === null) return;
+    const observer = new ResizeObserver(() => { if (following.current) list.scrollTop = list.scrollHeight; });
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, []);
   const current = transcript?.agentId === agentId ? transcript : undefined;
   const children = useMemo(() => {
     const byParent = new Map<string, TranscriptTool[]>();
