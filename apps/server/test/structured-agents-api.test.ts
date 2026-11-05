@@ -2638,7 +2638,8 @@ describe('the Conductor\'s Watches', () => {
     for (let index = 0; index < 21; index += 1) { windows.print(`line ${index}`); await new Promise(resolve => setTimeout(resolve, 15)); }
     await vi.waitFor(async () => expect((await told()).at(-1)).toBe(`[RAC event] Watch ${noisy} #21 "noise": it was stopped: it sent more than 20 events in a minute. Set it again with a quieter command if you still need it.`), { timeout: 2_000 });
     expect(await told()).toHaveLength(21);
-    expect(windows.closed).toEqual(['%1']);
+    // terminal delivery precedes durable acknowledgement and window shutdown
+    await vi.waitFor(() => expect(windows.closed).toEqual(['%1']));
     expect((await call('list_watches', {}, false)).data.watches).toEqual([]);
 
     // a reboot ends its window: the next console runs it again from its start
