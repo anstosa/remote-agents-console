@@ -34,13 +34,28 @@ async function verifyLauncherLabels(page: import('@playwright/test').Page, scree
   await stubLauncher(page);
   await page.goto('/');
   await page.evaluate(() => document.fonts.ready);
-  // phones hide the main +; New Workspace opens the same launcher
-  if (page.viewportSize()!.width <= 768) {
-    await page.locator('.workspace-dropdown').click();
-    await page.getByRole('button', { name: /New Workspace/u }).click();
-  } else await page.locator('.new-agent-tab').click();
+  // the tab-row plus opens workspaces directly at every breakpoint
+  const tabs = page.getByRole('tablist', { name: 'Agents and worktrees' });
+  const plus = tabs.getByRole('button', { name: 'Launch agent', exact: true });
+  await expect(plus).toBeVisible();
+  expect(await tabs.evaluate(element => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+  const [plusBounds, tabsBounds] = await Promise.all([plus.boundingBox(), tabs.boundingBox()]);
+  // require a visible button within the tab row
+  if (plusBounds === null || tabsBounds === null) throw new Error('workspace plus did not render');
+  expect(plusBounds.x).toBeGreaterThanOrEqual(tabsBounds.x);
+  expect(plusBounds.x + plusBounds.width).toBeLessThanOrEqual(tabsBounds.x + tabsBounds.width);
+  await plus.click();
 
   const launcher = page.getByRole('group', { name: 'Agent launcher' });
+  await expect(launcher).toBeVisible();
+  await expect(plus).toHaveAttribute('aria-expanded', 'true');
+  const launcherBounds = await launcher.boundingBox();
+  // keep the opened flyout inside the viewport
+  if (launcherBounds === null) throw new Error('workspace launcher did not render');
+  expect(launcherBounds.x).toBeGreaterThanOrEqual(0);
+  expect(launcherBounds.x + launcherBounds.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+  expect(launcherBounds.y).toBeGreaterThanOrEqual(0);
+  expect(launcherBounds.y + launcherBounds.height).toBeLessThanOrEqual(page.viewportSize()!.height);
   const scratchLabel = launcher.locator('.launcher-symbol-label');
   const newWorktree = launcher.getByRole('button', { name: 'New worktree…' });
   await expect(scratchLabel).toHaveText('Scratch');
@@ -81,6 +96,11 @@ async function verifyLauncherLabels(page: import('@playwright/test').Page, scree
   expect(Math.abs(measurements.scratchTextLeft - measurements.worktreeTextLeft)).toBeLessThan(1);
   expect(measurements.scratchFontSize).toBe(measurements.worktreeFontSize);
 
+  // closing the flyout restores direct access to the plus
+  await page.keyboard.press('Escape');
+  await expect(launcher).toBeHidden();
+  await expect(plus).toHaveAttribute('aria-expanded', 'false');
+  await plus.click();
   await newWorktree.click();
   await expect(page.getByRole('dialog', { name: 'New worktree' })).toBeVisible();
   return measurements;
@@ -93,9 +113,12 @@ test('launcher label icons align with emoji labels on desktop', async ({ page },
   testInfo.annotations.push({ type: 'measurements', description: JSON.stringify(measurements) });
 });
 
-// verify mobile geometry
-test('launcher label icons align with emoji labels on mobile', async ({ page }, testInfo) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  const measurements = await verifyLauncherLabels(page, testInfo.outputPath('launcher-label-icons-mobile.png'));
-  testInfo.annotations.push({ type: 'measurements', description: JSON.stringify(measurements) });
-});
+// verify the mobile plus and labels across narrow and wide phone layouts
+for (const width of [320, 390, 768]) {
+  // preserve direct workspace creation while the dropdown is present
+  test(`launcher label icons and workspace plus align on mobile ${width}`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 844 });
+    const measurements = await verifyLauncherLabels(page, testInfo.outputPath(`launcher-label-icons-mobile-${width}.png`));
+    testInfo.annotations.push({ type: 'measurements', description: JSON.stringify(measurements) });
+  });
+}

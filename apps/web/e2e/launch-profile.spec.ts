@@ -410,11 +410,11 @@ test('the + flyout keeps direct Place actions while its dropdown chooses configu
 });
 
 // keep running-worktree choices available from a phone without changing Open
-test('mobile running worktrees keep agent choices without the hidden main toolbar plus', async ({ page }) => {
+test('mobile running worktrees keep agent choices through the workspace picker', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const agent = { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 1, title: 'Ready', kind: 'codex', attention: 'finished', queuedPromptCount: 0, launch: { kind: 'codex', origin: 'worktree' } };
   const posts = await mount(page, { generation: 1, adapters: { codex, claude }, agents: [agent], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'codex', origin: 'worktree' })] }] });
-  // phones hide the main +; New Workspace opens the same launcher
+  // the workspace picker remains an alternative way into the launcher
   await page.locator('.workspace-dropdown').click();
   await page.getByRole('button', { name: /New Workspace/u }).click();
   const launcher = page.getByRole('group', { name: 'Agent launcher' });

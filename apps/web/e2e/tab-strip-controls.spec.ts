@@ -16,7 +16,8 @@ test('keeps phone icon controls square and aligned with the workspace tab', asyn
     </nav>
   `);
   await page.setViewportSize({ width: 390, height: 844 });
-  const controls = [page.getByRole('button', { name: 'Switch server' }), page.getByRole('button', { name: 'Call' }), page.getByRole('button', { name: 'Settings' })];
+  const plus = page.getByRole('button', { name: 'Launch agent', exact: true });
+  const controls = [page.getByRole('button', { name: 'Switch server' }), page.getByRole('button', { name: 'Call' }), page.getByRole('button', { name: 'Settings' }), plus];
   const tab = page.getByRole('tab', { name: /Workspace/u });
   const tabBox = await tab.boundingBox();
   expect(tabBox).not.toBeNull();
@@ -32,8 +33,8 @@ test('keeps phone icon controls square and aligned with the workspace tab', asyn
     await expect(control).not.toHaveCSS('border-radius', '0px');
   }
   expect(tabBox!.height).toBeCloseTo(41.6, 1);
-  // the hidden plus must not reserve an empty mobile slot
-  await expect(page.locator('.new-agent-tab')).toBeHidden();
+  // keep the workspace plus alongside the other phone controls
+  await expect(plus).toBeVisible();
   await expect(tab).toHaveCSS('border-top-width', '1px');
   // preserve the server status dot inset
   const [serverBox, serverDotBox] = await Promise.all([controls[0].boundingBox(), controls[0].locator('.server-switcher-attention').boundingBox()]);

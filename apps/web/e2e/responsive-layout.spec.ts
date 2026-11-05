@@ -132,6 +132,7 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
       gitSummary: bounds('.workspace-toolbar .git-status-summary'),
       gitBranchDisplay: getComputedStyle(document.querySelector<HTMLElement>('.workspace-toolbar .git-branch')!).display,
       tabRowLead: bounds('.tab-row-lead'),
+      launcher: bounds('.tabs .new-agent-tab'),
       serverSettings: bounds('.tabs > .server-switcher-settings-wrap .server-switcher-settings'),
       tabs: bounds('.tabs'),
       tabsBorder: getComputedStyle(document.querySelector<HTMLElement>('.tabs')!).borderBottomWidth,
@@ -171,11 +172,12 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
   expect(layout.queued.bottom).toBeLessThanOrEqual(layout.send.top);
   expect(layout.send.left).toBeGreaterThanOrEqual(layout.prompt.right);
   expect(layout.send.right).toBeLessThanOrEqual(layout.viewportWidth);
-  // the server selector and Call lead; the Workspace dropdown fills the row up to the trailing settings button
+  // leave room for the workspace plus between the dropdown and settings
   expect(Math.abs(layout.tabRowLead.left - layout.tabs.left - 6)).toBeLessThanOrEqual(1);
   expect(Math.abs(layout.tabRowLead.top - layout.tabs.top - 6)).toBeLessThanOrEqual(1);
   expect(Math.abs(layout.activeTab.left - layout.tabRowLead.right - parseFloat(layout.tabsGap))).toBeLessThanOrEqual(1);
-  expect(Math.abs(layout.serverSettings.left - layout.activeTab.right - parseFloat(layout.tabsGap))).toBeLessThanOrEqual(1);
+  expect(Math.abs(layout.launcher.left - layout.activeTab.right - parseFloat(layout.tabsGap))).toBeLessThanOrEqual(1);
+  expect(Math.abs(layout.serverSettings.left - layout.launcher.right - parseFloat(layout.tabsGap))).toBeLessThanOrEqual(1);
   expect(Math.abs(layout.serverSettings.right - layout.tabs.right + 6)).toBeLessThanOrEqual(1);
   expect(Math.abs(layout.serverSettings.height - layout.activeTab.height)).toBeLessThanOrEqual(1);
   expect(Math.abs(layout.serverSettings.width - layout.serverSettings.height)).toBeLessThanOrEqual(1);
@@ -464,16 +466,17 @@ test('a phone shows only the current Workspace, as a dropdown over a sheet of ev
   // the marks stand apart from the title
   await expect(dropdown).toHaveCSS('gap', '9.6px');
 
-  // one outlined row: the lead controls, the Workspace dropdown, then settings at the far edge
+  // keep the lead controls, workspace dropdown, plus and settings in one row
   const row = await tabs.evaluate(nav => {
     const box = (element: Element) => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right, middle: Math.round(rect.top + rect.height / 2) }; };
-    return { overflow: nav.scrollWidth - nav.clientWidth, width: nav.getBoundingClientRect().width, lead: box(nav.querySelector('.tab-row-lead')!), dropdown: box(nav.querySelector('.workspace-dropdown')!), settings: box(nav.querySelector('.server-switcher-settings-wrap')!) };
+    return { overflow: nav.scrollWidth - nav.clientWidth, width: nav.getBoundingClientRect().width, lead: box(nav.querySelector('.tab-row-lead')!), dropdown: box(nav.querySelector('.workspace-dropdown')!), launcher: box(nav.querySelector('.launcher')!), settings: box(nav.querySelector('.server-switcher-settings-wrap')!) };
   });
   expect(row.overflow).toBeLessThanOrEqual(0);
-  expect(new Set([row.lead.middle, row.dropdown.middle, row.settings.middle]).size).toBe(1);
+  expect(new Set([row.lead.middle, row.dropdown.middle, row.launcher.middle, row.settings.middle]).size).toBe(1);
   expect(Math.abs(row.dropdown.left - row.lead.right - 6)).toBeLessThanOrEqual(1);
-  // phones hide the main +, so settings follows the dropdown directly
-  expect(Math.abs(row.settings.left - row.dropdown.right - 6)).toBeLessThanOrEqual(1);
+  // keep the plus between the workspace dropdown and settings
+  expect(Math.abs(row.launcher.left - row.dropdown.right - 6)).toBeLessThanOrEqual(1);
+  expect(Math.abs(row.settings.left - row.launcher.right - 6)).toBeLessThanOrEqual(1);
   expect(Math.abs(row.settings.right - (row.width - 6))).toBeLessThanOrEqual(1);
 
   // the sheet omits zero and singular counts while retaining each workspace state
