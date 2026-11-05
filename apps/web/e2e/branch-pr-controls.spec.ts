@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
+// describe dashboard fixtures and action hooks
 type DashboardMount = {
   dashboard: unknown;
   onPrompt?: (body: unknown) => void | Promise<void>;
@@ -127,24 +128,46 @@ test('keeps the current pull request in the Working footer and queues one active
   const actions = footer.locator(':scope > .git-status-actions');
   const mode = footer.getByRole('group', { name: 'Git change view' });
   await expect(footer.locator(':scope > .git-status-actions + .pull-request-card + .git-status-mode')).toHaveCount(1);
-  await expect(card.getByRole('link', { name: `Open pull request #812: ${longTitle}` })).toHaveAttribute('href', activePullRequest.url);
-  // only the status icon and number: the summary button above carries the indicators
-  await expect(card).toHaveText('#812');
+  const pullRequestLink = card.getByRole('link', { name: `Open pull request #812: ${longTitle}` });
+  await expect(pullRequestLink).toHaveAttribute('href', activePullRequest.url);
+  await expect(pullRequestLink).toHaveAttribute('title', `Open pull request #812: ${longTitle}`);
+  await expect(card.getByText('#812', { exact: true })).toBeVisible();
+  const title = card.locator('.pull-request-card-title');
+  await expect(title).toHaveText(longTitle);
   await expect(card.locator('.pull-request-card-icon')).toBeVisible();
-  await expect(card.locator('.pull-request-issues')).toHaveCount(0);
+  const cardIndicators = card.locator('.pull-request-issues');
+  await expect(cardIndicators.getByRole('img')).toHaveCount(3);
   const [footerBox, actionsBox, cardBox, modeBox, reviewBox, pushBox, allPrBox] = await Promise.all([
     renderedBox(footer), renderedBox(actions), renderedBox(card), renderedBox(mode), renderedBox(actions.getByRole('button', { name: 'Review', exact: true })), renderedBox(actions.getByRole('button', { name: 'Finish and PR', exact: true })), renderedBox(mode.getByRole('button', { name: 'All PR' }))
   ]);
-  expect(actionsBox.x + actionsBox.width).toBeLessThanOrEqual(cardBox.x + 1);
-  expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(modeBox.x + 1);
+  // measure the available middle space
+  const footerLayout = await footer.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { gap: Number.parseFloat(style.columnGap), paddingLeft: Number.parseFloat(style.paddingLeft), paddingRight: Number.parseFloat(style.paddingRight) };
+  });
+  expect(actionsBox.x).toBeCloseTo(footerBox.x + footerLayout.paddingLeft, 0);
+  expect(cardBox.x).toBeCloseTo(actionsBox.x + actionsBox.width + footerLayout.gap, 0);
+  expect(cardBox.x + cardBox.width).toBeCloseTo(modeBox.x - footerLayout.gap, 0);
+  expect(modeBox.x + modeBox.width).toBeCloseTo(footerBox.x + footerBox.width - footerLayout.paddingRight, 0);
   expect([actionsBox, cardBox, modeBox].every(box => { /* center one footer control */ return Math.abs(box.y + box.height / 2 - cardBox.y - cardBox.height / 2) <= 1; })).toBe(true);
   // match the pr card and actions to the standard control height
+  expect(cardBox.width).toBeGreaterThanOrEqual(192);
   expect(Math.abs(cardBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
   expect(Math.abs(reviewBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
   expect(Math.abs(pushBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
   expect(Math.abs(allPrBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
   expect(cardBox.x).toBeGreaterThanOrEqual(footerBox.x);
   expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(footerBox.x + footerBox.width);
+  // locate the card-owned status corner
+  const indicatorCorner = await card.evaluate(element => {
+    const cardBounds = element.getBoundingClientRect();
+    const indicators = element.querySelector<HTMLElement>('.pull-request-issues')!.getBoundingClientRect();
+    return { right: cardBounds.right - indicators.right, bottom: cardBounds.bottom - indicators.bottom };
+  });
+  expect(indicatorCorner.right).toBeGreaterThanOrEqual(0);
+  expect(indicatorCorner.right).toBeLessThanOrEqual(12);
+  expect(indicatorCorner.bottom).toBeGreaterThanOrEqual(0);
+  expect(indicatorCorner.bottom).toBeLessThanOrEqual(12);
 
   const working = mode.getByRole('button', { name: 'Working' });
   const allPr = mode.getByRole('button', { name: 'All PR' });
@@ -178,36 +201,56 @@ test('keeps the current pull request in the Working footer and queues one active
   expect(historyRequests).toBeGreaterThanOrEqual(1);
 });
 
-// expand the flyout while keeping the current pr centered and reachable
-test('centers the current pull request across viewport-bounded flyout widths', async ({ page }, testInfo) => {
+// size the flyout from repository content without letting the pr title inflate it
+test('uses a viewport-capped natural flyout width from filenames and footer controls', async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1_600, height: 1_000 });
-  await mountDashboard(page, { dashboard: { generation: 1, agents: [activeAgent], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [activeWorktree] }] } });
+  const shortStatus = { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0, changes: [{ code: ' M', path: 'src/app.ts', additions: 2, deletions: 1, category: 'implementation' }] };
+  const shortPrStatus = { base: 'origin/main', files: 1, changes: shortStatus.changes };
+  const dashboardMount: DashboardMount = { dashboard: { generation: 1, agents: [{ ...activeAgent, gitStatus: shortStatus, gitPrStatus: shortPrStatus }], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [{ ...activeWorktree, gitStatus: shortStatus, gitPrStatus: shortPrStatus }] }] } };
+  await mountDashboard(page, dashboardMount);
 
   await page.getByRole('button', { name: /^Git status: feature\/current-pr-controls/u }).click();
-  const panel = page.getByRole('region', { name: 'Changed files' });
-  const footer = panel.locator('.git-status-panel-footer');
-  const card = footer.locator(':scope > .pull-request-card');
-  // exercise wide, breakpoint, phone, and smallest supported layouts
-  for (const viewport of [{ width: 1_600, height: 1_000 }, { width: 1_440, height: 900 }, { width: 900, height: 500 }, { width: 600, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 700 }]) {
+  let panel = page.getByRole('region', { name: 'Changed files' });
+  await expect(panel.getByText('src/app.ts', { exact: true })).toBeVisible();
+  const shortWidth = (await renderedBox(panel)).width;
+  expect(shortWidth).toBeLessThan(1_000);
+
+  await page.setViewportSize({ width: 1_440, height: 900 });
+  await expect.poll(async () => /* wait for natural sizing */ (await renderedBox(panel)).width).toBeCloseTo(shortWidth, 0);
+
+  const shortTitlePullRequest = { ...activePullRequest, title: 'Short title' };
+  dashboardMount.dashboard = { generation: 2, agents: [{ ...activeAgent, gitStatus: shortStatus, gitPrStatus: shortPrStatus, pullRequest: shortTitlePullRequest }], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [{ ...activeWorktree, gitStatus: shortStatus, gitPrStatus: shortPrStatus, pullRequest: shortTitlePullRequest }] }] };
+  await page.reload();
+  await page.getByRole('button', { name: /^Git status: feature\/current-pr-controls/u }).click();
+  panel = page.getByRole('region', { name: 'Changed files' });
+  await expect.poll(async () => /* wait for natural sizing */ (await renderedBox(panel)).width).toBeCloseTo(shortWidth, 0);
+
+  const longPath = 'apps/web/src/features/repository/branch-flyout/natural-sizing/fixtures/a-significantly-longer-directory-name/another-significantly-longer-directory-name/a-significantly-longer-filename-that-sets-the-natural-popup-width.tsx';
+  const longStatus = { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0, changes: [{ code: ' M', path: longPath, additions: 2, deletions: 1, category: 'implementation' }] };
+  const longPrStatus = { base: 'origin/main', files: 1, changes: longStatus.changes };
+  dashboardMount.dashboard = { generation: 3, agents: [{ ...activeAgent, gitStatus: longStatus, gitPrStatus: longPrStatus }], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [{ ...activeWorktree, gitStatus: longStatus, gitPrStatus: longPrStatus }] }] };
+  await page.reload();
+  await page.getByRole('button', { name: /^Git status: feature\/current-pr-controls/u }).click();
+  panel = page.getByRole('region', { name: 'Changed files' });
+  await expect(panel.getByText(longPath, { exact: true })).toBeVisible();
+  const longWidth = (await renderedBox(panel)).width;
+  expect(longWidth).toBeGreaterThan(shortWidth + 64);
+
+  // exercise the breakpoint, phone, smallest, and low-height caps
+  for (const viewport of [{ width: 900, height: 500 }, { width: 600, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 700 }, { width: 667, height: 320 }]) {
     await page.setViewportSize(viewport);
-    await expect.poll(async () => { /* wait for the resize refit */ return (await renderedBox(panel)).width; }).toBeLessThanOrEqual(viewport.width);
-    const [panelBox, footerBox, cardBox] = await Promise.all([renderedBox(panel), renderedBox(footer), renderedBox(card)]);
-    expect(panelBox.x).toBeGreaterThanOrEqual(0);
-    expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(viewport.width + 1);
-    expect(footerBox.x).toBeGreaterThanOrEqual(panelBox.x);
-    expect(footerBox.x + footerBox.width).toBeLessThanOrEqual(panelBox.x + panelBox.width + 1);
+    const visual = await page.evaluate(() => /* read the visible bounds */ ({ left: visualViewport?.offsetLeft ?? 0, top: visualViewport?.offsetTop ?? 0, width: visualViewport?.width ?? innerWidth, height: visualViewport?.height ?? innerHeight }));
+    await expect.poll(async () => { /* wait for the resize refit */ return (await renderedBox(panel)).width; }).toBeLessThanOrEqual(visual.width - 12 + 1);
+    const panelBox = await renderedBox(panel);
+    expect(panelBox.x).toBeGreaterThanOrEqual(visual.left);
+    expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(visual.left + visual.width + 1);
+    expect(panelBox.y).toBeGreaterThanOrEqual(visual.top);
+    expect(panelBox.y + panelBox.height).toBeLessThanOrEqual(visual.top + visual.height + 1);
     expect(await page.evaluate(() => { /* measure page overflow */ return document.documentElement.scrollWidth; })).toBeLessThanOrEqual(viewport.width);
-    // require horizontal growth and geometric centering above the stacked breakpoint
-    if (viewport.width > 900) {
-      expect(panelBox.width).toBeGreaterThan(720);
-      expect(Math.abs(cardBox.x + cardBox.width / 2 - footerBox.x - footerBox.width / 2)).toBeLessThanOrEqual(1);
-    } else {
-      // keep every stacked footer control reachable on bounded viewports
-      await expectReachableWithin(footer, panel);
-    }
-    // retain the requested wide and phone render evidence
-    if (viewport.width === 1_600 || viewport.width === 390) await page.screenshot({ path: testInfo.outputPath(`pr-flyout-${viewport.width}.png`), fullPage: true });
+    await expectReachableWithin(panel.locator('.git-status-panel-footer'), panel);
+    // retain phone and low-height render evidence
+    if (viewport.width === 390 || viewport.height === 320) await page.screenshot({ path: testInfo.outputPath(`pr-flyout-${viewport.width}x${viewport.height}.png`), fullPage: true });
   }
 });
 
@@ -316,8 +359,10 @@ test('floats compact branch indicators from the same corners at every width', as
     const panel = page.getByRole('region', { name: 'Changed files' });
     const card = panel.locator('.git-status-panel-footer > .pull-request-card');
     await expect(panel).toBeVisible();
-    await expect(card).toHaveText('#812');
-    await expect(card.locator('.pull-request-issues')).toHaveCount(0);
+    await expect(card.getByText('#812', { exact: true })).toBeVisible();
+    await expect(card.locator('.pull-request-card-title')).toHaveText(longTitle);
+    await expect(card.locator('.pull-request-issues')).toHaveCount(1);
+    await expect(card.locator('.pull-request-issues').getByRole('img')).toHaveCount(3);
     // keep card evidence beside the requested toolbar artifacts
     if (width === 390 || width === 1440) await page.screenshot({ path: testInfo.outputPath(`branch-card-${width}.png`), fullPage: true });
     await page.mouse.click(4, 4);
@@ -428,7 +473,14 @@ test('stacks standard-height Working footer controls at 375px without growing th
   ]);
   expect(actionsBox.y + actionsBox.height).toBeLessThanOrEqual(cardBox.y + 1);
   expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(modeBox.y + 1);
-  expect(Math.abs(modeBox.width - actionsBox.width)).toBeLessThanOrEqual(1);
+  // measure the stacked footer content
+  const footerContentWidth = await footer.evaluate(element => {
+    const style = getComputedStyle(element);
+    return element.getBoundingClientRect().width - Number.parseFloat(style.borderLeftWidth) - Number.parseFloat(style.borderRightWidth) - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+  });
+  expect(actionsBox.width).toBeCloseTo(footerContentWidth, 0);
+  expect(cardBox.width).toBeCloseTo(footerContentWidth, 0);
+  expect(modeBox.width).toBeCloseTo(footerContentWidth, 0);
   // retain standard action heights on narrow screens
   expect(Math.abs(reviewBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
   expect(Math.abs(workingBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
@@ -446,7 +498,9 @@ test('stacks standard-height Working footer controls at 375px without growing th
   expect(fixup.x).toBeGreaterThanOrEqual(push.x + push.width);
   expect(fixup.height).toBeCloseTo(attachmentBox.height, 0);
   await expect(card.getByRole('button')).toHaveCount(0);
-  await expect(card).toHaveText('#812');
+  await expect(card.getByText('#812', { exact: true })).toBeVisible();
+  await expect(card.locator('.pull-request-card-title')).toHaveText(longTitle);
+  await expect(card.locator('.pull-request-issues').getByRole('img')).toHaveCount(3);
 
   await page.setViewportSize({ width: 667, height: 320 });
   await expect(panel).toHaveCSS('overflow-y', 'auto');

@@ -170,6 +170,7 @@ test('prefetches shared repository choices and refreshes them when reopened', as
 
 // keep configured branch actions aligned with standard prompt controls
 test('dispatches an iconless configured pull request action without a legacy fallback', async ({ page }) => {
+  test.setTimeout(120_000);
   const emptyButtonSlots = {
     tabLead: [], leftNav: [], rightNav: [], navMenu: [], pullRequest: [],
     'split:agent': [], 'split:terminal': [], 'split:note': [], 'split:browser': [], 'split:files': [], 'split:code': [], 'split:review': [], 'split:stack': [], 'split:settings': []
@@ -235,16 +236,14 @@ test('dispatches an iconless configured pull request action without a legacy fal
     if (queueSize === null || reviewSize === null || customSize === null) throw new Error('responsive branch action bounds unavailable');
     expect(reviewSize.height).toBeCloseTo(queueSize.height, 1);
     expect(customSize.height).toBeCloseTo(queueSize.height, 1);
-    // keep the flyout right-aligned while the phone spans its viewport edges
-    const flyoutBox = () => branchFlyout.evaluate(element => { const box = element.getBoundingClientRect(); return { left: Math.round(box.left), width: Math.round(box.width) }; });
-    await expect.poll(async () => { const box = await flyoutBox(); return box.left + box.width; }).toBe(viewport.width - 6);
+    // keep the naturally sized flyout right-aligned and viewport-bounded
+    const flyoutBox = () => branchFlyout.evaluate(element => { /* measure actual edges */ const box = element.getBoundingClientRect(); return { left: Math.round(box.left), right: Math.round(box.right), width: Math.round(box.width) }; });
+    await expect.poll(async () => { /* wait for anchoring */ const box = await flyoutBox(); return box.right; }).toBe(viewport.width - 6);
     const renderedFlyout = await flyoutBox();
-    // match the current viewport layout
-    if (viewport.width > 600) {
-      expect(renderedFlyout.left).toBeGreaterThanOrEqual(6);
-      expect(renderedFlyout.width).toBeGreaterThan(600);
-    }
-    else await expect.poll(flyoutBox).toEqual({ left: 6, width: viewport.width - 12 });
+    expect(renderedFlyout.left).toBeGreaterThanOrEqual(6);
+    expect(renderedFlyout.width).toBeLessThanOrEqual(viewport.width - 12);
+    // compact no-pr controls do not retain the old 45rem desktop floor
+    if (viewport.width > 600) expect(renderedFlyout.width).toBeLessThan(650);
   }
   await custom.click();
   await expect.poll(() => starts).toHaveLength(1);

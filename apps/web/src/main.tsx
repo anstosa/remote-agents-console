@@ -6467,6 +6467,7 @@ function GitCommitSections({ log, error, uncommitted, collapsed, onToggle, messa
   </>;
 }
 // render working changes, current pr controls, and repository switchers
+// show repository changes in a content-sized flyout
 function GitStatus({ worktreeId, branch, summary, prSummary, attention, pullRequest, expanded = false, onToggle, onOpenFile, onViewChanges, onViewCommit, onReview, onReviewCommit, review, reviewUnavailable, onSelectTarget, onNewWorktree, onOperationFeedback }: { worktreeId?: string; branch?: string; summary?: GitStatusSummary; prSummary?: GitComparisonSummary; attention?: string; pullRequest?: PullRequestSummary; expanded?: boolean; onToggle?: () => void; onOpenFile: (path: string, mode: CodePanelMode) => void; onViewChanges?: (mode: CodePanelMode) => void; onViewCommit?: (commit: CodePanelCommit) => void; onReview?: (scope: ReviewScope) => void; onReviewCommit?: (commit: CodePanelCommit) => void; review?: ReviewTourIndicator; reviewUnavailable?: string; onSelectTarget?: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   const wrapRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -6596,10 +6597,10 @@ function GitStatus({ worktreeId, branch, summary, prSummary, attention, pullRequ
   // fit the popup above the toolbar
   useLayoutEffect(() => {
     const wrap = wrapRef.current;
-    // wait for an expanded anchor
-    if (!expanded || wrap === null) return;
-    // measure the available viewport
-    // place the portal at its former anchored position
+    const panel = panelRef.current;
+    // wait for an expanded anchor and portal
+    if (!expanded || wrap === null || panel === null) return;
+    // clamp natural content above the toolbar anchor
     const syncPanelPosition = () => {
       const viewport = window.visualViewport;
       const viewportTop = viewport?.offsetTop ?? 0;
@@ -6609,28 +6610,19 @@ function GitStatus({ worktreeId, branch, summary, prSummary, attention, pullRequ
       const gap = rootFontSize * .7;
       // unrounded, so a full-height popup meets the viewport's top wherever the toolbar lays out
       const maxHeight = Math.max(0, anchorTop - viewportTop - gap);
-    // open upward from the branch shortcut and clamp to the viewport
+      // keep content inside the visible viewport
       const edge = rootFontSize * .375;
-      // a phone's toolbar packs the git status near its right end, so the popup spans the screen;
-      // wider screens get a fixed width from the button, shifted left to stay on screen
-      const phone = window.matchMedia('(max-width: 600px)').matches;
       const viewportLeft = viewport?.offsetLeft ?? 0;
       const viewportWidth = viewport?.width ?? window.innerWidth;
-      const footer = panelRef.current?.querySelector<HTMLElement>('.git-status-panel-footer');
-      const leftActions = footer?.querySelector<HTMLElement>('.git-status-actions');
-      const rightActions = footer?.querySelector<HTMLElement>('.git-status-mode');
-      // measure intrinsic controls rather than stretched tracks to avoid resize feedback
-      const actionWidth = (group: HTMLElement | null | undefined) => Array.from(group?.querySelectorAll('button') ?? []).reduce((width, button) => width + button.getBoundingClientRect().width + rootFontSize * .4, 0);
-      const outsideWidth = Math.max(actionWidth(leftActions), actionWidth(rightActions));
-      const desiredWidth = Math.max(rootFontSize * 45, outsideWidth * 2 + rootFontSize * 20);
-      const width = phone ? viewportWidth - 2 * edge : Math.min(desiredWidth, viewportWidth - 2 * edge);
-      const left = phone ? viewportLeft + edge : Math.max(viewportLeft + edge, Math.min(anchorRect.left, viewportLeft + viewportWidth - edge - width));
-      setPanelStyle({ position: 'fixed', top: 'auto', left, right: 'auto', bottom: window.innerHeight - anchorTop + gap, width, maxHeight, maxWidth: viewportWidth - edge * 2, visibility: 'visible' });
+      const availableWidth = Math.max(1, viewportWidth - edge * 2);
+      const width = Math.min(panel.getBoundingClientRect().width, availableWidth);
+      const left = Math.max(viewportLeft + edge, Math.min(anchorRect.left, viewportLeft + viewportWidth - edge - width));
+      setPanelStyle({ position: 'fixed', top: 'auto', left, right: 'auto', bottom: window.innerHeight - anchorTop + gap, maxHeight, maxWidth: availableWidth, visibility: 'visible' });
     };
     const observer = new ResizeObserver(syncPanelPosition);
     observer.observe(wrap);
-    // content and configured action changes may need a wider centered footer
-    if (panelRef.current !== null) observer.observe(panelRef.current);
+    // refit when repository content or configured actions change
+    observer.observe(panel);
     const shell = wrap.closest('.log-shell');
     // follow shell size changes
     if (shell !== null) observer.observe(shell);

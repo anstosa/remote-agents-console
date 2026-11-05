@@ -35,11 +35,10 @@ export function PullRequestIndicators({ checks, issues: issueFlags }: Pick<PullR
   return <span className="pull-request-issues" aria-label="Pull request status"><CheckStatusIcon status={checkStatus} />{issues.map(issue => <IssueIcon key={issue} issue={issue} />)}</span>;
 }
 
-// the current pull request as its status icon and number, linking to it on GitHub; the summary
-// button above it carries the indicators, and the GitHub panel the rest
+// link the current pr with its title and health indicators
 export function PullRequestCard({ pullRequest }: { pullRequest?: PullRequestSummary }) {
   // omit absent pull requests
   if (pullRequest === undefined) return null;
   const label = `${statusLabel[pullRequest.status]} pull request #${pullRequest.number}: ${pullRequest.title}`;
-  return <div className={`pull-request-card status-${pullRequest.status}`}><a className="pull-request-card-main" href={pullRequest.url} target="_blank" rel="noreferrer" aria-label={label} title={label}><PullRequestStatusIcon status={pullRequest.status} className="pull-request-card-icon" /><strong>#{pullRequest.number}</strong></a></div>;
+  return <div className={`pull-request-card status-${pullRequest.status}`}><a className="pull-request-card-main" href={pullRequest.url} target="_blank" rel="noreferrer" aria-label={label} title={label}><PullRequestStatusIcon status={pullRequest.status} className="pull-request-card-icon" /><strong>#{pullRequest.number}</strong><span className="pull-request-card-title">{pullRequest.title}</span><PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} /></a></div>;
 }
