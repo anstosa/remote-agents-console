@@ -2532,6 +2532,7 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const [draggingAttachments, setDraggingAttachments] = useState(false);
   const attachmentDragDepth = useRef(0);
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  const queuedPromptReadSequence = useRef(0);
   const [queuedPromptsOpen, setQueuedPromptsOpen] = useState(false);
   const [queuedPromptAction, setQueuedPromptAction] = useState<{ id: string; kind: 'cancel' | 'edit' | 'move' | 'save' }>();
   const [queuedPromptEdit, setQueuedPromptEdit] = useState<{ id: string; text: string }>();
@@ -2589,17 +2590,22 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const refreshQueuedPrompts = useCallback(async () => {
     // wait for dashboard confirmation
     if (!ready) return;
+    const sequence = ++queuedPromptReadSequence.current;
     const response = await request(`/api/agents/${encodeURIComponent(id)}/queued-prompts`);
     if (!response.ok) return;
     const payload: unknown = await response.json();
     if (payload === null || typeof payload !== 'object' || !Array.isArray((payload as { prompts?: unknown }).prompts)) return;
     const prompts = (payload as { prompts: unknown[] }).prompts.filter(isQueuedPrompt);
     if (prompts.length !== (payload as { prompts: unknown[] }).prompts.length) return;
+    // discard reads superseded by another read, note save or agent change
+    if (sequence !== queuedPromptReadSequence.current) return;
     setQueuedPrompts(prompts);
     if (prompts.length === 0) setQueuedPromptsOpen(false);
   }, [id, ready]);
   // start queue polling when the agent becomes available
   useEffect(() => {
+    // invalidate reads from the previous agent or readiness state
+    queuedPromptReadSequence.current += 1;
     setQueuedPrompts([]);
     setQueuedPromptsOpen(false);
     setQueuedPromptEdit(undefined);
@@ -2849,7 +2855,9 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     } catch { setQueuedPromptError('Unable to cancel this queued prompt.'); }
     finally { setQueuedPromptAction(undefined); }
   };
+  // save durably before removing the queued copy
   const saveQueuedPromptAsNote = async (queued: QueuedPrompt) => {
+    // serialize queue actions while the save is pending
     if (queuedPromptAction !== undefined) return;
     setQueuedPromptAction({ id: queued.id, kind: 'save' });
     setQueuedPromptError(undefined);
@@ -2858,6 +2866,8 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
       if (!response.ok) throw new Error();
       const note: unknown = await response.json();
       if (!isWorktreeNote(note)) throw new Error();
+      // successful saves supersede every older queue snapshot
+      queuedPromptReadSequence.current += 1;
       setQueuedPrompts(current => {
         const remaining = current.filter(prompt => prompt.id !== queued.id);
         if (remaining.length === 0) setQueuedPromptsOpen(false);

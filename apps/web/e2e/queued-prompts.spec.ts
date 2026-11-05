@@ -9,6 +9,12 @@ test('manages waiting prompts from the queue-add control connected to Queue', as
   ];
   const saved: Array<{ id: string; text: string; attachments?: Array<{ name: string; size: number }> }> = [];
   const notes: Array<{ id: string; title: string; text: string }> = [];
+  let delayQueueReads = false;
+  const heldQueueReads: Array<() => void> = [];
+  // signal the first delayed poll
+  let queueReadStarted = () => {};
+  // capture a poll that read the queue before the save
+  const staleQueueRead = new Promise<void>(resolve => { queueReadStarted = resolve; });
   await page.addInitScript(() => {
     class MockWebSocket {
       static readonly CONNECTING = 0;
@@ -36,7 +42,13 @@ test('manages waiting prompts from the queue-add control connected to Queue', as
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: saved } });
     if (url.pathname === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes } });
     if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/queued-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: queued } });
+    // preserve each read's original snapshot across a concurrent note save
+    if (url.pathname === '/api/agents/agent-1/queued-prompts' && request.method() === 'GET') {
+      const prompts = queued.map(prompt => ({ ...prompt }));
+      // hold late queue reads until their assertions release them
+      if (delayQueueReads) await new Promise<void>(resolve => { heldQueueReads.push(resolve); queueReadStarted(); });
+      return route.fulfill({ json: { prompts } });
+    }
     const saveMatch = /^\/api\/agents\/agent-1\/queued-prompts\/([^/]+)\/save$/u.exec(url.pathname);
     if (saveMatch && request.method() === 'POST') {
       const index = queued.findIndex(prompt => prompt.id === saveMatch[1]);
@@ -112,10 +124,25 @@ test('manages waiting prompts from the queue-add control connected to Queue', as
 
   const saveAsNote = page.getByRole('button', { name: 'Save queued prompt as note: Edited queued prompt' });
   await expect(saveAsNote).toHaveAttribute('title', 'Save as note');
+  delayQueueReads = true;
+  await staleQueueRead;
   await saveAsNote.click();
   await expect(page.getByRole('button', { name: 'Queued prompts (1)' })).toBeVisible();
   await expect(copies).toHaveCount(1);
   expect(requested).toContain('POST /api/agents/agent-1/queued-prompts/queued-prompt-002/save');
+  try {
+    // deliver the old poll only after the saved prompt has left the queue
+    const response = page.waitForResponse(reply => reply.request().method() === 'GET' && new URL(reply.url()).pathname === '/api/agents/agent-1/queued-prompts');
+    heldQueueReads.shift()?.();
+    await (await response).finished();
+    // let the stale response reach the rendered queue before inspecting its count
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    expect(await submissionControls.getByRole('button', { name: /^Queued prompts \(/u }).getAttribute('aria-label')).toBe('Queued prompts (1)');
+  } finally {
+    delayQueueReads = false;
+    // release any later reads even when the regression assertion fails
+    for (const release of heldQueueReads.splice(0)) release();
+  }
   // dismiss through the click-blocking backdrop, then open Notes: the saved prompt is now a note
   await page.locator('.flyout-backdrop').click({ position: { x: 4, y: 4 } });
   const notesButton = page.getByRole('button', { name: /^Notes \(/u });
