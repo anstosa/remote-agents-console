@@ -1,16 +1,13 @@
 import { expect, test } from '@playwright/test';
 
-// the Remove and Prune flows: every idle Worktree's launcher row carries a Remove icon —
-// disabled with its reason on Main and on locked checkouts, so the column never goes blank —
-// the dialog decides with fresh facts, and a Project with stale checkouts offers
-// "N stale · Prune".
+// unpinned worktrees offer removal with fresh safeguards; stale checkouts offer pruning
 const dashboard = {
   generation: 1,
   agents: [],
   projects: [
     { id: 'repo', label: 'Repo', available: true, manageWorktrees: true, stalePaths: ['/repo/wts/gone', '/repo/wts/orphan'], worktrees: [
       { id: 'repo:/repo', projectId: 'repo', label: 'Repo', path: '/repo', main: true, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'main' },
-      { id: 'repo:/repo/wts/feat', projectId: 'repo', label: 'Repo · feat', path: '/repo/wts/feat', main: false, detached: false, locked: false, available: true, pinned: true, order: 1, branch: 'feat' },
+      { id: 'repo:/repo/wts/feat', projectId: 'repo', label: 'Repo · feat', path: '/repo/wts/feat', main: false, detached: false, locked: false, available: true, pinned: false, order: 1, branch: 'feat' },
       { id: 'repo:/repo/wts/held', projectId: 'repo', label: 'Repo · held', path: '/repo/wts/held', main: false, detached: false, locked: true, available: true, pinned: false, order: 2, branch: 'held' }
     ] }
   ]
@@ -18,15 +15,26 @@ const dashboard = {
 
 const facts = { main: false, detached: false, locked: false, branch: 'feat', dirtyCount: 2, pushed: true, merged: false, ahead: 1, behind: 0, blockers: [], stopsProcesses: [] };
 
-async function stub(page: import('@playwright/test').Page, handlers: { onDelete?: (body: unknown) => void; onPrune?: (contentType: string | undefined) => void; removal?: unknown; closedPullRequests?: unknown } = {}) {
+// isolate dashboard state and handle removal and pin requests
+async function stub(page: import('@playwright/test').Page, handlers: { onDelete?: (body: unknown) => void; onPrune?: (contentType: string | undefined) => void; removal?: unknown; closedPullRequests?: unknown; pinned?: boolean } = {}) {
+  const currentDashboard = structuredClone(dashboard);
+  const feature = currentDashboard.projects[0]!.worktrees[1]!;
+  feature.pinned = handlers.pinned ?? false;
+  // answer each mocked request
   await page.route('**/api/**', async route => {
     const request = route.request();
     // the Worktree wire id carries `:` and `/`, so decode the encoded path before matching
     const path = decodeURIComponent(new URL(request.url()).pathname);
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (path === '/api/dashboard') return route.fulfill({ json: dashboard });
+    // publish refreshed pin state
+    if (path === '/api/dashboard') return route.fulfill({ json: currentDashboard });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     if (path === '/api/worktrees/closed-pull-requests') return route.fulfill({ json: { worktrees: handlers.closedPullRequests ?? [] } });
+    // persist the feature pin for the following dashboard refresh
+    if (path === '/api/worktrees/repo:/repo/wts/feat/pin' && request.method() === 'POST') {
+      feature.pinned = request.postDataJSON().pinned;
+      return route.fulfill({ status: 204, body: '' });
+    }
     if (path === '/api/worktrees/repo:/repo/wts/feat/removal') return route.fulfill({ json: handlers.removal ?? facts });
     if (path === '/api/worktrees/repo:/repo/wts/feat' && request.method() === 'DELETE') {
       handlers.onDelete?.(request.postDataJSON());
@@ -40,6 +48,55 @@ async function stub(page: import('@playwright/test').Page, handlers: { onDelete?
   });
 }
 
+// verify pin-sensitive controls at desktop and phone breakpoints
+for (const viewport of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'mobile', width: 390, height: 844 }]) {
+  // exercise pin refreshes and rendered removal geometry
+  test(`hides pinned removal and matches launch height on ${viewport.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await stub(page, { pinned: true, closedPullRequests: [{ worktreeId: 'repo:/repo/wts/feat', reason: 'merged' }] });
+    await page.goto('/');
+    await page.evaluate(() => document.fonts.ready);
+    // phones open the launcher through the workspace menu
+    if (viewport.width <= 768) {
+      await page.locator('.workspace-dropdown').click();
+      await page.getByRole('button', { name: /New Workspace/u }).click();
+    } else await page.locator('.new-agent-tab').click();
+    const launcher = page.getByRole('group', { name: 'Agent launcher' });
+    const row = launcher.locator('.launcher-row').filter({ has: page.getByRole('button', { name: 'Rename Repo · feat', exact: true }) });
+    const remove = row.getByRole('button', { name: 'Remove Repo · feat', exact: true });
+    const offer = row.getByRole('button', { name: 'PR merged · Remove Repo · feat', exact: true });
+
+    await expect(row.getByRole('button', { name: 'Unpin Repo · feat' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(remove).toHaveCount(0);
+    await expect(offer).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath(`pinned-removal-${viewport.name}.png`), fullPage: true });
+
+    await row.getByRole('button', { name: 'Unpin Repo · feat' }).click();
+    await expect(row.getByRole('button', { name: 'Pin Repo · feat', exact: true })).toHaveAttribute('aria-pressed', 'false');
+    await expect(remove).toBeVisible();
+    await expect(offer).toBeVisible();
+    await expect(offer.locator(':scope > span')).toHaveText(['Merged.', 'Remove?']);
+    const launch = row.getByRole('button', { name: 'Launch Repo · feat', exact: true });
+    const [removeBounds, offerBounds, launchBounds] = await Promise.all([remove.boundingBox(), offer.boundingBox(), launch.boundingBox()]);
+    // require real rendered comparison targets
+    if (removeBounds === null || offerBounds === null || launchBounds === null) throw new Error('worktree action buttons did not render');
+    expect(Math.abs(removeBounds.height - launchBounds.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs(offerBounds.height - launchBounds.height)).toBeLessThanOrEqual(1);
+    expect(offerBounds.width).toBeLessThan(launchBounds.width);
+    const [statusBounds, promptBounds] = await Promise.all([offer.locator(':scope > span').first().boundingBox(), offer.locator(':scope > span').last().boundingBox()]);
+    // require two separate rendered lines
+    if (statusBounds === null || promptBounds === null) throw new Error('cleanup prompt lines did not render');
+    expect(promptBounds.y).toBeGreaterThanOrEqual(statusBounds.y + statusBounds.height - 1);
+    testInfo.annotations.push({ type: 'measurements', description: JSON.stringify({ removeHeight: removeBounds.height, offerHeight: offerBounds.height, launchHeight: launchBounds.height }) });
+    await page.screenshot({ path: testInfo.outputPath(`unpinned-removal-${viewport.name}.png`), fullPage: true });
+
+    await row.getByRole('button', { name: 'Pin Repo · feat', exact: true }).click();
+    await expect(row.getByRole('button', { name: 'Unpin Repo · feat' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(remove).toHaveCount(0);
+    await expect(offer).toHaveCount(0);
+  });
+}
+
 test('removes a linked worktree with discard and branch-delete from the launcher', async ({ page }) => {
   let deleted: unknown;
   await stub(page, { onDelete: body => { deleted = body; } });
@@ -47,10 +104,9 @@ test('removes a linked worktree with discard and branch-delete from the launcher
   await page.locator('.new-agent-tab').click();
   const launcher = page.getByRole('group', { name: 'Agent launcher' });
 
-  // Main keeps the Remove column but cannot act, and a locked linked worktree says why too
+  // pinned main hides removal; unpinned locked checkouts still explain their restriction
   const mainRemove = launcher.getByRole('button', { name: 'Remove Repo', exact: true });
-  await expect(mainRemove).toBeDisabled();
-  await expect(mainRemove).toHaveAttribute('title', 'The main worktree cannot be removed');
+  await expect(mainRemove).toHaveCount(0);
   const lockedRemove = launcher.getByRole('button', { name: 'Remove Repo · held' });
   await expect(lockedRemove).toBeDisabled();
   await expect(lockedRemove).toHaveAttribute('title', 'Locked worktrees cannot be removed');
@@ -73,9 +129,10 @@ test('removes a linked worktree with discard and branch-delete from the launcher
   await expect(dialog).toBeHidden();
 });
 
+// keep explicit toolbar removal available for pinned worktrees
 test('removes a linked worktree from the idle tab toolbar menu', async ({ page }) => {
   let deleted: unknown;
-  await stub(page, { onDelete: body => { deleted = body; } });
+  await stub(page, { pinned: true, onDelete: body => { deleted = body; } });
   await page.goto('/');
   // the pinned idle worktree has its own tab; open it, then the toolbar's ⋮ → Remove
   await page.getByRole('tab', { name: /Repo · feat/u }).click();
@@ -152,12 +209,13 @@ test('offers a closed pull request worktree for removal through the Remove dialo
 
   // each closed pull request worktree's row says why; a locked one cannot be removed, so it says why not
   const merged = launcher.getByRole('button', { name: 'PR merged · Remove Repo · feat', exact: true });
-  await expect(merged).toHaveText('PR merged · Remove');
+  await expect(merged.locator(':scope > span')).toHaveText(['Merged.', 'Remove?']);
   await expect(merged).toBeEnabled();
   // orange, as the GitHub panel's Remove Worktree…
   await page.mouse.move(0, 0);
   await expect(merged).toHaveCSS('background-color', 'rgb(250, 179, 135)');
   const closed = launcher.getByRole('button', { name: 'PR closed · Remove Repo · held', exact: true });
+  await expect(closed.locator(':scope > span')).toHaveText(['Closed.', 'Remove?']);
   await expect(closed).toBeDisabled();
   await expect(closed).toHaveAttribute('title', 'Locked worktrees cannot be removed');
   await expect(launcher.getByRole('button', { name: /PR (merged|closed)/u })).toHaveCount(2);

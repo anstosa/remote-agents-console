@@ -2748,14 +2748,15 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .launcher-prune { border: 1px solid color-mix(in srgb, var(--peach) 45%, transparent); border-radius: var(--control-radius); padding: .18rem .5rem; background: transparent; color: var(--peach); font-size: .62rem; letter-spacing: 0; text-transform: none; cursor: pointer; white-space: nowrap; }
 .launcher-prune:not(:disabled):hover { background: color-mix(in srgb, var(--peach) 16%, transparent); }
 .launcher-prune:disabled { opacity: .45; cursor: not-allowed; }
-/* a row's closed-pull-request offer keeps its own width beside the row's controls */
-.more-menu .launcher-closed-pr { flex: none; width: auto; }
+/* stack the cleanup prompt without widening the row */
+.more-menu .launcher-closed-pr { flex: none; width: auto; flex-direction: column; justify-content: center; gap: 0; line-height: 1.15; }
 /* a phone row has no room for it, so it wraps below the controls rather than splitting them */
 @media (max-width: 600px) { .more-menu .launcher-closed-pr { order: 1; margin-left: auto; } }
 
-/* a row's Pin and Remove icons, in fixed columns between the name and Launch. Both are the
-   same size (Remove's border is transparent) so the columns hold on every row. */
+/* keep row icons in fixed-width columns before launch */
 .launcher-menu .launcher-icon { display: inline-flex; flex: 0 0 1.7rem; width: 1.7rem; height: 1.7rem; align-items: center; justify-content: center !important; padding: 0 !important; border: 1px solid transparent !important; border-radius: var(--control-radius); background: transparent; color: var(--overlay-2); cursor: pointer; }
+/* keep removal and compact launch controls at one height */
+.launcher-menu :is(.launcher-remove, .launcher-closed-pr, .launch-compact, .launch-chevron) { height: 2.25rem; }
 .launcher-menu .launcher-icon:disabled { opacity: .3; cursor: not-allowed; }
 .launcher-icon-glyph { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
 /* keep edit and delete glyphs aligned with the shared line-icon stroke */

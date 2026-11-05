@@ -14,6 +14,8 @@ async function stubDynamicWorktrees(page: import('@playwright/test').Page, soloS
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
     // return the launcher projects
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, bookmarks: true, inlineQuestions: false, commands: true, sandbox: false } }, agents: [{ id: 'agent-solo', sessionId: 'socket:$1', home: solo.path, worktreeId: solo.id, worktreeLabel: solo.label, title: 'Ready', kind: 'codex' }], projects: [{ id: 'solo', label: 'Solo', available: true, manageWorktrees: true, worktrees: [solo], ...(soloStale ? { stalePaths: ['/worktrees/stale'] } : {}) }, { id: 'multi', label: 'Multi', available: true, manageWorktrees: true, worktrees: [multiMain, multiSecond] }] } });
+    // offer cleanup for both expanded and compacted projects
+    if (url.pathname === '/api/worktrees/closed-pull-requests') return route.fulfill({ json: { worktrees: [{ worktreeId: solo.id, reason: 'merged' }, { worktreeId: multiSecond.id, reason: 'closed' }] } });
     // return agent bootstrap data
     if (url.pathname === '/api/agents/agent-solo/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty agent collections
@@ -47,8 +49,24 @@ async function openProjectsSettings(page: import('@playwright/test').Page) {
   return settings;
 }
 
+// open the launcher after its cleanup inventory has rendered
+async function openLauncher(page: import('@playwright/test').Page) {
+  const inventory = page.waitForResponse('**/api/worktrees/closed-pull-requests');
+  const launch = page.getByRole('tablist', { name: 'Agents and worktrees' }).getByRole('button', { name: 'Launch agent', exact: true });
+  // phones open the launcher through the workspace picker
+  if (await launch.isVisible()) await launch.click();
+  else {
+    await page.locator('.workspace-dropdown').click();
+    await page.getByRole('button', { name: /New Workspace/u }).click();
+  }
+  await (await inventory).finished();
+  // allow response parsing and the following react render to finish
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  return page.getByRole('group', { name: 'Agent launcher' });
+}
+
 // persist density changes and compact only single-worktree projects
-test('dynamic worktrees defaults on and compacts single-worktree projects when disabled', async ({ page }) => {
+test('dynamic worktrees defaults on and compacts single-worktree projects when disabled', async ({ page }, testInfo) => {
   await stubDynamicWorktrees(page);
   await page.goto('/');
 
@@ -57,12 +75,13 @@ test('dynamic worktrees defaults on and compacts single-worktree projects when d
   await expect(dynamicWorktrees).toBeChecked();
   await settings.getByRole('button', { name: 'Close settings' }).click();
 
-  await page.getByRole('tablist', { name: 'Agents and worktrees' }).getByRole('button', { name: 'Launch agent', exact: true }).click();
-  let launcher = page.getByRole('group', { name: 'Agent launcher' });
+  let launcher = await openLauncher(page);
   const expandedSoloProject = launcher.getByRole('group', { name: 'Solo', exact: true });
   await expect(expandedSoloProject.getByRole('button', { name: 'New worktree…' })).toBeVisible();
   await expect(expandedSoloProject.getByRole('group', { name: 'Solo worktree controls' })).toHaveCount(0);
   await expect(expandedSoloProject.getByRole('button', { name: 'Open Solo main' })).toBeVisible();
+  await expect(expandedSoloProject.getByRole('button', { name: 'Remove Solo main', exact: true })).toBeVisible();
+  await expect(expandedSoloProject.getByRole('button', { name: 'PR merged · Remove Solo main', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
 
   await openProjectsSettings(page);
@@ -73,8 +92,7 @@ test('dynamic worktrees defaults on and compacts single-worktree projects when d
   expect(await page.evaluate(() => localStorage.getItem('rac.dynamic-worktrees'))).toBe('disabled');
   await settings.getByRole('button', { name: 'Close settings' }).click();
 
-  await page.getByRole('button', { name: 'Launch agent', exact: true }).click();
-  launcher = page.getByRole('group', { name: 'Agent launcher' });
+  launcher = await openLauncher(page);
   await expect(launcher.getByRole('button', { name: 'New worktree…' })).toHaveCount(0);
   const soloProject = launcher.getByRole('group', { name: 'Solo', exact: true });
   const soloHeader = soloProject.locator('.launcher-project-header');
@@ -82,7 +100,9 @@ test('dynamic worktrees defaults on and compacts single-worktree projects when d
   await expect(soloControls.getByRole('button', { name: 'Open Solo main' })).toBeVisible();
   await expect(soloControls.getByRole('button', { name: 'Pin Solo main' })).toBeVisible();
   await expect(soloControls.getByRole('button', { name: 'Rename Solo main' })).toBeVisible();
-  await expect(soloControls.getByRole('button', { name: 'Remove Solo main' })).toBeVisible();
+  // disabled mode hides removal in inline controls and expanded worktree rows
+  await expect(launcher.getByRole('button', { name: /^Remove /u })).toHaveCount(0);
+  await expect(launcher.getByRole('button', { name: /^PR (merged|closed) · Remove /u })).toHaveCount(0);
   // Open is the default of the same split control Launch uses, so the two line up
   const [nameBounds, openBounds] = await Promise.all([soloHeader.locator(':scope > span').boundingBox(), soloControls.getByRole('group', { name: 'Launch agent' }).boundingBox()]);
   // require rendered inline controls
@@ -98,14 +118,23 @@ test('dynamic worktrees defaults on and compacts single-worktree projects when d
   if (launchBounds === null || soloPinBounds === null || multiPinBounds === null) throw new Error('launcher controls did not render');
   expect(Math.abs(openBounds.width - launchBounds.width)).toBeLessThanOrEqual(1);
   expect(Math.abs(soloPinBounds.x - multiPinBounds.x)).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: testInfo.outputPath('dynamic-worktrees-disabled-desktop.png'), fullPage: true });
 
   await page.reload();
   await openProjectsSettings(page);
   await expect(page.getByRole('dialog', { name: 'Settings' }).getByRole('switch', { name: 'Dynamic worktrees' })).not.toBeChecked();
+
+  // enabling dynamic mode restores unpinned removal controls
+  await dynamicWorktrees.check();
+  await settings.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await settings.getByRole('button', { name: 'Close settings' }).click();
+  await openLauncher(page);
+  await expect(launcher.getByRole('button', { name: 'Remove Multi second', exact: true })).toBeVisible();
+  await expect(launcher.getByRole('button', { name: 'PR closed · Remove Multi second', exact: true })).toBeVisible();
 });
 
 // keep compact stale projects inside a narrow launcher
-test('a stale single-worktree project stays contained when compacted', async ({ page }) => {
+test('a stale single-worktree project stays contained when compacted', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 360, height: 800 });
   await stubDynamicWorktrees(page, true);
   await page.goto('/');
@@ -114,14 +143,16 @@ test('a stale single-worktree project stays contained when compacted', async ({ 
   await settings.getByRole('switch', { name: 'Dynamic worktrees' }).uncheck();
   await settings.getByRole('button', { name: 'Save changes', exact: true }).click();
   await settings.getByRole('button', { name: 'Close settings' }).click();
-  await page.locator('.workspace-dropdown').click();
-  await page.getByRole('button', { name: /New Workspace/u }).click();
+  const launcher = await openLauncher(page);
 
-  const soloProject = page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Solo', exact: true });
+  const soloProject = launcher.getByRole('group', { name: 'Solo', exact: true });
   const soloHeader = soloProject.locator('.launcher-project-header');
   const soloControls = soloHeader.getByRole('group', { name: 'Solo worktree controls' });
   await expect(soloControls.getByRole('button', { name: 'Open Solo main' })).toBeVisible();
   await expect(soloHeader.getByRole('button', { name: '1 stale · Prune' })).toBeVisible();
+  await expect(launcher.getByRole('button', { name: /^Remove /u })).toHaveCount(0);
+  await expect(launcher.getByRole('button', { name: /^PR (merged|closed) · Remove /u })).toHaveCount(0);
   const overflow = await soloHeader.evaluate(element => element.scrollWidth - element.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
+  await page.screenshot({ path: testInfo.outputPath('dynamic-worktrees-disabled-mobile.png'), fullPage: true });
 });
