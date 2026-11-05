@@ -87,6 +87,16 @@ describe('application integration surfaces', () => {
       const metadata = await app.inject({ method: 'GET', url: '/.well-known/oauth-protected-resource', headers: { host: 'agents.example.com' } });
       expect(metadata.json().resource).toBe('https://agents.example.com/mcp');
       const signed = auth.sign({ id: 'browser-session', csrf: 'browser-csrf' });
+      const registration = await app.inject({ method: 'POST', url: '/oauth/register', headers: { host: 'agents.example.com' }, payload: { redirect_uris: ['https://chatgpt.com/connector/oauth/test-callback'] } });
+      const consent = { response_type: 'code', client_id: registration.json().client_id, redirect_uri: 'https://chatgpt.com/connector/oauth/test-callback', resource: 'https://agents.example.com/mcp', scope: 'status:read', code_challenge: 'a'.repeat(43), code_challenge_method: 'S256' };
+      // missing CSRF cannot bypass origin validation on an authenticated consent POST
+      for (const [origin, csrf] of [['https://evil.example', undefined], ['https://agents.example.com', undefined], ['https://evil.example', 'browser-csrf'], [undefined, 'browser-csrf'], ['https://agents.example.com', 'wrong-csrf']]) {
+        const denied = await app.inject({ method: 'POST', url: '/oauth/authorize', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}`, ...(origin === undefined ? {} : { origin }) }, payload: { ...consent, ...(csrf === undefined ? {} : { csrf }) } });
+        expect(denied.statusCode).toBe(401);
+        expect(denied.headers.location).toBeUndefined();
+      }
+      const approved = await app.inject({ method: 'POST', url: '/oauth/authorize', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}`, origin: 'https://agents.example.com' }, payload: { ...consent, csrf: 'browser-csrf' } });
+      expect(approved.statusCode).toBe(302);
       const status = await app.inject({ method: 'GET', url: '/api/integrations/status', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}` } });
       expect(status.json()).toMatchObject({ enabled: true, control: { voiceActive: false }, realtime: { enabled: true, available: true, writeToolsEnabled: true } });
       const voiceSessionId = 'voice-session-123456789';
@@ -97,6 +107,17 @@ describe('application integration surfaces', () => {
       await control.take('browser-session');
       const realtime = await app.inject({ method: 'POST', url: '/api/realtime/session', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId } });
       expect(realtime.statusCode).toBe(200);
+      const fetchMock = vi.mocked(globalThis.fetch);
+      const provider = JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body));
+      const bearer = provider.session.tools[0].authorization as string;
+      const mcpHeaders = { host: 'agents.example.com', 'mcp-protocol-version': '2025-06-18', authorization: `Bearer ${bearer}` };
+      const listed = await app.inject({ method: 'POST', url: '/mcp', headers: mcpHeaders, payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' } });
+      expect(listed.statusCode).toBe(200);
+      const names = listed.json().result.tools.map((tool: { name: string }) => tool.name);
+      expect(names).toEqual(expect.arrayContaining(['get_agent_runtime', 'list_agent_models', 'list_conversations', 'restart_agent', 'get_lifecycle_command', 'get_launch_options', 'launch_agent', 'queue_prompt_with_attachments', 'relay_agent_question_answer', 'get_comparison', 'list_comparison_commits', 'ask_review', 'ask_comparison', 'create_pull_request_review_draft', 'get_files_capabilities', 'begin_file_upload', 'download_file_chunk', 'get_note', 'list_notes', 'create_note', 'schedule_note', 'list_configured_actions', 'spawn_agent', 'close_agent', 'create_worktree', 'watch_pull_request', 'get_watch_events']));
+      expect(names).not.toContain('watch_command');
+      const denied = await app.inject({ method: 'POST', url: '/mcp', headers: mcpHeaders, payload: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'watch_command', arguments: { command: 'echo unsafe', description: 'unavailable', request_id: 'request-denied-command' } } } });
+      expect(denied.json().error.code).toBe(-32602);
       const activeStatus = await app.inject({ method: 'GET', url: '/api/integrations/status', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}` } });
       expect(activeStatus.json()).toMatchObject({ control: { voiceActive: true } });
       const heartbeat = await app.inject({ method: 'POST', url: '/api/realtime/session/heartbeat', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId } });
@@ -105,6 +126,8 @@ describe('application integration surfaces', () => {
       expect(stopped.statusCode).toBe(200);
       const stoppedStatus = await app.inject({ method: 'GET', url: '/api/integrations/status', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}` } });
       expect(stoppedStatus.json()).toMatchObject({ control: { voiceActive: false } });
+      const revoked = await app.inject({ method: 'POST', url: '/mcp', headers: mcpHeaders, payload: { jsonrpc: '2.0', id: 3, method: 'tools/list' } });
+      expect(revoked.statusCode).toBe(401);
       expect(realtime.headers['content-security-policy']).toContain('https://api.openai.com');
     } finally { await app.close(); }
   });

@@ -100,7 +100,7 @@ export type ReviewStatusV1 = {
   review?: StoredReviewTour;
 };
 
-export type StackStatusV1 = StackStateV1 & { log?: StackOperationLog };
+export type StackStatusV1 = StackStateV1;
 
 export type WorkspaceSummaryEntryV1 = {
   id: string;

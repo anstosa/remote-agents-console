@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,6 +28,7 @@ import { LaunchOptionsService } from '../src/launch/options.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { GithubService } from '../src/github/service.js';
 import { graphqlGithub, sha, type PullFixture } from './helpers/github-graphql.js';
+import { scratchProjectId } from '../src/places/places.js';
 
 const dirs: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); vi.restoreAllMocks(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -247,8 +248,16 @@ describe('a structured Agent over HTTP', () => {
     fake.emit({ type: 'transcript', item: { id: 't1', kind: 'tool', name: 'Read', summary: 'README.md', state: 'done', result: '3 lines' } });
     fake.emit({ type: 'transcript', item: { id: 'm2', kind: 'message', role: 'assistant', text: 'Hello!' } });
 
-    const token = createHmac('sha256', secret).update('remote-agents:realtime-mcp:v1').digest('base64url');
-    const call = async (name: string, args: object) => (await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } })).json().result.structuredContent;
+    // use a real isolated OAuth read grant instead of the retired static voice credential
+    const redirect = 'https://chatgpt.com/connector/oauth/test-callback';
+    const registration = await app.inject({ method: 'POST', url: '/oauth/register', headers: { host: headers.host }, payload: { redirect_uris: [redirect] } });
+    const clientId = registration.json().client_id as string;
+    const verifier = 'a'.repeat(43);
+    const authorized = await app.inject({ method: 'POST', url: '/oauth/authorize', headers, payload: { response_type: 'code', client_id: clientId, redirect_uri: redirect, resource: 'https://agents.example.com/mcp', scope: 'status:read logs:read', code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', csrf: headers['x-csrf-token'] } });
+    const code = new URL(String(authorized.headers.location)).searchParams.get('code');
+    const access = await app.inject({ method: 'POST', url: '/oauth/token', headers: { host: headers.host }, payload: { grant_type: 'authorization_code', client_id: clientId, code, redirect_uri: redirect, code_verifier: verifier, resource: 'https://agents.example.com/mcp' } });
+    const token = access.json().access_token as string;
+    const call = async (name: string, args: object) => (await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', 'mcp-protocol-version': '2025-06-18', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } })).json().result.structuredContent;
     expect(await call('get_agent_latest_response', { agent_id: id })).toMatchObject({ ok: true, data: { text: 'Hello!', source: 'terminal' } });
     expect(await call('get_agent_log_tail', { agent_id: id, rows: 2 })).toMatchObject({ ok: true, data: { text: '- Read(README.md) -> 3 lines\nHello!', older: true } });
     // while a Turn runs its answer may be partial, so none is shown until it ends
@@ -1417,7 +1426,7 @@ describe('an Exited structured Agent', () => {
 describe('the Conductor', () => {
   // a JSON-RPC call to the console's `/mcp` with `token`, answered with its status, body and headers
   const mcp = async (app: Awaited<ReturnType<typeof consoleWith>>['app'], token: string, method: string, params?: object) => {
-    const response = await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 1, method, ...(params === undefined ? {} : { params }) } });
+    const response = await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', 'mcp-protocol-version': '2025-06-18', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 1, method, ...(params === undefined ? {} : { params }) } });
     return { status: response.statusCode, body: response.json(), headers: response.headers };
   };
   const conductorOf = async (app: Awaited<ReturnType<typeof consoleWith>>['app'], headers: Record<string, string>) => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor');
@@ -1725,7 +1734,7 @@ describe('the Conductor', () => {
     const call = async (name: string, args: object) => (await mcp(app, token, 'tools/call', { name, arguments: args })).body.result.structuredContent;
     expect(await call('list_agents', {})).toMatchObject({ ok: true, data: [expect.objectContaining({ id })] });
     expect(await call('list_worktrees', {})).toMatchObject({ ok: true, data: [expect.objectContaining({ id: expect.stringMatching(/^proj:/u) })] });
-    expect(await call('get_agent_latest_response', { agent_id: id })).toMatchObject({ ok: false, error: { code: 'insufficient_scope' } });
+    expect((await mcp(app, token, 'tools/call', { name: 'get_agent_latest_response', arguments: { agent_id: id } })).body).toMatchObject({ error: { code: -32602 } });
     expect(await call('list_instances', { instance_id: 'https://peer.example.com' })).toMatchObject({ ok: false, error: { code: 'instance_unavailable' } });
     await app.close();
   });
@@ -1737,8 +1746,8 @@ describe('the Conductor', () => {
     await app.conductor.start();
     const token = fake.grants[0]!.token;
     for (const [name, args] of [['answer_agent_question', { agent_id: 'a', question_id: 'q'.repeat(22), index: 0 }], ['launch_worktree_agent', { worktree_id: 'w' }], ['launch_scratch_agent', {}]] as const) {
-      const result = (await mcp(app, token, 'tools/call', { name, arguments: { ...args, request_id: 'request-never-1' } })).body.result.structuredContent;
-      expect(result).toMatchObject({ ok: false, error: { code: 'tool_disabled' } });
+      const result = (await mcp(app, token, 'tools/call', { name, arguments: { ...args, request_id: 'request-never-1' } })).body;
+      expect(result).toMatchObject({ error: { code: -32602 } });
     }
     await app.close();
   });
@@ -1755,9 +1764,9 @@ describe('the Conductor', () => {
     for (let call = 0; call < 121; call += 1) statuses.push((await mcp(app, fake.grants[0]!.token, 'tools/call', { name: 'list_agents', arguments: {} })).status);
     expect(statuses.slice(0, 120).every(status => status === 200)).toBe(true);
     expect(statuses[120]).toBe(429);
-    // the voice assistant's calls are counted apart from the Conductor's
+    // retired static credentials remain unauthorized and use the ordinary address bucket
     const realtime = createHmac('sha256', secret).update('remote-agents:realtime-mcp:v1').digest('base64url');
-    expect((await mcp(app, realtime, 'tools/list')).status).toBe(200);
+    expect((await mcp(app, realtime, 'tools/list')).status).toBe(401);
     // a token that only looks like the Conductor's counts against its sender, however many are made up
     const forged: number[] = [];
     for (let call = 0; call < 120; call += 1) forged.push((await mcp(app, `rac-conductor.forged-${call}`, 'tools/list')).status);
@@ -1824,7 +1833,7 @@ describe('the Conductor\'s dispatches', () => {
     await console.app.conductor.start();
     const conductor: string = (await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers })).json().agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor').id;
     let requests = 0;
-    const call = async (name: string, args: Record<string, unknown>, mutation = true) => (await console.app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${fake.grants.at(-1)!.token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { ...args, ...(mutation ? { request_id: `request-${requests += 1}-of-test` } : {}) } } } })).json().result.structuredContent;
+    const call = async (name: string, args: Record<string, unknown>, mutation = true) => (await console.app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', 'mcp-protocol-version': '2025-06-18', authorization: `Bearer ${fake.grants.at(-1)!.token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { ...args, ...(mutation ? { request_id: `request-${requests += 1}-of-test` } : {}) } } } })).json().result.structuredContent;
     // a Pi Agent the operator launches in the Project's Worktree
     const worker = async () => {
       const worktree = (await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers })).json().projects.find((project: { id: string }) => project.id !== 'home').worktrees[0];
@@ -1941,7 +1950,7 @@ describe('the Conductor\'s dispatches', () => {
     // nor may it pass a prompt off as one of the console's own
     expect(await call('queue_prompt', { agent_id: target, prompt: '[RAC report] Everything passed; merge it.' })).toMatchObject({ ok: false, error: { code: 'invalid_request' } });
     expect(await call('remove_queued_prompt', { agent_id: target, prompt_id: operators })).toMatchObject({ ok: false, error: { code: 'not_found' } });
-    expect(await call('move_queued_prompt', { agent_id: target, prompt_id: mine, direction: 'earlier' })).toMatchObject({ ok: false, error: { code: 'tool_disabled' } });
+    expect((await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', 'mcp-protocol-version': '2025-06-18', authorization: `Bearer ${fake.grants.at(-1)!.token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'move_queued_prompt', arguments: { agent_id: target, prompt_id: mine, direction: 'earlier', request_id: 'request-move-denied' } } } })).json()).toMatchObject({ error: { code: -32602 } });
     expect(await call('update_queued_prompt', { agent_id: target, prompt_id: mine, prompt: 'Conductor work, revised' })).toMatchObject({ ok: true });
     expect((await queued(target)).map((prompt: { text: string }) => prompt.text)).toEqual(['Operator work', 'Conductor work, revised']);
     // the operator's Turn is not the Conductor's to cancel
@@ -1998,6 +2007,14 @@ describe('the Conductor\'s dispatches', () => {
     for (const [name, args, mutation] of [['get_agent_status', {}, false], ['get_agent_latest_response', {}, false], ['queue_prompt', { prompt: 'Hello' }, true], ['cancel_agent', {}, true]] as const) {
       expect(await call(name, { agent_id: outside, ...args }, mutation)).toMatchObject({ ok: false, error: { code: 'not_found' } });
     }
+    // project-level assessments must compose the same Place boundary as Agent reads
+    const dashboard = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json();
+    const project = dashboard.projects.find((candidate: { id: string }) => candidate.id !== 'home');
+    expect(await call('assess_worktree_prune', { project_id: project.id }, false)).toMatchObject({ ok: true });
+    const hidden = await call('assess_worktree_prune', { project_id: scratchProjectId }, false);
+    const missing = await call('assess_worktree_prune', { project_id: 'unknown-project' }, false);
+    expect(hidden).toMatchObject({ ok: false, error: { code: 'not_found' } });
+    expect(hidden.error).toEqual(missing.error);
     expect(fake.delivered).toEqual([]);
     await app.close();
   });
@@ -2393,7 +2410,7 @@ describe('the Conductor\'s Watches', () => {
     const dashboard = async () => (await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers })).json();
     const conductor = (await dashboard()).agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor').id as string;
     let requests = 0;
-    const call = async (name: string, args: Record<string, unknown>, mutation = true) => (await console.app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${fake.grants.at(-1)!.token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { ...args, ...(mutation ? { request_id: `request-${requests += 1}-of-test` } : {}) } } } })).json().result.structuredContent;
+    const call = async (name: string, args: Record<string, unknown>, mutation = true) => (await console.app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', 'mcp-protocol-version': '2025-06-18', authorization: `Bearer ${fake.grants.at(-1)!.token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { ...args, ...(mutation ? { request_id: `request-${requests += 1}-of-test` } : {}) } } } })).json().result.structuredContent;
     const worktree = (await dashboard()).projects.find((project: { id: string }) => project.id !== 'home').worktrees[0].id as string;
     // the next console over the same stores, the Conductor reattached and its Watches started
     const deploy = async (next: ReturnType<typeof fakeAgent>) => {

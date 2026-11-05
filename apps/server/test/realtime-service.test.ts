@@ -70,6 +70,16 @@ describe('RealtimeService', () => {
     await expect(service.create(request)).resolves.toEqual({ ok: false, code: 'provider_error' });
   });
 
+  it('accepts the expanded bounded catalog allowlist', async () => {
+    const provider = vi.fn(async () => new Response(JSON.stringify({ value: 'ek_ephemeral-client-secret' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const service = new RealtimeService({ apiKey: 'provider-key', fetch: provider as typeof fetch });
+    const expanded = Array.from({ length: 120 }, (_, index) => `tool_${index}`);
+
+    await expect(service.create({ ...request, allowedTools: expanded })).resolves.toMatchObject({ ok: true });
+    await expect(service.create({ ...request, allowedTools: Array.from({ length: 257 }, (_, index) => `tool_${index}`) })).resolves.toEqual({ ok: false, code: 'invalid_request' });
+    expect(provider).toHaveBeenCalledTimes(1);
+  });
+
   it('uses the current configurable name and context without retaining the default persona', async () => {
     const provider = vi.fn(async () => new Response(JSON.stringify({ value: 'ek_ephemeral-client-secret' }), { status: 200, headers: { 'content-type': 'application/json' } }));
     let settings = { name: 'Riley', context: 'Speak plainly and keep the tone dry.' };

@@ -18,7 +18,8 @@ import type { Schedule } from '../schedule/types.js';
 import type { WorkspaceFileService, WorkspaceFilePreview } from '../workspace-files/service.js';
 import { configuredWorktreeForWorkspace, projectIdOf, worktreeById } from '../workspaces/resolver.js';
 import { limitText, redactIntegrationText } from '../integrations/text.js';
-import { processActions, type StackState, type WorktreeCommandService } from '../worktree-commands/service.js';
+import { safeIntegrationPath } from '../integrations/path-safety.js';
+import { processActions, type StackOperationLog, type StackState, type WorktreeCommandService } from '../worktree-commands/service.js';
 import { declaredProcesses } from '../domain/stack-processes.js';
 import { GithubRequestError, originRepository, type GithubRepository } from '../github/github.js';
 import type { WatchRefusal, Watches } from '../watches/service.js';
@@ -128,10 +129,6 @@ type NoteFacade = {
 /** Which Places a principal may act on, by the Worktree (or Place) id and its Project. */
 export type PlaceScope = (place: { id: string; projectId: string }) => boolean;
 
-const safeHiddenPaths = new Set(['.dockerignore', '.editorconfig', '.gitattributes', '.github', '.gitignore']);
-const sensitiveFileNames = new Set(['.npmrc', '.netrc', '.pypirc', 'auth.json', 'credentials', 'credentials.json', 'id_ed25519', 'id_rsa', 'integration-auth.json', 'integration-state.json', 'secrets.json']);
-const sensitiveExtensions = new Set(['.cer', '.crt', '.jks', '.key', '.keystore', '.p12', '.pem', '.pfx']);
-
 // build one successful v1 result
 function success<T>(value: T): OrchestrationResult<T> {
   return { ok: true, version: orchestrationContractVersion, value };
@@ -148,25 +145,9 @@ function validIdentifier(value: string): boolean {
 }
 
 // reject prompt payloads that can enter PromptService shell mode
-function validIntegrationPrompt(value: string): boolean {
+export function validIntegrationPrompt(value: string): boolean {
   // nor pass for one of the console's own labelled prompts (a report, an event, a Run)
   return validPrompt(value) && Buffer.byteLength(value) <= maxIntegrationPromptBytes && !/^\s*!/u.test(value) && !/^\[RAC (?:report|event|run)\]/u.test(value);
-}
-
-// reject hidden and credential-bearing integration paths
-function safeIntegrationPath(value: string): boolean {
-  const normalized = value.replaceAll('\\', '/').replace(/^\.\//u, '');
-  const segments = normalized.split('/').filter(Boolean);
-  // reject traversal and absolute paths before the workspace service
-  if (normalized.startsWith('/') || segments.includes('..')) return false;
-  // reject unsafe hidden files and directories
-  if (segments.some(segment => segment.startsWith('.') && !safeHiddenPaths.has(segment))) return false;
-  const basename = segments.at(-1)?.toLocaleLowerCase() ?? '';
-  // reject known credential stores and key material
-  if (sensitiveFileNames.has(basename) || [...sensitiveExtensions].some(extension => basename.endsWith(extension))) return false;
-  // reject deployment-specific private configuration
-  if (/^remote-agent-console\.(?!example\.json$).+\.json$/u.test(basename)) return false;
-  return true;
 }
 
 // copy a file preview through the caller's byte boundary
@@ -545,7 +526,7 @@ export class OrchestrationService {
     });
   }
 
-  // report configured stack state and latest operation output
+  // report configured state without reading logs under status-only authority
   async stackStatus(worktreeId: string): Promise<OrchestrationResult<StackStatusV1>> {
     // reject malformed identifiers
     if (!validIdentifier(worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
@@ -553,11 +534,20 @@ export class OrchestrationService {
       const worktree = this.worktree(worktreeId);
       // require a configured worktree
       if (worktree === undefined) return failure('not_found', 'Worktree not found.');
-      const [state, log] = await Promise.all([
-        this.dependencies.worktreeCommands.state(worktree),
-        this.dependencies.worktreeCommands.log(worktreeId)
-      ]);
-      return success({ actions: this.dependencies.worktreeCommands.actions(worktree), ...integrationStack(state), ...(log === undefined ? {} : { log: { ...log, output: redactIntegrationText(log.output) } }) });
+      const state = await this.dependencies.worktreeCommands.state(worktree);
+      return success({ actions: this.dependencies.worktreeCommands.actions(worktree), ...integrationStack(state) });
+    });
+  }
+
+  // read bounded redacted operation output only through the explicit logs port
+  async stackLog(worktreeId: string): Promise<OrchestrationResult<StackOperationLog>> {
+    // reject malformed or inaccessible targets before reading a log
+    if (!validIdentifier(worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
+    return await this.operation(async () => {
+      // enforce the same Place boundary as state reads
+      if (this.worktree(worktreeId) === undefined) return failure('not_found', 'Worktree not found.');
+      const log = await this.dependencies.worktreeCommands.log(worktreeId);
+      return log === undefined ? failure('not_found', 'Stack log not found.') : success({ ...log, output: limitText(redactIntegrationText(log.output), maxTerminalBytes).text });
     });
   }
 
@@ -680,8 +670,9 @@ export class OrchestrationService {
     return await this.operation(async () => {
       // the Conductor cancels only a Turn it dispatched
       const conductor = this.dependencies.conductor;
-      if (conductor !== undefined && this.dependencies.prompts.inFlight(agentId)?.sender.from !== conductor) return failure('conflict', 'The agent is not on a Turn you dispatched.');
-      const outcome = await this.dependencies.prompts.cancel(agentId);
+      const dispatched = this.dependencies.prompts.inFlight(agentId);
+      if (conductor !== undefined && dispatched?.sender.from !== conductor) return failure('conflict', 'The agent is not on a Turn you dispatched.');
+      const outcome = await this.dependencies.prompts.cancel(agentId, undefined, conductor === undefined || dispatched === undefined ? undefined : { promptId: dispatched.promptId, from: conductor });
       // 'ok' interrupted; 'not-working' refused a finished agent; 'unavailable' had no target
       if (outcome === 'ok') return success({ cancelled: true as const });
       if (outcome === 'not-working') return failure('conflict', 'The agent is not working; there is nothing to interrupt.');

@@ -48,7 +48,7 @@ export type SwitchOutcome = { status: 'switched'; agentId: string } | { status: 
 export interface AgentTransport {
   answer(agentId: string, questionId: string, answer: QuestionAnswer): Promise<boolean>;
   /** `returned` hears the steers a cancel dropped, which go back to the operator. */
-  interrupt(agentId: string, returned?: (steers: string[]) => void): Promise<InterruptOutcome>;
+  interrupt(agentId: string, returned?: (steers: string[]) => void, mayDispatch?: () => boolean): Promise<InterruptOutcome>;
   close(agentId: string): Promise<boolean>;
   rename(agentId: string, name: string): Promise<RenameOutcome>;
   newConversation(agentId: string): Promise<boolean>;

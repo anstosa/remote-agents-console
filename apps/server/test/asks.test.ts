@@ -114,7 +114,7 @@ describe('Ask jobs', () => {
     await expect(jobs.ask('owner', target, ask('And?'))).rejects.toMatchObject({ code: 'busy' });
     turns[0]!.answer({ value: 'Because **the guard** runs later.', conversation });
     await settled();
-    expect(jobs.get('owner', started.job.id)?.state).toEqual({ kind: 'ready' });
+    expect(jobs.get('owner', started.job.id)?.state).toEqual({ kind: 'ready', answer: 'Because **the guard** runs later.' });
     expect(jobs.get('someone-else', started.job.id)).toBeUndefined();
     expect(await store.askThreads('cora', 'feature/one', tour.fingerprint)).toEqual([{ id: finding.id, target: 'reviewer', kind: 'claude', conversation, anchor: findingAnchor(finding, change), turns: [{ id: started.job.id, question: 'Why is this a problem?', askedAt: started.job.startedAt, answer: 'Because **the guard** runs later.' }] }]);
     // a follow-up joins the same thread

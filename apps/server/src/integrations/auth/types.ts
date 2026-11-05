@@ -11,12 +11,26 @@ export const supportedIntegrationScopes = [
 
 export const SUPPORTED_INTEGRATION_SCOPES = supportedIntegrationScopes;
 
+export type PublicIntegrationScope = typeof supportedIntegrationScopes[number];
+
+export const internalIntegrationScopes = [
+  ...supportedIntegrationScopes,
+  'files:write',
+  'github:read',
+  'github:write',
+  'notes:write',
+  'agents:spawn',
+  'actions:invoke'
+] as const;
+
+export type InternalIntegrationScope = typeof internalIntegrationScopes[number];
+
 /** The Conductor's scopes (ADR 0018): the integrations' own, and three only it can hold. */
-export const conductorScopes = [...supportedIntegrationScopes, 'agents:spawn', 'notes:write', 'github:read'] as const;
+export const conductorScopes = [...supportedIntegrationScopes, 'agents:spawn', 'notes:write', 'github:read', 'files:write'] as const;
 /** What a Conductor configured without `scopes` gets: everything but these, which the operator must name. */
 export const conductorOptInScopes: readonly IntegrationScope[] = ['admin:dangerous', 'github:read'];
 
-export type IntegrationScope = typeof conductorScopes[number];
+export type IntegrationScope = InternalIntegrationScope;
 // the kinds a Conductor's workers may be; only Pi's sandbox is the console's own (ADR 0018)
 export const conductorSpawnKinds = ['pi', 'claude', 'codex'] as const;
 export type ConductorSpawnKind = typeof conductorSpawnKinds[number];
@@ -46,7 +60,7 @@ export type OAuthProtectedResourceMetadata = {
   resource: string;
   authorization_servers: string[];
   bearer_methods_supported: ['header'];
-  scopes_supported: readonly IntegrationScope[];
+  scopes_supported: readonly PublicIntegrationScope[];
   resource_name: string;
 };
 
@@ -59,7 +73,7 @@ export type OAuthAuthorizationServerMetadata = {
   grant_types_supported: ['authorization_code', 'refresh_token'];
   token_endpoint_auth_methods_supported: ['none'];
   code_challenge_methods_supported: ['S256'];
-  scopes_supported: readonly IntegrationScope[];
+  scopes_supported: readonly PublicIntegrationScope[];
 };
 
 export type DynamicClientRegistrationRequest = {
@@ -128,7 +142,7 @@ export type OAuthTokenResponse = {
 
 export type AccessAuthenticationRequest = {
   resource: string;
-  scopes?: readonly IntegrationScope[];
+  scopes?: readonly PublicIntegrationScope[];
 };
 
 /**
@@ -142,6 +156,9 @@ export type IntegrationPrincipal = {
   scopes: IntegrationScope[];
   clientId?: string;
   expiresAt?: number;
+  stableOwnerKey?: string;
+  leaseKey?: string;
+  federated?: { originInstanceId: string; destinationInstanceId: string; issuedAt: number; expiresAt: number; issuedAuthority: 'read' | 'oauth-control' | 'realtime-lease'; originStableOwnerKey?: string };
   places?: (worktree: { id: string; projectId: string }) => boolean;
 };
 

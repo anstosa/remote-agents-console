@@ -119,6 +119,9 @@ describe('integration OAuth authentication', () => {
       response_type: 'code', client_id: client.client_id, redirect_uri: chatGptCallback, resource, scope: 'unknown:scope', code_challenge: pkceChallenge(verifier), code_challenge_method: 'S256'
     }, { id: 'local-user' })).toMatchObject({ ok: false, error: 'invalid_scope' });
     expect(await service.authorize({
+      response_type: 'code', client_id: client.client_id, redirect_uri: chatGptCallback, resource, scope: 'actions:invoke', code_challenge: pkceChallenge(verifier), code_challenge_method: 'S256'
+    }, { id: 'local-user' })).toMatchObject({ ok: false, error: 'invalid_scope' });
+    expect(await service.authorize({
       response_type: 'code', client_id: client.client_id, redirect_uri: chatGptCallback, resource, scope: 'status:read', code_challenge: pkceChallenge(verifier), code_challenge_method: 'S256'
     }, undefined)).toMatchObject({ ok: false, error: 'access_denied' });
 
@@ -187,8 +190,9 @@ describe('integration OAuth authentication', () => {
     let currentTime = 1_800_000_000_000;
     // provide a controllable clock
     const clock = () => currentTime;
-    const realtimeToken = 'realtime-static-token-that-is-long-enough';
-    const service = new IntegrationAuthService({ issuer, resource, stateFile: file, now: clock, authorizationCodeTtlMs: 1_000, accessTokenTtlMs: 1_000, refreshTokenTtlMs: 2_000, realtimeToken, realtimeSubjectId: 'configured-realtime' });
+    const realtimeToken = 'r'.repeat(43);
+    const realtimePrincipal = { authentication: 'realtime' as const, subjectId: 'stable-owner', stableOwnerKey: 'o'.repeat(43), leaseKey: 'l'.repeat(43), audience: 'realtime', scopes: ['status:read' as const], expiresAt: currentTime + 10_000 };
+    const service = new IntegrationAuthService({ issuer, resource, stateFile: file, now: clock, authorizationCodeTtlMs: 1_000, accessTokenTtlMs: 1_000, refreshTokenTtlMs: 2_000, realtimeAuthenticator: token => token === realtimeToken && currentTime < (realtimePrincipal.expiresAt ?? 0) ? realtimePrincipal : undefined });
     const client = await register(service);
     const verifier = 'expiry-verifier-'.padEnd(64, 'e');
 
@@ -204,8 +208,7 @@ describe('integration OAuth authentication', () => {
     expect(await service.refresh({ grant_type: 'refresh_token', client_id: client.client_id, refresh_token: tokens.refresh_token, resource })).toMatchObject({ ok: false, error: 'invalid_grant' });
 
     expect(service.authenticateRealtimeToken('wrong-token-that-is-also-long-enough')).toMatchObject({ ok: false, error: 'invalid_token' });
-    const realtimePrincipal = valueOf(service.authenticateRealtimeToken(realtimeToken));
-    expect(realtimePrincipal).toEqual({ authentication: 'realtime', subjectId: 'configured-realtime', audience: 'realtime', scopes: [] });
+    expect(valueOf(service.authenticateRealtimeToken(realtimeToken))).toEqual(realtimePrincipal);
     expect(await service.authenticateAccessToken(realtimeToken, { resource })).toMatchObject({ ok: false, error: 'invalid_token' });
     expect(await readFile(file, 'utf8')).not.toContain(realtimeToken);
   });

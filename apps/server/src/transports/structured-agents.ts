@@ -34,7 +34,7 @@ export type HolderLaunch = { program: string; args: string[]; env: Record<string
  * role (the Conductor's). `access` is the hash of the console MCP token its current process holds,
  * while it runs.
  */
-export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator' | { conductor: string }; role?: 'conductor'; access?: string; launchedAt: number; version?: string };
+export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator' | { conductor: string } | { davo: string }; role?: 'conductor'; access?: string; launchedAt: number; version?: string; processGeneration?: number; lifecycleCommand?: { commandId: string; expectedGeneration: number; effectGeneration?: number } };
 /**
  * What a launch starts: one process of `kind` at `place`, for the Agent `id`, on a new
  * Conversation (on `model` when Allowed models are configured) or resuming the Conversation `resume`,
@@ -154,7 +154,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
 // by `offers` so the web takes each one once. `nonce` is what the latest process's launch report
 // must echo, and `refusal` why its report refused it. `access` is the console MCP token a
 // Conductor's process is given once it reports in, and `scripts` the deadlines of its scripts running
-type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; modelGuard?: Promise<void>; desiredModel?: ModelSetting; desiredNativeDefault?: true; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; observedAt: Map<string, string>; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; modelGuard?: Promise<void>; desiredModel?: ModelSetting; desiredNativeDefault?: true; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -200,7 +200,18 @@ const isStoredRecord = (value: unknown): value is StructuredRecord => {
   const validHost = holder?.host === undefined || holder.host === true;
   const sandboxGeneration = holder?.sandboxGeneration;
   const validSandboxGeneration = sandboxGeneration === undefined || typeof sandboxGeneration === 'string' && sandboxGenerationPattern.test(sandboxGeneration);
+  const origin = record?.origin;
+  const originKeys = typeof origin === 'object' && origin !== null ? Object.keys(origin) : [];
+  const validOrigin = origin === 'operator' || originKeys.length === 1 && (
+    'conductor' in origin! && typeof origin.conductor === 'string' && origin.conductor.length > 0 && origin.conductor.length <= 240 && !origin.conductor.includes('\0')
+    || 'davo' in origin! && typeof origin.davo === 'string' && origin.davo.length > 0 && origin.davo.length <= 240 && !origin.davo.includes('\0')
+  );
+  const marker = record?.lifecycleCommand;
+  const validMarker = marker === undefined || typeof marker.commandId === 'string' && marker.commandId.length > 0 && marker.commandId.length <= 240 && nonNegativeInt(marker.expectedGeneration) && nonNegativeInt(marker.effectGeneration);
   return typeof record === 'object' && record !== null && typeof record.id === 'string' && typeof record.kind === 'string' && typeof record.placeId === 'string' && typeof record.home === 'string'
+    && validOrigin
+    && nonNegativeInt(record.processGeneration)
+    && validMarker
     && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && validTmuxSocket && validHost && validSandboxGeneration && (holder.host !== true || typeof tmuxSocket === 'string') && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
 };
 
@@ -237,9 +248,13 @@ export class StructuredAgents {
    * the entry's default. Answers the new Agent's id once its process started (it may then have
    * failed to report in); undefined when it could not start, or `model` is not an Allowed model.
    */
-  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role, spawnedBy, nativeDefaultValidated }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor'; spawnedBy?: string; nativeDefaultValidated?: true } = {}): Promise<string | undefined> {
+  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role, spawnedBy, workerOwner, nativeDefaultValidated }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor'; spawnedBy?: string; workerOwner?: { kind: 'davo'; id: string }; nativeDefaultValidated?: true } = {}): Promise<string | undefined> {
     // the Conductor starts on its configured model
     if (role === 'conductor') model ??= this.conductor?.model;
+    // one launch cannot claim two independent owners
+    if (spawnedBy !== undefined && workerOwner !== undefined) return undefined;
+    // reject an owner tag that cannot identify its principal
+    if (workerOwner !== undefined && workerOwner.id.length === 0) return undefined;
     const configured = this.options.allowedModels?.(kind);
     // an explicit empty policy never inherits native defaults
     if (configured !== undefined && configured.length === 0) return undefined;
@@ -247,7 +262,8 @@ export class StructuredAgents {
     // explicit model choices remain within the configured policy
     if (model !== undefined && entry === undefined && !(configured === undefined && nativeDefaultValidated === true)) return undefined;
     const records = await this.load();
-    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin: spawnedBy === undefined ? 'operator' : { conductor: spawnedBy }, ...(role === undefined ? {} : { role }), launchedAt: Date.now() };
+    const origin: StructuredRecord['origin'] = workerOwner !== undefined ? { davo: workerOwner.id } : spawnedBy !== undefined ? { conductor: spawnedBy } : 'operator';
+    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin, ...(role === undefined ? {} : { role }), launchedAt: Date.now(), processGeneration: 0 };
     const live = this.idle();
     records.push(record);
     this.live.set(record.id, live);
@@ -301,6 +317,66 @@ export class StructuredAgents {
     return await this.relaunch(record, live, record.conversationId) === true;
   }
 
+  /** Restart only the exact process generation a durable command claimed. */
+  async restartAtGeneration(id: string, expectedGeneration: number, commandId?: string): Promise<'ok' | 'target_changed' | 'invalid_state'> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    const live = this.live.get(id) ?? this.idle();
+    if (record === undefined || (record.processGeneration ?? 0) !== expectedGeneration) return 'target_changed';
+    if (live.busy || live.working || record.lifecycle === 'starting') return 'invalid_state';
+    if (commandId !== undefined && record.lifecycleCommand !== undefined && record.lifecycleCommand.commandId !== commandId && record.lifecycleCommand.effectGeneration === undefined) return 'target_changed';
+    this.live.set(id, live);
+    // reserve before marker persistence can yield to another lifecycle mutation
+    live.busy = true;
+    const previousMarker = record.lifecycleCommand;
+    try {
+      // claim one durable marker before the replacing effect
+      if (commandId !== undefined) {
+        record.lifecycleCommand = { commandId, expectedGeneration };
+        if (!await this.save()) {
+          // a failed claim cannot remain authoritative in memory
+          if (previousMarker === undefined) delete record.lifecycleCommand; else record.lifecycleCommand = previousMarker;
+          return 'invalid_state';
+        }
+        const current = (await this.load()).find(candidate => candidate.id === id);
+        // a concurrent Close or target change invalidates the saved claim before any effect
+        if (current !== record || (record.processGeneration ?? 0) !== expectedGeneration || record.lifecycleCommand?.commandId !== commandId || record.lifecycleCommand.expectedGeneration !== expectedGeneration || record.lifecycleCommand.effectGeneration !== undefined) return 'target_changed';
+      }
+      return await this.relaunch(record, live, record.conversationId, commandId) === true ? 'ok' : 'invalid_state';
+    } finally {
+      live.busy = false;
+    }
+  }
+
+  /** Resume only the exact exited generation a durable command claimed. */
+  async resumeAtGeneration(id: string, expectedGeneration: number, conversationId?: string, commandId?: string): Promise<'ok' | 'target_changed' | 'invalid_state'> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    const live = this.live.get(id) ?? this.idle();
+    if (record === undefined || (record.processGeneration ?? 0) !== expectedGeneration) return 'target_changed';
+    if (record.lifecycle !== 'exited' || live.busy) return 'invalid_state';
+    if (commandId !== undefined && record.lifecycleCommand !== undefined && record.lifecycleCommand.commandId !== commandId && record.lifecycleCommand.effectGeneration === undefined) return 'target_changed';
+    this.live.set(id, live);
+    // reserve before marker persistence can yield to another lifecycle mutation
+    live.busy = true;
+    const previousMarker = record.lifecycleCommand;
+    try {
+      // claim one durable marker before the replacing effect
+      if (commandId !== undefined) {
+        record.lifecycleCommand = { commandId, expectedGeneration };
+        if (!await this.save()) {
+          // a failed claim cannot remain authoritative in memory
+          if (previousMarker === undefined) delete record.lifecycleCommand; else record.lifecycleCommand = previousMarker;
+          return 'invalid_state';
+        }
+        const current = (await this.load()).find(candidate => candidate.id === id);
+        // a concurrent Close or target change invalidates the saved claim before any effect
+        if (current !== record || (record.processGeneration ?? 0) !== expectedGeneration || record.lifecycleCommand?.commandId !== commandId || record.lifecycleCommand.expectedGeneration !== expectedGeneration || record.lifecycleCommand.effectGeneration !== undefined) return 'target_changed';
+      }
+      return await this.relaunch(record, live, conversationId ?? record.conversationId, commandId) === true ? 'ok' : 'invalid_state';
+    } finally {
+      live.busy = false;
+    }
+  }
+
   /** Stop the Agent's process and leave it Exited, saying why; a resume or restart starts it again. */
   async stop(id: string, reason: string): Promise<boolean> {
     const record = (await this.load()).find(candidate => candidate.id === id);
@@ -328,7 +404,7 @@ export class StructuredAgents {
 
   // start the Agent's process again under a new holder, on `conversationId` when its kind's store
   // still has it (a Conversation never saved starts afresh); the old holder window goes first
-  private async relaunch(record: StructuredRecord, live: Live, conversationId: string | undefined): Promise<boolean | undefined> {
+  private async relaunch(record: StructuredRecord, live: Live, conversationId: string | undefined, commandId?: string): Promise<boolean | undefined> {
     live.busy = true;
     try {
       const place = await this.place(record.placeId);
@@ -346,9 +422,18 @@ export class StructuredAgents {
       live.status.clear();
       // a Conductor's fresh Conversation starts on its configured model
       const model = resume === undefined && record.role === 'conductor' ? this.conductor?.model : undefined;
-      const started = await this.start(record, live, { id: record.id, kind: record.kind, place, ...(resume === undefined ? {} : { resume }), ...(model === undefined ? {} : { model }) });
+      const started = await this.start(record, live, { id: record.id, kind: record.kind, place, ...(resume === undefined ? {} : { resume }), ...(model === undefined ? {} : { model }) }, commandId);
       // one that did not start, or did not report in, stays Exited, so it can be resumed again
-      if (started === undefined || (record.lifecycle as AgentLifecycle) === 'failed') { record.lifecycle = 'exited'; record.reason ??= 'It could not be started again.'; await this.save(); this.changed(live); return false; }
+      if (started === undefined || (record.lifecycle as AgentLifecycle) === 'failed') {
+        record.lifecycle = 'exited';
+        record.reason ??= 'It could not be started again.';
+        const marker = record.lifecycleCommand;
+        // clear a known no-effect marker for a later command
+        if (marker !== undefined && marker.commandId === commandId && marker.effectGeneration === undefined) delete record.lifecycleCommand;
+        await this.save();
+        this.changed(live);
+        return false;
+      }
       return started;
     } finally { live.busy = false; }
   }
@@ -356,7 +441,7 @@ export class StructuredAgents {
   // Start a process for the record and wait for its launch report: true once started (it may
   // then have failed to report in), false when it was closed meanwhile, undefined when no process
   // started. Events from an earlier process of the same Agent are ignored.
-  private async start(record: StructuredRecord, live: Live, launch: Omit<StructuredLaunch, 'sandboxed' | 'nonce'>): Promise<boolean | undefined> {
+  private async start(record: StructuredRecord, live: Live, launch: Omit<StructuredLaunch, 'sandboxed' | 'nonce'>, commandId?: string): Promise<boolean | undefined> {
     const generation = live.generation += 1;
     // each process reports in under its own nonce, Sandboxed as the Agent was launched; a
     // Conductor's gets its own console token, and the one before it no longer works
@@ -378,6 +463,11 @@ export class StructuredAgents {
     }
     if (started === undefined) return undefined;
     await this.adopt(record, live, started);
+    // persist one durable effect generation only after a new process was adopted
+    record.processGeneration = (record.processGeneration ?? 0) + 1;
+    // bind the observed generation to the command that caused it
+    if (commandId !== undefined) record.lifecycleCommand = { commandId, expectedGeneration: record.processGeneration - 1, effectGeneration: record.processGeneration };
+    await this.save();
     if (await reported) { if (await this.grantAccess(record, live)) await this.noteUnreachableModels(record, live); }
     else if (record.lifecycle === 'starting') await this.fail(record, live, live.refusal ?? 'Its process did not report in after starting.', true);
     return true;
@@ -527,7 +617,7 @@ export class StructuredAgents {
 
   // what this console knows of an Agent it has no process for yet
   private idle(): Live {
-    return { generation: 0, working: false, busy: false, questions: [], steers: [], offers: 0, transcript: [], revision: 0, status: new Map(), noticeCount: 0, notices: [] };
+    return { generation: 0, working: false, busy: false, questions: [], steers: [], offers: 0, transcript: [], observedAt: new Map(), revision: 0, status: new Map(), noticeCount: 0, notices: [] };
   }
 
 
@@ -555,12 +645,14 @@ export class StructuredAgents {
     } finally { live.busy = false; }
   }
 
-  /** Steer a working Agent with `prompt`, where its kind can steer; `refused` when it is not working or its process refused. */
-  async steer(id: string, prompt: string): Promise<'sent' | 'unsupported' | 'refused'> {
+  /** Steer a working Agent only while its caller's freshly sampled Turn guard still holds. */
+  async steer(id: string, prompt: string, mayDispatch?: () => boolean): Promise<'sent' | 'unsupported' | 'refused'> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     if (record === undefined || structuredAdapterFor(record.kind)?.steers !== true) return 'unsupported';
     const live = await this.connected(id);
-    if (live === undefined || !live.working || !await live.connection.steer(prompt)) return 'refused';
+    if (live === undefined || !live.working) return 'refused';
+    // recheck ownership after lookup and immediately before the transport effect
+    if (mayDispatch?.() === false || !await live.connection.steer(prompt)) return 'refused';
     live.draft = undefined;
     return 'sent';
   }
@@ -569,10 +661,12 @@ export class StructuredAgents {
    * Cancel a working Agent's Turn: its pending steers are dropped, then the Turn is aborted. The
    * dropped steers go to `returned`, or are offered for the composer when nobody asked for them.
    */
-  async interrupt(id: string, returned?: (steers: string[]) => void): Promise<InterruptOutcome> {
+  async interrupt(id: string, returned?: (steers: string[]) => void, mayDispatch?: () => boolean): Promise<InterruptOutcome> {
     const live = await this.connected(id);
     if (live === undefined) return 'unavailable';
     if (!live.working) return 'not-working';
+    // recheck ownership after lookup and immediately before the transport effect
+    if (mayDispatch?.() === false) return 'unavailable';
     const steers = await live.connection.cancel();
     if (steers === undefined) return 'unavailable';
     if (returned !== undefined) returned(steers);
@@ -650,8 +744,8 @@ export class StructuredAgents {
       const lines = (this.live.get(id)?.transcript ?? []).flatMap(item => transcriptText(item)?.split('\n') ?? []);
       return { text: lines.slice(-rows).join('\n'), older: lines.length > rows };
     },
-    steer: async (id, prompt) => await this.steer(id, prompt),
-    interrupt: async (id, returned) => await this.interrupt(id, returned),
+    steer: async (id, prompt, mayDispatch) => await this.steer(id, prompt, mayDispatch),
+    interrupt: async (id, returned, mayDispatch) => await this.interrupt(id, returned, mayDispatch),
     close: async id => await this.close(id)
   };
 
@@ -776,12 +870,41 @@ export class StructuredAgents {
       // one resyncing after a reattach may be working: nothing takes it to have finished
       const attention = questions.length > 0 ? 'question' : live?.working === true || live?.resyncing === true ? 'working' : 'finished';
       const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(live?.desiredModel !== undefined || live?.modelGuard !== undefined ? { preparing: true as const } : {}), ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }), ...(live?.compacting === true ? { compacting: true } : {}) } };
+      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' && 'conductor' in record.origin ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(live?.desiredModel !== undefined || live?.modelGuard !== undefined ? { preparing: true as const } : {}), ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }), ...(live?.compacting === true ? { compacting: true } : {}) } };
     });
   }
 
   async agent(id: string): Promise<Agent | undefined> {
     return (await this.agents()).find(agent => agent.id === id);
+  }
+
+  /** The Davo principal that owns a structured worker, if it is a Davo worker. */
+  async workerOwner(id: string): Promise<string | undefined> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    return typeof record?.origin === 'object' && 'davo' in record.origin ? record.origin.davo : undefined;
+  }
+
+  /** The structured workers owned by one Davo principal without exposing ownership on Agent. */
+  async ownedWorkers(owner: string): Promise<Agent[]> {
+    const owned = new Set((await this.load()).filter(record => typeof record.origin === 'object' && 'davo' in record.origin && record.origin.davo === owner).map(record => record.id));
+    return (await this.agents()).filter(agent => owned.has(agent.id));
+  }
+
+  /** The current process generation, used to fence recoverable lifecycle commands. */
+  async processGeneration(id: string): Promise<number | undefined> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    return record === undefined ? undefined : record.processGeneration ?? 0;
+  }
+
+  /** The durable marker for the lifecycle command that last claimed or changed this Agent. */
+  async lifecycleCommandMarker(id: string): Promise<StructuredRecord['lifecycleCommand'] | undefined> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    return record?.lifecycleCommand === undefined ? undefined : { ...record.lifecycleCommand };
+  }
+
+  /** When this server observed an item, not a provider-authored creation timestamp. */
+  transcriptObservedAt(id: string, itemId: string): string | undefined {
+    return this.live.get(id)?.observedAt.get(itemId);
   }
 
   /** The current Conversation's name, as the Agent last reported it. */
@@ -888,14 +1011,23 @@ export class StructuredAgents {
         }
         if (item.kind === 'tool' && item.source !== undefined && item.parentId === undefined) this.watchScript(record, live, item);
         const index = live.transcript.findIndex(candidate => candidate.id === item.id);
-        if (index === -1) live.transcript.push(item); else live.transcript[index] = item;
+        // retain the first server-observation time across streaming replacements
+        if (index === -1) {
+          live.observedAt.set(item.id, new Date().toISOString());
+          live.transcript.push(item);
+        } else live.transcript[index] = item;
         live.transcript.splice(0, live.transcript.length - maxTranscriptItems);
+        // prune timestamps for transcript entries no longer retained
+        const retained = new Set(live.transcript.map(candidate => candidate.id));
+        for (const id of live.observedAt.keys()) if (!retained.has(id)) live.observedAt.delete(id);
         break;
       }
       case 'history':
         // a history (loaded on a launch or a Conversation change) replaces the transcript, but not the
         // notices the console made for this Conversation since
         live.transcript = [...event.items, ...live.notices].slice(-maxTranscriptItems);
+        // history protocols provide no source time, so record bounded server observation explicitly
+        live.observedAt = new Map(live.transcript.map(item => [item.id, live.observedAt.get(item.id) ?? new Date().toISOString()]));
         live.prompt = event.items.filter((item): item is Extract<TranscriptItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'user' && item.steer !== true).at(-1)?.text;
         break;
       case 'status':
@@ -933,7 +1065,12 @@ export class StructuredAgents {
   // an Agent's process is gone: a Turn in flight ends failed, the queue waits for a resume, and
   // the console token the process held works no more
   private processExited(record: StructuredRecord, live: Live): void {
-    if (live.working) live.transcript.push({ id: `exited-${live.revision}`, kind: 'settled', outcome: 'failed' });
+    // timestamp the synthetic terminal item at server observation
+    if (live.working) {
+      const id = `exited-${live.revision}`;
+      live.transcript.push({ id, kind: 'settled', outcome: 'failed' });
+      live.observedAt.set(id, new Date().toISOString());
+    }
     live.turn = { type: 'exited' };
     live.working = false;
     live.questions = [];
@@ -966,6 +1103,7 @@ export class StructuredAgents {
     const item: TranscriptItem = { id: `notice-${live.noticeCount}`, kind: 'notice', text, tone };
     live.notices.push(item);
     live.transcript.push(item);
+    live.observedAt.set(item.id, new Date().toISOString());
     this.changed(live);
   }
 

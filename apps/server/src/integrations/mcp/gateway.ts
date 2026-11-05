@@ -4,13 +4,13 @@ import type { OrchestrationResult, OrchestrationService } from '../../orchestrat
 import type { IntegrationAuditService } from '../audit/service.js';
 import type { ConductorSpawnKind, IntegrationPrincipal } from '../auth/index.js';
 import type { IntegrationControlService } from '../control/index.js';
-import { digest, type IntegrationPolicyService } from '../policy/service.js';
-import { conductorCallable, integrationToolByName, integrationTools, type IntegrationTool } from './catalog.js';
+import { digest, IntegrationPolicyWriteError, type IntegrationPolicyService } from '../policy/service.js';
+import { conductorCallable, integrationTools, type IntegrationTool } from './catalog.js';
+import type { DeveloperResult, DeveloperTool } from './developer-tool.js';
+import type { FederationForwardContext } from '../federation/service.js';
 
 export type ToolCallResult = { content: Array<{ type: 'text'; text: string }>; structuredContent: Record<string, unknown>; isError?: boolean };
-export type IntegrationGatewayOptions = { config: IntegrationConfig; instanceId: string; orchestration: OrchestrationService; policy: IntegrationPolicyService; audit: Pick<IntegrationAuditService, 'record'>; control: IntegrationControlService; forward?: (instanceId: string, principal: IntegrationPrincipal, name: string, args: Record<string, unknown>, voiceAuthorized: boolean) => Promise<ToolCallResult | undefined> };
-export type IntegrationGatewayContext = { voiceAuthorized?: boolean };
-
+export type IntegrationGatewayOptions = { config: IntegrationConfig; instanceId: string; orchestration: OrchestrationService; policy: IntegrationPolicyService; audit: Pick<IntegrationAuditService, 'record'>; control: IntegrationControlService; developerTools?: () => readonly DeveloperTool[]; forward?: (instanceId: string, principal: IntegrationPrincipal, name: string, args: Record<string, unknown>, context: FederationForwardContext) => Promise<ToolCallResult | undefined> };
 type MutationArguments = Record<string, unknown> & { request_id: string };
 
 // route all transports through one policy boundary
@@ -20,14 +20,25 @@ export class IntegrationGateway {
 
   // list only tools enabled for this deployment and principal
   listTools(principal: IntegrationPrincipal): IntegrationTool[] {
-    return integrationTools.filter(candidate => this.enabled(candidate, principal) && candidate.requiredScopes.every(scope => principal.scopes.includes(scope)));
+    return this.definitions(principal).filter(candidate => this.enabled(candidate, principal) && candidate.requiredScopes.every(scope => principal.scopes.includes(scope))).map(tool => ({ ...tool, annotations: { ...tool.annotations, ...(principal.authentication === 'conductor' && ['begin_file_upload', 'finalize_file_upload'].includes(tool.name) ? { destructiveHint: false } : {}), openWorldHint: tool.annotations.openWorldHint || principal.authentication !== 'conductor' && this.options.config.multiInstance.enabled } }));
+  }
+
+  // select audience-specific contracts without widening the OAuth catalog
+  private definitions(principal: IntegrationPrincipal): IntegrationTool[] {
+    const definitions = new Map(integrationTools.map(tool => [tool.name, tool]));
+    // internal extensions replace a legacy name only for their declared audience
+    for (const tool of this.options.developerTools?.() ?? []) {
+      // never advertise an internal contract to an OAuth caller
+      if (principal.authentication !== 'oauth' && tool.audiences.includes(principal.authentication)) definitions.set(tool.name, tool);
+    }
+    return [...definitions.values()];
   }
 
   // validate, authorize, execute, and audit one tool call
-  async call(principal: IntegrationPrincipal, name: string, rawArguments: unknown, context: IntegrationGatewayContext = {}): Promise<ToolCallResult> {
+  async call(principal: IntegrationPrincipal, name: string, rawArguments: unknown): Promise<ToolCallResult> {
     const started = Date.now();
     const correlationId = randomBytes(12).toString('base64url');
-    const definition = integrationToolByName.get(name);
+    const definition = this.definitions(principal).find(tool => tool.name === name);
     const rawRecord = rawArguments !== null && typeof rawArguments === 'object' && !Array.isArray(rawArguments) ? { ...(rawArguments as Record<string, unknown>) } : undefined;
     const instanceId = rawRecord?.instance_id;
     // validate local tool arguments separately
@@ -38,6 +49,8 @@ export class IntegrationGateway {
     let requestId: string | undefined;
     let idempotencyId: string | undefined;
     let strictOutcomeAudit = false;
+    let effectMayHaveStarted = false;
+    const leaseKey = principal.authentication === 'realtime' ? principal.leaseKey : this.options.control.currentLease()?.leaseKey;
     let result: ToolCallResult;
 
     // write one payload-free audit event
@@ -65,69 +78,136 @@ export class IntegrationGateway {
     if (definition === undefined) result = errorResult('unknown_tool', 'The requested tool does not exist.', correlationId);
     else if (!this.enabled(definition, principal)) result = errorResult('tool_disabled', 'The requested tool is disabled.', correlationId);
     else if (!definition.requiredScopes.every(scope => principal.scopes.includes(scope))) result = errorResult('insufficient_scope', 'The access token lacks a required scope.', correlationId);
-    else if (instanceId !== undefined && (typeof instanceId !== 'string' || instanceId.length === 0 || instanceId.length > 240)) result = errorResult('invalid_request', 'The instance identifier is invalid.', correlationId);
+    else if (instanceId !== undefined && (typeof instanceId !== 'string' || instanceId.length === 0 || instanceId.length > 240 || instanceId.includes('\0'))) result = errorResult('invalid_request', 'The instance identifier is invalid.', correlationId);
     else if (parsed === undefined || !parsed.success) result = errorResult('invalid_request', 'The tool arguments are invalid.', correlationId);
     // the Conductor, and any principal held to Places, acts on its own console only
     else if (instanceId !== undefined && instanceId !== this.options.instanceId && (principal.authentication === 'conductor' || principal.places !== undefined)) result = errorResult('instance_unavailable', 'The requested instance is unavailable.', correlationId);
     else if (instanceId !== undefined && instanceId !== this.options.instanceId) {
-      const control = definition.risk === 'read' ? { ok: true as const } : this.options.control.authorizeMutation();
+      const control = definition.risk === 'read' ? { ok: true as const } : this.authorize(principal, leaseKey);
       // require local purple Davo mode before forwarding mutations
       if (!control.ok) result = errorResult(control.code, controlMessage(control.code), correlationId, true);
       else {
-        const forwarded = this.options.config.multiInstance.enabled && this.options.forward !== undefined ? await this.options.forward(instanceId, principal, name, parsed.data, definition.risk !== 'read') : undefined;
+        // only OAuth reads may skip the exact issuance-time lease recheck
+        const forwarded = this.options.config.multiInstance.enabled && this.options.forward !== undefined ? await this.options.forward(instanceId, principal, name, parsed.data, { ...(definition.risk === 'read' || leaseKey === undefined ? {} : { controlLeaseKey: leaseKey }), authorize: () => definition.risk === 'read' && principal.authentication === 'oauth' || this.authorize(principal, leaseKey).ok }) : undefined;
         result = forwarded ?? errorResult('instance_unavailable', 'The requested instance is unavailable.', correlationId, true);
       }
-    } else if (definition.risk === 'read') result = operationResult(await this.execute(definition.name, parsed.data, principal), correlationId);
+    } else if (definition.risk === 'read') result = await this.executeResult(definition, parsed.data, principal, correlationId);
     else {
       const mutation = parsed.data as MutationArguments;
       requestId = mutation.request_id;
       const canonicalDigest = digest(stableJson(mutation));
       // require active purple Davo mode, which the Conductor works without (ADR 0018)
-      const control = context.voiceAuthorized || principal.authentication === 'conductor' ? { ok: true as const } : this.options.control.authorizeMutation();
+      const control = this.authorize(principal, leaseKey);
       if (!control.ok) result = errorResult(control.code, controlMessage(control.code), correlationId, true);
+      // domain cursors own offsets; lifecycle handlers atomically own claim plus command
+      else if ('idempotency' in definition && (definition.idempotency === 'domain_cursor' || definition.idempotency === 'lifecycle')) {
+        try {
+          await audit('intent', 'pending');
+          const finalControl = this.authorize(principal, leaseKey);
+          // revoke between durable intent and dispatch without starting the operation
+          if (!finalControl.ok) result = errorResult(finalControl.code, controlMessage(finalControl.code), correlationId, true);
+          else {
+            effectMayHaveStarted = true;
+            strictOutcomeAudit = true;
+            result = await this.executeResult(definition, mutation, principal, correlationId);
+          }
+        } catch {
+          result = errorResult(effectMayHaveStarted ? 'unknown_outcome' : 'audit_unavailable', effectMayHaveStarted ? 'Inspect the domain cursor before retrying; the earlier call may have completed.' : 'The operation was not run because its audit intent could not be stored.', correlationId, true);
+        }
+      }
       else {
-        const claim = await this.options.policy.claim(principalKey, definition.name, mutation.request_id, canonicalDigest);
+        // refuse uncertain replay-protection admission before any intent or effect
+        const claim = await this.options.policy.claim(principalKey, definition.name, mutation.request_id, canonicalDigest).catch((error: unknown) => ({ kind: 'unavailable' as const, publicationUnknown: error instanceof IntegrationPolicyWriteError && error.publication !== 'not_published' }));
+        // no failed or uncertain claim can authorize a domain dispatch
+        if (claim.kind === 'unavailable') result = errorResult(claim.publicationUnknown ? 'unknown_outcome' : 'audit_unavailable', claim.publicationUnknown ? 'Replay protection may have been stored. The operation was not dispatched; retry only with the same request identifier.' : 'The operation was not run because replay protection could not be stored.', correlationId, true);
         // preserve at-most-once behavior across retries
-        if (claim.kind === 'conflict') result = errorResult('idempotency_conflict', 'The request identifier was already used with different arguments.', correlationId);
+        else if (claim.kind === 'conflict') result = errorResult('idempotency_conflict', 'The request identifier was already used with different arguments.', correlationId);
         else if (claim.kind === 'in_progress') { idempotencyId = claim.recordId; result = errorResult('in_progress', 'The operation is already in progress.', correlationId, true); }
         else if (claim.kind === 'replay') { idempotencyId = claim.recordId; result = replayResult(claim.state, claim.result, correlationId); }
+        else if (claim.kind === 'capacity') result = errorResult('idempotency_capacity', 'Replay-protection capacity is full; no operation was dispatched.', correlationId, true);
         else {
           idempotencyId = claim.recordId;
           try {
             // persist intent before the side effect
             await audit('intent', 'pending');
-            strictOutcomeAudit = true;
-            result = operationResult(await this.execute(definition.name, mutation, principal), correlationId);
+            const finalControl = this.authorize(principal, leaseKey);
+            // bind the final dispatch to the same authority captured before the claim
+            if (!finalControl.ok) result = errorResult(finalControl.code, controlMessage(finalControl.code), correlationId, true);
+            else {
+              strictOutcomeAudit = true;
+              effectMayHaveStarted = true;
+              result = await this.executeResult(definition, mutation, principal, correlationId);
+            }
             await this.options.policy.finish(claim.recordId, result.isError ? 'failed' : 'completed', result.structuredContent);
           } catch {
-            await this.options.policy.finish(claim.recordId, 'failed', { ok: false, error: { code: 'audit_unavailable' } });
-            result = errorResult('audit_unavailable', 'The operation was not run because its audit intent could not be stored.', correlationId, true);
+            const code = effectMayHaveStarted ? 'unknown_outcome' : 'audit_unavailable';
+            result = resultVersion(errorResult(code, effectMayHaveStarted ? 'The operation may have completed; inspect its state and retry only with the same request identifier.' : 'The operation was not run because its audit intent could not be stored.', correlationId, true), definition);
+            // persist uncertainty without ever repeating a possibly completed effect
+            try { await this.options.policy.finish(claim.recordId, effectMayHaveStarted ? 'unknown_outcome' : 'failed', result.structuredContent); } catch { /* retain the unresolved claim for startup recovery */ }
           }
         }
       }
     }
 
+    result = resultVersion(result, definition);
     const errorCode = resultErrorCode(result);
     try {
       await audit('outcome', result.isError ? 'error' : 'success', errorCode);
     } catch {
       // surface missing outcome audit after any possible side effect
-      if (strictOutcomeAudit) return errorResult('audit_outcome_unavailable', 'The operation finished but its audit outcome could not be stored. Retry only with the same request identifier.', correlationId, true);
+      if (strictOutcomeAudit) return resultVersion(errorResult('unknown_outcome', 'The operation may have completed but its audit outcome could not be stored. Retry only with the same request identifier.', correlationId, true), definition);
     }
     return result;
+  }
+
+  // local leases are exact; verified federation retains only its bounded issuance authority
+  private authorize(principal: IntegrationPrincipal, leaseKey: string | undefined): { ok: true } | { ok: false; code: string } {
+    // the Conductor does not require voice mode or acquire human approval
+    if (principal.authentication === 'conductor') return { ok: true };
+    // only the signed federation reconstruction can supply this server-side context
+    if (principal.federated !== undefined) return principal.federated.destinationInstanceId === this.options.instanceId && principal.federated.expiresAt > Date.now() && principal.federated.issuedAuthority !== 'read' ? { ok: true } : { ok: false, code: 'voice_lease_changed' };
+    // never let a stale or unbound Realtime principal adopt a new active lease
+    if (leaseKey === undefined) return { ok: false, code: 'voice_mode_required' };
+    return this.options.control.authorizeMutation(leaseKey);
   }
 
   // apply deployment feature gates independently of OAuth scopes; the Conductor has its own parent
   // gate (its configuration), independent of the integrations', calls only what it may, and its
   // writes and dangerous tools are held by its own scopes alone
   private enabled(definition: IntegrationTool, principal: IntegrationPrincipal): boolean {
-    if (principal.authentication === 'conductor' ? !conductorCallable(definition) : !this.options.config.enabled || definition.conductorOnly === true) return false;
+    // audience policy precedes scopes and feature gates
+    if (definition.audiences !== undefined && !definition.audiences.includes(principal.authentication)) return false;
+    const developer = definition.audiences !== undefined;
+    const davoRead = principal.authentication === 'realtime' && ['get_process_log', 'get_github_overview', 'get_github_pull_request'].includes(definition.name);
+    // new internal operations have explicit audience grants, not the legacy allowlist
+    if (principal.authentication === 'conductor' ? !developer && !conductorCallable(definition) : !this.options.config.enabled || !developer && definition.conductorOnly === true && !davoRead) return false;
+    // Realtime mutation visibility also requires its own write-tools opt-in
+    if (principal.authentication === 'realtime' && (!this.options.config.realtime.enabled || definition.risk !== 'read' && !this.options.config.realtime.writeToolsEnabled)) return false;
     // apply read-only deployment policy
     if (definition.feature === 'read') return this.options.config.mcp.readEnabled;
     if (principal.authentication === 'conductor') return true;
     // apply ordinary write deployment policy
     if (definition.feature === 'write') return this.options.config.mcp.writeEnabled;
     return this.options.config.mcp.dangerousEnabled;
+  }
+
+  // validate actual output against the same contract advertised for this audience
+  private async executeResult(definition: IntegrationTool, input: Record<string, unknown>, principal: IntegrationPrincipal, correlationId: string): Promise<ToolCallResult> {
+    const developer = 'execute' in definition ? definition as DeveloperTool : undefined;
+    try {
+      const result = developer === undefined ? await this.execute(definition.name, input, principal) : await developer.execute(input, principal);
+      // an invalid projector result must never be published as a successful contract
+      if (result.ok && definition.output !== undefined && !definition.output.safeParse(result.value).success) {
+        // a rejected mutation projector cannot prove that its effect did not happen
+        if (definition.risk !== 'read') throw new Error('operation output unavailable');
+        return errorResult('invalid_output', 'The operation returned an invalid result.', correlationId);
+      }
+      return operationResult(result, correlationId);
+    } catch {
+      // mutation exceptions remain uncertain; reads have no possible side effect
+      if (definition.risk !== 'read') throw new Error('operation outcome unavailable');
+      return errorResult('operation_failed', 'The requested read is unavailable.', correlationId, true);
+    }
   }
 
   // dispatch one already-authorized typed operation
@@ -147,8 +227,8 @@ export class IntegrationGateway {
       case 'get_agent_log_tail': return await orchestration.logTail(input.agent_id as string, input.rows as number | undefined);
       case 'list_prompt_history': return await orchestration.promptHistory(input.agent_id as string);
       case 'list_queued_prompts': return await orchestration.queuedPrompts(input.agent_id as string);
-      case 'get_stack_status':
-      case 'get_stack_log': return await orchestration.stackStatus(input.worktree_id as string);
+      case 'get_stack_status': return await orchestration.stackStatus(input.worktree_id as string);
+      case 'get_stack_log': return await orchestration.stackLog(input.worktree_id as string);
       case 'preview_file': return await orchestration.previewFile({ path: input.path as string, ...(input.agent_id === undefined ? {} : { agentId: input.agent_id as string }), ...(input.worktree_id === undefined ? {} : { worktreeId: input.worktree_id as string }), ...(input.max_bytes === undefined ? {} : { maxBytes: input.max_bytes as number }) });
       case 'get_process_log': return await orchestration.processLog(input.worktree_id as string, input.process as string);
       case 'list_notes': return await orchestration.listNotes(input.worktree_id as string);
@@ -204,8 +284,19 @@ export class IntegrationGateway {
   }
 }
 
+// keep all errors and replays inside the audience-selected envelope version
+function resultVersion(result: ToolCallResult, definition: IntegrationTool | undefined): ToolCallResult {
+  // public contracts remain v1 and internal extensions never alter them
+  if (definition?.audiences === undefined) return result;
+  const version = (definition as DeveloperTool).contractVersion ?? 'v2';
+  // exact existing data contracts keep their v1 envelope when re-audienced
+  if (result.structuredContent.contract_version === version) return result;
+  const structuredContent = { ...result.structuredContent, contract_version: version };
+  return { ...result, structuredContent, content: [{ type: 'text', text: JSON.stringify(structuredContent) }] };
+}
+
 // encode one successful or failed orchestration result for MCP
-function operationResult(result: OrchestrationResult<unknown>, correlationId: string): ToolCallResult {
+function operationResult(result: OrchestrationResult<unknown> | DeveloperResult, correlationId: string): ToolCallResult {
   const envelope = result.ok
     ? { ok: true, contract_version: result.version, correlation_id: correlationId, data: result.value }
     : { ok: false, contract_version: result.version, correlation_id: correlationId, error: result.error };
@@ -222,10 +313,18 @@ function errorResult(code: string, message: string, correlationId: string, retry
 function replayResult(state: 'completed' | 'failed' | 'unknown_outcome', stored: unknown, correlationId: string): ToolCallResult {
   // replay a stored result without repeating its side effect
   if (stored !== undefined && typeof stored === 'object' && stored !== null) {
-    const structuredContent = { ...(stored as Record<string, unknown>), correlation_id: correlationId, replayed: true };
-    return { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent, ...(state === 'completed' ? {} : { isError: true }) };
+    const envelope = stored as Record<string, unknown>;
+    const failure = envelope.error as Record<string, unknown> | undefined;
+    const validVersion = envelope.contract_version === 'v1' || envelope.contract_version === 'v2';
+    // legacy recovery records may contain only an error code rather than a full envelope
+    if (validVersion && (state === 'completed' ? envelope.ok === true && 'data' in envelope : envelope.ok === false && failure !== null && typeof failure === 'object' && typeof failure.code === 'string' && typeof failure.message === 'string' && typeof failure.retryable === 'boolean')) {
+      const structuredContent = { ...envelope, correlation_id: correlationId, replayed: true };
+      return { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent, ...(state === 'completed' ? {} : { isError: true }) };
+    }
   }
-  return errorResult(state, state === 'unknown_outcome' ? 'The earlier operation may have completed; it will not be repeated.' : 'The earlier operation failed.', correlationId);
+  const result = errorResult(state === 'failed' ? 'operation_failed' : 'unknown_outcome', state === 'failed' ? 'The earlier operation failed.' : 'The earlier operation may have completed; it will not be repeated.', correlationId, true);
+  const structuredContent = { ...result.structuredContent, replayed: true };
+  return { ...result, structuredContent, content: [{ type: 'text', text: JSON.stringify(structuredContent) }] };
 }
 
 // describe one canonical audit target
@@ -237,8 +336,8 @@ function auditTarget(instanceId: unknown, input: Record<string, unknown> | undef
 }
 
 // explain external control failures
-function controlMessage(code: 'voice_mode_required' | 'browser_control_changed'): string {
-  return code === 'voice_mode_required' ? 'Purple Davo mode must be active before remote tools can mutate agents.' : 'Browser control changed; restart purple Davo mode.';
+function controlMessage(code: string): string {
+  return code === 'voice_mode_required' ? 'Purple Davo mode must be active before remote tools can mutate agents.' : 'Browser control or voice lease changed; restart purple Davo mode.';
 }
 
 // read one gateway error code

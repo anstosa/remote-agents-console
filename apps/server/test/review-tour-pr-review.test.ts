@@ -285,7 +285,7 @@ describe('pull request review service', () => {
       comment({ id: 'absent', changeId: 'chg_missing1', startLine: 1, endLine: 1 })
     ];
     const result = await service.post('cora', request(comments));
-    expect(result).toEqual({ status: 'ok', review: { url: 'https://github.com/octo/repo/pull/7/files', pullRequest: { number: 7, url: 'https://github.com/octo/repo/pull/7' } }, sections: [{ key: 'general', posted: true }], comments: [
+    expect(result).toEqual({ status: 'ok', draftId: 'PRR_new', review: { url: 'https://github.com/octo/repo/pull/7/files', pullRequest: { number: 7, url: 'https://github.com/octo/repo/pull/7' } }, sections: [{ key: 'general', posted: true }], comments: [
       { id: 'line', result: 'line' },
       // refused on its lines and again on its file
       { id: 'refused', result: 'failed', reason: 'Validation failed' },

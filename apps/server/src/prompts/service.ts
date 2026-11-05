@@ -51,7 +51,7 @@ export interface TurnTransport extends Pick<AgentTransport, 'answer' | 'interrup
   recoverAnswer(agentId: string, entries: readonly PromptHistoryEntry[], sawWorking: boolean): Promise<RecoveredAnswer>;
   clearDraft(draft: FailedDraft): Promise<boolean>;
   /** Redirect the working Agent at once, where its Transport can steer. */
-  steer?(agentId: string, prompt: string): Promise<'sent' | 'unsupported' | 'refused'>;
+  steer?(agentId: string, prompt: string, mayDispatch?: () => boolean): Promise<'sent' | 'unsupported' | 'refused'>;
 }
 type TurnDelivery = Delivery | { status: 'busy' };
 // how a prompt is delivered (`waited`: it waited in the queue behind earlier work)
@@ -105,6 +105,7 @@ export class PromptService {
   private readonly restartLocks = new Set<string>();
   // scopes whose Agent is being interrupted: the Turn it ends is the cancel's to settle
   private readonly cancelling = new Set<string>();
+  private readonly ownedTurnMutations = new Set<string>();
   private readonly lockedAgentIds = new Set<string>();
   private readonly activeMutations = new Map<string, number>();
   private readonly mutationVersions = new Map<string, number>();
@@ -148,8 +149,8 @@ export class PromptService {
   }
 
   /** Queue a prompt from `sender` (another Agent, or the console), answering its queued prompt's id. */
-  async submitFrom(agentId: string, prompt: string, sender: PromptSender): Promise<string | undefined> {
-    return (await this.submitRequest(agentId, prompt, [], undefined, false, sender)).promptId;
+  async submitFrom(agentId: string, prompt: string, sender: PromptSender, attachments: PromptAttachment[] = []): Promise<string | undefined> {
+    return (await this.submitRequest(agentId, prompt, attachments, undefined, false, sender)).promptId;
   }
 
   /** The Transport an Agent is driven over: structured for the structured Agents, tmux otherwise. */
@@ -354,7 +355,7 @@ export class PromptService {
   // reserve one direct agent mutation
   beginAgentMutation(agentId: string): (() => void) | undefined {
     // reject input after restart reservation
-    if (this.lockedAgentIds.has(agentId)) return undefined;
+    if (this.lockedAgentIds.has(agentId) || this.ownedTurnMutations.has(agentId)) return undefined;
     this.lifecycleMutationVersion += 1;
     this.mutationVersions.set(agentId, this.mutationVersion(agentId) + 1);
     this.activeMutations.set(agentId, (this.activeMutations.get(agentId) ?? 0) + 1);
@@ -819,21 +820,37 @@ export class PromptService {
 
   // Redirect a working Agent at once, where its Transport can steer. A steer is not queued;
   // history keeps it as its own entry, with no answer.
-  async steer(agentId: string, prompt: string): Promise<'sent' | 'unsupported' | 'refused'> {
-    const transport = await this.transportFor(agentId);
-    const outcome = transport.steer === undefined ? 'unsupported' : await transport.steer(agentId, prompt);
-    if (outcome === 'sent') await this.history?.record(promptScope(agentId), prompt).catch(() => undefined);
-    return outcome;
+  async steer(agentId: string, prompt: string, expected?: { promptId: string; from: string }): Promise<'sent' | 'unsupported' | 'refused'> {
+    // reserve owned-Turn mutations so a browser input cannot replace their authorized Turn
+    if (this.ownedTurnMutations.has(agentId)) return 'refused';
+    // expected identity is checked again inside the transport at its final dispatch boundary
+    const current = () => expected === undefined || this.inFlight(agentId)?.promptId === expected.promptId && this.inFlight(agentId)?.sender.from === expected.from;
+    if (!current()) return 'refused';
+    if (expected !== undefined) this.ownedTurnMutations.add(agentId);
+    try {
+      const transport = await this.transportFor(agentId);
+      const outcome = transport.steer === undefined ? 'unsupported' : !current() ? 'refused' : await transport.steer(agentId, prompt, current);
+      // record only an actual steer in history
+      if (outcome === 'sent') await this.history?.record(promptScope(agentId), prompt).catch(() => undefined);
+      return outcome;
+    } finally { this.ownedTurnMutations.delete(agentId); }
   }
 
   // interrupt a working Agent, holding the in-flight prompt's queue rather than releasing it;
   // `returned` hears the steers it dropped
-  async cancel(agentId: string, returned?: (steers: string[]) => void): Promise<InterruptOutcome> {
+  async cancel(agentId: string, returned?: (steers: string[]) => void, expected?: { promptId: string; from: string }): Promise<InterruptOutcome> {
     const scope = promptScope(agentId);
+    // refuse concurrent input or a stale dispatch before any interrupt can be sent
+    if (this.ownedTurnMutations.has(agentId)) return 'not-working';
+    const current = () => expected === undefined || this.inFlight(agentId)?.promptId === expected.promptId && this.inFlight(agentId)?.sender.from === expected.from;
+    if (!current()) return 'not-working';
+    if (expected !== undefined) this.ownedTurnMutations.add(agentId);
     this.cancelling.add(scope);
     let outcome: InterruptOutcome;
-    try { outcome = await (await this.transportFor(agentId)).interrupt(agentId, returned); }
-    finally { this.cancelling.delete(scope); }
+    try {
+      const transport = await this.transportFor(agentId);
+      outcome = current() ? await transport.interrupt(agentId, returned, current) : 'not-working';
+    } finally { this.cancelling.delete(scope); this.ownedTurnMutations.delete(agentId); }
     if (outcome !== 'ok') return outcome;
     const phase = this.phases.get(scope);
     this.settleTrackedRequest(phase?.requestId, 'interrupted', 'prompt_interrupted');

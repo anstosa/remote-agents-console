@@ -210,7 +210,10 @@ describe('OrchestrationService', () => {
     expect(previews).toBe(0);
     await expect(service.previewFile({ worktreeId: cora.id, path: 'src/config.ts' })).resolves.toMatchObject({ ok: true, value: { content: '"api_key":"[REDACTED]"' } });
     await expect(service.logTail(activeAgent.id)).resolves.toMatchObject({ ok: true, value: { text: 'RAC_SESSION_SECRET=[REDACTED]\nAuthorization: [REDACTED]\nkey: [REDACTED TOKEN]\npassword: [REDACTED]' } });
-    await expect(service.stackStatus(cora.id)).resolves.toMatchObject({ ok: true, value: { log: { output: 'PASSWORD=[REDACTED]' } } });
+    const status = await service.stackStatus(cora.id);
+    expect(status).toEqual({ ok: true, version: 'v1', value: { actions: ['build'] } });
+    expect(JSON.stringify(status)).not.toContain('PASSWORD');
+    await expect(service.stackLog(cora.id)).resolves.toMatchObject({ ok: true, value: { output: 'PASSWORD=[REDACTED]' } });
     const symlinkService = new OrchestrationService(dependencies({ workspaceFiles: { preview: async () => ({ path: '.env', size: 12, binary: false, truncated: false, content: 'RAC_SESSION_SECRET=private' }) } }));
     await expect(symlinkService.previewFile({ worktreeId: cora.id, path: 'safe-link' })).resolves.toMatchObject({ ok: false, error: { code: 'not_found' } });
   });

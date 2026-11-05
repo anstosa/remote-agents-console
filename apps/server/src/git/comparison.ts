@@ -373,6 +373,41 @@ export async function mergeBaseChoices(workspace: string): Promise<{ branch?: st
   return { branch, ...(value === '' ? {} : { configured: value }), branches };
 }
 
+export type ResolvedMergeBaseChoice = { ref: string; label: string; sha: string };
+export type ResolvedMergeBaseChoices = { current?: { ref: string; sha: string }; options: ResolvedMergeBaseChoice[] };
+
+// resolve every selectable merge-base ref to its current commit identity
+export async function resolvedMergeBaseChoices(workspace: string): Promise<ResolvedMergeBaseChoices | undefined> {
+  const choices = await mergeBaseChoices(workspace);
+  // preserve an operational listing failure
+  if (choices === undefined) return undefined;
+  const options: ResolvedMergeBaseChoice[] = [];
+  // resolve each exact origin branch without accepting tags or arbitrary revisions
+  for (const ref of choices.branches) {
+    const resolved = await run(git, ['-C', workspace, 'rev-parse', '--verify', `refs/remotes/origin/${ref}^{commit}`]);
+    const sha = resolved.stdout.trim();
+    // omit a branch that moved or disappeared during the listing
+    if (resolved.code !== 0 || !objectId.test(sha)) continue;
+    options.push({ ref, label: ref, sha });
+  }
+  const selected = choices.configured === undefined ? undefined : options.find(option => option.ref === choices.configured);
+  return { ...(selected === undefined ? {} : { current: { ref: selected.ref, sha: selected.sha } }), options };
+}
+
+// save only the exact ref and commit pair returned by a fresh resolution
+export async function saveResolvedMergeBase(workspace: string, ref: string, sha: string): Promise<'saved' | 'target_changed' | 'not_found' | 'failed'> {
+  const choices = await resolvedMergeBaseChoices(workspace);
+  // distinguish an unreadable repository from an absent option
+  if (choices === undefined) return 'failed';
+  const selected = choices.options.find(option => option.ref === ref);
+  if (selected === undefined) return 'not_found';
+  // fence a ref that moved after the caller listed it
+  if (selected.sha !== sha) return 'target_changed';
+  const saved = await saveMergeBase(workspace, ref);
+  if (saved === 'saved') return 'saved';
+  return saved === 'unknown_base' || saved === 'detached' ? 'target_changed' : 'failed';
+}
+
 // save `base` as the checked-out branch's All PR base, or clear it with null. A named base must be
 // an origin branch: the candidate ladder silently skips one that does not resolve.
 export async function saveMergeBase(workspace: string, base: string | null): Promise<'saved' | 'detached' | 'unknown_base' | 'failed'> {

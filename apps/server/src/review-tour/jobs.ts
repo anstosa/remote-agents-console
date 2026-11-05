@@ -78,12 +78,27 @@ export class ReviewTourJobs {
 
   // create one latest-wins generation
   private async create(owner: string, worktreeId: string, input: ReviewTourInput, codeReview?: CodeReviewOptions): Promise<ReviewJobStart> {
-    // refuse an unusable Code review before anything starts
+    // refuse an unusable Code review before capturing anything
     if (codeReview !== undefined) {
       if (this.codeReviews === undefined) throw new ReviewTourError('capability_unavailable', false);
       await this.codeReviews.validate(codeReview);
     }
     const prepared = await this.service.prepare(worktreeId, input);
+    return await this.createPrepared(owner, prepared, codeReview);
+  }
+
+  // start one already captured and caller-filtered comparison
+  async startPrepared(owner: string, prepared: PreparedReviewTour, codeReview?: CodeReviewOptions): Promise<ReviewJobStart> {
+    // validate direct callers before mutating prior jobs
+    if (codeReview !== undefined) {
+      if (this.codeReviews === undefined) throw new ReviewTourError('capability_unavailable', false);
+      await this.codeReviews.validate(codeReview);
+    }
+    return await this.createPrepared(owner, prepared, codeReview);
+  }
+
+  // create one job after all caller-specific preparation and validation
+  private async createPrepared(owner: string, prepared: PreparedReviewTour, codeReview?: CodeReviewOptions): Promise<ReviewJobStart> {
     const storeWithCurrency = this.store as (ReviewTourStore & { invalidate?: ReviewTourStore['invalidate']; saveIfCurrent?: ReviewTourStore['saveIfCurrent'] }) | undefined;
     const persistenceVersion = await storeWithCurrency?.invalidate?.(prepared.comparison.worktreeId, prepared.comparison.branch) ?? (this.persistenceVersions.get(prepared.comparison.worktreeId) ?? 0) + 1;
     this.persistenceVersions.set(prepared.comparison.worktreeId, persistenceVersion);

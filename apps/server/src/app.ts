@@ -47,7 +47,7 @@ import { WorktreeManagementService, type AddInput, type CreatedWorktree } from '
 import { agentAttentionState, AgentNotificationCoordinator, pushNotifications, type AgentNotificationContext } from './notifications.js';
 import { ConsoleEvents } from './events.js';
 import { Watches, type CommandWindows } from './watches/service.js';
-import { GithubRequestError, type GithubRepository, type Request as GithubRequest } from './github/github.js';
+import { GithubRequestError, originRepository, type GithubRepository, type Request as GithubRequest } from './github/github.js';
 import { GithubWatchReader } from './watches/github.js';
 import { commandWindows } from './watches/commands.js';
 import { isReviewRun, paneTmuxSession, stackActions, worktreeAgents, type Agent, type Pane, type Project, type SocketRef, type StackAction, type TmuxAgent, type Worktree } from './domain/models.js';
@@ -96,13 +96,26 @@ import { instanceAttention, RemoteInstanceStatusPoller, validInstanceStatusReque
 import { createHmac, randomBytes } from 'node:crypto';
 import { integrationConfigForRemotes, parseDavoSettings, resolveAgentProgram, reviewConfig } from './config/schema.js';
 import { OrchestrationService, type AgentStatusV1, type PlaceScope } from './orchestration/index.js';
-import { IntegrationAuthService, registerIntegrationAuthServer, type ConductorSpawnKind, type IntegrationScope, type LocalIntegrationSubject } from './integrations/auth/index.js';
+import { IntegrationAuthService, registerIntegrationAuthServer, type ConductorSpawnKind, type IntegrationPrincipal, type IntegrationScope, type LocalIntegrationSubject } from './integrations/auth/index.js';
 import { IntegrationPolicyService } from './integrations/policy/service.js';
 import { IntegrationAuditService } from './integrations/audit/service.js';
 import { IntegrationGateway, registerMcpServer } from './integrations/mcp/index.js';
 import { RealtimeService } from './integrations/realtime/service.js';
-import { federationForwarder, verifyFederationRequest } from './integrations/federation/index.js';
+import { FederationAdmissionService, RemoteControllerPresenceService, federationForwarder } from './integrations/federation/index.js';
 import { IntegrationControlService } from './integrations/control/index.js';
+import type { DeveloperTool } from './integrations/mcp/developer-tool.js';
+import { developerFailure, developerSuccess } from './integrations/mcp/developer-tool.js';
+import { createAgentTools } from './integrations/mcp/agent-tools.js';
+import { createAgentOperations, recoverPendingAgentLifecycleCommands, type AgentOperationDependencies } from './integrations/mcp/agent-operations.js';
+import { GeneralAskJobs } from './asks/general-jobs.js';
+import { createSessionOperations } from './integrations/mcp/session-operations.js';
+import { createReviewDraftPort } from './integrations/mcp/review-draft.js';
+import { createLaunchOperations } from './integrations/mcp/launch-operations.js';
+import { RemoteArtifactLeaseTracker } from './integrations/mcp/lease-tracker.js';
+import { createWorkerTools } from './integrations/mcp/worker-tools.js';
+import { createWorkspaceTools } from './integrations/mcp/workspace-tools.js';
+import { McpFileTransferService } from './host-files/mcp-transfer.js';
+import type { HostFilesOwnerContext } from './host-files/contracts.js';
 import { ServerAdminService } from './server-admin/service.js';
 import { ApiKeySpendService } from './accounts/spend.js';
 import { readClaudeAccount } from './accounts/claude.js';
@@ -238,6 +251,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     notify: message => { void push.notify(message).catch(() => undefined); }
   });
   prompts.useDispatches?.(dispatches);
+  let developerControl: IntegrationControlService | undefined;
+  let remoteControllerPresence: RemoteControllerPresenceService | undefined;
+  let reconcileDeveloperTransfers: (() => Promise<void>) | undefined;
   // what Agents watch (ADR 0019): each event is a labelled prompt to its owner, held to the same budget
   const watches = new Watches({
     events,
@@ -252,6 +268,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       return place === undefined ? undefined : { place, kind: agent!.kind! };
     },
     logPath: async (worktreeId, process) => (await stackCommands.processLog(worktreeId, process))?.path,
+    // Davo liveness follows its controlling browser, independently of voice activity
+    davoOwnerPresent: async owner => owner.kind === 'davo-local' ? developerControl?.controllerPresent(owner.principalOwnerKey) === true : await remoteControllerPresence?.prove(owner.originInstanceId, owner.originStableOwnerId) ?? false,
+    // admission distinguishes saturated owner proofs from unavailable controllers
+    davoOwnerAdmit: async owner => owner.kind === 'davo-local' ? developerControl?.controllerPresent(owner.principalOwnerKey) === true ? { ok: true } : { ok: false, code: 'owner_presence_unavailable' } : await remoteControllerPresence?.admit(owner.originInstanceId, owner.originStableOwnerId) ?? { ok: false, code: 'owner_presence_unavailable' },
+    // release remote proof capacity only when the last Watch of that owner is gone
+    davoOwnerForgotten: owner => { if (owner.kind === 'davo-remote') remoteControllerPresence?.forget(owner.originInstanceId, owner.originStableOwnerId); },
     ...(deps.watchBatchMs === undefined ? {} : { batchMs: deps.watchBatchMs })
   });
   // publish only boot-opaque presentations of trusted configured actions
@@ -311,6 +333,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   let notesRevision = 0;
   // derive peer forwarding independently of the legacy saved toggle
   const integrationConfig = structuredClone(integrationConfigForRemotes(config.integrations, config.remoteServers));
+  let developerTools: DeveloperTool[] = [];
+  let developerPolicy: IntegrationPolicyService | undefined;
+  let currentConductorPlaces: (() => PlaceScope) | undefined;
+  let developerOrchestration: OrchestrationService | undefined;
   const davoAvailable = integrationConfig.enabled && Boolean(process.env.RAC_OPENAI_API_KEY?.trim());
   // expose one secret-free voice settings snapshot
   const publicDavoSettings = () => ({ enabled: integrationConfig.realtime.enabled, available: davoAvailable, name: integrationConfig.realtime.name, context: integrationConfig.realtime.context });
@@ -635,7 +661,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const resource = `${config.publicOrigin.origin}/mcp`;
     const integrationPolicy = new IntegrationPolicyService();
     const integrationAudit = new IntegrationAuditService();
-    const integrationControl = new IntegrationControlService(() => control.ownerSessionId());
+    const integrationControl = new IntegrationControlService(() => control.ownerSessionId(), Date.now, 25_000, process.env.RAC_SESSION_SECRET ?? '');
+    developerControl = integrationControl;
+    developerPolicy = integrationPolicy;
     await integrationPolicy.recoverUnknownOutcomes();
     const orchestration = new OrchestrationService({
       config,
@@ -680,8 +708,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       ...(config.conductor === undefined ? {} : { spawnWorker, createWorktree: (projectId, input, open, issue) => createWorktree(projectId, input, open, issue) })
     });
     const federationSecret = process.env.RAC_INTEGRATION_FEDERATION_SECRET?.trim() || instanceStatusSecret;
-    const integrationGateway = new IntegrationGateway({ config: integrationConfig, instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret) } : {}) });
-    const realtimeScopes: IntegrationScope[] = ['status:read', 'logs:read', 'files:read', ...(integrationConfig.realtime.writeToolsEnabled ? ['prompts:write', 'agents:control', 'stack:operate', 'review:write'] as IntegrationScope[] : [])];
+    developerOrchestration = orchestration;
+    const integrationGateway = new IntegrationGateway({ config: integrationConfig, instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, developerTools: () => developerTools, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret, config.publicOrigin.origin) } : {}) });
+    const realtimeScopes: IntegrationScope[] = ['status:read', 'logs:read', 'files:read', 'github:read', ...(integrationConfig.realtime.writeToolsEnabled ? ['prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write', 'files:write', 'github:write', 'actions:invoke', ...(integrationConfig.mcp.dangerousEnabled ? ['admin:dangerous'] : [])] as IntegrationScope[] : [])];
     const conductorConfig = config.conductor;
     // the Conductor's scope: the configured Projects and any Place whose Workspace exists
     const conductorPlaces = (): PlaceScope => {
@@ -689,6 +718,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const workspaces = discovery.workspacePlaces();
       return worktree => configured.has(worktree.projectId) || workspaces.has(worktree.id);
     };
+    currentConductorPlaces = conductorPlaces;
     const conductorAccess = conductorConfig === undefined ? undefined : {
       prefix: consoleTokenPrefix,
       // the Conductor whose current process holds the token
@@ -702,10 +732,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const listed = await orchestration.scoped(conductorPlaces(), conductorId).listAgents();
       return listed.ok ? listed.value : [];
     };
-    const derivedRealtimeToken = createHmac('sha256', process.env.RAC_SESSION_SECRET ?? '').update('remote-agents:realtime-mcp:v1').digest('base64url');
-    const realtimeToken = process.env.RAC_REALTIME_MCP_TOKEN?.trim() || derivedRealtimeToken;
-    // OAuth and the Realtime credential only while the integrations are enabled
-    const integrationAuth = integrationConfig.enabled ? new IntegrationAuthService({ issuer: config.publicOrigin.origin, resource, stateFile: process.env.RAC_INTEGRATION_AUTH_FILE ?? '.data/integration-auth.json', realtimeToken, realtimeSubjectId: 'local-voice' }) : undefined;
+    // OAuth and per-lease Realtime authentication remain separate credentials
+    const integrationAuth = integrationConfig.enabled ? new IntegrationAuthService({ issuer: config.publicOrigin.origin, resource, stateFile: process.env.RAC_INTEGRATION_AUTH_FILE ?? '.data/integration-auth.json', realtimeAuthenticator: token => integrationControl.authenticateRealtimeBearer(token) }) : undefined;
     registerMcpServer({ app, publicOrigin: config.publicOrigin.origin, ...(integrationAuth === undefined ? {} : { auth: integrationAuth }), gateway: integrationGateway, realtimeScopes, ...(conductorAccess === undefined ? {} : { conductor: conductorAccess }) });
     if (integrationAuth !== undefined) {
       registerIntegrationAuthServer({
@@ -716,20 +744,45 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         localSubject: (request, csrf): LocalIntegrationSubject | undefined => {
           try {
             const local = session(request);
-            // verify form approval with the session's CSRF secret
-            if (csrf !== undefined && (request.headers.origin !== config.publicOrigin.origin || !auth.csrf(local, csrf))) return undefined;
+            // require both origin and CSRF on every consent POST, including missing-token forms
+            if (request.method === 'POST' && (csrf === undefined || request.headers.origin !== config.publicOrigin.origin || !auth.csrf(local, csrf))) return undefined;
             return { id: local.id, csrf: local.csrf } as LocalIntegrationSubject;
           } catch { return undefined; }
         }
+      });
+      const federation = integrationConfig.multiInstance.enabled && Buffer.from(federationSecret, 'base64url').length >= 32 ? new FederationAdmissionService(federationSecret, config.publicOrigin.origin, new Set(config.remoteServers.map(remote => remote.url.origin))) : undefined;
+      // signed remote presence shares the current target process epoch
+      if (federation !== undefined) remoteControllerPresence = new RemoteControllerPresenceService({ localInstanceId: config.publicOrigin.origin, localEpoch: federation.destinationEpoch, remoteServers: config.remoteServers, secret: federationSecret });
+      app.post('/api/integration-federation/metadata', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (request, reply) => {
+        browser(request);
+        // unsigned metadata requests never reveal or rotate the startup epoch
+        if (federation === undefined) return reply.code(404).send({ error: 'federation unavailable' });
+        const signed = federation.issueEpochMetadata(request.headers['x-rac-federation-timestamp'], request.headers['x-rac-federation-signature'], request.body);
+        // bind discovery to configured peer identities and exact signed bodies
+        if (signed === undefined) return reply.code(401).send({ error: 'unauthorized' });
+        return reply.header('x-rac-federation-timestamp', signed.timestamp).header('x-rac-federation-signature', signed.signature).send(signed.body);
+      });
+      app.post('/api/integration-federation/controller-presence', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (request, reply) => {
+        browser(request);
+        // controller presence is independent of local voice activity
+        if (federation === undefined) return reply.code(404).send({ error: 'federation unavailable' });
+        const signed = federation.issueControllerPresence(request.headers['x-rac-federation-timestamp'], request.headers['x-rac-federation-signature'], request.body, owner => integrationControl.controllerPresent(owner));
+        // do not accept client-supplied presence assertions
+        if (signed === undefined) return reply.code(401).send({ error: 'unauthorized' });
+        return reply.header('x-rac-federation-timestamp', signed.timestamp).header('x-rac-federation-signature', signed.signature).send(signed.body);
       });
       app.post('/api/integration-federation', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (request, reply) => {
         browser(request);
         // keep cross-instance execution independently disabled
         if (!integrationConfig.multiInstance.enabled) return reply.code(404).send({ error: 'federation unavailable' });
-        const delegated = verifyFederationRequest(federationSecret, request.headers['x-rac-federation-timestamp'], request.headers['x-rac-federation-signature'], request.body);
-        // reject unsigned or malformed delegation
-        if (delegated === undefined) return reply.code(401).send({ error: 'unauthorized' });
-        return await integrationGateway.call({ authentication: 'oauth', subjectId: delegated.principal.subjectId, audience: resource, scopes: delegated.principal.scopes, ...(delegated.principal.clientId === undefined ? {} : { clientId: delegated.principal.clientId }) }, delegated.name, delegated.arguments, { voiceAuthorized: delegated.voiceAuthorized });
+        const delegated = federation?.verifyDelegation(request.headers['x-rac-federation-timestamp'], request.headers['x-rac-federation-signature'], request.body);
+        // malformed signatures receive no replay-capacity or process identity detail
+        if (delegated === undefined || !delegated.ok && delegated.reason === 'invalid') return reply.code(401).send({ error: 'unauthorized' });
+        // only a startup-epoch change permits one authenticated metadata refresh
+        if (!delegated.ok && delegated.reason === 'epoch_mismatch') return reply.code(409).send({ error: delegated.code });
+        // saturated and replayed calls fail before gateway claims or dispatch
+        if (!delegated.ok) return reply.code(503).send({ error: delegated.code });
+        return await integrationGateway.call({ ...delegated.principal, audience: resource }, delegated.payload.name, delegated.payload.arguments);
       });
       const realtime = new RealtimeService({ apiKey: process.env.RAC_OPENAI_API_KEY, settings: () => ({ name: integrationConfig.realtime.name, context: integrationConfig.realtime.context }) });
       app.get('/api/integrations/status', async request => {
@@ -740,18 +793,19 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         const local = controlled(request, true);
         // keep voice disabled unless both the feature and provider are configured
         if (!integrationConfig.realtime.enabled || !realtime.available()) return reply.code(503).send({ error: 'Realtime voice is unavailable.' });
-        const principal = integrationAuth.authenticateRealtimeToken(realtimeToken);
-        // fail closed if the isolated MCP credential is unavailable
-        if (!principal.ok) return reply.code(503).send({ error: 'Realtime orchestration is unavailable.' });
-        const allowedTools = integrationGateway.listTools({ ...principal.value, audience: resource, scopes: realtimeScopes }).map(tool => tool.name);
         const requestedContext = body(request);
         // accept only canonical selected-target identifiers
         if ((requestedContext.worktreeId !== undefined && (typeof requestedContext.worktreeId !== 'string' || requestedContext.worktreeId.length > 240)) || (requestedContext.agentId !== undefined && (typeof requestedContext.agentId !== 'string' || requestedContext.agentId.length > 240)) || typeof requestedContext.voiceSessionId !== 'string' || !/^[A-Za-z0-9_-]{20,64}$/u.test(requestedContext.voiceSessionId)) return reply.code(400).send({ error: 'invalid voice context' });
         // activate mutation access only for this voice session
-        if (!integrationControl.startVoice(local.id, requestedContext.voiceSessionId)) return reply.code(409).send({ error: 'voice session stopped' });
-        const result = await realtime.create({ subject: local.id, mcpUrl: resource, mcpAuthorization: realtimeToken, allowedTools, context: { instanceId: config.publicOrigin.origin, ...(requestedContext.worktreeId === undefined ? {} : { worktreeId: requestedContext.worktreeId as string }), ...(requestedContext.agentId === undefined ? {} : { agentId: requestedContext.agentId as string }) } });
+        const credential = integrationControl.startVoiceLease(local.id, requestedContext.voiceSessionId, realtimeScopes);
+        // never share a credential between leases or controlling browsers
+        if (credential === undefined) return reply.code(409).send({ error: 'voice session stopped' });
+        await reconcileDeveloperTransfers?.();
+        const principal = integrationControl.authenticateRealtimeBearer(credential.bearer)!;
+        const allowedTools = integrationGateway.listTools({ ...principal, audience: resource }).map(tool => tool.name);
+        const result = await realtime.create({ subject: local.id, mcpUrl: resource, mcpAuthorization: credential.bearer, allowedTools, context: { instanceId: config.publicOrigin.origin, ...(requestedContext.worktreeId === undefined ? {} : { worktreeId: requestedContext.worktreeId as string }), ...(requestedContext.agentId === undefined ? {} : { agentId: requestedContext.agentId as string }) } });
         // revoke access when provider setup fails
-        if (!result.ok) integrationControl.stopVoice(local.id, requestedContext.voiceSessionId);
+        if (!result.ok) { integrationControl.stopVoice(local.id, requestedContext.voiceSessionId); await reconcileDeveloperTransfers?.(); }
         return result.ok ? reply.send(result) : reply.code(result.code === 'invalid_request' ? 400 : 502).send({ error: result.code });
       });
       app.post('/api/realtime/session/heartbeat', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
@@ -765,7 +819,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         const local = session(request, true);
         const voiceSessionId = body(request).voiceSessionId;
         // stop only one canonical browser voice session
-        if (typeof voiceSessionId === 'string' && /^[A-Za-z0-9_-]{20,64}$/u.test(voiceSessionId)) integrationControl.stopVoice(local.id, voiceSessionId);
+        if (typeof voiceSessionId === 'string' && /^[A-Za-z0-9_-]{20,64}$/u.test(voiceSessionId)) { integrationControl.stopVoice(local.id, voiceSessionId); await reconcileDeveloperTransfers?.(); }
         return { ok: true };
       });
     }
@@ -1120,6 +1174,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // retain signed directory authority until the host has opened the cwd
     directoryLease: async (place, sessionId, token) => {
       try { return await hostFiles.resolveDirectoryCapability(place, { id: sessionId }, token); }
+      catch (error) { throw new ButtonActionError('files_context_changed', error instanceof HostFilesError ? error.statusCode : 503); }
+    },
+    // first-class internal Files owners use the same host directory lease guard
+    directoryLeaseOwned: async (place, owner, token) => {
+      try { return await hostFiles.resolveDirectoryCapability(place, owner, token); }
       catch (error) { throw new ButtonActionError('files_context_changed', error instanceof HostFilesError ? error.statusCode : 503); }
     },
     shell: new HostCommandRunner(config),
@@ -4770,9 +4829,272 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (derives) void runDerive(true);
     } catch { socket.close(1008); }
   });
+  // bind developer ports after all existing browser/domain guards have initialized
+  if (developerControl !== undefined && developerPolicy !== undefined && developerOrchestration !== undefined) {
+    const operator = developerOrchestration;
+    const authority = developerControl;
+    const remoteTransferLeases = new RemoteArtifactLeaseTracker();
+    // retain browser and internal owners as distinct capability namespaces
+    const developerOwner = (principal: IntegrationPrincipal): HostFilesOwnerContext | undefined => {
+      // a Conductor is a real Agent owner, never a browser session stand-in
+      if (principal.authentication === 'conductor') return { namespace: 'conductor', principalOwnerKey: principal.subjectId };
+      // Davo capabilities require the exact authenticated lease
+      if (principal.authentication !== 'realtime' || principal.stableOwnerKey === undefined || principal.leaseKey === undefined) return undefined;
+      // remote stream authority lasts only through its last signed one-use delegation
+      if (principal.federated !== undefined) {
+        // a delayed old delegation cannot replace the newer observed lease
+        if (!remoteTransferLeases.observe(principal.stableOwnerKey, principal.leaseKey, principal.federated.issuedAt, principal.federated.expiresAt)) return undefined;
+      }
+      return { namespace: 'davo', principalOwnerKey: principal.stableOwnerKey, leaseKey: principal.leaseKey };
+    };
+    // resolve current Place identity without accepting an absolute host path
+    const developerPlace = async (id: string, principal: IntegrationPrincipal) => {
+      const place = await resolvePlace(id);
+      return place === undefined || principal.places !== undefined && !principal.places(place) ? undefined : place;
+    };
+    // enforce Place visibility separately from agent state-change ownership
+    const developerAgent = async (principal: IntegrationPrincipal, id: string, access: 'read' | 'mutate') => {
+      const agent = (await discovery.dashboard()).agents.find(candidate => candidate.id === id);
+      // missing, hidden and foreign worker identities have the same response
+      if (agent === undefined || principal.places !== undefined && !await operator.scoped(principal.places, principal.authentication === 'conductor' ? principal.subjectId : undefined).hasAgent(id)) return undefined;
+      // model, conversation and lifecycle state changes belong to self or an owned worker
+      if (access === 'mutate' && principal.authentication === 'conductor' && agent.id !== principal.subjectId && agent.spawnedBy !== principal.subjectId) return undefined;
+      return { agent, ...(agent.worktreeId === undefined ? {} : { worktree: configuredWorktree(agent.worktreeId) }) };
+    };
+    // Worktree-scoped reads use canonical current identity and the same Place filter
+    const developerWorktree = async (id: string, principal: IntegrationPrincipal) => {
+      const worktree = configuredWorktree(id);
+      return worktree === undefined || principal.places !== undefined && !principal.places(worktree) ? undefined : worktree;
+    };
+    const transfers = new McpFileTransferService(hostFiles, async (id, owner) => {
+      const place = await resolvePlace(id);
+      // token ownership never substitutes for current Conductor Place authorization
+      if (place === undefined || owner.namespace === 'conductor' && currentConductorPlaces?.()(place) !== true) return undefined;
+      return place;
+    });
+    // reconcile private stages after lease revocation, expiry or owner departure
+    reconcileDeveloperTransfers = async () => await transfers.reconcile(async (owner, placeId) => {
+      const currentPlace = await resolvePlace(placeId);
+      // no lease keeps a stage alive after its configured Place disappears
+      if (currentPlace === undefined) return false;
+      // a real Conductor owner must still have its structured process
+      if (owner.namespace === 'conductor') {
+        return currentConductorPlaces?.()(currentPlace) === true && (await structuredAgents.agent(owner.principalOwnerKey))?.structured?.role === 'conductor';
+      }
+      const local = authority.currentLease();
+      return local?.stableOwnerKey === owner.principalOwnerKey && local.leaseKey === owner.leaseKey || remoteTransferLeases.active(owner.principalOwnerKey, owner.leaseKey);
+    });
+    const transferTimer = setInterval(() => { void reconcileDeveloperTransfers?.().catch(() => undefined); }, 1_000);
+    transferTimer.unref();
+    // close streams before the underlying Files transport shuts down
+    app.addHook('onClose', async () => { clearInterval(transferTimer); await transfers.close(); });
+    const sessionPorts = createSessionOperations({
+      resolveAgent: developerAgent,
+      prompts,
+      transfers,
+      owner: developerOwner,
+      // reuse the browser's allowed conversation roots and console naming records
+      conversations: async agent => {
+        const persistence = await agentPersistence(agent.id);
+        // a departed agent grants no stale conversation scope
+        if (persistence === undefined) return [];
+        const { scope, directories } = await agentConversationScope(persistence);
+        const rows = await listConversations(directories, scope, await currentConversationId(agent.id), await conversationRecords([persistence.saveKey]));
+        return rows.map(row => ({ ...row, exited: !row.current }));
+      },
+      // use a known conversation identity, not a client-supplied resume path
+      switchConversation: async (agent, conversation) => {
+        // current structured conversations switch through their native transport
+        if (agent.transport === 'structured') return await structuredAgents.switchConversation(agent.id, conversation.id) === 'ok';
+        // pane restarts retain the existing idle/queue/generation guard
+        if (agent.worktreeId === undefined) return false;
+        return (await switchByRestart(agent.id, { kind: conversation.kind, id: conversation.id, worktreeId: agent.worktreeId, chosenAt: prompts.mutationGeneration() })).status === 'switched';
+      },
+      // forgetting remains a console-record mutation and never deletes provider history
+      forgetConversation: async (agent, conversation) => {
+        const persistence = await agentPersistence(agent.id);
+        return persistence !== undefined && await consoleNamed.remove(persistence.saveKey, conversation.kind, conversation.id);
+      }
+    });
+    const launchPorts = createLaunchOperations({
+      options: launchOptions,
+      conductorKinds: config.conductor?.spawnKinds ?? [],
+      // resolve folder selections only from a known Place, never from a raw path
+      resolve: async (input, principal) => {
+        let target: LaunchSelectionTarget;
+        // configured Worktree targets retain current availability and Places
+        if (input.destination_kind === 'worktree') {
+          const worktree = await developerWorktree(input.worktree_id as string, principal);
+          // a stale selection grants no launch authority
+          if (worktree === undefined) throw new Error('target unavailable');
+          target = { type: 'worktree', id: worktree.id };
+        } else if (input.destination_kind === 'folder') {
+          const place = await developerPlace(input.folder_place_id as string, principal);
+          // folder launches use a current configured Place
+          if (place === undefined) throw new Error('target unavailable');
+          target = { type: 'folder', path: place.home };
+        } else {
+          // a Conductor cannot use Scratch as an escape from its allowed Places
+          if (principal.authentication === 'conductor') throw new Error('target unavailable');
+          target = { type: 'scratch' };
+        }
+        return { target, context: (await resolveManualTarget(target)).context };
+      },
+      prepare: prepareManual,
+      // browser and MCP share final native-choice revalidation and the real launch primitive
+      launch: async manual => {
+        await confirmManual(manual);
+        const choice = manual.choice;
+        let outcome: LaunchOutcome | undefined;
+        // match the exact target through the existing launch-observation primitive
+        if (manual.target.type === 'worktree') outcome = await launchAgent(inWorktree(manual.target.id), () => launch.launch(manual.target.type === 'worktree' ? manual.target.id : '', choice.kind, choice.model, manualSandbox(choice), undefined, choice));
+        else if (manual.target.type === 'scratch') {
+          const place = await launch.scratchPlace();
+          outcome = await launchAgent(atPlace(place.id), () => launch.launchHome(choice.kind, choice.model, manualSandbox(choice), choice));
+        } else if (manual.target.type === 'folder') {
+          const place = placeForRoot(configuredPlaces(discovery.worktreesNow(), discovery.projectsNow(), config.scratchDirectory ?? nativeHome()), manual.target.path);
+          outcome = await launchAgent(atPlace(place.id), () => launch.launchAt(place, choice.kind, choice.model, manualSandbox(choice), choice));
+        }
+        // a failed or unobservable launch never fabricates a new Agent identity
+        return outcome !== undefined && 'agent' in outcome ? outcome.agent : undefined;
+      }
+    });
+    const generalAsks = new GeneralAskJobs(reviewRunner, review.tour);
+    // pending Ask runs are owned by this server and abort before shutdown
+    app.addHook('onClose', async () => { generalAsks.close(); });
+    const agentOperationDeps: AgentOperationDependencies = {
+      structuredAgents,
+      comparison,
+      resolveAgent: developerAgent,
+      processGeneration: id => structuredAgents.processGeneration(id),
+      createdAt: (id, itemId) => structuredAgents.transcriptObservedAt(id, itemId),
+      capabilities: agent => ({ attachments: agent.transport !== 'structured', steer: agent.transport === 'structured' && structuredAdapterFor(agent.kind)?.steers === true, compact: agent.transport === 'structured', resume: agent.transport === 'structured', restart: agent.transport === 'structured' }),
+      policy: developerPolicy,
+      review: { tours: reviewTours, tourJobs: reviewJobs, codeJobs: codeReviews, store: reviewStore, asks, generalAsks, resolveWorktree: (principal, id) => developerWorktree(id, principal), currentBranch: reviewBranch },
+      extensions: { ...sessionPorts, ...launchPorts, create_pull_request_review_draft: createReviewDraftPort({ worktrees: () => discovery.worktreesNow().filter(worktree => config.projects.some(project => project.id === worktree.projectId)), repositoryAt: originRepository, current: (id, input) => reviewTours.current(id, input), post: (id, input) => pullRequestReviews.post(id, input) }) }
+    };
+    // reconcile durable markers before waking only safely unstarted restart commands
+    await developerPolicy.reconcileLifecycleCommands(id => structuredAgents.processGeneration(id), id => structuredAgents.lifecycleCommandMarker(id));
+    await recoverPendingAgentLifecycleCommands(agentOperationDeps);
+    const agentPorts = createAgentOperations(agentOperationDeps);
+    const workspaceTools = createWorkspaceTools({
+      hostFiles,
+      transfers,
+      resolvePlace: developerPlace,
+      resolveAgent: async (id, principal) => {
+        const target = await developerAgent(principal, id, 'read');
+        return target?.agent.worktreeId === undefined ? undefined : { agentId: id, worktreeId: target.agent.worktreeId, projectId: target.worktree?.projectId ?? projectIdOf(target.agent.worktreeId) };
+      },
+      resolveWorktree: developerWorktree,
+      // project assessments require a current authorized Place before reading global facts
+      resolveProject: async (id, principal) => {
+        const project = config.projects.find(candidate => candidate.id === id);
+        // unknown and unscoped Conductor projects share one refusal
+        if (project === undefined || principal.authentication === 'conductor' && principal.places === undefined) return undefined;
+        const places = configuredPlaces(discovery.worktreesNow(), discovery.projectsNow(), config.scratchDirectory ?? nativeHome());
+        // configured project existence never bypasses the caller's Place filter
+        if (principal.places !== undefined && !places.some(place => place.projectId === project.id && principal.places!(place))) return undefined;
+        return { id: project.id };
+      },
+      listWorktrees: async (projectId, principal) => discovery.worktreesNow().filter(worktree => worktree.projectId === projectId && (principal.places === undefined || principal.places(worktree))),
+      owner: developerOwner,
+      // the Watch retains origin identity rather than impersonating a local Agent
+      davoWatchOwner: principal => principal.authentication !== 'realtime' || principal.stableOwnerKey === undefined ? undefined : principal.federated === undefined
+        ? { kind: 'davo-local', principalOwnerKey: principal.stableOwnerKey }
+        : { kind: 'davo-remote', principalOwnerKey: principal.stableOwnerKey, originInstanceId: principal.federated.originInstanceId, originStableOwnerId: principal.federated.originStableOwnerKey ?? principal.stableOwnerKey },
+      pullRequests: prSwitch,
+      worktrees: worktreeManagement,
+      worktreeStatus: async (id, principal) => {
+        const scoped = principal.places === undefined ? operator : operator.scoped(principal.places, principal.authentication === 'conductor' ? principal.subjectId : undefined);
+        const result = await scoped.worktreeStatus(id);
+        // hidden or unavailable Worktrees return no wider status
+        if (!result.ok) throw new Error(result.error.message);
+        return result.value;
+      },
+      pullRequestStatus: async (id, principal) => {
+        const target = (await discovery.dashboard()).agents.find(agent => agent.worktreeId === id);
+        // a Worktree without a current Agent has no switch status
+        if (target === undefined) return {};
+        const scoped = principal.places === undefined ? operator : operator.scoped(principal.places, principal.authentication === 'conductor' ? principal.subjectId : undefined);
+        const result = await scoped.pullRequestStatus(target.id);
+        // preserve the existing Place-scoped refusal
+        if (!result.ok) throw new Error(result.error.message);
+        return result.value;
+      },
+      // preserve Remove's fresh runtime, shell, dirty-tree and stack-stop guards
+      removeWorktree: async (worktree, input) => {
+        // main and locked checkouts are never removable
+        if (worktree.main || worktree.locked) return { removed: false };
+        await asks.supersedeWorktree(worktree.id, 'all');
+        // recheck live holders before reading removal facts
+        if (await worktreeRemovalRefusal(worktree) !== undefined) return { removed: false };
+        const facts = await worktreeManagement.removal(worktree);
+        // changed files require the exact discard acknowledgement
+        if (!facts.ok || facts.facts.dirtyCount > 0 && !input.discardChanges) return { removed: false };
+        const removed = await stackCommands.stopForRemoval(worktree, async () => {
+          // stopping a process can await; re-read runtime blockers before removing anything
+          const refusal = await worktreeRemovalRefusal(worktree);
+          if (refusal !== undefined) return { ok: false, status: 409, error: refusal } as const;
+          // close only process-less records, never a newly started Agent
+          for (const agent of (await discovery.dashboard(true)).agents) if (agent.worktreeId === worktree.id && withoutProcess(agent)) await prompts.close(agent.id);
+          await launch.killWorktreeShells(worktree);
+          return await worktreeManagement.removeCheckout(worktree, { force: input.discardChanges });
+        });
+        // incomplete removals keep console records intact
+        if (removed === false || removed === 'busy' || !removed.ok) return { removed: false };
+        await deleteWorktreeRecords(worktree.id);
+        // branch deletion is never inferred from Worktree removal approval
+        if (input.deleteBranch && facts.facts.branch !== undefined) await worktreeManagement.deleteBranch(worktree, facts.facts.branch);
+        discovery.invalidateWorktrees();
+        await dashboardUpdates.refresh().catch(() => undefined);
+        return { removed: true };
+      },
+      pruneRecords: pruneOrphanRecords,
+      // the same current stale set drives both the browser Prune and its MCP preparation
+      pruneFacts: async projectId => {
+        const project = (await discovery.dashboard(true)).projects.find(project => project.id === projectId);
+        return project === undefined ? { ids: [], blockers: ['Project not found.'] } : { ids: project.stalePaths.map(path => worktreeWireId(projectId, path)), blockers: [] };
+      },
+      github,
+      notes,
+      noteKey: worktree => placeSaveKey(worktree.id),
+      // C schedules can target only the configured Conductor; D uses configured operator targets
+      scheduleTargets: async (_worktree, principal) => principal.authentication === 'conductor'
+        ? [{ target: { conductor: true }, label: 'Conductor', available: config.conductor !== undefined }]
+        : [...discovery.worktreesNow().filter(worktree => worktree.available && config.projects.some(project => project.id === worktree.projectId)).map(worktree => ({ target: { worktreeId: worktree.id }, label: worktree.label, available: true })), ...config.projects.filter(project => project.mode === 'directory' && project.available).map(project => ({ target: { projectId: project.id }, label: project.label, available: true })), { target: { scratch: true }, label: 'Scratch', available: true }, ...(config.conductor === undefined ? [] : [{ target: { conductor: true as const }, label: 'Conductor', available: true }])],
+      previewSchedule: async cron => (previewRuns(cron, new Date(), 3) ?? []).map(date => date.toISOString()),
+      // existing schedule validation retains kinds, models, cron and target policy
+      buildSchedule: async (_worktree, note, input, principal) => buildSchedule({ ...input, kind: 'conductor' in input.target ? config.conductor?.kind : note.schedule?.kind ?? config.defaultAgent ?? 'codex', ...(note.schedule?.model === undefined ? {} : { model: note.schedule.model }), ...(note.schedule?.effort === undefined ? {} : { effort: note.schedule.effort }) }),
+      // Run now uses the same per-Note concurrency and deletion lock as scheduled runs
+      runNoteNow: async (worktree, note, target) => {
+        const key = await placeSaveKey(worktree.id);
+        // absent save roots cannot dispatch a Note
+        if (key === undefined) return { runId: randomBytes(18).toString('base64url'), state: 'failed' };
+        const resolved = await notes.resolve(key, note.id);
+        // deleted Notes cannot run from a stale selection
+        if (resolved === undefined) return { runId: randomBytes(18).toString('base64url'), state: 'failed' };
+        const flight = `${resolved.key}:${note.id}`;
+        // scheduled and manual runs share the same reservation
+        if (scheduleRunsInFlight.has(flight) || noteDeletionsInFlight.has(flight)) return { runId: randomBytes(18).toString('base64url'), state: 'skipped' };
+        scheduleRunsInFlight.add(flight);
+        try {
+          const latest = await notes.resolve(key, note.id);
+          // reload the Note after claiming its run slot
+          if (latest === undefined) return { runId: randomBytes(18).toString('base64url'), state: 'failed' };
+          const outcome = 'conductor' in target ? await runForConductor(latest.note) : await runOnce({ text: latest.note.text, attachments: latest.note.attachments ?? [], kind: latest.note.schedule?.kind ?? config.defaultAgent, target });
+          return { runId: 'agentId' in outcome && outcome.agentId !== undefined ? outcome.agentId : randomBytes(18).toString('base64url'), state: outcome.status === 'delivered' ? 'running' : outcome.status };
+        } finally { scheduleRunsInFlight.delete(flight); }
+      },
+      canInvokeActionTarget: async (target, principal) => principal.authentication !== 'conductor' || await developerAgent(principal, target.agentId, 'mutate') !== undefined,
+      buttons: buttonActions,
+      buttonCatalog,
+      watches
+    });
+    developerTools = [...createAgentTools(agentPorts), ...workspaceTools, ...createWorkerTools({ config, structured: structuredAgents, resolvePlace: developerPlace, close: id => prompts.close(id), createWorktree: (projectId, input, open, issue) => createWorktree(projectId, input, open, issue) })];
+  }
   // close owned Files transport and existing background services on shutdown
   // close both viewer-owned streams and server-owned dashboard connections
-  app.addHook('onClose', async () => { watches.close(); buttonActions.close(); scheduler.stop(); reviewJobs.close(); codeReviews.close(); asks.close(); await hostFiles.close(); await accounts.close(); await paneViewports.restoreAll(); paneStream.closeAll(); tmux.closeCommands?.(); dashboardUpdates.close(); await structuredAgents.saved(); });
+  app.addHook('onClose', async () => { await watches.close(); buttonActions.close(); scheduler.stop(); reviewJobs.close(); codeReviews.close(); asks.close(); await hostFiles.close(); await accounts.close(); await paneViewports.restoreAll(); paneStream.closeAll(); tmux.closeCommands?.(); dashboardUpdates.close(); await structuredAgents.saved(); });
   // expose the scheduler on the instance (index.ts starts it; the HTTP-seam tests tick it)
   app.decorate('scheduler', scheduler);
   app.decorate('structuredAgents', structuredAgents);

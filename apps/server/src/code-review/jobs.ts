@@ -26,6 +26,9 @@ export class CodeReviewJobs {
 
   constructor(private readonly reviewer: CodeReviewer, private readonly store?: CodeReviewStore, private readonly onSettled?: (job: SettledCodeReviewJob) => void | Promise<void>) {}
 
+  // expose the reviewer's bounded preset capabilities
+  async capability() { return await this.reviewer.capability(); }
+
   // check a request against its preset before anything starts
   async validate(options: CodeReviewOptions): Promise<void> { await this.reviewer.resolve(options); }
 

@@ -1162,9 +1162,10 @@ export class GithubService {
     return await this.write(repository, number, async token => await replyToThread(this.client, token, threadId, body));
   }
 
-  async resolveThread(repository: GithubRepository, number: number, threadId: string): Promise<void> {
+  // set one exact current Review thread resolution state
+  async resolveThread(repository: GithubRepository, number: number, threadId: string, resolved = true): Promise<void> {
     await this.thread(repository, number, threadId);
-    await this.write(repository, number, async token => await resolveThread(this.client, token, threadId));
+    await this.write(repository, number, async token => await resolveThread(this.client, token, threadId, resolved));
   }
 
   /** Ask one of the pull request's reviewers, a user or bot who reviewed it, for another review. */

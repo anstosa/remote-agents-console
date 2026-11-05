@@ -54,7 +54,7 @@ describe('integration HTTP surfaces', () => {
       expect(metadata.json().resource).toBe(resource);
       const token = await accessToken(app, resource);
       expect(token).toHaveLength(43);
-      const initialized = await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} } });
+      const initialized = await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } } } });
       expect(initialized.json().result.protocolVersion).toBe('2025-06-18');
       const listed = await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 2, method: 'tools/list' } });
       expect(listed.json().result.tools.map((tool: { name: string }) => tool.name)).toContain('list_instances');

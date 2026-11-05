@@ -6,6 +6,7 @@ const defaultModel = 'gpt-realtime-2.1';
 const defaultVoice = 'cedar';
 const clientSecretLifetimeSeconds = 600;
 const maxSubjectLength = 256;
+const maxAllowedTools = 256;
 const realtimeInstructions = [
   'Every intermediate spoken or transcript message used for reasoning, tool use, lookup, or a working update must contain at most five words. Do not split one intermediate update into multiple messages to evade this limit; only the final answer may be longer.',
   'When the caller directly tells you to hang up or end the call, reply with no more than four words, do not use tools, and say nothing else.',
@@ -130,8 +131,8 @@ function validRequest(request: RealtimeSessionRequest): boolean {
   if (mcpUrl.protocol !== 'https:' || mcpUrl.username || mcpUrl.password || mcpUrl.hash || mcpUrl.pathname !== '/mcp') return false;
   // require the raw bounded authorization token
   if (!/^[A-Za-z0-9._~-]{20,4096}$/u.test(request.mcpAuthorization)) return false;
-  // require a narrow unique tool allowlist
-  if (request.allowedTools.length === 0 || request.allowedTools.length > 64 || new Set(request.allowedTools).size !== request.allowedTools.length) return false;
+  // require a bounded unique tool allowlist large enough for the full internal catalog
+  if (request.allowedTools.length === 0 || request.allowedTools.length > maxAllowedTools || new Set(request.allowedTools).size !== request.allowedTools.length) return false;
   // require safe catalog names
   if (!request.allowedTools.every(tool => /^[a-z][a-z0-9_]{1,63}$/u.test(tool))) return false;
   // accept only bounded canonical context identifiers

@@ -45,7 +45,7 @@ export type PullRequestReviewInput = { scope: 'pr'; includeTests: boolean; inclu
 // `file` is a comment posted as a file-level thread, `reason` saying why it could not sit on its lines
 export type PullRequestReviewCommentResult = { id: string; result: 'line' | 'file' | 'failed'; reason?: string };
 // a section is `posted` when the draft holds it, appended now or already there
-export type PullRequestReviewResult = { status: 'ok'; review: { url: string; pullRequest: { number: number; url: string } }; sections: Array<{ key: string; posted: boolean }>; comments: PullRequestReviewCommentResult[] };
+export type PullRequestReviewResult = { status: 'ok'; draftId?: string; review: { url: string; pullRequest: { number: number; url: string } }; sections: Array<{ key: string; posted: boolean }>; comments: PullRequestReviewCommentResult[] };
 export type PullRequestReviewErrorCode = 'stale' | 'uncommitted' | 'no_pull_request' | 'pull_request_mismatch' | 'no_github_token' | 'head_mismatch' | 'pending_review_outdated' | 'github_forbidden' | 'github_failed';
 
 export class PullRequestReviewError extends Error {
@@ -271,7 +271,7 @@ export class PullRequestReviewService {
       if (planned.length > 0 || input.sections.length > 0) this.github.changed(repository, pullRequest.number);
     }
     const finalBody = review?.body ?? '';
-    return { status: 'ok', review: { url: `${pullRequest.url}/files`, pullRequest: { number: pullRequest.number, url: pullRequest.url } }, sections: input.sections.map(section => ({ key: section.key, posted: finalBody.includes(sectionMarker(section)) })), comments: input.comments.map(comment => results.get(comment.id)!) };
+    return { status: 'ok', ...(review === undefined ? {} : { draftId: review.id }), review: { url: `${pullRequest.url}/files`, pullRequest: { number: pullRequest.number, url: pullRequest.url } }, sections: input.sections.map(section => ({ key: section.key, posted: finalBody.includes(sectionMarker(section)) })), comments: input.comments.map(comment => results.get(comment.id)!) };
   }
 
   // refuse a draft review on another commit

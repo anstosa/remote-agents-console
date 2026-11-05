@@ -1,11 +1,11 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { isHostFileIdentity, isHostFilesPath, type HostFileIdentity } from './contracts.js';
+import { isHostFileIdentity, isHostFilesPath, sameHostFilesOwner, type HostFileIdentity, type HostFilesOwnerContext } from './contracts.js';
 
 export type HostFileTokenPurpose = 'object'|'destination-directory';
 export type HostFileTokenPayload = {
-  version: 1;
+  version: 2;
   purpose: HostFileTokenPurpose;
-  sessionId: string;
+  owner: HostFilesOwnerContext;
   placeId: string;
   backendGeneration: string;
   path: string;
@@ -17,13 +17,23 @@ export type HostFileTokenPayload = {
 
 const maxTokenBytes = 16_384;
 
+// validate one bounded first-class capability owner
+function validOwner(value: unknown): value is HostFilesOwnerContext {
+  // require one plain owner record
+  if (value === null || typeof value !== 'object') return false;
+  const owner = value as Partial<HostFilesOwnerContext>;
+  return (owner.namespace === 'browser' || owner.namespace === 'davo' || owner.namespace === 'conductor')
+    && typeof owner.principalOwnerKey === 'string' && owner.principalOwnerKey.length >= 1 && owner.principalOwnerKey.length <= 512
+    && (owner.leaseKey === undefined || typeof owner.leaseKey === 'string' && owner.leaseKey.length >= 1 && owner.leaseKey.length <= 512);
+}
+
 // validate one decoded capability payload
 function isPayload(value: unknown): value is HostFileTokenPayload {
   // require one plain payload object
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const payload = value as Record<string, unknown>;
-  return payload.version === 1 && (payload.purpose === 'object' || payload.purpose === 'destination-directory')
-    && typeof payload.sessionId === 'string' && payload.sessionId.length >= 1 && payload.sessionId.length <= 512
+  return payload.version === 2 && (payload.purpose === 'object' || payload.purpose === 'destination-directory')
+    && validOwner(payload.owner)
     && typeof payload.placeId === 'string' && payload.placeId.length >= 1 && payload.placeId.length <= 4096
     && typeof payload.backendGeneration === 'string' && payload.backendGeneration.length >= 1 && payload.backendGeneration.length <= 512
     && isHostFilesPath(payload.path) && isHostFileIdentity(payload.identity)
@@ -39,11 +49,14 @@ export class HostFilesTokenService {
   }
 
   // issue one session, Place, generation and identity-bound capability
-  issue(input: Omit<HostFileTokenPayload, 'version'|'backendGeneration'|'issuedAt'|'expiresAt'|'nonce'>): string {
+  issue(input: Omit<HostFileTokenPayload, 'version'|'backendGeneration'|'issuedAt'|'expiresAt'|'nonce'> | Omit<HostFileTokenPayload, 'version'|'owner'|'backendGeneration'|'issuedAt'|'expiresAt'|'nonce'> & { sessionId: string }): string {
     const issuedAt = this.now();
+    const owner = 'owner' in input ? input.owner : { namespace: 'browser' as const, principalOwnerKey: input.sessionId };
+    const { sessionId: _sessionId, ...fields } = input as typeof input & { sessionId?: string };
     const payload: HostFileTokenPayload = {
-      version: 1,
-      ...input,
+      version: 2,
+      ...fields,
+      owner,
       backendGeneration: this.generation(),
       issuedAt,
       expiresAt: issuedAt + this.ttlMs,
@@ -54,7 +67,7 @@ export class HostFilesTokenService {
   }
 
   // verify one capability for its exact request context
-  verify(token: string, expected: { purpose: HostFileTokenPurpose; sessionId: string; placeId?: string }): HostFileTokenPayload | undefined {
+  verify(token: string, expected: { purpose: HostFileTokenPurpose; owner: HostFilesOwnerContext; placeId?: string; leaseBound?: boolean } | { purpose: HostFileTokenPurpose; sessionId: string; placeId?: string; leaseBound?: boolean }): HostFileTokenPayload | undefined {
     // reject oversized or malformed envelopes before decoding
     if (typeof token !== 'string' || token.length < 20 || token.length > maxTokenBytes) return undefined;
     const parts = token.split('.');
@@ -73,7 +86,8 @@ export class HostFilesTokenService {
     try { parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')); }
     catch { return undefined; }
     // require a current, context-bound payload
-    if (!isPayload(parsed) || parsed.purpose !== expected.purpose || parsed.sessionId !== expected.sessionId || expected.placeId !== undefined && parsed.placeId !== expected.placeId) return undefined;
+    const expectedOwner = 'owner' in expected ? expected.owner : { namespace: 'browser' as const, principalOwnerKey: expected.sessionId };
+    if (!isPayload(parsed) || parsed.purpose !== expected.purpose || !sameHostFilesOwner(parsed.owner, expectedOwner, expected.leaseBound) || expected.placeId !== undefined && parsed.placeId !== expected.placeId) return undefined;
     const currentGeneration = this.generation();
     const currentTime = this.now();
     // compare one consistent backend/time snapshot

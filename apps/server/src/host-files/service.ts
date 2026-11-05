@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { basename, dirname, join, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { previewFileBytes, type WorkspaceFilePreview } from '../workspace-files/service.js';
+import { safeIntegrationPath } from '../integrations/path-safety.js';
 import {
   HostFilesError,
   type CollisionDecision,
@@ -13,7 +14,7 @@ import {
   type HostFilesItemResult,
   type HostFilesMutationResult,
   type HostFilesPlace,
-  type HostFilesSession,
+  hostFilesOwner, sameHostFilesOwner, type HostFilesOwnerContext, type HostFilesSession,
   type HostFilesTreeManifest,
   type OperationConflict,
   type OperationKind,
@@ -47,7 +48,7 @@ type PreparedItem = {
 type PreparedOperation = {
   id: string;
   kind: OperationKind;
-  sessionId: string;
+  owner: HostFilesOwnerContext;
   placeId: string;
   destination?: HostFileTokenPayload;
   items: PreparedItem[];
@@ -74,7 +75,7 @@ type UploadFile = {
 };
 type PreparedUpload = {
   id: string;
-  sessionId: string;
+  owner: HostFilesOwnerContext;
   placeId: string;
   destination: HostFileTokenPayload;
   files: UploadFile[];
@@ -89,7 +90,7 @@ type PreparedUpload = {
 };
 type PreparedDownload = {
   id: string;
-  sessionId: string;
+  owner: HostFilesOwnerContext;
   placeId: string;
   filename: string;
   selections: HostFilesZipSelection[];
@@ -234,6 +235,7 @@ export class HostFilesService {
   private readonly favorites: HostFileFavorites;
   private readonly now: () => number;
   private readonly operations = new Map<string, PreparedOperation>();
+  private readonly internalRoots = new Map<string, { root: string; touchedAt: number }>();
   private readonly uploads = new Map<string, PreparedUpload>();
   private readonly downloads = new Map<string, PreparedDownload>();
   private readonly locks = new PathLockRegistry();
@@ -248,6 +250,11 @@ export class HostFilesService {
 
   // expose the backend only for controlled route streaming and shutdown
   get backend(): HostFilesBackend { return this.options.backend; }
+
+  // recover only the signed Place identifier for owner-bound MCP token routing
+  objectPlaceId(session: HostFilesSession, token: string): string | undefined {
+    return this.tokens.verify(token, { purpose: 'object', owner: hostFilesOwner(session) })?.placeId;
+  }
 
   // retain signed directory identity through host-side command scheduling
   async resolveDirectoryCapability(place: HostFilesPlace, session: HostFilesSession, token: string): Promise<{ canonicalHostPath: string; backendGeneration: string; expiresAt: number; identity: { dev: string; ino: string; kind: 'directory' }; current(): boolean }> {
@@ -265,6 +272,8 @@ export class HostFilesService {
   // list one canonical host directory and issue fresh session capabilities
   async list(place: HostFilesPlace, session: HostFilesSession, path?: string, objectToken?: string): Promise<{ path: string; parent?: string; destinationDirectoryToken: string; directoryEntry: FileEntry; entries: FileEntry[]; inaccessibleEntries: number; truncated: boolean; limits: typeof hostFilesLimits }> {
     this.prune();
+    const owner = hostFilesOwner(session);
+    const root = this.internalRoot(place, owner);
     const selected = objectToken === undefined ? undefined : await this.objectToken(place, session, objectToken);
     // prevent a scoped capability from authorizing an unrelated pathname
     if (selected !== undefined && path !== undefined && path !== selected.path) throw new HostFilesError('invalid_request', 'folder path does not match its selection', 400);
@@ -275,21 +284,41 @@ export class HostFilesService {
       : { path: selected.path, ...selected.identity };
     // reject symlinks whose current target is not a directory
     if (target !== undefined && target.kind !== 'directory') throw new HostFilesError('unsupported_type', 'selection is not a folder', 422);
-    const listed = await this.options.backend.request({ kind: 'list', path: target?.path ?? path ?? place.hostPath ?? place.home, maxEntries: hostFilesLimits.listEntries });
+    let requestedPath = target?.path ?? path ?? place.hostPath ?? place.home;
+    // internal callers address only safe Place-relative paths
+    if (owner.namespace !== 'browser' && selected === undefined) {
+      const relativePath = path ?? '';
+      if (!safeIntegrationPath(relativePath)) throw new HostFilesError('invalid_path', 'sensitive or invalid path', 400);
+      requestedPath = resolve(root, relativePath);
+      this.requireContainedPath(root, requestedPath);
+      const resolvedTarget = await this.options.backend.request({ kind: 'inspect', path: requestedPath, followSymlink: true });
+      // reject intermediate or final symlinks that escape the Place
+      if (!await this.internalStatAllowed(root, resolvedTarget) || resolvedTarget.kind !== 'directory') throw new HostFilesError('invalid_path', 'folder is outside the Place', 400);
+      requestedPath = resolvedTarget.path;
+    }
+    const listed = await this.options.backend.request({ kind: 'list', path: requestedPath, maxEntries: hostFilesLimits.listEntries });
     // never issue replacement authority after resolving a selected folder
     if (target !== undefined && (target.path !== listed.path || !sameIdentity(target, listed.directory))) throw new HostFilesError('stale_object', 'selected folder changed; refresh and try again', 409);
     const records = await this.favorites.list(place.id);
     // issue object capabilities and consistent favorites for rows and the current directory
     const decorate = (stat: HostFileStat): FileEntry => {
-      const token = this.tokens.issue({ purpose: 'object', sessionId: session.id, placeId: place.id, path: stat.path, identity: stat });
+      const token = this.tokens.issue({ purpose: 'object', owner: hostFilesOwner(session), placeId: place.id, path: stat.path, identity: stat });
       const entry = entryOf(stat, token);
       const favorite = records.find(record => record.path === stat.path);
       // decorate only matching path favorites
       if (favorite !== undefined) entry.favorite = { id: favorite.id, state: sameFavoriteObject(favorite.identity, stat) ? favorite.identity.ctimeNs === stat.ctimeNs ? favorite.freshness === undefined ? 'available' : 'repair-pending' : 'modified' : 'replaced' };
       return entry;
     };
-    const entries = listed.entries.map(decorate);
+    const visible: HostFileStat[] = [];
+    // filter sensitive and escaping rows before issuing any capabilities
+    for (const stat of listed.entries) {
+      // browser capabilities retain the existing full Files surface
+      if (owner.namespace === 'browser' || await this.internalStatAllowed(root, stat)) visible.push(stat);
+    }
+    const entries = visible.map(decorate);
     const directory = await this.options.backend.request({ kind: 'inspect', path: listed.path });
+    // internal destination authority never names hidden or escaped directories
+    if (owner.namespace !== 'browser' && !await this.internalStatAllowed(root, directory)) throw new HostFilesError('invalid_path', 'folder is outside the Place', 400);
     // bind background menus to the same exact directory as the destination capability
     if (!sameIdentity(listed.directory, directory)) throw new HostFilesError('stale_object', 'folder changed while listing; refresh and try again', 409);
     // preserve the clicked object across directory and symlink resolution races
@@ -304,7 +333,7 @@ export class HostFilesService {
       }
     }
     const directoryEntry = decorate(directory);
-    const destinationDirectoryToken = this.tokens.issue({ purpose: 'destination-directory', sessionId: session.id, placeId: place.id, path: listed.path, identity: listed.directory });
+    const destinationDirectoryToken = this.tokens.issue({ purpose: 'destination-directory', owner: hostFilesOwner(session), placeId: place.id, path: listed.path, identity: listed.directory });
     return { path: listed.path, ...(listed.parent === undefined ? {} : { parent: listed.parent }), destinationDirectoryToken, directoryEntry, entries, inaccessibleEntries: listed.inaccessibleEntries, truncated: listed.truncated, limits: hostFilesLimits };
   }
 
@@ -323,6 +352,37 @@ export class HostFilesService {
     // preserve the true size while keeping the default text cap
     const preview = previewFileBytes(selected.path, bytes, undefined, size);
     return { ...preview, path: selected.path, size, truncated: preview.truncated || size > bytes.length };
+  }
+
+  // read one bounded regular-file range through the same owner-bound capability
+  async readFileChunk(place: HostFilesPlace, session: HostFilesSession, objectToken: string, offset: number, maxBytes: number): Promise<{ bytes: Buffer; size: number; digest: string }> {
+    // reject invalid ranges before touching the backend
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 40_960) throw new HostFilesError('invalid_request', 'invalid file range', 400);
+    const selected = await this.objectToken(place, session, objectToken);
+    // refuse directories, special objects and unresolved symlinks
+    if (selected.identity.kind !== 'file' && selected.identity.kind !== 'symlink') throw new HostFilesError('unsupported_type', 'only regular files can be downloaded', 422);
+    const target = selected.identity.kind === 'symlink' ? await this.options.backend.request({ kind: 'inspect', path: selected.path, followSymlink: true }) : await this.options.backend.request({ kind: 'inspect', path: selected.path });
+    // require a stable regular target
+    if (target.kind !== 'file') throw new HostFilesError('unsupported_type', 'only regular files can be downloaded', 422);
+    const size = Number(target.size);
+    const length = Math.min(maxBytes, Math.max(0, size - offset));
+    const stream = await this.options.backend.read({ kind: 'read', path: target.path, identity: target, start: offset, length });
+    const bytes = await this.readBounded(stream, length);
+    const digest = createHash('sha256').update(JSON.stringify({ dev: target.dev, ino: target.ino, size: target.size, mtimeNs: target.mtimeNs })).digest('base64url');
+    return { bytes, size, digest };
+  }
+
+  // read one owner-bound regular file for the existing prompt-attachment budget
+  async readAttachmentFile(place: HostFilesPlace, session: HostFilesSession, objectToken: string, maxBytes = 25 * 1024 * 1024): Promise<{ name: string; bytes: Buffer }> {
+    const selected = await this.objectToken(place, session, objectToken);
+    // allow only regular files and proven regular symlinks
+    if (selected.identity.kind !== 'file' && selected.identity.kind !== 'symlink') throw new HostFilesError('unsupported_type', 'only regular files can be attached', 422);
+    const target = selected.identity.kind === 'symlink' ? await this.options.backend.request({ kind: 'inspect', path: selected.path, followSymlink: true }) : await this.options.backend.request({ kind: 'inspect', path: selected.path });
+    // enforce the prompt budget before allocating a buffer
+    if (target.kind !== 'file' || Number(target.size) > maxBytes) throw new HostFilesError('limit_exceeded', 'file exceeds the attachment limit', 413);
+    const size = Number(target.size);
+    const stream = await this.options.backend.read({ kind: 'read', path: target.path, identity: target, start: 0, length: size });
+    return { name: basename(selected.path), bytes: await this.readBounded(stream, size) };
   }
 
   // resolve one current regular file capability into its canonical host editor path
@@ -352,7 +412,7 @@ export class HostFilesService {
       try {
         const current = await this.options.backend.request({ kind: 'inspect', path: favorite.path });
         const state = !sameFavoriteObject(favorite.identity, current) ? 'replaced' : favorite.freshness !== undefined ? 'repair-pending' : favorite.identity.ctimeNs === current.ctimeNs ? 'available' : 'modified';
-        const token = this.tokens.issue({ purpose: 'object', sessionId: session.id, placeId: place.id, path: current.path, identity: current });
+        const token = this.tokens.issue({ purpose: 'object', owner: hostFilesOwner(session), placeId: place.id, path: current.path, identity: current });
         views.push({ ...favorite, state, entry: entryOf(current, token) });
       } catch (error) {
         const failure = error as HostFilesError;
@@ -371,7 +431,7 @@ export class HostFilesService {
       const selected = await this.objectToken(place, session, objectToken);
       const favorite = await this.favorites.add(place.id, selected.path, selected.identity);
       const current = await this.options.backend.request({ kind: 'inspect', path: selected.path });
-      const token = this.tokens.issue({ purpose: 'object', sessionId: session.id, placeId: place.id, path: current.path, identity: current });
+      const token = this.tokens.issue({ purpose: 'object', owner: hostFilesOwner(session), placeId: place.id, path: current.path, identity: current });
       return { favorite: { ...favorite, state: 'available', entry: entryOf(current, token) } };
     } finally { release(); }
   }
@@ -383,7 +443,7 @@ export class HostFilesService {
       const selected = await this.objectToken(place, session, objectToken);
       const favorite = await this.favorites.acknowledge(place.id, favoriteId, selected.path, selected.identity);
       const current = await this.options.backend.request({ kind: 'inspect', path: selected.path });
-      const token = this.tokens.issue({ purpose: 'object', sessionId: session.id, placeId: place.id, path: current.path, identity: current });
+      const token = this.tokens.issue({ purpose: 'object', owner: hostFilesOwner(session), placeId: place.id, path: current.path, identity: current });
       return { favorite: { ...favorite, state: 'available', entry: entryOf(current, token) } };
     } finally { release(); }
   }
@@ -452,10 +512,40 @@ export class HostFilesService {
       }
     }
     const operation: OperationResult = { operationId: id, kind: input.kind, state: 'queued', phase: 'prepared', completedItems: 0, totalItems: items.length, bytesCompleted: 0, bytesTotal: items.reduce((total, item) => total + (item.sourceManifest?.totalBytes ?? 0), 0), results: [] };
-    const prepared: PreparedOperation = { id, kind: input.kind, sessionId: session.id, placeId: place.id, ...(destination === undefined ? {} : { destination }), items, conflicts, createdAt: this.now(), expiresAt: this.now() + 15 * 60_000, operation };
+    const prepared: PreparedOperation = { id, kind: input.kind, owner: hostFilesOwner(session), placeId: place.id, ...(destination === undefined ? {} : { destination }), items, conflicts, createdAt: this.now(), expiresAt: this.now() + 15 * 60_000, operation };
     this.operations.set(id, prepared);
     this.logLifecycle(id, input.kind, place.id, 'queued', items.length, operation.bytesTotal, 0);
     return { operationId: id, kind: input.kind, totalItems: items.length, conflicts, ...(input.kind === 'delete' ? { confirmation: { permanent: true as const, names: items.map(item => basename(item.source!.path)), count: items.length } } : {}) };
+  }
+
+  // re-prepare bearer assessment facts for a new first-class owner
+  async reprepareOperation(place: HostFilesPlace, operationId: string, session: HostFilesSession): Promise<PrepareOperationResponse> {
+    this.prune();
+    const prior = this.operations.get(operationId);
+    // assessment ids do not authorize another Place or a started mutation
+    if (prior === undefined || prior.placeId !== place.id || prior.operation.state !== 'queued' || prior.expiresAt < this.now()) throw new HostFilesError('not_found', 'file assessment not found', 404);
+    const owner = hostFilesOwner(session);
+    // mint one capability from a fresh current identity
+    const issue = async (selected: HostFileTokenPayload, purpose: 'object' | 'destination-directory'): Promise<string> => {
+      const current = await this.options.backend.request({ kind: 'inspect', path: selected.path });
+      const root = selected.placeId === place.id ? this.internalRoot(place, owner) : this.internalRoots.get(selected.placeId)?.root;
+      // facts handoff never widens Place or sensitive-path access
+      if (owner.namespace !== 'browser' && (root === undefined || !await this.internalStatAllowed(root, current))) throw new HostFilesError('invalid_path', 'sensitive or escaped file assessment', 400);
+      return this.tokens.issue({ purpose, owner, placeId: selected.placeId, path: current.path, identity: current });
+    };
+    const destinationToken = prior.destination === undefined ? undefined : await issue(prior.destination, 'destination-directory');
+    const sourceTokens: string[] = [];
+    // bind every fresh source identity to the confirming owner
+    for (const item of prior.items) {
+      // create operations have no source capability
+      if (item.source === undefined) continue;
+      sourceTokens.push(await issue(item.source, 'object'));
+    }
+    // reconstruct only the prior server-derived operation shape
+    if (prior.kind === 'create-file' || prior.kind === 'create-folder') return await this.prepareOperation(place, session, { kind: prior.kind, name: basename(prior.items[0]!.destinationPath!), destinationDirectoryToken: destinationToken! });
+    if (prior.kind === 'rename') return await this.prepareOperation(place, session, { kind: 'rename', sourceToken: sourceTokens[0]!, newName: basename(prior.items[0]!.destinationPath!), destinationDirectoryToken: destinationToken! });
+    if (prior.kind === 'copy' || prior.kind === 'move') return await this.prepareOperation(place, session, { kind: prior.kind, sourceTokens, destinationDirectoryToken: destinationToken! });
+    return await this.prepareOperation(place, session, { kind: 'delete', sourceTokens });
   }
 
   // start one prepared operation after complete conflict and delete confirmation
@@ -473,16 +563,24 @@ export class HostFilesService {
     }
     // reject injected decision ids
     if (Object.keys(decisions).some(id => !prepared.conflicts.some(conflict => conflict.id === id))) throw new HostFilesError('invalid_request', 'unknown conflict decision', 400);
+    // claim this operation synchronously before the first asynchronous validation
+    prepared.operation.state = 'running';
+    prepared.operation.phase = 'validating';
     const paths = prepared.items.flatMap(item => [item.source?.path, item.destinationPath, item.keepBothPath]).filter((value): value is string => value !== undefined);
-    const release = this.locks.acquire(prepared.id, paths);
+    let release: (() => void) | undefined;
     try {
+      release = this.locks.acquire(prepared.id, paths);
       await this.prevalidateOperation(prepared, decisions);
-      prepared.operation.state = 'running';
       prepared.operation.phase = 'executing';
       this.logLifecycle(prepared.id, prepared.kind, prepared.placeId, 'running', prepared.items.length, prepared.operation.bytesTotal, this.now() - prepared.createdAt);
       prepared.promise = this.runOperation(prepared, decisions).finally(release);
     } catch (error) {
-      release();
+      release?.();
+      const known = error instanceof HostFilesError;
+      prepared.operation.state = 'failed';
+      prepared.operation.phase = 'rejected';
+      prepared.operation.results.push({ outcome: 'failed', code: known ? error.code : 'partial_failure', message: known ? error.message : 'File operation failed' });
+      prepared.expiresAt = this.now() + 15 * 60_000;
       this.logLifecycle(prepared.id, prepared.kind, prepared.placeId, 'rejected', prepared.items.length, 0, this.now() - prepared.createdAt, (error as HostFilesError).code ?? 'partial_failure');
       throw error;
     }
@@ -513,7 +611,7 @@ export class HostFilesService {
       files.push({ clientId: inputFile.clientId, name: inputFile.name, size: inputFile.size, operationId: randomUUID(), destinationPath: prepared.destinationPath!, ...(prepared.destinationIdentity === undefined ? {} : { destinationIdentity: prepared.destinationIdentity }), ...(prepared.destinationManifest === undefined ? {} : { destinationManifest: prepared.destinationManifest }), ...(prepared.conflictId === undefined ? {} : { conflictId: prepared.conflictId, keepBothPath: prepared.keepBothPath }), state: 'prepared' });
     }
     const id = randomUUID();
-    this.uploads.set(id, { id, sessionId: session.id, placeId: place.id, destination, parentIdentity: destination.identity, files, conflicts, expiresAt: this.now() + 15 * 60_000, mutation: Promise.resolve(), createdAt: this.now() });
+    this.uploads.set(id, { id, owner: hostFilesOwner(session), placeId: place.id, destination, parentIdentity: destination.identity, files, conflicts, expiresAt: this.now() + 15 * 60_000, mutation: Promise.resolve(), createdAt: this.now() });
     this.logLifecycle(id, 'upload', place.id, 'queued', files.length, total, 0);
     return { uploadId: id, conflicts };
   }
@@ -636,7 +734,7 @@ export class HostFilesService {
     if (single === undefined) preflightZipSelections(selections);
     const filename = single === undefined ? `${selected.length === 1 ? basename(selected[0]!.path) : 'files'}.zip` : basename(single.path);
     const id = randomUUID();
-    this.downloads.set(id, { id, sessionId: session.id, placeId: place.id, filename, selections, ...(single === undefined ? {} : { single }), state: 'prepared', bytesCompleted: 0, expiresAt: this.now() + 30_000, opened: false, createdAt: this.now() });
+    this.downloads.set(id, { id, owner: hostFilesOwner(session), placeId: place.id, filename, selections, ...(single === undefined ? {} : { single }), state: 'prepared', bytesCompleted: 0, expiresAt: this.now() + 30_000, opened: false, createdAt: this.now() });
     this.logLifecycle(id, 'download', place.id, 'queued', selections.reduce((count, selection) => count + selection.manifest.entries.length, 0), selections.reduce((total, selection) => total + selection.manifest.totalBytes, 0), 0);
     return { downloadId: id, filename, target: id };
   }
@@ -646,7 +744,7 @@ export class HostFilesService {
     this.prune();
     const download = this.downloads.get(downloadId);
     // hide missing, cross-session, expired and replayed manifests alike
-    if (download === undefined || download.sessionId !== session.id || download.expiresAt < this.now() || download.opened) throw new HostFilesError('not_found', 'download unavailable', 404);
+    if (download === undefined || !sameHostFilesOwner(download.owner, hostFilesOwner(session)) || download.expiresAt < this.now() || download.opened) throw new HostFilesError('not_found', 'download unavailable', 404);
     download.opened = true;
     let source: Readable;
     try {
@@ -683,7 +781,7 @@ export class HostFilesService {
   downloadStatus(place: HostFilesPlace, session: HostFilesSession, downloadId: string): { state: PreparedDownload['state']; bytesCompleted: number; error?: string } {
     const download = this.downloads.get(downloadId);
     // hide another session or Place's status
-    if (download === undefined || download.sessionId !== session.id || download.placeId !== place.id) throw new HostFilesError('not_found', 'download unavailable', 404);
+    if (download === undefined || !sameHostFilesOwner(download.owner, hostFilesOwner(session)) || download.placeId !== place.id) throw new HostFilesError('not_found', 'download unavailable', 404);
     return { state: download.state, bytesCompleted: download.bytesCompleted, ...(download.error === undefined ? {} : { error: download.error }) };
   }
 
@@ -734,29 +832,95 @@ export class HostFilesService {
 
   // revalidate and decode one current object token
   private async objectToken(place: HostFilesPlace, session: HostFilesSession, token: string): Promise<HostFileTokenPayload> {
-    const selected = this.tokens.verify(token, { purpose: 'object', sessionId: session.id, placeId: place.id });
+    const owner = hostFilesOwner(session);
+    const selected = this.tokens.verify(token, { purpose: 'object', owner, placeId: place.id });
     // reject malformed, expired and wrong-purpose tokens uniformly
     if (selected === undefined) throw new HostFilesError('stale_object', 'file selection is invalid or expired', 409);
     await this.revalidatePayload(selected);
+    // recheck every internal capability against current Place containment and exclusions
+    if (owner.namespace !== 'browser' && !await this.internalPayloadAllowed(this.internalRoot(place, owner), selected)) throw new HostFilesError('invalid_path', 'sensitive or escaped file capability', 400);
     return selected;
   }
 
   // decode a signed source token from any Place on this same server/session
   private async crossPlaceSourceToken(session: HostFilesSession, token: string): Promise<HostFileTokenPayload> {
-    const selected = this.tokens.verify(token, { purpose: 'object', sessionId: session.id });
+    const owner = hostFilesOwner(session);
+    const selected = this.tokens.verify(token, { purpose: 'object', owner });
     // reject malformed, expired and cross-session source capabilities
     if (selected === undefined) throw new HostFilesError('stale_object', 'file selection is invalid or expired', 409);
     await this.revalidatePayload(selected);
+    const root = this.internalRoots.get(selected.placeId)?.root;
+    // developer capabilities can originate only from a resolved Place listing
+    if (owner.namespace !== 'browser' && (root === undefined || !await this.internalPayloadAllowed(root, selected))) throw new HostFilesError('invalid_path', 'sensitive or escaped file capability', 400);
     return selected;
   }
 
   // revalidate and decode one canonical directory token
   private async directoryToken(place: HostFilesPlace, session: HostFilesSession, token: string): Promise<HostFileTokenPayload> {
-    const selected = this.tokens.verify(token, { purpose: 'destination-directory', sessionId: session.id, placeId: place.id });
+    const owner = hostFilesOwner(session);
+    const selected = this.tokens.verify(token, { purpose: 'destination-directory', owner, placeId: place.id });
     // reject malformed, expired and wrong-purpose tokens uniformly
     if (selected === undefined || selected.identity.kind !== 'directory') throw new HostFilesError('stale_object', 'destination folder is invalid or expired', 409);
     await this.revalidatePayload(selected);
+    // recheck every internal destination immediately before preparation
+    if (owner.namespace !== 'browser' && !await this.internalPayloadAllowed(this.internalRoot(place, owner), selected)) throw new HostFilesError('invalid_path', 'sensitive or escaped destination capability', 400);
     return selected;
+  }
+
+  // register and return one configured internal Place root
+  private internalRoot(place: HostFilesPlace, owner: HostFilesOwnerContext): string {
+    const root = resolve(place.hostPath ?? place.home);
+    // browser calls never establish developer cross-Place authority
+    if (owner.namespace !== 'browser') {
+      this.pruneInternalRoots();
+      // refuse rather than growing developer Place authority without bound
+      if (!this.internalRoots.has(place.id) && this.internalRoots.size >= 1_024) throw new HostFilesError('limit_exceeded', 'developer Place capacity is full', 429, true);
+      this.internalRoots.set(place.id, { root, touchedAt: this.now() });
+    }
+    return root;
+  }
+
+  // discard Place roots after their capability lifetime
+  private pruneInternalRoots(): void {
+    const cutoff = this.now() - 15 * 60_000;
+    // inspect every bounded Place root
+    for (const [placeId, record] of this.internalRoots) {
+      // retain roots that may still back a capability
+      if (record.touchedAt >= cutoff) continue;
+      this.internalRoots.delete(placeId);
+    }
+  }
+
+  // reject paths outside one exact configured Place root
+  private requireContainedPath(root: string, path: string): string {
+    const relativePath = relative(root, resolve(path));
+    // reject siblings, parents, and cross-drive paths
+    if (relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) throw new HostFilesError('invalid_path', 'path is outside the Place', 400);
+    return relativePath;
+  }
+
+  // validate one current stat before capability issuance
+  private async internalStatAllowed(root: string, stat: HostFileStat): Promise<boolean> {
+    try {
+      const relativePath = this.requireContainedPath(root, stat.path);
+      // reject unsafe hidden or credential-bearing components
+      if (!safeIntegrationPath(relativePath)) return false;
+      // symlinks must resolve to another safe object inside the same Place
+      if (stat.kind === 'symlink') {
+        const target = await this.options.backend.request({ kind: 'inspect', path: stat.path, followSymlink: true });
+        const targetRelative = this.requireContainedPath(root, target.path);
+        if (!safeIntegrationPath(targetRelative)) return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // validate one signed payload and its current symlink target
+  private async internalPayloadAllowed(root: string, selected: HostFileTokenPayload): Promise<boolean> {
+    const current = await this.options.backend.request({ kind: 'inspect', path: selected.path });
+    return await this.internalStatAllowed(root, current);
   }
 
   // compare one token with a fresh backend lstat
@@ -803,9 +967,9 @@ export class HostFilesService {
       prepared.expiresAt = this.now() + 15 * 60_000;
       this.logLifecycle(prepared.id, prepared.kind, prepared.placeId, prepared.operation.state, prepared.items.length, prepared.operation.bytesCompleted, this.now() - prepared.createdAt, failed ? 'partial_failure' : undefined);
     } catch (error) {
-      const failure = error as HostFilesError;
-      const code = failure.code ?? 'partial_failure';
-      prepared.operation.results.push({ sourcePath: activeItem?.source?.path, destinationPath: activeItem?.destinationPath, outcome: 'failed', code, message: failure.message });
+      const failure = error instanceof HostFilesError ? error : undefined;
+      const code = failure?.code ?? 'partial_failure';
+      prepared.operation.results.push({ sourcePath: activeItem?.source?.path, destinationPath: activeItem?.destinationPath, outcome: 'failed', code, message: failure?.message ?? 'File operation failed' });
       const mayHavePublished = code === 'partial_failure' || code === 'favorite_freshness_pending';
       prepared.operation.state = prepared.operation.completedItems > 0 || mayHavePublished ? 'partial' : 'failed';
       prepared.operation.phase = 'failed';
@@ -930,7 +1094,7 @@ export class HostFilesService {
     this.prune();
     const prepared = this.operations.get(operationId);
     // hide missing and cross-scope operations alike
-    if (prepared === undefined || prepared.sessionId !== session.id || prepared.placeId !== place.id || prepared.expiresAt < this.now()) throw new HostFilesError('not_found', 'file operation not found', 404);
+    if (prepared === undefined || !sameHostFilesOwner(prepared.owner, hostFilesOwner(session)) || prepared.placeId !== place.id || prepared.expiresAt < this.now()) throw new HostFilesError('not_found', 'file operation not found', 404);
     return prepared;
   }
 
@@ -939,7 +1103,7 @@ export class HostFilesService {
     this.prune();
     const upload = this.uploads.get(uploadId);
     // hide missing and cross-scope uploads alike
-    if (upload === undefined || upload.sessionId !== session.id || upload.placeId !== place.id || upload.expiresAt < this.now()) throw new HostFilesError('not_found', 'upload not found', 404);
+    if (upload === undefined || !sameHostFilesOwner(upload.owner, hostFilesOwner(session)) || upload.placeId !== place.id || upload.expiresAt < this.now()) throw new HostFilesError('not_found', 'upload not found', 404);
     return upload;
   }
 

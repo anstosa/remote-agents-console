@@ -1,6 +1,7 @@
 import type { Worktree } from '../domain/models.js';
 import {
   addUntrackedLineStats, captureComparisonPatch, commitLog, fileAtRevision, prComparisonCandidates, resolveCommitComparison, resolveComparison,
+  resolvedMergeBaseChoices, saveResolvedMergeBase,
   type CommitLog, type Comparison, type ComparisonFailure, type ComparisonKind, type ComparisonPatch,
   type PatchLimits, type RevisionFile
 } from './comparison.js';
@@ -74,6 +75,16 @@ export class ComparisonService {
   // the commits the All PR Comparison spans, each with its own Changes
   async commits(worktree: Worktree): Promise<CommitLog | undefined> {
     return commitLog(worktree.identity, await this.prCandidates(worktree));
+  }
+
+  // list fresh merge-base refs with their resolved commit identities
+  async mergeBases(worktree: Worktree) {
+    return await resolvedMergeBaseChoices(worktree.identity);
+  }
+
+  // save one fresh merge-base ref and commit pair
+  async setMergeBase(worktree: Worktree, ref: string, sha: string) {
+    return await saveResolvedMergeBase(worktree.identity, ref, sha);
   }
 
   // resolve a Comparison for one worktree; Working folds HEAD vs the working tree, All PR compares

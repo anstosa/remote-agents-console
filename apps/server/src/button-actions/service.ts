@@ -7,6 +7,7 @@ import type { PromptService } from '../prompts/service.js';
 import { validPrompt } from '../prompts/validation.js';
 import { ConfiguredButtonCatalog } from './catalog.js';
 import { guardedDirectoryCommand, type DirectoryExecutionLease, type HostCommandInput, type ShellActionResult } from './host-command-runner.js';
+import type { HostFilesOwnerContext } from '../host-files/contracts.js';
 
 // share the server-owned action locator without accepting executable browser input
 const buttonActionLocatorShape = {
@@ -28,6 +29,7 @@ export type ButtonActionInput = z.infer<typeof buttonActionInputSchema>;
 export type ButtonActionDraftInput = z.infer<typeof buttonActionDraftInputSchema>;
 export type ButtonActionDraft = { kind: 'prompt'; text: string; placeId: string; agentId: string } | { kind: 'shell'; text: string; placeId: string };
 export type ButtonOperation = { id: string; state: 'queued' | 'launching' | 'running' | 'complete' | 'failed' | 'interrupted'; phase?: string; error?: string; exitCode?: number; agentId?: string };
+export type ButtonActionOwner = { key: string; filesOwner?: HostFilesOwnerContext };
 type StoredOperation = { operation: ButtonOperation; sessionId: string; guard: string; touchedAt: number; append?: string; promptRequestId?: string; agentKind?: Agent['kind'] };
 type StartRecord = { fingerprint: string; promise: Promise<ButtonOperation>; operationId?: string; createdAt: number };
 type ButtonActionDependencies = {
@@ -38,6 +40,7 @@ type ButtonActionDependencies = {
   observePrompt(agentId: string): Promise<void>;
   warn?(message: string): void;
   directoryLease(place: Place, sessionId: string, token: string): Promise<DirectoryExecutionLease>;
+  directoryLeaseOwned?(place: Place, owner: HostFilesOwnerContext, token: string): Promise<DirectoryExecutionLease>;
   shell: { execute(input: HostCommandInput): Promise<ShellActionResult>; close?(): void };
   now?: () => number;
 };
@@ -85,12 +88,17 @@ export class ButtonActionService {
 
   // reserve a retry identity before any asynchronous validation or side effect
   async start(sessionId: string, input: ButtonActionInput): Promise<ButtonOperation> {
+    return await this.startOwned({ key: sessionId }, input);
+  }
+
+  // reserve a retry identity for one first-class non-browser owner
+  async startOwned(owner: ButtonActionOwner, input: ButtonActionInput): Promise<ButtonOperation> {
     this.prune();
     // reject stale boot/catalog identities before retry registration
     if (input.configRevision !== this.catalog.value.revision) throw new ButtonActionError('stale_button_configuration');
     // shutdown never launches new work
     if (this.closed) throw new ButtonActionError('server_stopped', 503);
-    const key = `${sessionId}\0${input.requestId}`;
+    const key = `${owner.key}\0${input.requestId}`;
     const fingerprint = createHmac('sha256', this.signingKey).update(JSON.stringify(input)).digest('hex');
     const prior = this.starts.get(key);
     // identical same-boot retries recover the exact operation
@@ -98,12 +106,12 @@ export class ButtonActionService {
       // reuse of a request identity cannot retarget its action or context
       if (prior.fingerprint !== fingerprint) throw new ButtonActionError('request_id_conflict');
       const result = await prior.promise;
-      return this.retainedStatus(sessionId, result.id);
+      return this.retainedStatus(owner.key, result.id);
     }
     // bound retained requests without evicting active work
     if (this.starts.size >= 1024) throw new ButtonActionError('button_action_limit', 429);
     const entry: StartRecord = { fingerprint, promise: Promise.resolve(undefined as never), createdAt: this.now() };
-    entry.promise = this.prepare(sessionId, input).then(operation => { entry.operationId = operation.id; return operation; });
+    entry.promise = this.prepare(owner, input).then(operation => { entry.operationId = operation.id; return operation; });
     this.starts.set(key, entry);
     try { return { ...await entry.promise }; }
     catch (error) {
@@ -193,6 +201,9 @@ export class ButtonActionService {
     return { ...stored.operation };
   }
 
+  // read one first-class non-browser owner's operation
+  async statusOwned(owner: ButtonActionOwner, id: string): Promise<ButtonOperation> { return await this.status(owner.key, id); }
+
   // retain accepted work only for the bounded observer outage
   private async retainedStatus(sessionId: string, id: string): Promise<ButtonOperation> {
     try { return await this.status(sessionId, id); }
@@ -218,7 +229,7 @@ export class ButtonActionService {
   }
 
   // validate immutable context before creating a process or sending a prompt
-  private async prepare(sessionId: string, input: ButtonActionInput): Promise<ButtonOperation> {
+  private async prepare(owner: ButtonActionOwner, input: ButtonActionInput): Promise<ButtonOperation> {
     const place = await this.deps.resolvePlace(input.placeId);
     // only server-discovered Workspaces can execute an action
     if (place === undefined) throw new ButtonActionError('place_unavailable', 404);
@@ -231,7 +242,7 @@ export class ButtonActionService {
     if (input.filesDirectoryToken !== undefined && (!shell || input.slot !== 'split:files')) throw new ButtonActionError('unexpected_files_context', 400);
     // a Files shell never falls back to the Workspace directory
     if (shell && input.slot === 'split:files' && input.filesDirectoryToken === undefined) throw new ButtonActionError('files_context_required', 400);
-    const lease = shell && input.slot === 'split:files' ? await this.deps.directoryLease(place, sessionId, input.filesDirectoryToken!) : undefined;
+    const lease = shell && input.slot === 'split:files' ? owner.filesOwner !== undefined && this.deps.directoryLeaseOwned !== undefined ? await this.deps.directoryLeaseOwned(place, owner.filesOwner, input.filesDirectoryToken!) : await this.deps.directoryLease(place, owner.key, input.filesDirectoryToken!) : undefined;
     const agents = shell ? [] : await this.deps.agents();
     const selected = input.agentId === undefined ? agents.find(agent => belongs(agent, place)) : agents.find(agent => agent.id === input.agentId && belongs(agent, place));
     // never redirect a selected Agent that disappeared or belongs elsewhere
@@ -249,15 +260,15 @@ export class ButtonActionService {
     if (existing !== undefined) {
       const previous = this.operations.get(existing);
       // a controller change cannot duplicate or inspect the other browser's active action
-      if (previous?.sessionId !== sessionId) throw new ButtonActionError('action_in_progress');
+      if (previous?.sessionId !== owner.key) throw new ButtonActionError('action_in_progress');
       // a repeat click joins the running prompt only when it would send the same text
       if (previous.append !== input.append) throw new ButtonActionError('action_in_progress');
-      return this.retainedStatus(sessionId, existing);
+      return this.retainedStatus(owner.key, existing);
     }
     // bound active and retained records without throwing work away
     if (this.operations.size >= 512 || this.active.size >= 128) throw new ButtonActionError('button_action_limit', 429);
     const operation: ButtonOperation = { id: randomBytes(24).toString('base64url'), state: 'queued' };
-    const stored: StoredOperation = { operation, sessionId, guard, touchedAt: this.now(), ...(input.append === undefined ? {} : { append: input.append }) };
+    const stored: StoredOperation = { operation, sessionId: owner.key, guard, touchedAt: this.now(), ...(input.append === undefined ? {} : { append: input.append }) };
     this.operations.set(operation.id, stored);
     this.active.set(guard, operation.id);
     // execute only the captured definition and context after registration

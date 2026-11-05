@@ -67,7 +67,7 @@ describe('the Watches\' minute', () => {
     expect(reads).toBe(2);
     await vi.advanceTimersByTimeAsync(1);
     await reading(3);
-    watches.close();
+    await watches.close();
   });
 });
 

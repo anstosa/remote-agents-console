@@ -1,0 +1,9 @@
+// these operations can reach another service, model, process or configured command
+export const externalTools = new Set([
+  'list_instances', 'get_github_overview', 'get_github_pull_request', 'get_pull_request_status', 'list_agent_destinations', 'get_pull_request_draft', 'get_launch_options', 'queue_prompt', 'queue_prompt_with_attachments', 'answer_agent_question', 'relay_agent_question_answer', 'run_stack_action', 'start_review', 'launch_worktree_agent', 'launch_scratch_agent', 'spawn_agent', 'create_worktree', 'start_new_task', 'switch_pull_request', 'watch_pull_request', 'watch_review_requests', 'watch_command', 'resume_conversation', 'resume_agent', 'restart_agent', 'compact_conversation', 'launch_agent', 'steer_agent', 'move_pull_request', 'start_review_tour', 'start_code_review', 'ask_review', 'ask_comparison', 'create_pull_request_review_draft', 'reply_github_thread', 'resolve_github_thread', 'rerequest_github_review', 'create_pull_request', 'run_note_now', 'invoke_configured_action'
+]);
+
+// additive operations do not overwrite, remove or replace an existing resource
+export const additiveTools = new Set([
+  'queue_prompt', 'launch_worktree_agent', 'launch_scratch_agent', 'start_review', 'spawn_agent', 'create_worktree', 'create_note', 'watch_pull_request', 'watch_process', 'watch_review_requests', 'watch_command', 'new_conversation', 'launch_agent', 'queue_prompt_with_attachments', 'steer_agent', 'start_review_tour', 'start_code_review', 'ask_review', 'ask_comparison', 'create_pull_request_review_draft', 'reply_github_thread', 'rerequest_github_review', 'create_pull_request', 'prepare_file_operation', 'upload_file_chunk', 'undo_note_delete', 'add_note_attachment', 'run_note_now', 'prepare_branch_removal', 'prepare_worktree_removal', 'prepare_worktree_prune', 'prepare_confirmed_file_operation'
+]);

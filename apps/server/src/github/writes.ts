@@ -46,10 +46,13 @@ export async function replyToThread(client: GithubClient, token: string, threadI
   return { id, ...(typeof url === 'string' ? { url } : {}), pending: at(comment, 'state') === 'PENDING' };
 }
 
-export async function resolveThread(client: GithubClient, token: string, threadId: string): Promise<void> {
-  const action = 'GitHub could not resolve the thread';
-  const payload = await client.mutate(token, 'mutation($input:ResolveReviewThreadInput!){resolveReviewThread(input:$input){thread{id isResolved}}}', { input: { threadId } }, action, timeoutMs);
-  if (at(payload.data, 'resolveReviewThread', 'thread', 'isResolved') !== true) throw graphqlError(payload, action);
+export async function resolveThread(client: GithubClient, token: string, threadId: string, resolved = true): Promise<void> {
+  const action = resolved ? 'GitHub could not resolve the thread' : 'GitHub could not unresolve the thread';
+  const field = resolved ? 'resolveReviewThread' : 'unresolveReviewThread';
+  const input = resolved ? 'ResolveReviewThreadInput' : 'UnresolveReviewThreadInput';
+  const payload = await client.mutate(token, `mutation($input:${input}!){${field}(input:$input){thread{id isResolved}}}`, { input: { threadId } }, action, timeoutMs);
+  // require GitHub to report the requested exact state
+  if (at(payload.data, field, 'thread', 'isResolved') !== resolved) throw graphqlError(payload, action);
 }
 
 /** Ask reviewers for another review of a pull request, each named by its node id under its kind. */

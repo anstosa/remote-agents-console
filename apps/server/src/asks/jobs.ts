@@ -9,7 +9,7 @@ import { ASK_JOB_TTL_MS, ASK_TIMEOUT_MS, findingAnchor, guideAskPrompt, linesAnc
 
 // `run` is an interactive turn's visible Agent, once it is delivered
 type PendingAsk = { kind: 'pending'; controller: AbortController; run?: ReviewRunInfo };
-type ReadyAsk = { kind: 'ready' };
+type ReadyAsk = { kind: 'ready'; answer: string };
 type FailedAsk = { kind: 'error'; code: ReviewErrorCode; retryable: boolean };
 type GoneAsk = { kind: 'gone'; code: 'job_superseded' };
 export type AskJobState = PendingAsk | ReadyAsk | FailedAsk | GoneAsk;
@@ -150,7 +150,7 @@ export class AskJobs {
     const saved = conversation === undefined ? undefined : await save(conversation, turn).catch(() => undefined);
     if (this.jobs.get(job.id) !== job || job.state.kind !== 'pending') return;
     if (saved === false) { this.markGone(job, 'job_superseded'); return; }
-    job.state = turn.error !== undefined ? { kind: 'error', code: turn.error.code as ReviewErrorCode, retryable: turn.error.retryable } : saved === undefined ? { kind: 'error', code: 'generation_failed', retryable: true } : { kind: 'ready' };
+    job.state = turn.error !== undefined ? { kind: 'error', code: turn.error.code as ReviewErrorCode, retryable: turn.error.retryable } : saved === undefined ? { kind: 'error', code: 'generation_failed', retryable: true } : { kind: 'ready', answer: turn.answer ?? '' };
     this.removeLater(job);
   }
 

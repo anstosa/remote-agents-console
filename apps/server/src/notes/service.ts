@@ -144,14 +144,14 @@ export class WorktreeNoteService {
   }
 
   // append attachments atomically
-  async appendAttachments(worktreeId: string, noteId: string, attachments: PromptAttachment[]): Promise<WorktreeNote | 'invalid' | undefined> {
+  async appendAttachments(worktreeId: string, noteId: string, attachments: PromptAttachment[], by: NoteAuthor = 'operator'): Promise<WorktreeNote | 'invalid' | undefined> {
     const normalized = normalizedAttachments(attachments);
     // reject malformed additions
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || normalized === undefined || normalized.length === 0) return 'invalid';
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
-      // require an existing note
-      if (note === undefined) return undefined;
+      // require an existing role-mutable note
+      if (note === undefined || !this.mayChange(note, by)) return undefined;
       const combined = normalizedAttachments([...(note.attachments ?? []), ...normalized]);
       // enforce per-note limits and duplicate names
       if (combined === undefined) return 'invalid';
@@ -161,24 +161,24 @@ export class WorktreeNoteService {
       if (totalAttachmentBytes(stored) - previousBytes + nextBytes > this.attachmentStorageLimit) return 'invalid';
       // enforce the serialized attachment footprint budget
       if (totalAttachmentFootprint(stored) - promptAttachmentsStorageFootprint(note.attachments ?? []) + promptAttachmentsStorageFootprint(combined) > this.attachmentFootprintLimit) return 'invalid';
-      this.claim(note, 'operator');
+      this.claim(note, by);
       note.attachments = combined;
       return { ...note };
     });
   }
 
   // remove one canonical attachment name atomically
-  async removeAttachment(worktreeId: string, noteId: string, name: string): Promise<WorktreeNote | undefined> {
+  async removeAttachment(worktreeId: string, noteId: string, name: string, by: NoteAuthor = 'operator'): Promise<WorktreeNote | undefined> {
     const normalizedName = promptAttachmentName(name);
     // reject invalid identifiers and names
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || normalizedName === undefined) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
-      // require an existing matching attachment
-      if (note === undefined || note.attachments === undefined) return undefined;
+      // require one role-mutable matching attachment
+      if (note === undefined || note.attachments === undefined || !this.mayChange(note, by)) return undefined;
       const next = note.attachments.filter(attachment => attachment.name !== normalizedName);
       if (next.length === note.attachments.length) return undefined;
-      this.claim(note, 'operator');
+      this.claim(note, by);
       // omit empty attachment arrays
       if (next.length === 0) delete note.attachments;
       else note.attachments = next;
@@ -218,6 +218,7 @@ export class WorktreeNoteService {
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || !validTitle(title)) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
+      // require one role-mutable Note
       if (note === undefined || !this.mayChange(note, by)) return undefined;
       if (totalNoteLength(stored) - (note.title?.length ?? 0) + title.length > maxTotalNoteLength) return undefined;
       this.claim(note, by);
@@ -343,12 +344,13 @@ export class WorktreeNoteService {
   }
 
   // remove one note's Schedule, keeping the note
-  async removeSchedule(worktreeId: string, noteId: string): Promise<WorktreeNote | undefined> {
+  async removeSchedule(worktreeId: string, noteId: string, by: NoteAuthor = 'operator'): Promise<WorktreeNote | undefined> {
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId)) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
-      if (note === undefined) return undefined;
-      this.claim(note, 'operator');
+      // require one role-mutable Note
+      if (note === undefined || !this.mayChange(note, by)) return undefined;
+      this.claim(note, by);
       delete note.schedule;
       return { ...note };
     });

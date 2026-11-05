@@ -1012,13 +1012,15 @@ export class TmuxTransport implements AgentTransport {
 
   // interrupt a working Agent; a stray interrupt on a finished pane is refused so
   // it can never send a chord that exits the agent or opens a Rewind dialog
-  async interrupt(agentId: string): Promise<InterruptOutcome> {
+  async interrupt(agentId: string, _returned?: (steers: string[]) => void, mayDispatch?: () => boolean): Promise<InterruptOutcome> {
     const target = await this.discovery.target(agentId);
     if (target === undefined) return 'unavailable';
     const adapter = this.resolveAdapter(target.agent.kind);
     if (adapter === undefined) return 'unavailable';
     // the interrupt is sent only while the Agent is working or a question is pending
     if (agentAttentionState(target.agent) === 'finished') return 'not-working';
+    // bind integration cancellation to the same Turn after asynchronous target discovery
+    if (mayDispatch !== undefined && !mayDispatch()) return 'not-working';
     if (!await this.tmux.sendKeys(target.socket, target.agent.pane.paneId, adapter.submission.interrupt)) return 'unavailable';
     // a reported-state Agent fires no Stop hook on an interrupt; write `finished`
     // ourselves so the pane does not keep looking busy (Codex's title already stops)

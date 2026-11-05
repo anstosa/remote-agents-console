@@ -18,6 +18,7 @@ import {
   type OAuthProtectedResourceMetadata,
   type OAuthResult,
   type OAuthTokenResponse,
+  type PublicIntegrationScope,
   type RefreshTokenRequest,
   type RegisteredPublicClient
 } from './types.js';
@@ -33,7 +34,7 @@ type StoredAuthorizationCode = {
   clientId: string;
   subjectId: string;
   resource: string;
-  scopes: IntegrationScope[];
+  scopes: PublicIntegrationScope[];
   redirectUri: string;
   codeChallenge: string;
   expiresAt: number;
@@ -43,7 +44,7 @@ type StoredAccessToken = {
   clientId: string;
   subjectId: string;
   resource: string;
-  scopes: IntegrationScope[];
+  scopes: PublicIntegrationScope[];
   issuedAt: number;
   expiresAt: number;
 };
@@ -71,8 +72,7 @@ export type IntegrationAuthOptions = {
   issuer: string;
   resource: string;
   stateFile: string;
-  realtimeToken?: string;
-  realtimeSubjectId?: string;
+  realtimeAuthenticator?: (token: string) => IntegrationPrincipal | undefined;
   now?: () => number;
   authorizationCodeTtlMs?: number;
   accessTokenTtlMs?: number;
@@ -166,7 +166,7 @@ function normalizedHttpsUrl(value: string, label: string): string {
 }
 
 // parse and validate a requested scope collection
-function parseScopes(value: string | readonly string[] | undefined): OAuthResult<IntegrationScope[]> {
+function parseScopes(value: string | readonly string[] | undefined): OAuthResult<PublicIntegrationScope[]> {
   // require an explicit scope request
   if (value === undefined) return failure('invalid_scope', 'scope is required');
   // reject non-string JSON values before iteration
@@ -178,7 +178,7 @@ function parseScopes(value: string | readonly string[] | undefined): OAuthResult
   if (raw.length === 0 || raw.length > supportedIntegrationScopes.length || raw.some(scope => typeof scope !== 'string' || scope.length === 0) || new Set(raw).size !== raw.length) return failure('invalid_scope', 'scope must contain distinct supported values');
   // reject any unsupported capability
   if (raw.some(scope => !supportedScopeSet.has(scope))) return failure('invalid_scope', 'one or more requested scopes are unsupported');
-  return { ok: true, value: raw as IntegrationScope[] };
+  return { ok: true, value: raw as PublicIntegrationScope[] };
 }
 
 // ensure one requested scope list is a subset of a grant
@@ -218,10 +218,10 @@ function parseClient(value: unknown, key: string): StoredClient | undefined {
 }
 
 // parse one persisted scope list
-function parseStoredScopes(value: unknown): IntegrationScope[] | undefined {
+function parseStoredScopes(value: unknown): PublicIntegrationScope[] | undefined {
   // validate the durable array without coercion
   if (!Array.isArray(value) || value.length === 0 || value.length > supportedIntegrationScopes.length || value.some(scope => typeof scope !== 'string' || !supportedScopeSet.has(scope)) || new Set(value).size !== value.length) return undefined;
-  return value as IntegrationScope[];
+  return value as PublicIntegrationScope[];
 }
 
 // validate shared persisted token fields
@@ -370,8 +370,7 @@ export class IntegrationAuthService {
   private readonly authorizationCodeTtlMs: number;
   private readonly accessTokenTtlMs: number;
   private readonly refreshTokenTtlMs: number;
-  private readonly realtimeToken?: string;
-  private readonly realtimeSubjectId?: string;
+  private readonly realtimeAuthenticator?: (token: string) => IntegrationPrincipal | undefined;
 
   // validate security-critical configuration once
   constructor(options: IntegrationAuthOptions) {
@@ -384,12 +383,7 @@ export class IntegrationAuthService {
     this.authorizationCodeTtlMs = boundedTtl(options.authorizationCodeTtlMs, defaultAuthorizationCodeTtlMs, 10 * 60_000, 'authorization code lifetime');
     this.accessTokenTtlMs = boundedTtl(options.accessTokenTtlMs, defaultAccessTokenTtlMs, 60 * 60_000, 'access token lifetime');
     this.refreshTokenTtlMs = boundedTtl(options.refreshTokenTtlMs, defaultRefreshTokenTtlMs, 90 * 24 * 60 * 60_000, 'refresh token lifetime');
-    // validate the optional static Realtime credential independently
-    if (options.realtimeToken !== undefined && (typeof options.realtimeToken !== 'string' || options.realtimeToken.length < 32 || options.realtimeToken.length > 512)) throw new Error('realtime token is outside supported bounds');
-    // require an explicit safe principal for an enabled Realtime token
-    if (options.realtimeToken !== undefined && (options.realtimeSubjectId === undefined || !validSubjectId(options.realtimeSubjectId))) throw new Error('realtime subject is required for a configured realtime token');
-    this.realtimeToken = options.realtimeToken;
-    this.realtimeSubjectId = options.realtimeSubjectId;
+    this.realtimeAuthenticator = options.realtimeAuthenticator;
   }
 
   // return RFC 9728-style protected-resource metadata
@@ -546,13 +540,16 @@ export class IntegrationAuthService {
     });
   }
 
-  // authenticate the independently configured Realtime principal
+  // authenticate one registry-backed per-lease Realtime principal
   authenticateRealtimeToken(token: string): OAuthResult<IntegrationPrincipal> {
-    // fail closed when no independent Realtime credential exists
-    if (this.realtimeToken === undefined || this.realtimeSubjectId === undefined) return failure('invalid_token', 'realtime authentication is not configured', 401);
-    // compare static secret material in constant time
-    if (typeof token !== 'string' || token.length === 0 || token.length > 512 || !constantTimeEqual(token, this.realtimeToken)) return failure('invalid_token', 'realtime token is invalid', 401);
-    return { ok: true, value: { authentication: 'realtime', subjectId: this.realtimeSubjectId, audience: 'realtime', scopes: [] } };
+    // fail closed when no lease registry is connected
+    if (this.realtimeAuthenticator === undefined) return failure('invalid_token', 'realtime authentication is not configured', 401);
+    // bound raw input before delegating to the digest-only registry
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(token)) return failure('invalid_token', 'realtime token is invalid', 401);
+    const principal = this.realtimeAuthenticator(token);
+    // require the registry to return an exact Realtime lease identity
+    if (principal?.authentication !== 'realtime' || principal.stableOwnerKey === undefined || principal.leaseKey === undefined) return failure('invalid_token', 'realtime token is invalid or expired', 401);
+    return { ok: true, value: principal };
   }
 
   // revoke a refresh family idempotently
@@ -576,7 +573,7 @@ export class IntegrationAuthService {
   }
 
   // issue one access token and rotating refresh token
-  private issueTokenPair(state: StoredState, clientId: string, subjectId: string, resource: string, scopes: IntegrationScope[], familyId = opaqueToken(), refreshExpiresAt = this.now() + this.refreshTokenTtlMs): OAuthResult<OAuthTokenResponse> {
+  private issueTokenPair(state: StoredState, clientId: string, subjectId: string, resource: string, scopes: PublicIntegrationScope[], familyId = opaqueToken(), refreshExpiresAt = this.now() + this.refreshTokenTtlMs): OAuthResult<OAuthTokenResponse> {
     // enforce active token boundaries before recording new secrets
     if (Object.keys(state.accessTokens).length >= maxAccessTokens || Object.keys(state.refreshTokens).length >= maxRefreshTokens) return failure('invalid_grant', 'token storage limit reached');
     const now = this.now();

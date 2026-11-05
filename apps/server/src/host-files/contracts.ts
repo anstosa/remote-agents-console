@@ -279,7 +279,20 @@ export type OperationResult = {
 };
 
 export type HostFilesPlace = { id: string; home: string; hostPath?: string };
-export type HostFilesSession = { id: string };
+export type HostFilesOwnerContext = { namespace: 'browser' | 'davo' | 'conductor'; principalOwnerKey: string; leaseKey?: string };
+export type HostFilesSession = { id: string } | HostFilesOwnerContext;
+
+// bind browser and developer callers through one canonical capability owner
+export function hostFilesOwner(session: HostFilesSession): HostFilesOwnerContext {
+  // preserve existing browser ownership without making developer principals fake sessions
+  if ('id' in session) return { namespace: 'browser', principalOwnerKey: session.id };
+  return session;
+}
+
+// compare stable authority, optionally requiring the exact active lease
+export function sameHostFilesOwner(left: HostFilesOwnerContext, right: HostFilesOwnerContext, leaseBound = false): boolean {
+  return left.namespace === right.namespace && left.principalOwnerKey === right.principalOwnerKey && (!leaseBound || left.namespace !== 'davo' || left.leaseKey !== undefined && left.leaseKey === right.leaseKey);
+}
 
 // describe one generic byte sink for direct engine adapters
 export type HostFilesWritableFactory = (command: HostFilesWriteCommand, signal?: AbortSignal) => Promise<Writable>;

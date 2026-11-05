@@ -744,7 +744,7 @@ describe('Conductor configuration', () => {
 
   it('runs Pi in a directory Project on an Allowed model, with every scope but admin:dangerous and github:read by default', async () => {
     const config = await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openrouter/z/glm' }));
-    expect(config.conductor).toEqual({ kind: 'pi', projectId: 'home', model: 'openrouter/z/glm', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write'], spawnKinds: ['pi'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10 });
+    expect(config.conductor).toEqual({ kind: 'pi', projectId: 'home', model: 'openrouter/z/glm', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write', 'files:write'], spawnKinds: ['pi'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10 });
     const chosen = await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', effort: 'high', scopes: ['status:read'], spawnKinds: ['pi', 'claude'], maxWorkers: 2, maxSelfStartedTurnsPerHour: 5, scriptDeadlineMinutes: 3 }, { ...pi, claude: { program: '/bin/echo' } }));
     expect(chosen.conductor).toEqual({ kind: 'pi', projectId: 'home', model: 'openai/gpt-5.6', effort: 'high', scopes: ['status:read'], spawnKinds: ['pi', 'claude'], maxWorkers: 2, maxSelfStartedTurnsPerHour: 5, scriptDeadlineMinutes: 3 });
     // GitHub reads are the operator's to grant by name
