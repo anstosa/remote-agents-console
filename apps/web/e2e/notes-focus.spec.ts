@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
-// mount one focused workspace with an empty notes list
-async function mountNotesWorkspace(page: Page) {
+// mount one focused workspace with the requested note fixtures
+async function mountNotesWorkspace(page: Page, notes: Array<{ id: string; text: string }> = []) {
   await page.route('**/api/**', async route => {
     // answer only the console requests this focus contract needs
     const request = route.request();
@@ -18,8 +18,8 @@ async function mountNotesWorkspace(page: Page) {
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // keep prompt history empty
     if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
-    // expose an empty notes flyout
-    if (url.pathname === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes: [] } });
+    // expose the requested notes flyout
+    if (url.pathname === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes } });
     // reject unrelated requests
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -85,5 +85,17 @@ test.describe('desktop notes focus', () => {
       // read the preserved range
       return [element.selectionStart, element.selectionEnd];
     })).toEqual([6, 10]);
+  });
+
+  // focus read-only note content without activating an editor
+  test('moves focus into a note opened from its flyout', async ({ page }) => {
+    await mountNotesWorkspace(page, [{ id: 'note-cora-000001', text: 'Desktop checklist' }]);
+    await page.getByRole('button', { name: 'Notes (1)' }).click();
+    await page.getByRole('button', { name: 'Desktop checklist…', exact: true }).click();
+
+    const note = page.getByRole('dialog', { name: 'Note' });
+    await expect(note).toBeVisible();
+    await expect.poll(() => note.evaluate(element => element === document.activeElement || element.contains(document.activeElement))).toBe(true);
+    await expect(note.getByRole('textbox', { name: 'Note content' })).toHaveCount(0);
   });
 });

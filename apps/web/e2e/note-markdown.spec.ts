@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { installPaneMock } from './pane-stream-mock.js';
+import { chooseSplit } from './split-menu.js';
 
 // preserve both table formats and existing note interactions
 test('renders saved notes with stable tables, lists, links, selection actions, and inferred select/edit modes', async ({ page }) => {
@@ -164,6 +165,12 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
   await expect.poll(() => preview.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
   await preview.evaluate(element => { element.scrollTop = 0; });
 
+  // require the transfer to restore a deliberately hidden destination
+  const agentPanel = page.locator('.agent-panel');
+  await expect(agentPanel).toBeVisible();
+  await page.getByRole('button', { name: 'Minimize agent output' }).click();
+  await expect(agentPanel).toHaveCount(0);
+
   await preview.locator('p').first().evaluate(element => {
     const selection = window.getSelection();
     const range = document.createRange();
@@ -181,7 +188,19 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
   await expect(selectionActions.getByRole('button', { name: 'Add to prompt' })).toBeVisible();
   await expect(selectionActions.getByRole('button', { name: 'Copy' })).toBeVisible();
   await selectionActions.getByRole('button', { name: 'Add to prompt' }).click();
-  await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveValue('Review carefully and use the guide.');
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect(agentPanel).toBeVisible();
+  await expect(prompt).toHaveValue('Review carefully and use the guide.');
+  await expect(prompt).toBeFocused();
+  // restore the source selection after destination focus cleared it
+  await preview.locator('p').first().evaluate(element => {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
   await selectionActions.getByRole('button', { name: 'Copy' }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __copiedNoteSelection: string }).__copiedNoteSelection)).toBe('Review carefully and use the guide.');
   await expect(preview).toHaveClass(/selection-copied/u);
@@ -199,6 +218,7 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
 
   // a very narrow note folds its secondary actions into the header ⋮, so its actions stay on screen
   await page.setViewportSize({ width: 240, height: 640 });
+  await chooseSplit(page, 'Note');
   const toolbar = page.getByRole('toolbar', { name: 'Note actions' });
   await expect(toolbar.getByRole('button', { name: 'More note actions' })).toBeVisible();
   await expect(toolbar.getByRole('button', { name: 'Close note' })).toBeInViewport({ ratio: 1 });

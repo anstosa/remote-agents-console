@@ -6,7 +6,7 @@ type PreviewOptions = { body?: unknown; source?: 'files' | 'notes'; onReturn?: (
 type PreviewView = FilePreviewView & { onEdit?: () => void };
 
 // own transient file previews independently of git comparisons
-export function useFilePreview(scope: string | undefined, request: PreviewRequest) {
+export function useFilePreview(scope: string | undefined, request: PreviewRequest, onOpen?: () => void) {
   const [view, setView] = useState<PreviewView>();
   const generation = useRef(0);
   const destination = useRef(0);
@@ -43,6 +43,7 @@ export function useFilePreview(scope: string | undefined, request: PreviewReques
     const origin = { source: options?.source, onReturn: options?.onReturn, onEdit: options?.onEdit };
     retry.current = () => openFilePreview(path, url, options);
     setView({ path, state: 'loading', ...origin });
+    onOpen?.();
     // settle only the latest surviving workspace request
     void (async () => {
       try {
@@ -60,13 +61,14 @@ export function useFilePreview(scope: string | undefined, request: PreviewReques
         if (id === generation.current) setView({ path, state: 'error', ...origin });
       }
     })();
-  }, [request]);
+  }, [request, onOpen]);
 
   // preview already-redacted settings bytes without another host read
   const openContentPreview = useCallback((path: string, content: string) => {
     close();
     setView({ path, state: 'ready', source: 'settings', preview: { path, size: new TextEncoder().encode(content).byteLength, truncated: false, binary: false, content } });
-  }, [close]);
+    onOpen?.();
+  }, [close, onOpen]);
   // retry the original capability rather than reconstructing a host path
   const refresh = useCallback(() => { retry.current?.(); }, []);
   return { open: view !== undefined, view, beginFileAction, openFilePreview, openContentPreview, close, refresh };

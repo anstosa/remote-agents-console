@@ -79,7 +79,7 @@ export type PrepareBody =
 export type FilesController = ReturnType<typeof useFilesController>;
 
 // own one place's files state and requests
-export function useFilesController(placeId: string | undefined, request: Requester) {
+export function useFilesController(placeId: string | undefined, request: Requester, onOpen?: () => void) {
   const [open, setOpen] = useState(() => savedFilesOpen(placeId));
   const [listing, setListing] = useState<FilesList>();
   const [loading, setLoading] = useState(false);
@@ -180,11 +180,14 @@ export function useFilesController(placeId: string | undefined, request: Request
   }, []);
 
   // open and retain this place's files panel
-  const show = useCallback(() => { setNavigationError(undefined); setOpen(true); saveFilesOpen(placeId, true); }, [placeId]);
+  const show = useCallback(() => { setNavigationError(undefined); setOpen(true); saveFilesOpen(placeId, true); onOpen?.(); }, [placeId, onOpen]);
   // close and retain this place's files panel
   const close = useCallback(() => { setOpen(false); setNavigationError(undefined); saveFilesOpen(placeId, false); }, [placeId]);
   // toggle retained visibility
-  const toggle = useCallback(() => { setNavigationError(undefined); setOpen(current => { const next = !current; saveFilesOpen(placeId, next); return next; }); }, [placeId]);
+  const toggle = useCallback(() => {
+    // choose the matching persisted action
+    if (open) close(); else show();
+  }, [open, close, show]);
   // refresh the current listing and favorite menu together
   const refresh = useCallback(async (): Promise<boolean> => {
     const [listed] = await Promise.all([navigate(listing?.path), refreshFavorites()]);

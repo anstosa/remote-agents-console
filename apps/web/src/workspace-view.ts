@@ -26,7 +26,15 @@ export type WorkspaceView = {
   toggleGithub?: () => void;
 };
 export const workspaceViews = new Map<string, WorkspaceView>();
-export const pendingWorkspaceJumps = new Map<string, string>();
+export const pendingWorkspaceJumps = new Map<string, { panelKey: string; input: boolean }>();
+// focus an existing split immediately or wait for its first committed column
+export const requestWorkspaceJump = (workspaceKey: string, panelKey: string, input = false) => {
+  const view = workspaceViews.get(workspaceKey);
+  pendingWorkspaceJumps.delete(workspaceKey);
+  // repeated opens need no state change to reveal their destination
+  if (view?.splits.some(split => split.key === panelKey)) view.jump(panelKey, input);
+  else pendingWorkspaceJumps.set(workspaceKey, { panelKey, input });
+};
 const listeners = new Set<() => void>();
 let revision = 0;
 const preferences = new Map<string, string | null>();
@@ -88,4 +96,8 @@ export const setWorkspaceAlias = (key: string, name: string) => write(`rac.works
 // restore settings visibility without sharing it across workspace identities
 export const settingsSplitOpen = (key: string) => read(`rac.settings-open:${key}`) === '1';
 // retain visibility only and keep settings values out of browser persistence
-export const setSettingsSplitOpen = (key: string, open: boolean) => write(`rac.settings-open:${key}`, open ? '1' : null);
+export const setSettingsSplitOpen = (key: string, open: boolean) => {
+  // retained visibility reads remain passive; explicit opens select settings
+  if (open) requestWorkspaceJump(key, 'settings');
+  write(`rac.settings-open:${key}`, open ? '1' : null);
+};

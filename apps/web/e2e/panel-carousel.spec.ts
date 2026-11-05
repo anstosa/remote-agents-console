@@ -24,6 +24,9 @@ const routeApi = (page: Page, agents = [coraAgent]) => page.route('**/api/**', a
   if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(path) || /^\/api\/worktrees\/(?:cora|owen)\/tickets$/u.test(path)) return route.fulfill({ json: { ticket: 'pane-ticket' } });
   if (/^\/api\/agents\/agent-[12]\/(?:saved-prompts|prompt-history|queued-prompts)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
   if (/^\/api\/agents\/agent-[12]\/message-files$/u.test(path)) return route.fulfill({ json: { files: [] } });
+  // create one blank note for focus-preservation coverage
+  if (path === '/api/worktrees/cora/notes' && route.request().method() === 'POST') return route.fulfill({ status: 201, json: { id: 'note-cora-new', text: '' } });
+  // retain the existing note fixture for picker navigation
   if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [{ id: 'note-cora-000001', text: 'Phone checklist' }] } });
   if (path === '/api/worktrees/owen/notes') return route.fulfill({ json: { notes: [] } });
   if (path === '/api/worktrees/cora/panes') return route.fulfill({ json: { panes } });
@@ -57,6 +60,8 @@ const expectBottomBorder = async (target: Locator, label: string) => {
 const expectSnapped = (page: Page) => expect.poll(() => carousel(page).evaluate(element => element.scrollLeft % element.clientWidth)).toBe(0);
 // the panel whose dot is current
 const expectCurrentDot = (page: Page, name: string) => expect(dots(page).locator(`.panel-dot[title="${name}"]`)).toHaveAttribute('data-current', 'true');
+// require keyboard focus to follow an explicit split destination
+const expectPanelFocused = (panel: Locator) => expect.poll(() => panel.evaluate(element => element === document.activeElement || element.contains(document.activeElement))).toBe(true);
 // a one-finger swipe across the middle of `over`, `distance` pixels (positive moves the finger
 // right). A quick swipe flings; a `slow` one drags and stops before lifting, so it carries no
 // velocity and the carousel snaps to the nearest panel. Small controls start at their centre.
@@ -408,6 +413,75 @@ test('Browser and Code move into the ⋮, and a panel opened from the toolbar sc
   await page.getByRole('button', { name: 'Browser', exact: true }).click();
   await expect(browser).toBeInViewport({ ratio: 0.99 });
   await expect(dots(page).locator('.panel-dot')).toHaveCount(4);
+});
+
+// explicit content opens select and focus new or retained phone splits
+test('explicit opens focus reused notes and browser destinations', async ({ page }) => {
+  const toolbarRegion = toolbar(page);
+  const note = page.getByRole('dialog', { name: 'Note' });
+  const browser = page.getByRole('dialog', { name: 'Browser' });
+
+  await toolbarRegion.getByRole('button', { name: 'Notes (1)' }).click();
+  await page.getByRole('button', { name: 'Phone checklist…', exact: true }).click();
+  await expect(note).toBeInViewport({ ratio: 0.99 });
+  await expectPanelFocused(note);
+
+  await toolbarRegion.getByRole('button', { name: 'More options' }).click();
+  await page.getByRole('button', { name: 'Browser', exact: true }).click();
+  await expect(browser).toBeInViewport({ ratio: 0.99 });
+  await expectPanelFocused(browser);
+
+  // an already-mounted note must still replace the current mobile split
+  await toolbarRegion.getByRole('button', { name: 'Notes (1)' }).click();
+  await page.getByRole('button', { name: 'Phone checklist…', exact: true }).click();
+  await expect(note).toBeInViewport({ ratio: 0.99 });
+  await expectCurrentDot(page, 'Show note');
+  await expectPanelFocused(note);
+
+  await chooseSplit(page, 'Agent output');
+  await expectPanelFocused(agentPanel(page));
+  await pushBytes(page, 'agent-1', '\r\nProject https://project.example.com/details\r\n');
+  const projectLink = page.getByRole('link', { name: 'Open https://project.example.com/details', exact: true });
+  await projectLink.click();
+  await expect(browser).toBeInViewport({ ratio: 0.99 });
+  await expectCurrentDot(page, 'Show project browser');
+  await expectPanelFocused(browser);
+
+  // repeated navigation to the same retained URL must focus the same destination again
+  await chooseSplit(page, 'Agent output');
+  await projectLink.click();
+  await expect(browser).toBeInViewport({ ratio: 0.99 });
+  await expectPanelFocused(browser);
+
+  await toolbarRegion.getByRole('button', { name: 'Notes (1)' }).click();
+  await page.getByRole('button', { name: '+ New note', exact: true }).click();
+  const editor = page.getByRole('textbox', { name: 'Note content' });
+  await expect(editor).toBeInViewport({ ratio: 0.9 });
+  await expect(editor).toBeFocused();
+  await expectCurrentDot(page, 'Show note');
+});
+
+// desktop destinations receive focus even though every split remains visible
+test.describe('desktop split focus', () => {
+  test.use({ hasTouch: false, isMobile: false, viewport: { width: 1400, height: 900 } });
+
+  test('accepted output links focus an existing browser split every time', async ({ page }) => {
+    const toolbarRegion = toolbar(page);
+    const browser = page.getByRole('dialog', { name: 'Browser' });
+    await toolbarRegion.getByRole('button', { name: 'Browser', exact: true }).click();
+    await expect(browser).toBeVisible();
+    await expectPanelFocused(browser);
+
+    await pushBytes(page, 'agent-1', '\r\nProject https://project.example.com/details\r\n');
+    const projectLink = page.getByRole('link', { name: 'Open https://project.example.com/details', exact: true });
+    await projectLink.click();
+    await expectPanelFocused(browser);
+
+    // the same retained URL still represents a fresh explicit open
+    await page.getByRole('textbox', { name: 'Prompt' }).focus();
+    await projectLink.click();
+    await expectPanelFocused(browser);
+  });
 });
 
 // keep each split edge visible while input footers sit below terminal content

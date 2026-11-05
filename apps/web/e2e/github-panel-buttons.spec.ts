@@ -169,8 +169,14 @@ test('puts my pull request\'s buttons in its detail and hands picked threads to 
   // "Add N to prompt" drafts them in this Worktree's composer, in the list's order
   await threads.getByRole('checkbox', { name: 'Select the thread on src/github/service.ts' }).check();
   await threads.getByRole('checkbox', { name: 'Select the thread on src/github/github.ts' }).check();
+  // require the GitHub transfer to restore its hidden Agent destination
+  const agentPanel = page.locator('.agent-panel');
+  await page.getByRole('button', { name: 'Minimize agent output' }).click();
+  await expect(agentPanel).toHaveCount(0);
   await bar.getByRole('button', { name: 'Add 2 to prompt' }).click();
+  await expect(agentPanel).toBeVisible();
   await expect(composer(page)).toHaveValue(/^Address this feedback on PR #214:\n\n1\. Review thread on src\/github\/github\.ts:7\n[^]*\n2\. Review thread on src\/github\/service\.ts:42\n/u);
+  await expect(composer(page)).toBeFocused();
   await expect(bar).toHaveCount(0);
   expect(starts).toHaveLength(2);
 

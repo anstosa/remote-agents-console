@@ -15,7 +15,7 @@ import { FlyoutPortal } from './flyout-portal.js';
 import { ContextMenuHost, contextMenuOwnsFocus, openContextMenu, type ContextMenuItem } from './context-menu.js';
 import { SelectionActionsContext, openSelectionContextMenu, preserveContextMenuPress, useSelectionActions, type ClipboardContents, type SelectionActions } from './selection-context-menu.js';
 import { ContextFlyoutEvents } from './context-flyouts.js';
-import { agentSplitHidden, setAgentSplitHidden, workspaceOpenGeneration, workspaceOpenStillCurrent, workspaceIntentionallyEmpty, setWorkspaceIntentionallyEmpty, workspaceAlias, setWorkspaceAlias, settingsSplitOpen, setSettingsSplitOpen, useWorkspaceViewRevision, workspaceViews, pendingWorkspaceJumps, type WorkspaceSplit, type WorkspaceView } from './workspace-view.js';
+import { agentSplitHidden, setAgentSplitHidden, workspaceOpenGeneration, workspaceOpenStillCurrent, workspaceIntentionallyEmpty, setWorkspaceIntentionallyEmpty, workspaceAlias, setWorkspaceAlias, settingsSplitOpen, setSettingsSplitOpen, useWorkspaceViewRevision, workspaceViews, pendingWorkspaceJumps, requestWorkspaceJump, type WorkspaceSplit, type WorkspaceView } from './workspace-view.js';
 import { PanelExpandContext, type PanelAction, type PanelExpansion, PanelHeader, PanelIcon, panelIcons, type ProgressColor, useExpansionScope, usePanelExpand, usePanelExpansion, usePhoneLayout } from './panel-header.js';
 import { ConfiguredButtonList, ConfiguredButtonsProvider, type ButtonActionDraft, type ButtonCatalog, useConfiguredButtons, useConfiguredButtonsBusy } from './configured-buttons.js';
 import { clearTerminalCommand, pruneTerminalCommands, stageTerminalCommand, terminalCommandKey, terminalCommandLimitMessage, TerminalCommandDraft } from './terminal-command-draft.js';
@@ -1708,6 +1708,13 @@ function ClientSettingsLayout({ settings, workspaceKey, children, onOperationFee
   const triggerRef = useRef<HTMLButtonElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
   const settingsCloseGuard = useRef<SettingsCloseGuard>(null);
+  // settings can also open before the first workspace exists
+  useLayoutEffect(() => {
+    // mounted workspaces handle selection through their ordinary jump path
+    if (!open || workspaceKey !== 'dashboard' || pendingWorkspaceJumps.get(workspaceKey)?.panelKey !== 'settings') return;
+    pendingWorkspaceJumps.delete(workspaceKey);
+    pageRef.current?.focus({ preventScroll: true });
+  });
   const pendingSettingsClose = useRef(new Map<string, Promise<boolean>>());
   // honor settings links while the authenticated workspace stays mounted
   useEffect(() => {
@@ -3579,7 +3586,7 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
 // manage persistent worktree notes
 // `expansion` is the Workspace's: the note pane expands through it, and a retained note view
 // restores its expansion into it.
-function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpansion, agentId?: string, agentWorking = false, latestAssistantMessage?: string, latestAssistantMessageOverflows = false, onPromptHistoryChanged?: () => void | Promise<void>, promptHistory: PromptHistoryEntry[] = [], schedulePrefill?: SchedulePrefill, onLaunchAndRun?: (noteId: string) => Promise<boolean>, launchRunLabel?: string, promptNote?: PromptNoteSource, onAttachmentPreview?: (path: string, url: string, restore: () => boolean) => void) {
+function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpansion, agentId?: string, agentWorking = false, latestAssistantMessage?: string, latestAssistantMessageOverflows = false, onPromptHistoryChanged?: () => void | Promise<void>, promptHistory: PromptHistoryEntry[] = [], schedulePrefill?: SchedulePrefill, onLaunchAndRun?: (noteId: string) => Promise<boolean>, launchRunLabel?: string, promptNote?: PromptNoteSource, onAttachmentPreview?: (path: string, url: string, restore: () => boolean) => void, onAddToPrompt?: (text: string) => void) {
   const noteFeedback = useContext(NoteFeedbackContext);
   // use the shared mobile text-editing breakpoint
   const phone = usePhoneLayout();
@@ -3975,6 +3982,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     setSaveStatus(failedNotes.current.has(note.id) ? 'error' : dirtyTexts.current.has(note.id) ? 'saving' : 'saved');
     setMenuOpen(false);
     if (dirtyTexts.current.has(note.id)) persist(note.id, text);
+    // explicit note choices reveal both new and reused panes
+    requestWorkspaceJump(worktreeId === undefined ? `agent-${agentId ?? 'pending'}` : placeItemKey(worktreeId), 'note');
   };
   // preserve the saved snapshot while visibility may revoke this workspace's access
   const updateDraft = (note: WorktreeNote, text: string) => {
@@ -4708,7 +4717,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
       canCreateNote: !loading,
       appendToNote: appendToActive,
       createNote: text => create(text, assistantNoteTitle(text)),
-      addToPrompt: agentId === undefined ? undefined : text => setPromptDraft(agentId, current => appendTextBlock(current, text))
+      addToPrompt: agentId === undefined ? undefined : onAddToPrompt
     };
     openSelectionContextMenu(event, {
       label: 'Note actions',
@@ -4744,7 +4753,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     setEditing(true);
   };
   const selectionActions = activeNote === undefined || selectionToolbar === undefined ? null : createPortal(<div className="output-selection-toolbar note-selection-toolbar" role="toolbar" aria-label="Note selection actions" style={{ top: selectionToolbar.top }} onPointerDown={event => event.preventDefault()}>
-    <button type="button" disabled={agentId === undefined} onClick={() => { if (agentId !== undefined) setPromptDraft(agentId, current => appendTextBlock(current, selectionToolbar.text)); }}>Add to prompt</button>
+    <button type="button" disabled={agentId === undefined} onClick={() => { /* reveal the owning composer after appending selected text */ onAddToPrompt?.(selectionToolbar.text); }}>Add to prompt</button>
     <button type="button" onClick={() => void copySelection(selectionToolbar.text)}>Copy</button>
   </div>, document.body);
   // the note-pane Schedule editor (variant C): always shown under the toolbar when a prefill resolves.
@@ -4930,7 +4939,12 @@ function useStackPanel(worktreeId: string | undefined) {
     else stackSelections.set(worktreeId, next);
   };
   // open the panel on `next`, or on its first process when nothing is named
-  const openOn = (next?: StackSelection) => { select(next); save(true); };
+  const openOn = (next?: StackSelection) => {
+    select(next);
+    save(true);
+    // only explicit stack opens redirect focus
+    if (worktreeId !== undefined) requestWorkspaceJump(placeItemKey(worktreeId), 'stack');
+  };
   return { open: open && worktreeId !== undefined, selection, select, openOn, close: () => save(false) };
 }
 // retain one github split per place and consume dashboard-owned open commands once
@@ -4971,7 +4985,7 @@ function useGithubPanel(placeId: string | undefined, defaultScope: GithubScope) 
     if (pending.scope !== undefined) setScope(pending.scope);
     setOpen(true);
     saveGithubPanel(placeId, true);
-    pendingWorkspaceJumps.set(placeItemKey(placeId), 'github');
+    requestWorkspaceJump(placeItemKey(placeId), 'github');
     controller?.consume(pending.id);
   }, [placeId, pending?.id]);
   // close also consumes a transient item request
@@ -4979,7 +4993,11 @@ function useGithubPanel(placeId: string | undefined, defaultScope: GithubScope) 
     setOpen(value);
     // a later ordinary open does not replay an earlier command
     if (!value) { setFocus(undefined); setScopeState(defaultScope); }
-    if (placeId !== undefined) saveGithubPanel(placeId, value);
+    if (placeId !== undefined) {
+      saveGithubPanel(placeId, value);
+      // retained github state never calls this explicit opener
+      if (value) requestWorkspaceJump(placeItemKey(placeId), 'github');
+    }
   };
   return { open: open && placeId !== undefined, focus, scope, setScope, savedView: placeId === undefined ? undefined : githubViews.get(placeId), saveView: remember, show: () => save(true), toggle: () => save(!open), close: () => save(false) };
 }
@@ -4988,7 +5006,7 @@ const githubListsRevision = (serverStartedAt: number | undefined, githubRevision
 // the Project a Worktree belongs to, for its GitHub repository
 const projectOfWorktree = (projects: readonly Project[], worktreeId: string | undefined) => worktreeId === undefined ? undefined : projects.find(project => project.worktrees.some(worktree => worktree.id === worktreeId));
 // retain browser state for one worktree
-function useProjectBrowser(homeUrl?: string, worktreeId?: string, projectProxied?: boolean) {
+function useProjectBrowser(homeUrl?: string, worktreeId?: string, projectProxied?: boolean, onOpen?: () => void) {
   const proxied = projectProxied !== false;
   const [open, setOpen] = useState(() => homeUrl !== undefined && savedBrowserSplit(worktreeId));
   const [currentUrl, setCurrentUrl] = useState(() => homeUrl === undefined ? undefined : savedBrowserUrl(homeUrl, worktreeId));
@@ -5025,8 +5043,9 @@ function useProjectBrowser(homeUrl?: string, worktreeId?: string, projectProxied
     setCurrentUrl(next);
     // distinguish repeated clicks on one retained URL
     setNavigationRequest(current => ({ sequence: (current?.sequence ?? 0) + 1, url: next }));
+    onOpen?.();
     return true;
-  }, [homeUrl, worktreeId]);
+  }, [homeUrl, worktreeId, onOpen]);
   return {
     open: open && homeUrl !== undefined,
     homeUrl,
@@ -5038,7 +5057,11 @@ function useProjectBrowser(homeUrl?: string, worktreeId?: string, projectProxied
     toggle: () => {
       // ignore unavailable browser panes
       if (homeUrl === undefined) return;
-      setOpen(value => { const next = !value; saveBrowserSplit(worktreeId, next); return next; });
+      const next = !open;
+      saveBrowserSplit(worktreeId, next);
+      setOpen(next);
+      // closing a browser never redirects focus to its removed pane
+      if (next) onOpen?.();
     },
     close: () => { saveBrowserSplit(worktreeId, false); setOpen(false); }
   };
@@ -5621,7 +5644,7 @@ function CodePane({ controller, files, worktreeId, prAvailable, branch, review, 
 // `expansion` is the Workspace's expanded panel; a split without a Workspace keeps its own.
 // On a phone the panels sit in a swipe carousel, one per screen; `onCarousel` hears its panels and
 // the one in view, for the toolbar's dots.
-function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, code, preview, previewController: workspacePreview, review, stack, github, withSettings = false, terminals, terminalSelectionActions, onCarousel, initialPanelsReady, expansion: workspaceExpansion }: { worktreeId?: string; output?: ReactNode; empty?: ReactNode; note?: ReactNode; browser?: ReactNode; files?: ReactNode; code?: ReactNode; preview?: ReactNode; previewController?: FilePreviewController; review?: ReactNode; stack?: ReactNode; github?: ReactNode; withSettings?: boolean; terminals?: TerminalColumn[]; terminalSelectionActions?: TerminalSelectionActions; onCarousel?: (carousel: PanelCarousel) => void; initialPanelsReady?: boolean; expansion?: PanelExpansion }) {
+function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, code, preview, previewController: workspacePreview, review, stack, github, withSettings = false, terminals, terminalSelectionActions, onCarousel, onFocusSplit, initialPanelsReady, expansion: workspaceExpansion }: { worktreeId?: string; output?: ReactNode; empty?: ReactNode; note?: ReactNode; browser?: ReactNode; files?: ReactNode; code?: ReactNode; preview?: ReactNode; previewController?: FilePreviewController; review?: ReactNode; stack?: ReactNode; github?: ReactNode; withSettings?: boolean; terminals?: TerminalColumn[]; terminalSelectionActions?: TerminalSelectionActions; onCarousel?: (carousel: PanelCarousel) => void; onFocusSplit?: (key: string, input?: boolean) => void; initialPanelsReady?: boolean; expansion?: PanelExpansion }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const settingsState = useContext(ClientSettingsSplitContext);
   const editorConfigured = useContext(EditorConfiguredContext);
@@ -5636,7 +5659,7 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
     if (withSettings && !settingsState?.open && previewController.view?.source === 'settings') previewController.close();
   }, [withSettings, settingsState?.open, previewController.view?.source, previewController.close]);
   // return from the base file to the same settings split
-  const returnToSettings = () => { expansion.restore(); carousel.show('settings'); };
+  const returnToSettings = () => { expansion.restore(); focusSplit('settings'); };
   const previewPane = preview ?? (standalonePreview.open ? <PreviewPane controller={standalonePreview} onReturnToSettings={returnToSettings} /> : null);
   // resolve native editor ownership where the global Settings page is rendered
   const settingsEditor = {
@@ -5649,11 +5672,9 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
     // reuse catalog bytes instead of sending a host path through Files
     preview: (target: SettingsPreviewTarget) => {
       expansion.restore();
-      const mounted = previewController.open;
       previewController.openContentPreview(target.path, target.content);
-      // wait for the preview column on its first mount
-      if (mounted) carousel.show('preview');
-      else window.requestAnimationFrame(() => carousel.show('preview'));
+      // standalone previews have no workspace-owned open callback
+      if (onFocusSplit === undefined) focusSplit('preview');
     }
   };
   const settingsPane = withSettings && settingsState?.open ? <SettingsTerminalEditorContext.Provider value={settingsEditor}>{settingsState.page}</SettingsTerminalEditorContext.Provider> : null;
@@ -5690,6 +5711,19 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
   const signature = keys.join('|');
   const phone = usePhoneLayout();
   const carousel = usePanelCarousel(containerRef, keys, phone, worktreeId, initialPanelsReady);
+  // standalone settings previews share the workspace focus contract
+  const focusSplit = (panelKey: string, input = false) => {
+    // mounted workspaces own deferred navigation and split input focus
+    if (onFocusSplit !== undefined) { onFocusSplit(panelKey, input); return; }
+    window.requestAnimationFrame(() => {
+      carousel.show(panelKey);
+      const panel = containerRef.current?.querySelector<HTMLElement>(`:scope > ${splitPanelSelector(panelKey)}`);
+      // closed destinations never redirect focus
+      if (panel == null || panel.contains(document.activeElement)) return;
+      panel.tabIndex = -1;
+      panel.focus({ preventScroll: true });
+    });
+  };
   const expansionScope = useExpansionScope(expansion, keys, containerRef, carousel.visibleKey);
   const [sizes, setSizes] = useState<SplitSizes>(() => savedSplitSizes(worktreeId, signature, keys));
   // restore the exact workspace layout for each open-panel composition
@@ -5802,17 +5836,12 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
   // reveal the destination of a terminal selection action on phones
   const selectionActions: TerminalSelectionActions | undefined = terminalSelectionActions === undefined ? undefined : {
     canCreateNote: terminalSelectionActions.canCreateNote,
-    // open the shared note pane after saving selected output
-    createNote: async text => {
-      const created = await terminalSelectionActions.createNote(text);
-      // retain the selected terminal for retry when creation fails
-      if (created) carousel.show('note');
-      return created;
-    },
+    // generation-guarded note creation owns destination focus
+    createNote: terminalSelectionActions.createNote,
     // show the composer without submitting the selected output
     addToPrompt: terminalSelectionActions.addToPrompt === undefined ? undefined : text => {
       terminalSelectionActions.addToPrompt?.(text);
-      carousel.show('agent');
+      focusSplit('agent', true);
     }
   };
   // the panel columns interleaved with resizers
@@ -5951,6 +5980,8 @@ const requestTerminalFocus = (placeId: string, terminal: OpenTerminal) => {
   const open = savedTerminals(placeId);
   if (!open.some(candidate => candidate.paneId === terminal.paneId)) saveTerminals(placeId, [...open, terminal]);
   terminalOpenListeners.forEach(listener => listener(placeId, terminal));
+  // editor and stack terminals share the same split navigation as the picker
+  requestWorkspaceJump(placeItemKey(placeId), terminal.paneId, true);
   const focus = terminalFocusers.get(terminal.paneId);
   if (focus === undefined) pendingTerminalFocus.set(terminal.paneId, now + terminalRequestWindowMs);
   else focus();
@@ -6276,13 +6307,17 @@ const openNewShell = async (worktreeId: string, { refreshPanes, openPane }: Work
   const list = await refreshPanes();
   const shell = list?.find(pane => pane.paneId === paneId);
   // a later close-all keeps this existing shell minimized
-  if (workspaceOpenStillCurrent(key, generation)) openPane(paneId, shell ? terminalPaneLabel(shell) : editor ? 'editor' : 'shell');
+  if (workspaceOpenStillCurrent(key, generation)) {
+    const name = shell ? terminalPaneLabel(shell) : editor ? 'editor' : 'shell';
+    openPane(paneId, name);
+    requestTerminalFocus(worktreeId, { paneId, name });
+  }
   return undefined;
 };
 
 // render the terminal action and available pane picker
 function TerminalPicker({ worktreeId, terminals }: { worktreeId: string; terminals: WorktreeTerminals }) {
-  const { open, panes, refreshPanes, openPane, endPane } = terminals;
+  const { open, panes, refreshPanes, endPane } = terminals;
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -6324,7 +6359,8 @@ function TerminalPicker({ worktreeId, terminals }: { worktreeId: string; termina
     try { await endPane(pane); }
     finally { setBusy(false); }
   };
-  const choose = (pane: WorktreePane) => { openPane(pane.paneId, terminalPaneLabel(pane)); setMenuOpen(false); };
+  // picker restores select the terminal as well as mounting its column
+  const choose = (pane: WorktreePane) => { requestTerminalFocus(worktreeId, { paneId: pane.paneId, name: terminalPaneLabel(pane) }); setMenuOpen(false); };
   // the Agent's own pane and any hand-split siblings; a hidden Console shell (created but not
   // currently a Panel) is listed separately, with an End action
   const sessionPanes = panes.filter(pane => pane.role !== 'shell');
@@ -6788,11 +6824,14 @@ const minimizeWorkspacePanel = (workspaceKey: string, panelKey: string, minimize
 // and git expansion. The tab's card holds it, so it outlives a switch between the Agents there;
 // the agent panel's composer drives the same browser and Terminals, and the Workspace renders it.
 // `onCloseReview`, given while the guided review's panel is open here, minimizes it.
-function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, noteOptions: notes, onNavigateWorktree, onOperationFeedback, onCloseReview }: { agentId?: string; newConversationInPlace?: boolean; noteOptions: WorkspaceNotesOptions; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onCloseReview?: () => void }) {
-  const browser = useProjectBrowser(place.projectUrl, place.id, place.projectProxied);
-  const code = useCodePanel(place.worktreeId, request, comparisonChangeSignal(place.gitStatus, place.gitPrStatus, place.attention));
-  const files = useFilesController(place.id, request);
-  const preview = useFilePreview(place.id ?? agentId, request);
+function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, noteOptions: notes, onNavigateWorktree, onOperationFeedback, onCloseReview, onAddToPrompt }: { agentId?: string; newConversationInPlace?: boolean; noteOptions: WorkspaceNotesOptions; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onCloseReview?: () => void; onAddToPrompt?: (text: string) => void }) {
+  const key = place.id === undefined ? `agent-${agentId ?? 'pending'}` : placeItemKey(place.id);
+  // explicit content opens share one desktop focus and mobile selection path
+  const focusSplit = useCallback((panelKey: string, input = false) => requestWorkspaceJump(key, panelKey, input), [key]);
+  const browser = useProjectBrowser(place.projectUrl, place.id, place.projectProxied, () => focusSplit('browser'));
+  const code = useCodePanel(place.worktreeId, request, comparisonChangeSignal(place.gitStatus, place.gitPrStatus, place.attention), () => focusSplit('code'));
+  const files = useFilesController(place.id, request, () => focusSplit('files'));
+  const preview = useFilePreview(place.id ?? agentId, request, () => focusSplit('preview'));
   const stackPanel = useStackPanel(place.worktreeId);
   const githubProjects = useContext(ProjectsContext);
   const githubPanel = useGithubPanel(place.id, projectOfWorktree(githubProjects, place.worktreeId)?.github === undefined ? 'all' : 'repo');
@@ -6806,32 +6845,33 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
   // open ordinary Terminal file mentions through the owning Place's preview route
   const openTerminalFile = terminalPlaceId === undefined ? undefined : (path: string) => {
     expansion.restore();
-    const mounted = preview.open;
     preview.openFilePreview(path, `/api/worktrees/${encodeURIComponent(terminalPlaceId)}/file-preview`);
-    // reveal the existing split immediately or after its first mount
-    if (mounted) carousel?.show('preview');
-    else window.requestAnimationFrame(() => carousel?.show('preview'));
   };
   const terminals = useTerminalViews(terminalPlaceId, onOperationFeedback, openTerminalFile);
   // keep note capture available even when the agent panel is minimized
   const promptDraftId = agentId ?? (place.worktreeId === undefined ? undefined : worktreePromptId(place.worktreeId));
   const promptNote = promptDraftId === undefined ? undefined : { id: promptDraftId, placeId: place.id, worktreeId: place.worktreeId, onOperationFeedback };
+  // every selection source shares draft identity, agent restoration and input focus
+  const addToPrompt = onAddToPrompt === undefined ? undefined : (text: string) => {
+    onAddToPrompt(text);
+    requestWorkspaceJump(key, 'agent', true);
+    setAgentSplitHidden(key, false);
+  };
   const placeNotes = useWorktreeNotes(place.id, expansion, agentId, notes.agentWorking, notes.latestAssistantMessage, notes.latestAssistantMessageOverflows, notes.onPromptHistoryChanged, notes.promptHistory, notes.schedulePrefill, notes.onLaunchAndRun, notes.launchRunLabel, promptNote, (path, url, restore) => {
     expansion.restore();
     preview.openFilePreview(path, url, { source: 'notes', onReturn: () => {
       // return only to the original surviving note and preserve its draft
-      if (restore()) pendingWorkspaceJumps.set(key, 'note');
+      if (restore()) requestWorkspaceJump(key, 'note');
     } });
-    pendingWorkspaceJumps.set(key, 'preview');
-  });
+  }, addToPrompt);
   const [gitExpanded, setGitExpanded] = useState(false);
-  const key = place.id === undefined ? `agent-${agentId ?? 'pending'}` : placeItemKey(place.id);
   useWorkspaceViewRevision();
   const intentionallyEmpty = workspaceIntentionallyEmpty(key);
   const agentHidden = agentSplitHidden(key) || (agentId !== undefined && intentionallyEmpty);
   // bring a requested split into view; focus its container, or with `input` its terminal or composer
   const jump = (panelKey: string, input = false) => {
-    expansion.restore();
+    // reveal siblings without collapsing an already expanded destination
+    if (expansion.expanded !== panelKey) expansion.restore();
     carousel?.show(panelKey);
     window.requestAnimationFrame(() => {
       const panel = document.querySelector<HTMLElement>(`[data-workspace-key="${CSS.escape(key)}"] .log-split ${splitPanelSelector(panelKey)}`);
@@ -6842,6 +6882,8 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
       const command = panel.querySelector<HTMLElement>('.terminal-command-draft textarea');
       const field = command ?? (input ? panel.querySelector<HTMLElement>('.prompt-composer textarea:not([disabled])') ?? panel.querySelector<HTMLElement>('.xterm-helper-textarea') : null);
       if (field !== null) { field.focus({ preventScroll: true }); return; }
+      // newly created notes and terminals retain their own autofocus
+      if (panel.contains(document.activeElement)) return;
       panel.tabIndex = -1;
       panel.focus({ preventScroll: true });
     });
@@ -6928,12 +6970,8 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
     else if (panelKey === 'settings') settingsSplit?.close();
     else terminals.end(panelKey);
   };
-  // open a Terminal (a new shell, or a key binding's). A new panel comes into view and takes focus
-  // as it mounts; one already open (a reused binding) is jumped to here.
-  const openTerminal = (binding?: { table: string; key: string }) => void terminals.openFocused(binding).then(paneId => {
-    const live = workspaceViews.get(key);
-    if (paneId !== undefined && live?.splits.some(split => split.key === paneId)) live.jump(paneId, true);
-  });
+  // terminal requests reveal both new shells and reused bindings
+  const openTerminal = (binding?: { table: string; key: string }) => { void terminals.openFocused(binding); };
   // publish only live view callbacks for the active workspace
   useLayoutEffect(() => {
     const view = {
@@ -6978,8 +7016,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
       ...(place.worktreeId === undefined ? {} : {
         toggleCode: () => {
           if (code.open) return code.close();
-          // focus the panel once it reaches the carousel
-          pendingWorkspaceJumps.set(key, 'code');
+          // opening changes also reveals the destination split
           code.openChanges('working');
         },
         ...((place.stack?.processes?.length ?? 0) === 0 ? {} : { toggleStack: () => stackPanel.open ? stackPanel.close() : openStackPanel() }),
@@ -6989,18 +7026,18 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
     workspaceViews.set(key, view);
     const requested = pendingWorkspaceJumps.get(key);
     // wait until restored panels have reached the carousel
-    if (requested !== undefined && view.splits.some(panel => panel.key === requested)) {
+    if (requested !== undefined && view.splits.some(panel => panel.key === requested.panelKey)) {
       pendingWorkspaceJumps.delete(key);
-      jump(requested);
+      jump(requested.panelKey, requested.input);
     }
     return () => { /* release only this mounted view */ if (workspaceViews.get(key) === view) workspaceViews.delete(key); };
   });
   // restore and reveal a minimized agent without creating a new session
-  const showAgent = () => { pendingWorkspaceJumps.set(key, 'agent'); setAgentSplitHidden(key, false); };
+  const showAgent = () => { requestWorkspaceJump(key, 'agent'); setAgentSplitHidden(key, false); };
   // open the Stack panel (on `selection`, when given) and bring it into view
-  const openStackPanel = (selection?: StackSelection) => { stackPanel.openOn(selection); pendingWorkspaceJumps.set(key, 'stack'); };
+  const openStackPanel = stackPanel.openOn;
   // open the GitHub panel and bring it into view, or show it when open
-  const openGithubPanel = () => { if (githubPanel.open) carousel?.show('github'); else { githubPanel.show(); pendingWorkspaceJumps.set(key, 'github'); } };
+  const openGithubPanel = () => githubPanel.show();
   // share configured-editor terminals between code jumps and files
   const editorConfigured = useContext(EditorConfiguredContext);
   const placeId = place.id;
@@ -7015,7 +7052,9 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
     if (failure !== undefined) onOperationFeedback?.({ tone: 'error', message: options?.previewFallback ? 'The editor did not open; trying Preview instead' : 'The editor did not open', detail: failure });
     return failure === undefined;
   };
-  return { place, browser, files, code, preview, stackPanel, openStackPanel, githubPanel, openGithubPanel, terminals, carousel, setCarousel: reportCarousel, conversations, notes: placeNotes, expansion, gitExpanded, setGitExpanded, agentHidden, showAgent, minimizePanel, openInEditor, viewKey: key };
+  // chooser and toolbar swipes focus their split without changing passive carousel tracking
+  const navigationCarousel = useMemo(() => carousel === undefined ? undefined : { ...carousel, show: focusSplit }, [carousel, focusSplit]);
+  return { place, browser, files, code, preview, stackPanel, openStackPanel, githubPanel, openGithubPanel, terminals, carousel: navigationCarousel, setCarousel: reportCarousel, focusSplit, addToPrompt, conversations, notes: placeNotes, expansion, gitExpanded, setGitExpanded, agentHidden, showAgent, minimizePanel, openInEditor, viewKey: key };
 }
 type WorkspaceState = ReturnType<typeof useWorkspace>;
 // The git actions only an Agent offers (push, fixup, guided review); an agentless Workspace passes
@@ -7058,13 +7097,11 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
     noteOpen: notes.active,
     canCreateNote: notes.canCreate,
     canAppendToNote: notes.canAppendToActive,
-    appendToNote: text => { expansion.restore(); notes.appendToActive(text); workspace.carousel?.show('note'); },
-    createNote: async text => {
-      const created = await notes.createWithText(text, assistantNoteTitle(text));
-      // reveal a newly created note without disturbing failed saves
-      if (created) { expansion.restore(); workspace.carousel?.show('note'); }
-    },
-    addToPrompt: onAddToPrompt === undefined ? undefined : text => { expansion.restore(); onAddToPrompt(text); workspace.carousel?.show('agent'); }
+    // jump preserves an already-expanded note destination
+    appendToNote: text => { notes.appendToActive(text); workspace.focusSplit('note'); },
+    // successful note creation owns destination focus
+    createNote: async text => { await notes.createWithText(text, assistantNoteTitle(text)); },
+    addToPrompt: onAddToPrompt
   };
   const browserPane = browser.url === undefined || browser.homeUrl === undefined ? null : <ProjectBrowserPane url={browser.url} homeUrl={browser.homeUrl} proxied={browser.proxied} worktreeId={place.id} navigationRequest={browser.navigationRequest} onNavigate={browser.navigate} onClose={browser.close} />;
   const review = git === undefined || (git.onReview === undefined && git.reviewUnavailable === undefined) ? undefined : { onReview: git.onReview, open: git.review !== undefined, generating: git.review?.generating === true, unavailable: git.reviewUnavailable };
@@ -7075,7 +7112,6 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
     if (place.id === undefined) return;
     expansion.restore();
     preview.openFilePreview(entry.hostPath, `/api/worktrees/${encodeURIComponent(place.id)}/files/preview`, { body: { objectToken: entry.objectToken }, source: 'files', onEdit: openInEditor === undefined ? undefined : () => { void openInEditor({ objectToken: entry.objectToken }); } });
-    pendingWorkspaceJumps.set(workspace.viewKey, 'preview');
   };
   // use the browser default and retain a preview fallback after editor failures
   const openFilesEntry = async (entry: FileEntry) => {
@@ -7087,12 +7123,12 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
     previewFilesEntry(entry);
   };
   const filesPane = files.open && place.id !== undefined ? <FilesPanel controller={files} onOpenFile={openFilesEntry} onPreviewFile={previewFilesEntry} onEditFile={openInEditor === undefined ? undefined : async entry => { /* explicit edit retains error feedback without changing views */ await openInEditor({ objectToken: entry.objectToken }); }} /> : null;
-  const previewPane = preview.open ? <PreviewPane controller={preview} onReturnToFiles={() => { /* return to the same directory and selection */ expansion.restore(); workspace.carousel?.show('files'); }} onReturnToSettings={() => { /* retain the settings draft */ expansion.restore(); workspace.carousel?.show('settings'); }} onOpenInEditor={openInEditor === undefined ? undefined : target => { /* retain line-aware editor navigation */ void openInEditor(target); }} /> : null;
-  const codePane = code.open ? <CodePane controller={code} files={files} {...(place.worktreeId === undefined ? {} : { worktreeId: place.worktreeId })} prAvailable={place.gitPrStatus !== undefined} branch={place.branch} review={review} onReturnToFiles={() => { expansion.restore(); workspace.carousel?.show('files'); }} onReturnToSettings={() => { /* retain settings drafts while returning from the read-only base */ expansion.restore(); workspace.carousel?.show('settings'); }} {...(openInEditor === undefined ? {} : { onOpenInEditor: (target: EditorTarget) => void openInEditor(target) })} /> : null;
+  const previewPane = preview.open ? <PreviewPane controller={preview} onReturnToFiles={() => { /* return to the same directory and selection */ expansion.restore(); workspace.focusSplit('files'); }} onReturnToSettings={() => { /* retain the settings draft */ expansion.restore(); workspace.focusSplit('settings'); }} onOpenInEditor={openInEditor === undefined ? undefined : target => { /* retain line-aware editor navigation */ void openInEditor(target); }} /> : null;
+  const codePane = code.open ? <CodePane controller={code} files={files} {...(place.worktreeId === undefined ? {} : { worktreeId: place.worktreeId })} prAvailable={place.gitPrStatus !== undefined} branch={place.branch} review={review} onReturnToFiles={() => { expansion.restore(); workspace.focusSplit('files'); }} onReturnToSettings={() => { /* retain settings drafts while returning from the read-only base */ expansion.restore(); workspace.focusSplit('settings'); }} {...(openInEditor === undefined ? {} : { onOpenInEditor: (target: EditorTarget) => void openInEditor(target) })} /> : null;
   const stackName = stackPlaceName(place.worktreeId, projects);
   const placeId = place.id;
   // the Stack panel shows only for a Worktree whose stack has processes to show
-  const stackPane = !stackPanel.open || place.worktreeId === undefined || (place.stack?.processes?.length ?? 0) === 0 ? null : <StackPanel worktreeId={place.worktreeId} title={stackName === undefined ? 'this worktree' : `${stackName.project} / ${stackName.worktree}`} stack={place.stack} selection={stackPanel.selection} onSelect={stackPanel.select} onClose={stackPanel.close} handlers={stackHandlers(place.worktreeId)} onOpenWorktree={onOpenWorktreeStack} onOpenTerminal={placeId === undefined ? undefined : (paneId, name) => { /* on a phone an already-open panel is scrolled to; a new one comes into view as it opens */ workspace.carousel?.show(paneId); requestTerminalFocus(placeId, { paneId, name }); }} readOutput={processOutput} clearOutput={clearProcessOutput} />;
+  const stackPane = !stackPanel.open || place.worktreeId === undefined || (place.stack?.processes?.length ?? 0) === 0 ? null : <StackPanel worktreeId={place.worktreeId} title={stackName === undefined ? 'this worktree' : `${stackName.project} / ${stackName.worktree}`} stack={place.stack} selection={stackPanel.selection} onSelect={stackPanel.select} onClose={stackPanel.close} handlers={stackHandlers(place.worktreeId)} onOpenWorktree={onOpenWorktreeStack} onOpenTerminal={placeId === undefined ? undefined : (paneId, name) => { /* terminal requests reveal existing and new splits */ requestTerminalFocus(placeId, { paneId, name }); }} readOutput={processOutput} clearOutput={clearProcessOutput} />;
   const githubProject = projectOfWorktree(projects, place.worktreeId);
   const githubWorktree = githubProject?.worktrees.find(worktree => worktree.id === place.worktreeId);
   // the Worktree strip's checkout readiness is the branch switch's own: a clean working tree
@@ -7105,7 +7141,7 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
     onFeedback: feedback => githubController?.feedback({ ...feedback, workspaceKey: workspace.viewKey })
   };
   const githubPane = githubPanel.open ? <GithubPanel request={request} projects={projects} scope={githubPanel.scope} onScopeChange={githubPanel.setScope} dynamicWorktrees={githubController?.dynamicWorktrees ?? true} projectId={githubProject?.github === undefined ? undefined : githubProject.id} repository={githubProject?.github} worktreeId={place.worktreeId} main={githubWorktree?.main ?? true} branch={place.branch} hasPullRequest={place.pullRequest !== undefined} revision={githubListsRevision(serverStartedAt, githubRevision, projects)} focus={githubPanel.focus} savedView={githubPanel.savedView} onSaveView={githubPanel.saveView} actions={githubActions} onClose={githubPanel.close} onOpenWorktree={onOpenGithub} onNewWorktree={githubController?.newWorktree ?? githubNewWorktree(git?.onNewWorktree)} onAddToPrompt={selectionActions.addToPrompt} /> : null;
-  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} preview={previewPane} previewController={preview} review={reviewPanel} stack={stackPane} github={githubPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
+  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} preview={previewPane} previewController={preview} review={reviewPanel} stack={stackPane} github={githubPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} onFocusSplit={workspace.focusSplit} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
 }
 
 type LogProps = { id: string; onTurnOff?: () => void; embedded?: boolean; codexScrollControls?: boolean; onQuestion: (question: ChoiceQuestion | undefined) => void; onMetadata?: (response: string | undefined, overflow: boolean) => void; header?: (connection: string) => ReactNode; composer?: ReactNode; notes?: WorktreeNotes; onAddToPrompt?: (text: string) => void; onOpenUrl?: (url: string) => boolean; onOpenFile?: (path: string) => void; processingLabel?: string; processingDetail?: string };
@@ -7295,7 +7331,7 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
   // an expanded sibling hides the output, and its selection actions with it
   const selectionActions = selectionToolbar === undefined || (expand?.anyExpanded === true && !expanded) ? null : createPortal(<div className={`output-selection-toolbar${embedded ? ' embedded' : ''}`} role="toolbar" aria-label="Output selection actions" style={{ top: selectionToolbar.top, '--toolbar-x': `${selectionToolbar.left}px` } as React.CSSProperties} onPointerDown={event => event.preventDefault()}>
     {notes !== undefined && <button type="button" disabled={!notes.canCreate || selectionToolbar.text.length > 30_000} onClick={() => void notes.createWithText(selectionToolbar.text, assistantNoteTitle(selectionToolbar.text)).then(created => { /* reveal the new note; a failure keeps the selection to retry */ if (created) { expand?.restore(); clearOutputSelectionRef.current(); } })}>Create note</button>}
-    {notes?.active === true && <button type="button" disabled={!notes.canAppendToActive(selectionToolbar.text)} onClick={() => { expand?.restore(); notes.appendToActive(selectionToolbar.text); clearOutputSelectionRef.current(); }}>Append to note</button>}
+    {notes?.active === true && <button type="button" disabled={!notes.canAppendToActive(selectionToolbar.text)} onClick={() => { /* reveal the accepted note destination before clearing selection */ void workspaceSelectionActions?.appendToNote(selectionToolbar.text); clearOutputSelectionRef.current(); }}>Append to note</button>}
     {onAddToPrompt !== undefined && <button type="button" onClick={() => { onAddToPrompt(selectionToolbar.text); clearOutputSelectionRef.current(); }}>Add to prompt</button>}
     <button type="button" onClick={() => void copyOutputSelectionRef.current(selectionToolbar.text)}>Copy</button>
   </div>, document.body);
@@ -7712,7 +7748,7 @@ function reviewSendAgent(worktreeId: string, agents: readonly Agent[], shown?: A
 function reviewGitActions(worktreeId: string | undefined, viewKey: string, review: ReviewButtonState | undefined, onReview: (target: ReviewTarget) => void, unavailable: string | undefined): Pick<WorkspaceGitActions, 'onReview' | 'onReviewCommit' | 'review' | 'reviewUnavailable'> {
   if (worktreeId === undefined) return { reviewUnavailable: 'Guided review requires a configured worktree' };
   return {
-    onReview: review === undefined ? scope => onReview({ worktreeId, scope }) : () => { pendingWorkspaceJumps.set(viewKey, 'review'); review.onOpen(); },
+    onReview: review === undefined ? scope => onReview({ worktreeId, scope }) : () => { requestWorkspaceJump(viewKey, 'review'); review.onOpen(); },
     onReviewCommit: commit => onReview({ worktreeId, scope: 'commit', commit: commit.sha, commitSubject: commit.subject }),
     review,
     reviewUnavailable: review === undefined ? unavailable : undefined
@@ -7733,7 +7769,9 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
   const latestAssistantMessageOverflows = latest?.agentId === agent.id && latest.overflows;
   // the current Agent's prompt history (the hook refetches when the switcher changes Agent)
   const promptHistory = usePromptHistory(agent.id);
-  const workspace = useWorkspace({ id: agent.placeId ?? agent.worktreeId, worktreeId: agent.worktreeId, path: agent.home, stack: agent.stack, projectUrl: agent.projectUrl, projectProxied: agent.projectProxied, branch: agent.branch, gitStatus: agent.gitStatus, gitPrStatus: agent.gitPrStatus, pullRequest: agent.pullRequest, attention: agents.map(candidate => candidate.attention ?? '').join(' ') }, { agentId: agent.id, newConversationInPlace: agent.panel === 'transcript', noteOptions: { agentWorking: active, latestAssistantMessage, latestAssistantMessageOverflows, onPromptHistoryChanged: promptHistory.refresh, promptHistory: promptHistory.history, schedulePrefill }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => { /* close the latest review even when it arrived during confirmation */ if (agent.worktreeId !== undefined) onCloseReview(agent.worktreeId); } });
+  // preserve this agent's draft identity for all selection sources
+  const appendToPrompt = (text: string) => setPromptDraft(agent.id, current => appendTextBlock(current, text));
+  const workspace = useWorkspace({ id: agent.placeId ?? agent.worktreeId, worktreeId: agent.worktreeId, path: agent.home, stack: agent.stack, projectUrl: agent.projectUrl, projectProxied: agent.projectProxied, branch: agent.branch, gitStatus: agent.gitStatus, gitPrStatus: agent.gitPrStatus, pullRequest: agent.pullRequest, attention: agents.map(candidate => candidate.attention ?? '').join(' ') }, { agentId: agent.id, onAddToPrompt: appendToPrompt, newConversationInPlace: agent.panel === 'transcript', noteOptions: { agentWorking: active, latestAssistantMessage, latestAssistantMessageOverflows, onPromptHistoryChanged: promptHistory.refresh, promptHistory: promptHistory.history, schedulePrefill }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => { /* close the latest review even when it arrived during confirmation */ if (agent.worktreeId !== undefined) onCloseReview(agent.worktreeId); } });
   const { browser: projectBrowser, preview: projectPreview, setGitExpanded } = workspace;
   // keep the latest response each Agent's output reports
   const reportMetadata = useCallback((agentId: string, message: string | undefined, overflows: boolean) => setLatest({ agentId, message, overflows }), []);
@@ -7749,7 +7787,6 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
   const openFileInPreview = (path: string) => {
     workspace.expansion.restore();
     projectPreview.openFilePreview(path, `/api/agents/${encodeURIComponent(agent.id)}/file-preview`);
-    pendingWorkspaceJumps.set(workspace.viewKey, 'preview');
   };
   // route output links to the project browser only while its preview is open and the host matches
   const openOutputUrl = (url: string) => projectBrowser.url !== undefined && projectBrowser.homeUrl !== undefined && outputUrlMatchesHost(url, projectBrowser.homeUrl) && projectBrowser.openUrl(url);
@@ -7776,7 +7813,7 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
   // the Agent's push, fixup and guided-review actions on the git status
   const gitActions: WorkspaceGitActions = { worktreeId: agent.worktreeId, ...reviewGitActions(agent.worktreeId, workspace.viewKey, review, onReview, reviewTourUnavailableText(reviewCapability)), onSelectTarget, onNewWorktree, onOperationFeedback };
   // selected output and Terminal text append to the current Agent's draft without queueing it
-  const addToPrompt = (text: string) => setPromptDraft(agent.id, current => appendTextBlock(current, text));
+  const addToPrompt = workspace.addToPrompt;
   // the panel is keyed by Agent, so a switch swaps its output, draft, queue and pending actions
   const output = <AgentPanel key={agent.id} agent={agent} agents={agents} onSelectAgent={onSelectAgent} active={active} displayLabel={displayLabel} workspace={workspace} promptHistory={promptHistory} historyOpen={historyOpen} onHistoryOpenChange={changeHistoryOpen} latestAssistantMessage={latestAssistantMessage} onMetadata={reportMetadata} onAddToPrompt={addToPrompt} onOpenFile={openFileInPreview} onOpenUrl={openOutputUrl} onDeleted={onDeleted} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} />;
   return <article className="agent-view"><Workspace workspace={workspace} output={output} git={gitActions} reviewPanel={review?.panel} onAddToPrompt={addToPrompt} onOpenWorktreeStack={onOpenWorktreeStack} onOpenGithub={onOpenGithub} />{tabBar}{renderNotifications(upstreamRebase)}<WorkspaceToolbar workspace={workspace} agentCount={agents.length} launch={launch} onOpenWorktreeStack={onOpenWorktreeStack} git={gitActions} onGitToggle={() => setHistoryOpen(false)} cleanupControl={cleanupControl} menu={{ agentId: agent.id, worktreeId: agent.worktreeId, git: agent.worktreeId !== undefined || agent.placeId === undefined, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason }} /></article>;
@@ -7785,7 +7822,7 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
 // One Agent's panel inside its Place's Workspace: the live output under the floating header (the
 // switcher, state, conversations and power menu) and the composer at its foot.
 // Keyed by Agent, so its pending lifecycle actions and parsed question never leak across a switch.
-function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, workspace, promptHistory, historyOpen, onHistoryOpenChange, latestAssistantMessage, onMetadata, onAddToPrompt, onOpenFile, onOpenUrl, onDeleted, onPromptFocus, onOperationFeedback }: { agent: Agent; agents: readonly Agent[]; onSelectAgent: (agentId: string) => void; active: boolean; displayLabel: string; workspace: WorkspaceState; promptHistory: ReturnType<typeof usePromptHistory>; historyOpen: boolean; onHistoryOpenChange: (open: boolean) => void; latestAssistantMessage?: string; onMetadata: (agentId: string, message: string | undefined, overflows: boolean) => void; onAddToPrompt: (text: string) => void; onOpenFile: (path: string) => void; onOpenUrl: (url: string) => boolean; onDeleted: () => Promise<void>; onPromptFocus: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, workspace, promptHistory, historyOpen, onHistoryOpenChange, latestAssistantMessage, onMetadata, onAddToPrompt, onOpenFile, onOpenUrl, onDeleted, onPromptFocus, onOperationFeedback }: { agent: Agent; agents: readonly Agent[]; onSelectAgent: (agentId: string) => void; active: boolean; displayLabel: string; workspace: WorkspaceState; promptHistory: ReturnType<typeof usePromptHistory>; historyOpen: boolean; onHistoryOpenChange: (open: boolean) => void; latestAssistantMessage?: string; onMetadata: (agentId: string, message: string | undefined, overflows: boolean) => void; onAddToPrompt?: (text: string) => void; onOpenFile: (path: string) => void; onOpenUrl: (url: string) => boolean; onDeleted: () => Promise<void>; onPromptFocus: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   const mounted = useRef(true);
   const [cancelling, setCancelling] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -8419,14 +8456,14 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
   const githubBadge = useContext(DashboardGenerationContext).githubBadge ?? 0;
   const menuPanels: PlaceMenuPanel[] = [];
   if (phone && workspace !== undefined) {
-    const { browser, files, code, preview, carousel } = workspace;
-    if (browser.homeUrl !== undefined) menuPanels.push({ key: 'browser', label: 'Browser', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{browserGlyph}</svg>, title: 'Show the project in the browser panel', onSelect: () => browser.open ? carousel?.show('browser') : browser.toggle() });
-    if (place?.id !== undefined) menuPanels.push({ key: 'files', label: 'Files', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{filesGlyph}</svg>, title: 'Show the host Files panel', onSelect: () => files.open ? carousel?.show('files') : files.show() });
+    const { browser, files, code, preview, focusSplit } = workspace;
+    if (browser.homeUrl !== undefined) menuPanels.push({ key: 'browser', label: 'Browser', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{browserGlyph}</svg>, title: 'Show the project in the browser panel', onSelect: () => browser.open ? focusSplit('browser') : browser.toggle() });
+    if (place?.id !== undefined) menuPanels.push({ key: 'files', label: 'Files', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{filesGlyph}</svg>, title: 'Show the host Files panel', onSelect: () => files.open ? focusSplit('files') : files.show() });
     if (onGithub) menuPanels.push({ key: 'github', label: <>GitHub{githubBadge > 0 && <span className="github-badge" aria-label={`${githubBadge} new`}>{githubBadge}</span>}</>, icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{githubGlyph}</svg>, title: 'Show the GitHub panel', onSelect: workspace.openGithubPanel });
     if (worktreeId !== undefined && (place?.stack?.processes?.length ?? 0) > 0) menuPanels.push({ key: 'stack', label: 'Stack', icon: <StackIcon path={stackGlyphs.panel} className="more-menu-icon" />, title: 'Show the Stack panel', onSelect: () => workspace.openStackPanel() });
-    if (worktreeId !== undefined) menuPanels.push({ key: 'code', label: 'Code', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>, title: 'Show the working changes in the Code panel', onSelect: () => code.open ? carousel?.show('code') : code.openChanges('working') });
+    if (worktreeId !== undefined) menuPanels.push({ key: 'code', label: 'Code', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>, title: 'Show the working changes in the Code panel', onSelect: () => code.open ? focusSplit('code') : code.openChanges('working') });
     // expose the transient preview only while it has a file
-    if (preview.open) menuPanels.push({ key: 'preview', label: 'Preview', icon: <PanelIcon path={panelIcons.eye} />, title: 'Show the file preview', onSelect: () => carousel?.show('preview') });
+    if (preview.open) menuPanels.push({ key: 'preview', label: 'Preview', icon: <PanelIcon path={panelIcons.eye} />, title: 'Show the file preview', onSelect: () => focusSplit('preview') });
   }
   // toolbar actions must not dismiss the mounted settings split
   return <section className="workspace-toolbar" aria-label="Workspace toolbar"><div className="workspace-toolbar-actions">
@@ -8533,6 +8570,11 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
   const draftId = worktreePromptId(worktree.id);
   // keep a failed launch editable until retry, including after tab navigation
   const [promptOpened, setPromptOpened] = useState(() => Boolean(getPromptDraft(draftId) || promptAttachments.has(draftId)));
+  // inactive worktree selections also mount their existing draft composer
+  const appendToPrompt = (text: string) => {
+    setPromptDraft(draftId, current => appendTextBlock(current, text));
+    setPromptOpened(true);
+  };
   // retain the composer when startup progress ends in an error
   useEffect(() => {
     // open immediately for a launch transition
@@ -8543,7 +8585,7 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
   const presentation = inactiveWorktreePresentation(worktree.label, launchKind, { startingNewTask, restarting, turningOff, launching });
   const processingColor: ProgressColor = restarting ? 'yellow' : turningOff ? 'red' : 'blue';
   // keep place panels available without an agent
-  const workspace = useWorkspace({ ...worktree, worktreeId: worktree.id }, { noteOptions: { schedulePrefill, onLaunchAndRun: noteId => launchAndRun(noteId), launchRunLabel: `${launchKind === undefined ? 'an agent' : agentKindLabel[launchKind]} on ${worktree.label}` }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => onCloseReview(worktree.id) });
+  const workspace = useWorkspace({ ...worktree, worktreeId: worktree.id }, { onAddToPrompt: appendToPrompt, noteOptions: { schedulePrefill, onLaunchAndRun: noteId => launchAndRun(noteId), launchRunLabel: `${launchKind === undefined ? 'an agent' : agentKindLabel[launchKind]} on ${worktree.label}` }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => onCloseReview(worktree.id) });
   const [error, setError] = useState('');
   useEffect(() => {
     if (!error) return;
@@ -8655,11 +8697,8 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
   const empty = processing
     ? <PanelNotice className="workspace-empty" busy progress={processingColor} ariaLabel={presentation.ariaLabel} heading={presentation.heading} detail={presentation.detail} />
     : <EmptyWorkspace workspace={workspace} label={worktree.label} detail={worktree.branch === undefined ? worktree.path : `${worktree.path} · ${worktree.branch}`} launch={launch} onPin={transient ? onTogglePin : undefined} />;
-  // a Terminal selection added to the prompt opens the draft composer
-  const addToPrompt = (text: string) => {
-    setPromptDraft(draftId, current => appendTextBlock(current, text));
-    setPromptOpened(true);
-  };
+  // use the shared selection destination without changing the inactive draft key
+  const addToPrompt = workspace.addToPrompt;
   // preserve the same dismissal when an agent starts or stops in this worktree
   const upstreamNotificationKey = JSON.stringify([worktree.id, worktree.branch, worktree.gitUpstream?.upstream]);
   return <article className="agent-view"><Workspace workspace={workspace} output={agentPanel} empty={empty} git={gitActions} reviewPanel={review?.panel} onAddToPrompt={addToPrompt} onOpenWorktreeStack={onOpenWorktreeStack} onOpenGithub={onOpenGithub} />{tabBar}{renderNotifications(<UpstreamRebaseNotification key={upstreamNotificationKey} notificationKey={upstreamNotificationKey} summary={worktree.gitUpstream} />)}{error && <p className="launch-error" role="alert">{error}</p>}<WorkspaceToolbar workspace={workspace} launch={launch} onOpenWorktreeStack={onOpenWorktreeStack} conversations={workspace.conversations.control} git={gitActions} cleanupControl={cleanupControl} menu={{ worktreeId: worktree.id, git: true, onRemoveWorktree: onRemove, removeDisabledReason: processing ? 'An agent is starting or stopping here' : removeDisabledReason }} /></article>;
@@ -10193,7 +10232,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     selectedItemKey.current = item.key;
     const chosen = item.agents.find(agent => agent.id === agentId);
     // explicit agent navigation restores a previously minimized output
-    if (chosen !== undefined) { chooseAgent(item.key, chosen.id); setAgentSplitHidden(item.key, false); }
+    if (chosen !== undefined) {
+      chooseAgent(item.key, chosen.id);
+      setAgentSplitHidden(item.key, false);
+      requestWorkspaceJump(item.key, 'agent');
+    }
     const agent = chosen ?? currentAgentOf(item);
     // mark newly viewed agent output as read
     if (agent !== undefined && agent.id !== previousAgent?.id) viewAgent(agent);
@@ -11102,10 +11145,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const index = items.findIndex(candidate => candidate.key === entry.key);
     // ignore tabs removed since the menu opened
     if (index < 0) return;
-    const live = workspaceViews.get(entry.key);
-    // defer navigation until an inactive workspace mounts
-    if (live !== undefined) live.jump(splitKey, input);
-    else pendingWorkspaceJumps.set(entry.key, splitKey);
+    requestWorkspaceJump(entry.key, splitKey, input);
     select(index);
   };
   // route each tab menu action by identity rather than the currently selected tab

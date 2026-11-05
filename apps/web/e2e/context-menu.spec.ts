@@ -668,6 +668,37 @@ test('note menu preserves selection mode, enters edit mode for paste and exposes
   await expect(menu.getByRole('menuitem', { name: 'Add to prompt' })).toBeVisible();
 });
 
+test('note menu moves a phone to the focused Agent prompt', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installClipboardMock(page);
+  await mountConsole(page);
+  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+  await toolbar.getByRole('button', { name: 'Notes (1)' }).click();
+  await page.getByRole('button', { name: 'Plan', exact: true }).click();
+  const preview = page.getByLabel('Note preview');
+  await preview.evaluate(element => {
+    const text = element.querySelector('p')?.firstChild;
+    // require the selected preview text
+    if (text === null) throw new Error('note preview text is missing');
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 7);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, buttons: 2, clientX: 20, clientY: 20 }));
+  });
+  await page.getByRole('menu', { name: 'Note actions' }).getByRole('menuitem', { name: 'Add to prompt' }).click();
+
+  const agentPanel = page.locator('.agent-panel');
+  const notePanel = page.getByRole('dialog', { name: 'Note' });
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect(notePanel).not.toBeInViewport();
+  await expect(agentPanel).toBeInViewport({ ratio: 0.99 });
+  await expect(prompt).toHaveValue('Context');
+  await expect(prompt).toBeFocused();
+});
+
 // preserve both invocation paths and exercise the keyboard dismissal lifecycle once
 test('note context menu keeps editing through selection and dismissal', async ({ page }) => {
   await installClipboardMock(page);

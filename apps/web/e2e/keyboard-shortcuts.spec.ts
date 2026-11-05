@@ -598,3 +598,67 @@ test('prefix keys move between panels and the Workspace picker lists them', asyn
   await expect(tree).toHaveCount(0);
   await expect(terminal).toHaveClass(/focused/u);
 });
+
+test('the Workspace picker preserves input focus for an inactive Agent and Terminal', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await installPaneMock(page);
+  await page.addInitScript(() => {
+    localStorage.setItem('rac.terminals:cora', JSON.stringify([{ paneId: '%5', name: 'build' }]));
+    localStorage.setItem('rac.terminals:owen', JSON.stringify([{ paneId: '%15', name: 'test' }]));
+  });
+  const agents = [
+    { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Working', attention: 'working', queuedPromptCount: 0 },
+    { id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/owen', worktreeId: 'owen', worktreeLabel: 'Owen', title: 'Working', attention: 'working', queuedPromptCount: 0 }
+  ];
+  await routeApi(page, { dashboard: { agents } });
+  // add only the inactive workspace's missing fixture routes
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/agents/agent-2/tickets' || path === '/api/worktrees/owen/tickets') return route.fulfill({ json: { ticket: 'pane-ticket-owen' } });
+    if (/^\/api\/agents\/agent-2\/(?:saved-prompts|prompt-history|queued-prompts)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
+    if (path === '/api/worktrees/owen/notes') return route.fulfill({ json: { notes: [] } });
+    if (path === '/api/worktrees/owen/panes' && request.method() === 'GET') return route.fulfill({ json: { panes: [
+      { paneId: '%11', session: '$2', window: '@10', command: 'codex', path: '/worktrees/owen', title: '', agent: true },
+      { paneId: '%15', session: '$2', window: '@15', role: 'shell', name: 'test', command: 'zsh', path: '/worktrees/owen', title: '', agent: false, busy: false }
+    ] } });
+    return route.fallback();
+  });
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await seedPaneSize(page, '%5', 80, 24);
+
+  // choose Owen's nested Agent while its workspace is unmounted
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('w');
+  let tree = page.getByRole('dialog', { name: 'Workspaces and panels' });
+  await expect(tree.getByRole('option')).toHaveText([/Cora/u, 'Agent output', 'Terminal build', /Owen/u, 'Agent output', 'Terminal test']);
+  await tree.getByRole('option', { name: 'Agent output', exact: true }).nth(1).click();
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect(page.getByRole('tab', { name: /^Owen/u })).toHaveAttribute('aria-selected', 'true');
+  await expect(prompt).toBeFocused();
+
+  // repeat the deferred Agent destination before testing a different input kind
+  await page.getByRole('tab', { name: /^Cora/u }).click();
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('w');
+  tree = page.getByRole('dialog', { name: 'Workspaces and panels' });
+  await tree.getByRole('option', { name: 'Agent output', exact: true }).nth(1).click();
+  await expect(prompt).toBeFocused();
+
+  // choose Owen's Terminal through the same deferred path
+  await page.getByRole('tab', { name: /^Cora/u }).click();
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('w');
+  tree = page.getByRole('dialog', { name: 'Workspaces and panels' });
+  await tree.getByRole('option', { name: 'Terminal test', exact: true }).click();
+  const terminal = page.locator('.terminal-pane[data-panel-key="%15"]');
+  await expect(terminal).toBeVisible();
+  await seedPaneSize(page, '%15', 80, 24);
+  await expect(terminal.locator('.xterm-helper-textarea')).toBeFocused();
+
+  // ordinary tab restoration must not replay the consumed Agent request
+  await page.getByRole('tab', { name: /^Cora/u }).click();
+  await page.getByRole('tab', { name: /^Owen/u }).click();
+  await expect(prompt).not.toBeFocused();
+});

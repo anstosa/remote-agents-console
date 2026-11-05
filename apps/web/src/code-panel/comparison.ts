@@ -265,7 +265,8 @@ export const saveCodeOpen = (worktreeId: string | undefined, open: boolean) => {
 // (the dashboard pushes gitStatus/gitPrStatus on every edit). When it changes the panel does a SOFT
 // refresh: it refetches the current Comparison without tearing down the visible patch, so the diff
 // updates in place — file by file, preserving scroll — instead of blanking to a spinner.
-export const useCodePanel = (worktreeId: string | undefined, request: Requester, changeSignal?: string): CodePanelController => {
+// report only explicit reveals through onOpen
+export const useCodePanel = (worktreeId: string | undefined, request: Requester, changeSignal?: string, onOpen?: () => void): CodePanelController => {
   const [remembered] = useState(() => worktreeId === undefined ? undefined : rememberedPanels.get(worktreeId));
   const [open, setOpen] = useState(() => savedCodeOpen(worktreeId));
   const [mode, setModeState] = useState<CodePanelMode>(remembered?.mode ?? 'working');
@@ -377,6 +378,7 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
     })();
   }, [changeSignal, open, worktreeId, mode, commitSha, patch, fetchPatch]);
 
+  // reveal one explicit comparison
   const openChanges = useCallback((next: CodePanelMode, path?: string) => {
     restoring.current = false;
     // opening Changes leaves any File view the panel was showing
@@ -391,8 +393,10 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
     // read as "not part of the current changes".
     setRefreshToken(token => token + 1);
     saveCodeOpen(worktreeId, true);
-  }, [worktreeId]);
+    onOpen?.();
+  }, [worktreeId, onOpen]);
 
+  // reveal one explicit commit
   const openCommit = useCallback((next: CodePanelCommit) => {
     restoring.current = false;
     previewRequest.current += 1;
@@ -402,7 +406,8 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
     setOpen(true);
     setRefreshToken(token => token + 1);
     saveCodeOpen(worktreeId, true);
-  }, [worktreeId]);
+    onOpen?.();
+  }, [worktreeId, onOpen]);
 
   // open a transient file from a legacy path body or an explicit token body
   const openFilePreview = useCallback((path: string, previewUrl: string, options?: { body?: unknown; source?: 'files' | 'notes'; onReturn?: () => void }) => {
@@ -411,6 +416,7 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
     const origin = { ...(options?.source === undefined ? {} : { source: options.source }), ...(options?.onReturn === undefined ? {} : { onReturn: options.onReturn }) };
     setFilePreview({ path, state: 'loading', ...origin });
     setOpen(true);
+    onOpen?.();
     void (async () => {
       try {
         const response = await request(previewUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(options?.body ?? { path }) });
@@ -423,7 +429,7 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
         if (previewRequest.current === id) setFilePreview({ path, state: 'error', ...origin });
       }
     })();
-  }, [request]);
+  }, [request, onOpen]);
 
   // open a transient settings preview from already-redacted snapshot content
   const openContentPreview = useCallback((path: string, content: string) => {
@@ -435,7 +441,8 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
       preview: { path, size: new TextEncoder().encode(content).byteLength, truncated: false, binary: false, content }
     });
     setOpen(true);
-  }, []);
+    onOpen?.();
+  }, [onOpen]);
 
   // leave the preview while retaining an explicitly opened comparison
   const closeFilePreview = useCallback(() => {

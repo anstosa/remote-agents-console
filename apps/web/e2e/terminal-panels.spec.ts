@@ -25,7 +25,7 @@ const agentPanes: Pane[] = [
 // A live-mutable pane set + prompt capture, so a spec can change what the panes API returns
 // (a reload dropping a gone pane, a New shell appearing) between navigations. A DELETE prunes
 // the ended pane and records its query, a PATCH renames one, mirroring the real panes API.
-const routeApi = (page: Page, options: { panes: () => Pane[]; onShell?: () => string; prompts?: string[]; deleted?: string[]; deleteStatus?: (paneId: string, confirmed: boolean) => number | { status: number; busy?: boolean }; renamed?: { paneId: string; name: string }[]; notes?: Note[]; savedNotes?: string[]; noteCreateStatus?: () => number } = { panes: () => agentPanes }) =>
+const routeApi = (page: Page, options: { panes: () => Pane[]; onShell?: () => string; prompts?: string[]; deleted?: string[]; deleteStatus?: (paneId: string, confirmed: boolean) => number | { status: number; busy?: boolean }; renamed?: { paneId: string; name: string }[]; notes?: Note[]; savedNotes?: string[]; noteCreateStatus?: () => number; noteCreateGate?: Promise<void> } = { panes: () => agentPanes }) =>
   page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -39,6 +39,8 @@ const routeApi = (page: Page, options: { panes: () => Pane[]; onShell?: () => st
     if (path === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes: options.notes ?? [] } });
     // create a note through the shared persistence boundary
     if (path === '/api/worktrees/cora/notes' && request.method() === 'POST') {
+      // allow lifecycle tests to close the workspace during creation
+      if (options.noteCreateGate !== undefined) await options.noteCreateGate;
       const status = options.noteCreateStatus?.() ?? 201;
       // retain selection after a rejected note create
       if (status < 200 || status >= 300) return route.fulfill({ status, json: { error: 'create failed' } });
@@ -511,6 +513,10 @@ test('Terminal selection actions append to the prompt and create a note from ful
   await seedPaneSize(page, '%5', 80, 24);
   await pushBytes(page, '%5', `${'\r\n'.repeat(8)}Selected terminal note text`);
 
+  // hide the destination while retaining the Terminal source
+  const agentPanel = page.locator('.agent-panel');
+  await page.getByRole('button', { name: 'Minimize agent output' }).click();
+  await expect(agentPanel).toHaveCount(0);
   const terminal = page.locator('.terminal-pane[data-panel-key="%5"]');
   await selectTerminalText(page, terminal, 'Selected terminal note text');
   const toolbar = terminal.getByRole('toolbar', { name: 'Selection actions for terminal build' });
@@ -527,7 +533,9 @@ test('Terminal selection actions append to the prompt and create a note from ful
 
   await selectTerminalText(page, terminal, 'Selected terminal note text');
   await toolbar.getByRole('button', { name: 'Add to prompt', exact: true }).click();
+  await expect(agentPanel).toBeVisible();
   await expect(prompt).toHaveValue(`existing draft\n\n${selectedText}`);
+  await expect(prompt).toBeFocused();
   expect(prompts).toEqual([]);
   await expect(toolbar).toBeHidden();
   await expect(terminal.locator('.xterm-selection > div')).toHaveCount(0);
@@ -659,6 +667,54 @@ test('a phone Terminal keeps its selected text when note creation fails', async 
   await expect.poll(() => savedNotes).toContain('Retryable');
   expect(notes[0]).toMatchObject({ text: 'Retryable', title: 'Retryable' });
   await context.close();
+});
+
+// keep delayed note creation behind deliberate workspace closure
+test('a delayed terminal note creation cannot reopen a workspace closed during the request', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await installPaneMock(page);
+  const notes: Note[] = [];
+  const savedNotes: string[] = [];
+  let releaseCreate: (() => void) | undefined;
+  const noteCreateGate = new Promise<void>(resolve => { releaseCreate = resolve; });
+  await routeApi(page, { panes: () => agentPanes, notes, savedNotes, noteCreateGate });
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await openPicker(page);
+  await page.getByRole('menuitem', { name: /build/u }).click();
+  await seedPaneSize(page, '%5', 80, 24);
+  await pushBytes(page, '%5', `${'\r\n'.repeat(8)}Late terminal note`);
+
+  const terminal = page.locator('.terminal-pane[data-panel-key="%5"]');
+  await selectTerminalText(page, terminal, 'Late terminal note');
+  const create = terminal.getByRole('toolbar', { name: 'Selection actions for terminal build' }).getByRole('button', { name: 'Create note', exact: true });
+  const createRequest = page.waitForRequest(request => new URL(request.url()).pathname === '/api/worktrees/cora/notes' && request.method() === 'POST');
+  await create.click();
+  await createRequest;
+
+  try {
+    // commit deliberate empty intent before the server answers
+    await page.getByRole('tab', { name: /^Cora —/u }).click({ button: 'right' });
+    await page.getByRole('menu', { name: 'Cora workspace' }).getByRole('menuitem', { name: 'Close all splits' }).click();
+    await expect(page.locator('.agent-panel, .terminal-pane, .note-pane')).toHaveCount(0);
+
+    const createResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/worktrees/cora/notes' && response.request().method() === 'POST');
+    releaseCreate?.();
+    expect((await createResponse).status()).toBe(201);
+    await expect.poll(() => savedNotes[0]).toContain('Late terminal');
+    await expect(page.locator('.agent-panel, .terminal-pane, .note-pane')).toHaveCount(0);
+
+    // a later explicit restore must keep its own destination
+    const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+    await toolbar.getByRole('button', { name: 'Show agent' }).click();
+    const agentPanel = page.locator('.agent-panel');
+    await expect(agentPanel).toBeVisible();
+    await expect.poll(() => agentPanel.evaluate(element => element === document.activeElement || element.contains(document.activeElement))).toBe(true);
+    await expect(page.locator('.note-pane')).toHaveCount(0);
+  } finally {
+    // release the route during failed assertions and teardown
+    releaseCreate?.();
+  }
 });
 
 // hidden agent output releases its selection behind terminal fullscreen

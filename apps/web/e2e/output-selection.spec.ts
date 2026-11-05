@@ -104,6 +104,9 @@ test('shows selection actions for a terminal drag selection and adds to the prom
 
   await page.goto('/');
   await seedPaneSize(page, 'agent-1', 80, 24);
+  const agentPanel = page.locator('.agent-panel');
+  await page.getByRole('button', { name: 'Expand agent output' }).click();
+  await expect(agentPanel).toHaveClass(/\bexpanded\b/u);
   // Several rows down so the selectable row sits well inside the output (the stream
   // writes top-down; the old snapshot bottom-aligned its text).
   await pushBytes(page, 'agent-1', '\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nSelectable output text\r\n');
@@ -132,7 +135,10 @@ test('shows selection actions for a terminal drag selection and adds to the prom
   await expect(toolbar.getByRole('button', { name: 'Create note' })).toBeVisible();
   await expect(toolbar.getByRole('button', { name: 'Copy' })).toBeVisible();
   await toolbar.getByRole('button', { name: 'Add to prompt' }).click();
-  await expect(page.getByRole('textbox', { name: 'Prompt' })).not.toHaveValue('');
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect(prompt).not.toHaveValue('');
+  await expect(prompt).toBeFocused();
+  await expect(agentPanel).toHaveClass(/\bexpanded\b/u);
   // the action closes the toolbar and deselects the text
   await expect(toolbar).toBeHidden();
   await expect(page.locator('.log-canvas .xterm-selection > div')).toHaveCount(0);
@@ -334,11 +340,24 @@ test('a native output selection creates and appends notes, copies, and guards th
   await toolbar.getByRole('button', { name: 'Append to note' }).click();
   await expect.poll(() => savedNotes).toContain('Selectable\n\nSelectable');
   await expect(toolbar).toBeHidden();
+  const notePane = page.getByRole('dialog', { name: 'Note' });
+  await expect(notePane).toBeInViewport({ ratio: 0.99 });
+  await expect.poll(() => notePane.evaluate(element => element === document.activeElement || element.contains(document.activeElement))).toBe(true);
+
+  // repeat the explicit transfer after returning to its source
+  await chooseSplit(page, 'Agent output');
+  await selectWord();
+  await toolbar.getByRole('button', { name: 'Append to note' }).click();
+  await expect.poll(() => savedNotes).toContain('Selectable\n\nSelectable\n\nSelectable');
+  await expect(notePane).toBeInViewport({ ratio: 0.99 });
+  await expect.poll(() => notePane.evaluate(element => element === document.activeElement || element.contains(document.activeElement))).toBe(true);
 
   // Add to prompt fills the composer.
+  await chooseSplit(page, 'Agent output');
   await selectWord();
   await toolbar.getByRole('button', { name: 'Add to prompt' }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveValue('Selectable');
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeFocused();
   await expect(toolbar).toBeHidden();
 
   // The yank and Ctrl+Shift+C copy shortcuts do not fire while the composer owns keys.
