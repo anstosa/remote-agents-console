@@ -1,6 +1,6 @@
 import { createPortal } from 'react-dom';
 import { type ContextType, type CSSProperties, lazy, type ReactNode, Suspense, type UIEvent, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { PanelExpandContext, PanelHeader, PanelIcon, usePanelExpand, usePhoneLayout } from './panel-header.js';
+import { PanelExpandContext, PanelHeader, PanelIcon, usePanelExpand, usePhoneLayout, type PanelAction } from './panel-header.js';
 import type { CommentAnchor, ReviewDiffComment, ReviewDiffRange, ReviewDiffSide, ReviewDiffSuggestion } from './code-panel/review-diffs.js';
 import { AskThreadView, useLineAsks } from './ask-thread.js';
 import { askLines, useAskThreads, type LinesAskAnchor } from './asks.js';
@@ -454,7 +454,7 @@ export function ReviewPanelColumn({ onSlot }: { onSlot: (slot: ReviewPanelSlot |
 // (and a Since my review tour's replies to my earlier threads) there as a draft review;
 // `projectId`, the reviewed Worktree's github.com Project, is where the overview reads its description.
 // `onError` raises a failure the panel has no place to show, such as a diff's lines not expanding.
-export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, projectId, onMinimize, onDismiss, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent, onError }: { launch: ReviewLaunch; sendAgentId?: string; request: ReviewRequest; slot?: ReviewPanelSlot; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: ReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; projectId?: string; onMinimize: () => void; onDismiss: () => Promise<boolean>; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void; onError?: (message: string, detail: string) => void }) {
+export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, projectId, onMinimize, onDismiss, onNewReview, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent, onError }: { launch: ReviewLaunch; sendAgentId?: string; request: ReviewRequest; slot?: ReviewPanelSlot; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: ReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; projectId?: string; onMinimize: () => void; onDismiss: () => Promise<boolean>; onNewReview?: (confirmation?: string) => void; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void; onError?: (message: string, detail: string) => void }) {
   // the tour's prose reads at the terminal font size, as its diffs do
   const fontSize = useTerminalFontSize();
   // the Comparison is fixed for the review's lifetime: changing it means starting again
@@ -721,6 +721,9 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
       const pending = body.job;
       const reviewJob = body.codeReview !== null && typeof body.codeReview === 'object' ? (body.codeReview as { job?: unknown }).job : undefined;
       const failure = responseFailure(body);
+      // an accepted start replaced the stored tour, so the work saved on it goes too, even when the
+      // new tour comes back with the same identity
+      if (response.ok) saveReviewDraft(launch.worktreeId, undefined);
       // reap jobs created after local closure
       if (closed || generation.current !== run) {
         if (response.status === 202 && body.status === 'pending' && isReviewJob(pending)) void request(`/api/review-tour/jobs/${encodeURIComponent(pending.id)}`, { method: 'DELETE' }, false);
@@ -1229,11 +1232,14 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
     {pendingComments + pendingReplies + unpostedSections.length > 0 && <p>{[...(pendingComments > 0 ? [plural(pendingComments, 'comment')] : []), ...(pendingReplies > 0 ? [plural(pendingReplies, 'reply', 'replies')] : []), ...(unpostedSections.length > 0 ? [plural(unpostedSections.length, 'note')] : [])].join(' and ')} not posted yet{unpostedComments.length > maxPostComments || sectionBatch(unpostedSections).length < unpostedSections.length ? ' — one post cannot take them all; Post again for the rest' : ''}.</p>}
     <small>Comments and notes already posted are not updated by later edits; new comments and new or changed notes are added to the review.</small>
   </section>;
+  // open the start sheet for this Worktree, asking first when that would discard unposted work
+  const unposted = [...(unpostedComments.length > 0 ? [plural(unpostedComments.length, 'comment')] : []), ...(unpostedReplies.length > 0 ? [plural(unpostedReplies.length, 'reply', 'replies')] : []), ...(unpostedSections.length > 0 ? [plural(unpostedSections.length, 'note')] : [])];
+  const newReview: PanelAction | undefined = onNewReview === undefined || state === 'loading' ? undefined : { key: 'new-review', label: 'New review…', title: 'Start a new guided review of this Worktree', icon: <PanelIcon path="M12 5v14M5 12h14" />, onSelect: () => onNewReview(unposted.length === 0 ? undefined : `Start a new review? The open tour's unposted ${unposted.join(' and ')} will be discarded.`) };
   // keep generation and freshness polling mounted while minimized or out of view
   if (slot === undefined) return null;
   const title = tour ? displayedTourTitle(tour) : 'Generating change tour';
   const content = <section ref={setPanel} className={`review-tour${compact ? ' compact' : ''}`} role="region" aria-label={title} tabIndex={-1} onKeyDown={panelKey}>
-    <PanelHeader panelKey="review" label="guided review" title={<span className="review-tour-title" title={`${headerLabel} · ${title}`}><small>{headerLabel}</small>{title}</span>} close={{ key: 'minimize', label: 'Minimize guided review', title: 'Minimize (the review is kept)', icon: <PanelIcon path="M5 12h14" />, onSelect: onMinimize }} />
+    <PanelHeader panelKey="review" label="guided review" secondary={newReview === undefined ? [] : [newReview]} title={<span className="review-tour-title" title={`${headerLabel} · ${title}`}><small>{headerLabel}</small>{title}</span>} close={{ key: 'minimize', label: 'Minimize guided review', title: 'Minimize (the review is kept)', icon: <PanelIcon path="M5 12h14" />, onSelect: onMinimize }} />
     <div className="review-tour-content">
     {tour && stale && <div className="review-tour-stale" role="alert"><strong>Changes updated</strong><span>This cached review is out of date.</span>{dismissError && <span>{dismissError}</span>}{dismissButton}<button type="button" disabled={dismissing} onClick={() => { setStale(false); setRetry(value => value + 1); setState('loading'); }}>Regenerate</button></div>}
     {state === 'loading' && <div className="review-tour-message progress-border progress-peach" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />{tourRun?.needsInput === true ? <><strong>The tour needs input</strong><p>{agentName} asked a question in its pane. Answer it there to continue.</p></> : <><strong>Building the narrated tour…</strong><p>The AI is organizing the selected implementation changes into logical steps.</p></>}{tourRun !== undefined && onOpenAgent !== undefined && <button type="button" onClick={() => openRun(tourRun)}>Open pane</button>}<button type="button" onClick={() => { generation.current += 1; if (job !== undefined) void request(`/api/review-tour/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' }, false); cancelCodeReview(); setState('cancelled'); }}>Cancel</button></div>}

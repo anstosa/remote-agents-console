@@ -151,12 +151,13 @@ function useSinceReview(request: (url: string, init?: RequestInit) => Promise<Re
 }
 
 // Start a guided review: the Comparison (scope, base, Tests, Docs) and the tour's effort. Opened from
-// the Review button when the Worktree has no tour, or from a commit in the flyout's commit list, which
-// fixes the scope to that commit; `prBase` is the flyout's PR base. The All PR base
+// the Review button when the Worktree has no tour, from an open tour's New review…, or from a commit in
+// the flyout's commit list, which fixes the scope to that commit; `prBase` is the flyout's PR base. The All PR base
 // can be picked from origin's branches; Start saves a changed pick as the branch's `gh-merge-base`,
 // which outranks a pull request's base, before launching. Cancel saves nothing.
 // Tests, Docs and the AI Code review open as last started; `codeReview` absent hides the review.
-export function ReviewStartSheet({ target, prBase, request, tour, codeReview, onStart, onCancel }: { target: ReviewTarget; prBase?: string; request: (url: string, init?: RequestInit) => Promise<Response>; tour?: ReviewTourCapability; codeReview?: CodeReviewCapability; onStart: (launch: ReviewLaunch) => void; onCancel: () => void }) {
+// `confirmation` is asked before Start does anything, when starting would discard work.
+export function ReviewStartSheet({ target, prBase, request, tour, codeReview, confirmation, onStart, onCancel }: { target: ReviewTarget; prBase?: string; request: (url: string, init?: RequestInit) => Promise<Response>; tour?: ReviewTourCapability; codeReview?: CodeReviewCapability; confirmation?: string; onStart: (launch: ReviewLaunch) => void; onCancel: () => void }) {
   // a commit target fixes its scope; this is the operator's pick otherwise
   const [scope, setScope] = useState<'working' | 'pr' | 'since-review'>(target.scope === 'pr' && prBase !== undefined ? 'pr' : 'working');
   // a just-launched Agent's PR base can arrive after the sheet opens; take the asked-for All PR then
@@ -225,6 +226,7 @@ export function ReviewStartSheet({ target, prBase, request, tour, codeReview, on
   const prReady = prBase !== undefined || (pickable && base !== '');
   // send only the choices that differ from the configured defaults
   const start = async () => {
+    if (confirmation !== undefined && !window.confirm(confirmation)) return;
     if (scope === 'pr' && baseChanged) {
       setSaving(true);
       setSaveError(undefined);

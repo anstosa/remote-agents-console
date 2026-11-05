@@ -2333,6 +2333,59 @@ test('resumes a tour\'s notes, comments and step after a reload', async ({ page 
   await expect(dialog.getByLabel('Relevant changes').locator('.review-tour-inline-comment')).toContainText('Guard x.');
 });
 
+// a ready tour starts the next one from its own header: Cancel keeps it, unposted work is confirmed
+// first, and the new tour (here Since my review) takes its place
+test('starts a new review from an open tour, confirming before its unposted comments are discarded', async ({ page }) => {
+  const reviewedCommit = `a1b2c3d${'0'.repeat(33)}`;
+  const sinceTour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, baseBranch: 'main', base: 'a1b2c3d (rebased)', includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: postRoutePatch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }] };
+  const jobRequests: unknown[] = [];
+  let generated = false;
+  const { dialog } = await openPostTour(page);
+  await page.route('**/api/worktrees/owen/review-tour/since-review', route => route.fulfill({ json: { status: 'available', reviewedCommit, baseBranch: 'main', head: 'f'.repeat(40) } }));
+  await page.route('**/api/worktrees/owen/review-tour/jobs', route => { jobRequests.push(route.request().postDataJSON()); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-new') } }); });
+  await page.route('**/api/review-tour/jobs/job-new', route => route.fulfill(generated ? { json: { status: 'ready', tour: sinceTour } } : { status: 202, json: { status: 'pending', job: pendingJob('job-new') } }));
+  await commentOnLine(dialog, 'const x = 9;', 'line 5', 'Guard x.');
+
+  // Cancel returns to the tour as it was
+  await dialog.getByRole('button', { name: 'New review…' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Start guided review' });
+  await sheet.getByRole('button', { name: 'Cancel' }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect(dialog.getByLabel('Relevant changes').locator('.review-tour-inline-comment')).toContainText('Guard x.');
+
+  // declining the confirm keeps the tour and starts nothing
+  await dialog.getByRole('button', { name: 'New review…' }).click();
+  await sheet.getByRole('button', { name: 'Since my review (a1b2c3d)' }).click();
+  const confirms: string[] = [];
+  page.once('dialog', prompt => { confirms.push(prompt.message()); void prompt.dismiss(); });
+  await sheet.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect.poll(() => confirms).toEqual([expect.stringContaining('1 comment')]);
+  await expect(sheet).toBeVisible();
+  expect(jobRequests).toEqual([]);
+  await sheet.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dialog.getByLabel('Relevant changes').locator('.review-tour-inline-comment')).toContainText('Guard x.');
+
+  // accepting it replaces the tour and its draft
+  await dialog.getByRole('button', { name: 'New review…' }).click();
+  await sheet.getByRole('button', { name: 'Since my review (a1b2c3d)' }).click();
+  page.once('dialog', prompt => void prompt.accept());
+  await sheet.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect.poll(() => jobRequests).toEqual([expect.objectContaining({ scope: 'since-review', reviewedCommit, baseBranch: 'main' })]);
+  await expect(dialog).toHaveCount(0);
+  // the old tour's draft is gone as soon as the server takes the start, not only once the new tour is saved over it
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('remote-agent-console:review-draft:owen'))).toBeNull();
+  generated = true;
+  await page.route('**/api/worktrees/owen/review-tour/fingerprint**', route => route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, baseBranch: 'main', base: sinceTour.base, includeTests: false, includeDocs: false, fingerprint: sinceTour.fingerprint } } }));
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  const replaced = page.getByRole('region', { name: 'Review fixes' });
+  await replaced.getByRole('button', { name: 'Start tour' }).click();
+  await expect(replaced.getByLabel('Relevant changes').getByText('const x = 9;', { exact: true })).toBeVisible();
+  await expect(replaced.locator('.review-tour-inline-comment')).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('remote-agent-console:review-draft:owen'))).not.toContain('Guard x.');
+});
+
 // verify a tour started in another Worktree neither replaces this one's review nor, when this one is
 // opened again, cancels its own generation
 test('keeps one review per Worktree while another generates', async ({ page }) => {

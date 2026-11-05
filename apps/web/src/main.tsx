@@ -9540,8 +9540,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const [reviewSessions, setReviewSessions] = useState<Record<string, ReviewSession>>({});
   // counts tour starts, so each start mounts a fresh dialog
   const [reviewStarts, setReviewStarts] = useState(0);
-  // the Worktree whose start sheet is open
-  const [reviewStart, setReviewStart] = useState<ReviewTarget>();
+  // the Worktree whose start sheet is open; `fromTour` when its open tour asked, with what Start must confirm
+  const [reviewStart, setReviewStart] = useState<ReviewTarget & { fromTour?: true; confirmation?: string }>();
   // the open review panel's column in the active Worktree's split, while that tab is in view
   const [reviewSlot, setReviewSlot] = useState<ReviewPanelSlot>();
   const [reviewRestoringWorktreeId, setReviewRestoringWorktreeId] = useState<string>();
@@ -10763,10 +10763,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     setReviewStarts(count => count + 1);
     setReviewSessions(current => ({ ...current, [launch.worktreeId]: { launch, start: reviewStarts + 1, initialCodeReview: {}, minimized: true, indicator: { generating: true, stale: false } } }));
   };
-  // close the start sheet, handing focus back to the Git status control it came from
+  // close the start sheet, handing focus back to the tour or the Git status control it came from
   const cancelReviewStart = () => {
+    const opener = reviewStart?.fromTour !== true ? '.workspace-toolbar-actions .git-status-summary' : '.review-tour';
     setReviewStart(undefined);
-    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.workspace-toolbar-actions .git-status-summary')?.focus());
+    window.requestAnimationFrame(() => document.querySelector<HTMLElement>(opener)?.focus());
   };
   // restore one durable review without starting generation
   const openStoredReview = async (stored: StoredReviewSummary) => {
@@ -10967,9 +10968,9 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const reviewProject = projectOfWorktree(data.projects, worktreeId);
     // the reviewed branch's open or draft pull request, which an All PR tour can post its feedback to
     const pullRequest = [...data.agents.filter(candidate => candidate.worktreeId === worktreeId).map(candidate => candidate.pullRequest), worktrees.find(candidate => candidate.id === worktreeId)?.pullRequest].find(candidate => candidate !== undefined && candidate.status !== 'merged');
-    return <ReviewTourPanel key={`${worktreeId}:${initialTour?.fingerprint ?? `start-${start}`}`} launch={launch} sendAgentId={reviewSendAgent(worktreeId, data.agents, agent)?.id} request={request} {...(worktreeId === activeWorktreeId ? { slot: reviewSlot } : {})} initialTour={initialTour} tourAgent={data.reviewTour?.agent} {...(initialTour === undefined ? {} : { initialCodeReview: initialCodeReview.review, initialCodeReviewJob: initialCodeReview.job })} codeReviewCapability={codeReviewCapability(data.codeReview)} pullRequest={pullRequest} projectId={reviewProject?.github === undefined ? undefined : reviewProject.id} onMinimize={() => minimizeReview(worktreeId)} onDismiss={() => dismissReview(worktreeId)} onIndicatorChange={indicator => setReviewIndicator(worktreeId, indicator)} onReady={() => notifyReviewReady(launch)} onOpenAgent={setActivateAgentId} onError={(message, detail) => showOperationFeedback({ tone: 'error', message, detail, worktreeId })} {...(data.editor === true ? { onOpenInEditor: (target: EditorTarget) => void openEditorAt(worktreeId, target) } : {})} />;
+    return <ReviewTourPanel key={`${worktreeId}:${initialTour?.fingerprint ?? `start-${start}`}`} launch={launch} sendAgentId={reviewSendAgent(worktreeId, data.agents, agent)?.id} request={request} {...(worktreeId === activeWorktreeId ? { slot: reviewSlot } : {})} initialTour={initialTour} tourAgent={data.reviewTour?.agent} {...(initialTour === undefined ? {} : { initialCodeReview: initialCodeReview.review, initialCodeReviewJob: initialCodeReview.job })} codeReviewCapability={codeReviewCapability(data.codeReview)} pullRequest={pullRequest} projectId={reviewProject?.github === undefined ? undefined : reviewProject.id} onMinimize={() => minimizeReview(worktreeId)} onDismiss={() => dismissReview(worktreeId)} onNewReview={confirmation => setReviewStart({ worktreeId, scope: launch.scope === 'working' ? 'working' : 'pr', fromTour: true, ...(confirmation === undefined ? {} : { confirmation }) })} onIndicatorChange={indicator => setReviewIndicator(worktreeId, indicator)} onReady={() => notifyReviewReady(launch)} onOpenAgent={setActivateAgentId} onError={(message, detail) => showOperationFeedback({ tone: 'error', message, detail, worktreeId })} {...(data.editor === true ? { onOpenInEditor: (target: EditorTarget) => void openEditorAt(worktreeId, target) } : {})} />;
   });
-  const reviewStartSheet = reviewStart === undefined ? null : <ReviewStartSheet target={reviewStart} prBase={(data.agents.find(candidate => candidate.worktreeId === reviewStart.worktreeId && candidate.gitPrStatus !== undefined) ?? worktrees.find(candidate => candidate.id === reviewStart.worktreeId))?.gitPrStatus?.base} request={request} tour={data.reviewTour} codeReview={codeReviewCapability(data.codeReview)} onStart={launchReview} onCancel={cancelReviewStart} />;
+  const reviewStartSheet = reviewStart === undefined ? null : <ReviewStartSheet target={reviewStart} prBase={(data.agents.find(candidate => candidate.worktreeId === reviewStart.worktreeId && candidate.gitPrStatus !== undefined) ?? worktrees.find(candidate => candidate.id === reviewStart.worktreeId))?.gitPrStatus?.base} request={request} tour={data.reviewTour} codeReview={codeReviewCapability(data.codeReview)} {...(reviewStart.confirmation === undefined ? {} : { confirmation: reviewStart.confirmation })} onStart={launchReview} onCancel={cancelReviewStart} />;
   const storedReview = activeWorktreeId === undefined ? undefined : data.reviews?.find(review => review.worktreeId === activeWorktreeId);
   const localReview = activeWorktreeId === undefined ? undefined : reviewSessions[activeWorktreeId];
   const activeReview = localReview !== undefined ? { ...localReview.indicator, onOpen: () => openLocalReview(localReview.launch.worktreeId), ...(localReview.minimized ? {} : { panel: <ReviewPanelColumn onSlot={setReviewSlot} /> }) } : storedReview !== undefined ? { generating: reviewRestoringWorktreeId === storedReview.worktreeId, stale: false, onOpen: () => void openStoredReview(storedReview) } : undefined;
