@@ -20,6 +20,10 @@ const maxCaptureDepth = 5_000;
 // most once a second.
 const clientSizeSubscription = 'rac-clients';
 const clientSizeSubscribeArg = `${clientSizeSubscription}::#{L:#{client_width}x#{client_height},}`;
+// Every pane's foreground command, so a viewer knows when nvim runs there (`%*` reports each pane
+// of the session separately). tmux reports all of them once when the subscription arms.
+const foregroundSubscription = 'rac-foreground';
+const foregroundSubscribeArg = `${foregroundSubscription}:%*:#{pane_current_command}`;
 // a command whose reply block does not arrive in this long is a broken connection: the
 // client fails and its viewers reconnect, mirroring run()'s SIGKILL timeout for spawns.
 // Generous because tmux orders a reply behind pending %output.
@@ -44,6 +48,9 @@ export type PaneActivitySubscriber = {
   // text copied in any pane of the session (OSC 52 under `set-clipboard on`, or a copy-mode
   // yank); the Pane stream hands it to the browser's clipboard
   onClipboard?: (text: string) => void;
+  // the pane's foreground command (tmux `pane_current_command`): its last known value right after
+  // subscribing, then each change
+  onForeground?: (command: string) => void;
   // the session or control client ended; `reason` is the Pane stream's exit reason
   // ('session ended' when tmux told us via %exit, 'control client lost' when our client
   // process died). The viewer forwards it and reconnects.
@@ -82,6 +89,7 @@ export class TmuxControlClient implements PaneClient {
   private readonly blockWaiters: BlockWaiter[] = [];
   private readonly subscribers = new Map<string, Set<PaneActivitySubscriber>>();
   private readonly inputQueues = new Map<string, Promise<boolean>>();
+  private readonly foregrounds = new Map<string, string>();
   private disposed = false;
   // resolves once the attach's own %begin/%end block has been consumed
   readonly ready: Promise<void>;
@@ -108,7 +116,10 @@ export class TmuxControlClient implements PaneClient {
     // terminal no longer re-clamps, and there is no periodic fallback. A tmux that old is not a
     // target here, so this soft-degrades rather than wedges.
     // dashboard clients neither stream panes nor coordinate viewport sizes
-    if (!options.commandOnly) void this.ready.then(() => this.command(`refresh-client -B ${clientSizeSubscribeArg}`)).catch(() => { /* a broken connection tears the client down elsewhere */ });
+    if (!options.commandOnly) {
+      void this.ready.then(() => this.command(`refresh-client -B '${clientSizeSubscribeArg}'`)).catch(() => { /* a broken connection tears the client down elsewhere */ });
+      void this.ready.then(() => this.command(`refresh-client -B '${foregroundSubscribeArg}'`)).catch(() => { /* a broken connection tears the client down elsewhere */ });
+    }
     this.child.stdout.on('data', (chunk: Buffer) => this.parser.push(chunk));
     this.child.stderr.on('data', () => { /* tmux diagnostics are not actionable here */ });
     // a write to a child whose read-end has closed (server gone) raises EPIPE
@@ -136,7 +147,10 @@ export class TmuxControlClient implements PaneClient {
       // attached, detached or resized (our client-size subscription): every viewer re-clamps.
       // Both are session-wide, so broadcast; a re-clamp on an unaffected pane is a no-op.
       case 'layout': this.notifyResize(); return;
-      case 'subscription': if (event.name === clientSizeSubscription) this.notifyResize(); return;
+      case 'subscription':
+        if (event.name === clientSizeSubscription) this.notifyResize();
+        else if (event.name === foregroundSubscription && event.pane !== undefined) this.notifyForeground(event.pane, event.value);
+        return;
       case 'paste-buffer': void this.forwardCopy(event.name); return;
       case 'exit': this.fail('session ended'); return;
     }
@@ -193,6 +207,8 @@ export class TmuxControlClient implements PaneClient {
     const set = this.subscribers.get(pane) ?? new Set<PaneActivitySubscriber>();
     set.add(subscriber);
     this.subscribers.set(pane, set);
+    const foreground = this.foregrounds.get(pane);
+    if (foreground !== undefined) queueMicrotask(() => { if (set.has(subscriber)) subscriber.onForeground?.(foreground); });
     return () => {
       set.delete(subscriber);
       if (set.size === 0) this.subscribers.delete(pane);
@@ -224,6 +240,11 @@ export class TmuxControlClient implements PaneClient {
       subscriber.onActivity?.();
       if (subscriber.onOutput !== undefined) subscriber.onOutput(bytes ??= decodeControlOutput(data));
     }
+  }
+
+  private notifyForeground(pane: string, command: string): void {
+    this.foregrounds.set(pane, command);
+    for (const subscriber of [...this.subscribers.get(pane) ?? []]) subscriber.onForeground?.(command);
   }
 
   // a layout or attached-client change reaches every viewer of this session

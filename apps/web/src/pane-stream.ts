@@ -39,7 +39,9 @@ export type PaneServerFrame =
   // The Agent pane's latest Turn.
   | { type: 'metadata'; metadata: PaneMetadata }
   // Text copied in a pane of the session (OSC 52 or a tmux copy-mode yank).
-  | { type: 'clipboard'; text: string };
+  | { type: 'clipboard'; text: string }
+  // The pane's foreground command (tmux `pane_current_command`), on subscribe and on change.
+  | { type: 'foreground'; command: string };
 
 export interface PaneConnectionHandlers {
   onOpen: () => void;

@@ -33,6 +33,7 @@ import { isStackOperationLog, isStackProcessOutput, type StackAction, type Stack
 import { StackPanel } from './stack-panel.js';
 import { StackIcon, stackGlyphs, type ProcessAction, type StackHandlers } from './stack-controls.js';
 import { isPromptKeyboardTarget, useWorkspaceCycleKeys } from './tab-navigation.js';
+import { isVimCommand } from './terminal-navigation.js';
 import { confirmKey, KeyboardLayer, KeyPicker, keyTarget, shortcutSettingsNavigationEvent, terminalBindingAction, useKeyAction, useKeyActions, type KeyPickerOption } from './keyboard.js';
 import type { KeysConfig } from '../../server/src/config/keys.js';
 import { applyColorTheme, useColorTheme } from './color-theme.js';
@@ -10383,6 +10384,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const next = wrap ? panels[(index + step + panels.length) % panels.length] : panels[index + step];
     if (next !== undefined) view.jump(next, true);
   });
+  // a key typed into a Terminal running vim is vim's; vim at its edge hands back over OSC 7337
+  const typedIntoVim = (event: KeyboardEvent | undefined) => event !== undefined && isVimCommand(keyTarget(event)?.closest<HTMLElement>('.streamed-terminal')?.dataset.foreground);
   useKeyActions({
     'new-terminal': onPanels(view => view.openTerminal()),
     // the split is columns only, so beside and below both open a Terminal panel
@@ -10393,6 +10396,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     'previous-panel': stepPanel(-1, true),
     'select-panel-right': stepPanel(1, false),
     'select-panel-left': stepPanel(-1, false),
+    'navigate-left': event => typedIntoVim(event) ? false : stepPanel(-1, true)(),
+    'navigate-right': event => typedIntoVim(event) ? false : stepPanel(1, true)(),
     'last-panel': onPanels(view => { const last = view.lastPanel(); if (last !== undefined) view.jump(last, true); }),
     'toggle-expand': onPanels((view, _panels, current) => { if (current !== undefined) view.toggleExpand(current); }),
     'toggle-code': onPanels(view => { if (view.toggleCode === undefined) return false; view.toggleCode(); }),

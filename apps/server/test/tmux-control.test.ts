@@ -38,6 +38,8 @@ const scriptedRoots: string[] = [];
 // scripted replies isolate control-mode ordering from a live tmux server
 type ScriptedScenario = {
   captureError?: boolean;
+  // the foreground command %1 reports once the foreground subscription arms
+  foreground?: string;
   captureLines?: string[];
   metaError?: boolean;
   outputWrite?: 'same' | 'next';
@@ -82,7 +84,10 @@ process.stdin.on('data', chunk => {
     // detach ends the fixture
     if (command === 'detach') process.exit(0);
     // subscriptions are unrelated to the seed sequence
-    if (command.startsWith('refresh-client ')) process.stdout.write(block([]));
+    if (command.startsWith('refresh-client ')) {
+      process.stdout.write(block([]));
+      if (scenario.foreground !== undefined && command.includes('rac-foreground:%*:')) process.stdout.write(\`%subscription-changed rac-foreground $1 @1 0 %1 : ${'${scenario.foreground}'}\\n%subscription-changed rac-foreground $1 @1 1 %2 : zsh\\n\`);
+    }
     // metadata selects the requested screen mode
     else if (command.startsWith('display-message ')) {
       process.stdout.write(block(scenario.metaError ? ['metadata failed'] : ['0 2 3 1 0 0 0 1'], !scenario.metaError));
@@ -151,6 +156,27 @@ async function eventually(check: () => boolean): Promise<void> {
   }
   throw new Error('control client did not reach the expected state');
 }
+
+describe('tmux control client foreground command', () => {
+  it("delivers a pane's foreground command to that pane's subscribers, including later ones", async () => {
+    const { client } = await scriptedClient({ foreground: 'nvim' });
+    const viewer = { onReseed: () => {}, onResize: () => {}, onExit: () => {} };
+    const first: string[] = [];
+    const later: string[] = [];
+    try {
+      client.subscribe('%1', { ...viewer, onForeground: command => { first.push(command); } });
+      await eventually(() => first.length > 0);
+      // a viewer that subscribes after the report gets the remembered value
+      client.subscribe('%1', { ...viewer, onForeground: command => { later.push(command); } });
+      await eventually(() => later.length > 0);
+
+      expect(first).toEqual(['nvim']);
+      expect(later).toEqual(['nvim']);
+    } finally {
+      client.dispose();
+    }
+  });
+});
 
 describe('tmux control client seed boundary', () => {
   it('delivers the seed before same-chunk output without replaying earlier output', async () => {

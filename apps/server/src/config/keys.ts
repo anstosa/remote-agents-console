@@ -31,6 +31,9 @@ export const keyActions: Record<string, { description: string; repeat?: true }> 
   'last-panel': { description: 'Last used panel' },
   'select-panel-left': { description: 'Panel to the left', repeat: true },
   'select-panel-right': { description: 'Panel to the right', repeat: true },
+  // vim-tmux-navigator for RAC panels: the key goes to a focused Terminal running vim instead
+  'navigate-left': { description: 'Panel to the left, or the vim split there' },
+  'navigate-right': { description: 'Panel to the right, or the vim split there' },
   'toggle-expand': { description: 'Expand or restore the current panel' },
   'toggle-code': { description: 'Open or close the Code panel' },
   'toggle-stack': { description: 'Open or close the Stack panel' },

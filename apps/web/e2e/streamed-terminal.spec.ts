@@ -345,6 +345,40 @@ test('typed keys are sent as input frames through the panel modifier transform',
   await expect.poll(() => drive(page, 'inputData')).toBe('HI');
 });
 
+test("marks the container with the pane's foreground command", async ({ page }) => {
+  await setup(page);
+  await drive(page, 'pushFrame', { type: 'foreground', command: 'nvim' });
+  await expect(page.locator('#term')).toHaveAttribute('data-foreground', 'nvim');
+  await drive(page, 'pushFrame', { type: 'foreground', command: 'zsh' });
+  await expect(page.locator('#term')).toHaveAttribute('data-foreground', 'zsh');
+});
+
+test("moves panels on vim's OSC 7337 edge handoff only from the focused terminal", async ({ page }) => {
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'recordKeyActions', 'previous-panel', 'next-panel');
+  await drive(page, 'focusTerminal');
+  await drive(page, 'pushBytes', 'a\x1b]7337;navigate;left\x07b\x1b]7337;navigate;right\x1b\\c\x1b]7337;navigate;up\x07');
+  await expect.poll(() => drive(page, 'keyActionsRan')).toEqual(['previous-panel', 'next-panel']);
+  // the sequence itself never prints
+  await expect.poll(() => drive<string>(page, 'screenText')).toContain('abc');
+  expect(await drive<string>(page, 'screenText')).not.toContain('7337');
+
+  await drive(page, 'blurTerminal');
+  await drive(page, 'pushBytes', '\x1b]7337;navigate;left\x07d');
+  await expect.poll(() => drive<string>(page, 'screenText')).toContain('abcd');
+  expect(await drive(page, 'keyActionsRan')).toEqual(['previous-panel', 'next-panel']);
+});
+
+test('Ctrl+H and Ctrl+L reach the pane as vim expects them', async ({ page }) => {
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'focusTerminal');
+  await page.keyboard.press('Control+h');
+  await page.keyboard.press('Control+l');
+  await expect.poll(() => drive(page, 'inputData')).toBe('\x08\x0c');
+});
+
 test('an exit keeps the terminal mounted and shows a status', async ({ page }) => {
   await setup(page, { reconnectDelayMs: 60_000 });
   await drive(page, 'pushSize', 40, 10);

@@ -80,7 +80,8 @@ function fakePaneStream() {
     fire: (event: 'onReseed' | 'onResize') => subscriber?.[event]?.(),
     exit: (reason: string) => subscriber?.onExit?.(reason),
     activity: () => subscriber?.onActivity?.(),
-    clipboard: (text: string) => subscriber?.onClipboard?.(text)
+    clipboard: (text: string) => subscriber?.onClipboard?.(text),
+    foreground: (command: string) => subscriber?.onForeground?.(command)
   };
 }
 
@@ -409,6 +410,17 @@ describe('/ws/pane clipboard', () => {
     stream.clipboard('yanked line\n');
     await waitFor(() => conn.frames.some(frame => frame.type === 'clipboard'));
     expect(conn.frames.find(frame => frame.type === 'clipboard')).toEqual({ type: 'clipboard', text: 'yanked line\n' });
+  });
+});
+
+describe('/ws/pane foreground', () => {
+  it("forwards the pane's foreground command as a foreground frame", async () => {
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    stream.foreground('nvim');
+    await waitFor(() => conn.frames.some(frame => frame.type === 'foreground'));
+    expect(conn.frames.find(frame => frame.type === 'foreground')).toEqual({ type: 'foreground', command: 'nvim' });
   });
 });
 

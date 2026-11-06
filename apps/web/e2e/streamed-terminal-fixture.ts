@@ -3,6 +3,7 @@ import '../src/styles.css';
 import { mountStreamedTerminal, type StreamedTerminalHandle } from '../src/streamed-terminal.js';
 import { setTerminalFontSize } from '../src/terminal-font-size.js';
 import { setColorTheme } from '../src/color-theme.js';
+import { registerKeyAction } from '../src/keyboard.js';
 import type { PaneClientFrame, PaneConnectionHandlers, PaneServerFrame } from '../src/pane-stream.js';
 
 // Mounts the streamed terminal alone in a blank page against real xterm 6.0, driven by
@@ -100,6 +101,11 @@ export const sentFrames = () => sent.map(frame => frame.type);
 export const inputFrameCount = () => sent.filter(frame => frame.type === 'input').length;
 export const ackedBytes = () => sent.filter((frame): frame is Extract<PaneClientFrame, { type: 'ack' }> => frame.type === 'ack').map(frame => frame.bytes);
 export const focusTerminal = () => handle!.focus();
+export const blurTerminal = () => (document.activeElement as HTMLElement | null)?.blur();
+// record each run of the named key actions, as the app's panel handlers would receive them
+const ranKeyActions: string[] = [];
+export const recordKeyActions = (...names: string[]) => { for (const name of names) registerKeyAction(name, () => { ranKeyActions.push(name); }); };
+export const keyActionsRan = () => [...ranKeyActions];
 const decodeInput = (data: string) => new TextDecoder().decode(Uint8Array.from(atob(data.replace(/-/gu, '+').replace(/_/gu, '/')), character => character.charCodeAt(0)));
 export const inputData = () => sent.filter((frame): frame is Extract<PaneClientFrame, { type: 'input' }> => frame.type === 'input').map(frame => decodeInput(frame.data)).join('');
 export const connectCalls = () => connectCount;

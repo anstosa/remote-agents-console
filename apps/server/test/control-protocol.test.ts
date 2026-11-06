@@ -97,13 +97,18 @@ describe('ControlProtocolParser', () => {
     expect(collect(['%unlinked-window-close @4\n'])).toEqual([{ type: 'layout', window: '@4' }]);
   });
 
-  it('surfaces a %subscription-changed by its name so the viewer re-clamps', () => {
-    // only the name routes the change; the value that follows is not parsed
-    expect(collect(['%subscription-changed rac-clients @1 : 190x50 80x24\n'])).toEqual([
-      { type: 'subscription', name: 'rac-clients' }
+  it('surfaces a %subscription-changed by its name and value', () => {
+    expect(collect(['%subscription-changed rac-clients $1 - - - : 190x50 80x24\n'])).toEqual([
+      { type: 'subscription', name: 'rac-clients', value: '190x50 80x24' }
     ]);
     expect(collect(['%subscription-changed rac-clients\n'])).toEqual([
-      { type: 'subscription', name: 'rac-clients' }
+      { type: 'subscription', name: 'rac-clients', value: '' }
+    ]);
+  });
+
+  it('names the pane a per-pane %subscription-changed reports', () => {
+    expect(collect(['%subscription-changed rac-foreground $1 @2 0 %7 : nvim\n'])).toEqual([
+      { type: 'subscription', name: 'rac-foreground', pane: '%7', value: 'nvim' }
     ]);
   });
 

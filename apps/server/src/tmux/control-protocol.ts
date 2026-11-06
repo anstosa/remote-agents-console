@@ -20,10 +20,9 @@ export type ControlEvent =
   // pane killed, taking its last pane with it); the viewer re-asserts its Size claim and,
   // finding a gone pane, ends its stream
   | { type: 'layout'; window: string }
-  // a `refresh-client -B` format subscription changed (a terminal attached, detached or resized);
-  // the viewer re-clamps. Only the name routes the change — the value is a signal, never read —
-  // and tmux reports it at most once a second.
-  | { type: 'subscription'; name: string }
+  // a `refresh-client -B` format subscription changed; tmux reports it at most once a second.
+  // `pane` is set for a per-pane (`%*`) subscription, and `value` is the format's new value
+  | { type: 'subscription'; name: string; pane?: string; value: string }
   // a paste buffer was created or replaced (a copy in a pane, or a load-buffer/set-buffer)
   | { type: 'paste-buffer'; name: string }
   | { type: 'exit'; reason: string };
@@ -146,11 +145,13 @@ export class ControlProtocolParser {
     if (window !== '') this.emit({ type: 'layout', window });
   }
 
-  // %subscription-changed name [context] : value — the name is the first token and is all the
-  // viewer needs to route the change; the value that follows is a change signal, never read
+  // %subscription-changed name $session @window index %pane : value — tmux writes `-` for the
+  // context a session or window subscription lacks
   private emitSubscription(rest: string): void {
-    const name = rest.split(' ', 1)[0] ?? '';
-    if (name !== '') this.emit({ type: 'subscription', name });
+    const marker = rest.indexOf(' : ');
+    const [name = '', ...context] = (marker < 0 ? rest : rest.slice(0, marker)).split(' ');
+    const pane = context.find(token => /^%\d+$/u.test(token));
+    if (name !== '') this.emit({ type: 'subscription', name, ...(pane === undefined ? {} : { pane }), value: marker < 0 ? '' : rest.slice(marker + 3) });
   }
 
   // %output pane-id value

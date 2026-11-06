@@ -2,6 +2,8 @@ import { Terminal as XTerm, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { installPaneStreamSafety } from './pane-safety.js';
+import { runKeyAction } from './keyboard.js';
+import { navigateDirection, navigateOsc } from './terminal-navigation.js';
 import { computeTerminalTheme, terminalFontFamily } from './terminal-theme.js';
 import { attachTerminalTouchScroll } from './terminal-touch-scroll.js';
 import { createTerminalSelectionSurface } from './terminal-selection-surface.js';
@@ -180,6 +182,13 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   terminal.loadAddon(fit);
   // Enforce the pane-stream safety table before any byte is parsed.
   installPaneStreamSafety(terminal);
+  // vim at a split edge hands navigation back to the panels; only the focused panel's vim may move
+  // focus, and the move waits until xterm finishes parsing
+  terminal.parser.registerOscHandler(navigateOsc, data => {
+    const direction = navigateDirection(data);
+    if (direction !== undefined && container.contains(document.activeElement)) queueMicrotask(() => runKeyAction(direction === 'left' ? 'previous-panel' : 'next-panel'));
+    return true;
+  });
   // retain a safe native OSC fallback when semantic metadata cannot be resolved
   terminal.options.linkHandler = {
     activate: (event, uri) => {
@@ -477,6 +486,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       // the browser allows the write only shortly after a keypress in this tab (the yank), so
       // other open tabs and devices fail quietly
       case 'clipboard': navigator.clipboard?.writeText(frame.text).catch(() => {}); break;
+      // read by the `navigate-left`/`-right` actions
+      case 'foreground': container.dataset.foreground = frame.command; break;
     }
   };
 
