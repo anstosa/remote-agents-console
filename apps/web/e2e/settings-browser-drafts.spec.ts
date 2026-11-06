@@ -367,6 +367,20 @@ test("saves usage pace from Interface without changing files", async ({ page }) 
   await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.usage-pace"))).toBeNull();
 });
 
+// keep terminals on the DOM renderer until this browser opts in to WebGL
+test("saves WebGL terminals from Interface without changing files", async ({ page }) => {
+  const { settings, state } = await setupBrowserDrafts(page, true);
+  const webgl = settings.getByRole("switch", { name: "WebGL terminals", exact: true });
+  await expect(webgl).not.toBeChecked();
+  await webgl.check();
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.terminal-webgl"))).toBe("enabled");
+  expect(state.fileSaves).toHaveLength(0);
+  await webgl.uncheck();
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.terminal-webgl"))).toBeNull();
+});
+
 // stage and persist the browser-local file activation default
 test("saves the default file action from Interface", async ({ page }) => {
   const { settings, state } = await setupBrowserDrafts(page, true);

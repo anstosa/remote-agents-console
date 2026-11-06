@@ -6,6 +6,7 @@ import { computeTerminalTheme, terminalFontFamily } from './terminal-theme.js';
 import { attachTerminalTouchScroll } from './terminal-touch-scroll.js';
 import { createTerminalSelectionSurface } from './terminal-selection-surface.js';
 import { readTerminalFontSize, subscribeTerminalFontSize } from './terminal-font-size.js';
+import { attachWebglRenderer, wantsWebglRenderer } from './terminal-webgl.js';
 import { subscribeColorTheme } from './color-theme.js';
 import { createOutputLinkOverlays } from './output-links.js';
 import { safeHttpTarget } from './terminal-link-metadata.js';
@@ -695,6 +696,12 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     scheduleOverlayRender();
   });
 
+  const releaseWebgl = wantsWebglRenderer(coarse) ? attachWebglRenderer(terminal, () => {
+    if (disposed) return;
+    scheduleViewport();
+    scheduleOverlayRender();
+  }) : undefined;
+
   // share one resize observer for terminal layout and full-height placeholders
   const resizeObserver = new ResizeObserver(() => {
     if (disposed) return;
@@ -739,6 +746,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       jump.removeEventListener('click', jumpToBottom);
       unsubscribeFont();
       unsubscribeTheme();
+      releaseWebgl?.();
       overlays.clear();
       selectionSurface?.dispose();
       terminal.dispose();

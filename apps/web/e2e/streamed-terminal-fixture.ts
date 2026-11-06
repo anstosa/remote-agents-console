@@ -121,6 +121,18 @@ export const alternateScreen = () => terminal().buffer.active.type === 'alternat
 // report the active terminal mouse mode
 export const mouseTrackingMode = () => terminal().modes.mouseTrackingMode;
 export const terminalMounted = () => host?.querySelector('.xterm') !== null;
+// the DOM renderer draws `.xterm-rows`; the WebGL renderer draws canvases in its place
+export const rendererKind = (): 'dom' | 'webgl' | 'none' =>
+  host?.querySelector('.xterm-rows') ? 'dom' : host?.querySelector('.xterm-screen canvas') ? 'webgl' : 'none';
+// drop the WebGL context as a GPU reset would; null when no canvas holds one
+export const loseWebglContext = (): boolean => {
+  for (const canvas of host?.querySelectorAll('canvas') ?? []) {
+    const gl = canvas.getContext('webgl2');
+    const lose = gl?.getExtension('WEBGL_lose_context');
+    if (lose) { lose.loseContext(); return true; }
+  }
+  return false;
+};
 
 export const screenText = (): string => {
   const buffer = terminal().buffer.active;

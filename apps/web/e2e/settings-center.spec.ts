@@ -8771,8 +8771,8 @@ for (const width of [320, 390, 1440, 2560]) {
       });
       return { grid, width: bounds.width, terminalWidth: terminal.width, rows };
     });
-    // include notification and usage controls alongside the appearance controls
-    expect(metrics.rows).toHaveLength(7);
+    // include the renderer, notification and usage controls alongside the appearance controls
+    expect(metrics.rows).toHaveLength(8);
     // prove right alignment and centering for every interface preference
     for (const row of metrics.rows) {
       expect(row.separation).toBeGreaterThanOrEqual(0);

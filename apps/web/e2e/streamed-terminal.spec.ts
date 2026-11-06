@@ -1075,3 +1075,107 @@ test('a real touch swipe over agent output keeps scrolling after the first row r
     await context.close();
   }
 });
+
+const optInToWebgl = (page: Page) => page.addInitScript(() => localStorage.setItem('rac.terminal-webgl', 'enabled'));
+
+test('renders with WebGL on a desktop browser that opted in', async ({ page }) => {
+  await optInToWebgl(page);
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'GPU-LINE\r\n');
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  expect(await drive<string>(page, 'screenText')).toContain('GPU-LINE');
+  // the grid is re-proposed after the swap and input still flows
+  expect(await drive<string[]>(page, 'sentFrames')).toContain('viewport');
+  await drive(page, 'sendInputRaw', 'x');
+  expect(await drive<string>(page, 'inputData')).toBe('x');
+});
+
+test('redraws font-size and theme changes under WebGL', async ({ page }) => {
+  await optInToWebgl(page);
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'REDRAW-LINE\r\n');
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  const screen = page.locator('#term .xterm-screen');
+  const before = await screen.screenshot();
+  await drive(page, 'setTheme', 'latte');
+  await expect.poll(async () => (await screen.screenshot()).equals(before)).toBe(false);
+  const themed = await screen.screenshot();
+  const viewports = (await drive<string[]>(page, 'sentFrames')).filter(type => type === 'viewport').length;
+  await drive(page, 'setFont', 18);
+  await expect.poll(async () => (await screen.screenshot()).equals(themed)).toBe(false);
+  // the larger cell proposes a new grid
+  await expect.poll(async () => (await drive<string[]>(page, 'sentFrames')).filter(type => type === 'viewport').length).toBeGreaterThan(viewports);
+  expect(await drive(page, 'rendererKind')).toBe('webgl');
+});
+
+// WebGL only where it was asked for and is known to work
+for (const [name, optIn, contextOptions] of [
+  ['a desktop browser that has not opted in', false, {}],
+  ['a coarse-pointer phone that opted in', true, MOBILE],
+  ['Safari that opted in', true, { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' }]
+] as const) {
+  test(`keeps ${name} on the DOM renderer`, async ({ browser, baseURL }) => {
+    const context = await browser.newContext({ baseURL: baseURL ?? undefined, ...contextOptions });
+    const page = await context.newPage();
+    try {
+      if (optIn) await optInToWebgl(page);
+      const addonRequests: string[] = [];
+      page.on('request', request => { if (request.url().includes('addon-webgl')) addonRequests.push(request.url()); });
+      await setup(page);
+      await drive(page, 'pushSize', 40, 10);
+      await drive(page, 'pushBytes', 'DOM-LINE\r\n');
+      await expect(page.locator('#term .xterm-rows')).toContainText('DOM-LINE');
+      expect(await drive(page, 'rendererKind')).toBe('dom');
+      // the import would have been requested at mount; none means the addon never downloads
+      expect(addonRequests).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
+test('falls back to DOM for the page session when the WebGL renderer throws', async ({ page }) => {
+  await optInToWebgl(page);
+  await page.addInitScript(() => {
+    const probe = globalThis as unknown as { webglAttempts: number };
+    probe.webglAttempts = 0;
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, type: string, ...rest: unknown[]) {
+      if (type === 'webgl2') { probe.webglAttempts += 1; return null; }
+      return (original as (...args: unknown[]) => RenderingContext | null).call(this, type, ...rest);
+    } as typeof original;
+  });
+  await setup(page);
+  const attempts = () => page.evaluate(() => (globalThis as unknown as { webglAttempts: number }).webglAttempts);
+  await expect.poll(attempts).toBe(1);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'STILL-HERE\r\n');
+  await expect(page.locator('#term .xterm-rows')).toContainText('STILL-HERE');
+  expect(await drive(page, 'connectCalls')).toBe(1);
+  // a terminal mounted later in the same page does not try again
+  await page.evaluate(async () => {
+    const second = document.createElement('div');
+    document.body.append(second);
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    await module.renderStreamedTerminal(second);
+  });
+  await page.waitForTimeout(200);
+  expect(await attempts()).toBe(1);
+});
+
+test('returns to DOM without reconnecting when the WebGL context is lost', async ({ page }) => {
+  await optInToWebgl(page);
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'BEFORE-LOSS\r\n');
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  expect(await drive(page, 'loseWebglContext')).toBe(true);
+  // xterm waits 3 s for a restore before reporting the loss
+  await expect.poll(() => drive(page, 'rendererKind'), { timeout: 8000 }).toBe('dom');
+  await drive(page, 'pushBytes', 'AFTER-LOSS\r\n');
+  await expect(page.locator('#term .xterm-rows')).toContainText('BEFORE-LOSS');
+  await expect(page.locator('#term .xterm-rows')).toContainText('AFTER-LOSS');
+  expect(await drive(page, 'connectCalls')).toBe(1);
+});

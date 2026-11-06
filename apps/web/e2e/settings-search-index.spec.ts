@@ -139,6 +139,7 @@ test('indexes Interface and Projects controls under their owning pages', () => {
 
   expect(fieldAt(results, 'browser', ['deviceName'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['terminalFontSize'])).toBeDefined();
+  expect(fieldAt(results, 'interface', ['webglTerminals'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['colorTheme'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['reducedMotion'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['flyoutMarkers'])).toBeDefined();

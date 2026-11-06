@@ -211,6 +211,7 @@ function addBrowserFields(index: FieldIndex): void {
   const fields = [
     { pageId: 'browser', label: 'Name', path: ['deviceName'], keywords: 'browser device rename identity' },
     { pageId: 'interface', label: 'Terminal font', path: ['terminalFontSize'], keywords: 'font size preview' },
+    { pageId: 'interface', label: 'WebGL terminals', path: ['webglTerminals'], keywords: 'gpu renderer canvas performance vim redraw' },
     { pageId: 'interface', label: 'Theme', path: ['colorTheme'], keywords: 'appearance dark light mocha latte' },
     { pageId: 'interface', label: 'Reduced motion', path: ['reducedMotion'], keywords: 'animation shimmer pulse accessibility' },
     { pageId: 'interface', label: 'Notification sounds', path: ['notificationSounds'], keywords: 'alert chime audio mute silent' },
