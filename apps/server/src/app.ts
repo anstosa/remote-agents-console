@@ -599,7 +599,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const place = agent.placeId === undefined ? undefined : placeById.get(agent.placeId);
       return agent.worktreeId === undefined && place !== undefined ? launchResolutions.get(placeLaunchScope(place)) : launchFor(agent.worktreeId);
     };
-    return { ...discovered, agents: discovered.agents.map(agent => ({ ...agent, unread: notifications.isUnread(agent), completionId: notifications.completionId(agent), queuedPromptCount: queuedCounts.get(agent.id) ?? 0, ...(watched.get(agent.id) === undefined ? {} : { watches: watched.get(agent.id) }), ...(controlFor(agent.worktreeId) === undefined ? {} : { stack: controlFor(agent.worktreeId) }), ...(agentLaunch(agent) === undefined ? {} : { launch: agentLaunch(agent) }) })), places: discovered.places.map(place => ({ ...place, ...(launchResolutions.get(placeLaunchScope(place)) === undefined ? {} : { launch: launchResolutions.get(placeLaunchScope(place)) }) })), projects: discovered.projects.map(project => ({ ...project, ...(project.mode === 'directory' && launchResolutions.get(project.id) !== undefined ? { launch: launchResolutions.get(project.id) } : {}), worktrees: project.worktrees.map(worktree => ({ ...worktree, ...(controlFor(worktree.id) === undefined ? {} : { stack: controlFor(worktree.id) }), ...(launchFor(worktree.id) === undefined ? {} : { launch: launchFor(worktree.id) }) })) })), cleanupPending: cleanup.pending().length, buttons: buttonCatalog.value, notesRevision, githubRevision: github.revision, githubBadge: github.badge, scratchLaunch: launchResolutions.get(scratchLaunchKey), reviewTour: reviewTourCapability, codeReview: codeReviewCapability, reviews, ...(config.editor === undefined ? {} : { editor: true as const }), ...(config.keys === undefined ? {} : { keys: browserKeysConfig(config.keys) }) };
+    // reuse cached targets without starting a scan
+    const cleanupTargets = cleanup.pending();
+    const cleanupVersion = cleanup.version;
+    return { ...discovered, agents: discovered.agents.map(agent => ({ ...agent, unread: notifications.isUnread(agent), completionId: notifications.completionId(agent), queuedPromptCount: queuedCounts.get(agent.id) ?? 0, ...(watched.get(agent.id) === undefined ? {} : { watches: watched.get(agent.id) }), ...(controlFor(agent.worktreeId) === undefined ? {} : { stack: controlFor(agent.worktreeId) }), ...(agentLaunch(agent) === undefined ? {} : { launch: agentLaunch(agent) }) })), places: discovered.places.map(place => ({ ...place, ...(launchResolutions.get(placeLaunchScope(place)) === undefined ? {} : { launch: launchResolutions.get(placeLaunchScope(place)) }) })), projects: discovered.projects.map(project => ({ ...project, ...(project.mode === 'directory' && launchResolutions.get(project.id) !== undefined ? { launch: launchResolutions.get(project.id) } : {}), worktrees: project.worktrees.map(worktree => ({ ...worktree, ...(controlFor(worktree.id) === undefined ? {} : { stack: controlFor(worktree.id) }), ...(launchFor(worktree.id) === undefined ? {} : { launch: launchFor(worktree.id) }) })) })), cleanupPending: cleanupTargets.length, cleanupTargets, ...(cleanupVersion === undefined ? {} : { cleanupVersion }), buttons: buttonCatalog.value, notesRevision, githubRevision: github.revision, githubBadge: github.badge, scratchLaunch: launchResolutions.get(scratchLaunchKey), reviewTour: reviewTourCapability, codeReview: codeReviewCapability, reviews, ...(config.editor === undefined ? {} : { editor: true as const }), ...(config.keys === undefined ? {} : { keys: browserKeysConfig(config.keys) }) };
   };
   // observe only agent state needed by cross-instance attention
   const localInstanceAttention = async () => {
@@ -1123,13 +1126,24 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   app.get('/api/dashboard', async (request) => { controlled(request); return await dashboardUpdates.refresh(); });
   app.post('/api/dashboard/ticket', async (request) => { const s = controlled(request, true); return { ticket: tickets.mint(s.id, 'dashboard', 'dashboard').id }; });
-  app.get('/api/cleanup', async (request) => { controlled(request); const targets = await cleanup.scan(); await dashboardUpdates.refresh().catch(() => undefined); return { targets }; });
+  app.get('/api/cleanup', async (request) => {
+    controlled(request);
+    await cleanup.scan();
+    await dashboardUpdates.refresh().catch(() => undefined);
+    // pair cached targets with their ordering metadata
+    const targets = cleanup.pending();
+    const version = cleanup.version;
+    return { targets, ...(version === undefined ? {} : { version }) };
+  });
   app.post('/api/cleanup', async (request, reply) => {
     controlled(request, true);
-    const targets = await cleanup.cleanup(body(request).targetIds);
-    if (targets === undefined) return reply.code(400).send({ error: 'invalid cleanup targets' });
+    const result = await cleanup.cleanup(body(request).targetIds);
+    if (result === undefined) return reply.code(400).send({ error: 'invalid cleanup targets' });
     await dashboardUpdates.refresh().catch(() => undefined);
-    return { targets };
+    // pair cached targets with their ordering metadata
+    const targets = cleanup.pending();
+    const version = cleanup.version;
+    return { targets, ...(version === undefined ? {} : { version }) };
   });
   const configuredWorktree = (id: string) => worktreeById(discovery.worktreesNow(), id);
   // the Place with this id: a Worktree from the current snapshot, else a directory-Project or

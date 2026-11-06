@@ -131,6 +131,36 @@ type NewTaskAvailability = { enabled: boolean; reason?: string };
 type OperationFeedback = { id: number; tone: 'pending'|'success'|'error'; message: string; detail: string; worktreeId?: string; workspaceKey?: string; expires?: number };
 const toastDurationMs = 5_000;
 type CleanupTarget = { id: string; kind: 'orphan-worker'|'stale-agent'|'hud-pane'|'hud-process'|'merged-branch'|'closed-pr-branch'; label: string; detail: string };
+// keep menu counts and its return-focus target together
+type CleanupMenuState = { checked: number; unchecked: number; onOpen: () => void; triggerRef: React.RefObject<HTMLButtonElement | null> };
+type CleanupVersion = { epoch: number; revision: number };
+const cleanupChoicesKey = 'rac.cleanup-choices';
+const cleanupChoiceLimit = 1_000_000;
+// restore explicit choices without silently treating inaccessible preferences as valid
+const savedCleanupChoices = (): { choices: Map<string, boolean>; warning: string } => {
+  try {
+    const encoded = localStorage.getItem(cleanupChoicesKey) ?? '[]';
+    // keep corrupt or oversized preferences out of the selection model
+    if (encoded.length > cleanupChoiceLimit) throw new Error();
+    const stored: unknown = JSON.parse(encoded);
+    if (!Array.isArray(stored) || stored.some(entry => !Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || entry[0].length === 0 || entry[0].length > 128 || typeof entry[1] !== 'boolean')) throw new Error();
+    return { choices: new Map(stored as Array<[string, boolean]>), warning: '' };
+  } catch { return { choices: new Map(), warning: 'Cleanup choices could not be restored. Review your selections; preferences may reset after reload.' }; }
+};
+// retain every in-memory opt-out and report unavailable or exhausted storage
+const saveCleanupChoices = (choices: ReadonlyMap<string, boolean>): string => {
+  try {
+    const encoded = JSON.stringify([...choices]);
+    // do not prune remembered opt-outs to make a write appear successful
+    if (encoded.length > cleanupChoiceLimit) throw new Error();
+    localStorage.setItem(cleanupChoicesKey, encoded);
+    return '';
+  } catch { return 'Cleanup choices could not be saved in this browser. They may reset after reload.'; }
+};
+// accept only ordered cleanup snapshots from a known server epoch
+const isCleanupVersion = (value: unknown): value is CleanupVersion => value !== null && typeof value === 'object'
+  && Number.isSafeInteger((value as CleanupVersion).epoch) && (value as CleanupVersion).epoch >= 0
+  && Number.isSafeInteger((value as CleanupVersion).revision) && (value as CleanupVersion).revision >= 0;
 type BranchRemovalFacts = { branch: string; checkedOut: boolean; dirtyCount: number; pushed: boolean; merged: boolean; defaultBranch: boolean };
 type AttentionState = 'working' | 'finished' | 'question';
 
@@ -176,7 +206,7 @@ type ReviewButtonState = ReviewTourIndicator & { onOpen: () => void; panel?: Rea
 // a directory-Project or Scratch Place, listed beside the Worktrees (a Worktree is a Place with the same id)
 // `adhoc` marks a Scratch folder other than the configured one: the console cannot launch into it
 type Place = { id: string; kind: 'directory' | 'scratch'; projectId: string; label: string; home: string; adhoc?: true; pinned: boolean; consoleShells?: number; launch?: LaunchResolution };
-type Dashboard = { notesRevision?: number; githubRevision?: number; githubBadge?: number; generation?: number; serverStartedAt?: number; adapters?: AdapterCapabilities; agents: Agent[]; projects: Project[]; places?: Place[]; cleanupPending?: number; scratchLaunch?: LaunchResolution; reviewTour?: ReviewTourCapability; codeReview?: CodeReviewCapability; reviews?: StoredReviewSummary[]; editor?: boolean; keys?: KeysConfig; buttons?: ButtonCatalog };
+type Dashboard = { notesRevision?: number; githubRevision?: number; githubBadge?: number; generation?: number; serverStartedAt?: number; adapters?: AdapterCapabilities; agents: Agent[]; projects: Project[]; places?: Place[]; cleanupPending?: number; cleanupTargets?: CleanupTarget[]; cleanupVersion?: CleanupVersion; scratchLaunch?: LaunchResolution; reviewTour?: ReviewTourCapability; codeReview?: CodeReviewCapability; reviews?: StoredReviewSummary[]; editor?: boolean; keys?: KeysConfig; buttons?: ButtonCatalog };
 // every Worktree across the dashboard's Projects, flattened for tab and launcher rendering
 const allWorktrees = (dashboard: Pick<Dashboard, 'projects'>): Worktree[] => dashboard.projects.flatMap(project => project.worktrees);
 // why a Worktree's Remove is disabled (it is the Project's Main checkout, git holds a lock,
@@ -240,11 +270,13 @@ const isStoredReviewSummary = (value: unknown): value is StoredReviewSummary => 
   && typeof (value as StoredReviewSummary).fingerprint === 'string';
 const isDashboard = (value: unknown): value is Dashboard => {
   if (value === null || typeof value !== 'object') return false;
-  const dashboard = value as { serverStartedAt?: unknown; agents?: unknown; projects?: unknown; cleanupPending?: unknown; reviews?: unknown };
+  const dashboard = value as { serverStartedAt?: unknown; agents?: unknown; projects?: unknown; cleanupPending?: unknown; cleanupTargets?: unknown; cleanupVersion?: unknown; reviews?: unknown };
   return (dashboard.serverStartedAt === undefined || typeof dashboard.serverStartedAt === 'number' && Number.isSafeInteger(dashboard.serverStartedAt) && dashboard.serverStartedAt >= 0)
     && Array.isArray(dashboard.agents)
     && Array.isArray(dashboard.projects)
     && (dashboard.cleanupPending === undefined || Number.isInteger(dashboard.cleanupPending) && (dashboard.cleanupPending as number) >= 0)
+    && (dashboard.cleanupTargets === undefined || Array.isArray(dashboard.cleanupTargets) && dashboard.cleanupTargets.every(isCleanupTarget))
+    && (dashboard.cleanupVersion === undefined || isCleanupVersion(dashboard.cleanupVersion))
     && (dashboard.reviews === undefined || Array.isArray(dashboard.reviews) && dashboard.reviews.every(isStoredReviewSummary));
 };
 const isDashboardFrame = (value: unknown): value is { v: 1; type: 'dashboard'; dashboard: Dashboard } => value !== null && typeof value === 'object' && (value as { v?: unknown }).v === 1 && (value as { type?: unknown }).type === 'dashboard' && isDashboard((value as { dashboard?: unknown }).dashboard);
@@ -7678,7 +7710,7 @@ type PlaceMenuProps = { agentId?: string; worktreeId?: string; git?: boolean; pi
 type PlaceMenuPanel = { key: string; label: ReactNode; icon: ReactNode; title: string; disabled?: boolean; onSelect: () => void };
 
 // the toolbar's ⋮ keeps folder pin and worktree removal; GitHub Actions follows the current Place
-function PlaceMenu({ agentId, worktreeId, git = false, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason, panels = [] }: PlaceMenuProps & { panels?: PlaceMenuPanel[] }) {
+function PlaceMenu({ agentId, worktreeId, git = false, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason, panels = [], cleanup }: PlaceMenuProps & { panels?: PlaceMenuPanel[]; cleanup?: CleanupMenuState }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { anchorRef, flyoutRef, style } = useViewportFlyout(menuOpen);
   const [githubActionsUrl, setGithubActionsUrl] = useState<string>();
@@ -7727,13 +7759,15 @@ function PlaceMenu({ agentId, worktreeId, git = false, pinned, onTogglePin, onRe
   };
   // close the menu, then act
   const choose = (action: () => void) => { setMenuOpen(false); action(); };
-  // a Place with none of these actions has no menu
-  if (configuredMenuActions.length === 0 && panels.length === 0 && githubActionsRoute === undefined && onTogglePin === undefined && onRemoveWorktree === undefined) return null;
+  // cleanup keeps the menu available even without place-specific actions
+  if (cleanup === undefined && configuredMenuActions.length === 0 && panels.length === 0 && githubActionsRoute === undefined && onTogglePin === undefined && onRemoveWorktree === undefined) return null;
+  // omit only empty badges, never the cleanup entry
+  const cleanupRow = cleanup === undefined ? null : <button type="button" className="cleanup-menu-row" aria-label="Cleanup" aria-description={`${cleanup.checked} checked and ${cleanup.unchecked} unchecked cleanup items`} aria-haspopup="dialog" onClick={() => choose(cleanup.onOpen)}><svg className="more-menu-icon broom-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m19.36 2.72 1.42 1.42-5.72 5.71c1.07 1.54 1.22 3.39.32 4.59L9.06 8.12c1.2-.9 3.05-.75 4.59.32l5.71-5.72ZM5.93 17.57c-2.01-2.01-3.24-4.41-3.58-6.65l4.88-2.09 7.44 7.44-2.09 4.88c-2.24-.34-4.64-1.57-6.65-3.58Z" /></svg><span>Cleanup</span><span className="cleanup-badges" aria-hidden="true">{cleanup.unchecked > 0 && <span className="cleanup-count unchecked">{cleanup.unchecked}</span>}{cleanup.checked > 0 && <span className="cleanup-count checked">{cleanup.checked}</span>}</span></button>;
   const panelRows = panels.map(panel => <button key={panel.key} type="button" className={`place-menu-panel ${panel.key}-panel-row`} disabled={panel.disabled} title={panel.title} onClick={() => choose(panel.onSelect)}>{panel.icon}{panel.label}</button>);
   const pinToggle = onTogglePin !== undefined && <button className="more-pin-toggle" aria-pressed={pinned === true} onClick={() => choose(onTogglePin)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3-1-6Zm3 11v5" /></svg>{`${pinned ? 'Unpin' : 'Pin'} folder`}</button>;
   const githubActions = githubActionsRoute === undefined ? null : loadingGithubActions ? <button className="github-actions-loading" type="button" aria-label="GitHub Actions" disabled aria-busy="true"><Skeleton /></button> : githubActionsUrl === undefined ? <button type="button" disabled title="GitHub Actions unavailable"><MoreMenuIcon name="actions" />GitHub Actions</button> : <a className="more-menu-link" href={githubActionsUrl} target="_blank" rel="noreferrer" onClick={() => setMenuOpen(false)}><MoreMenuIcon name="actions" />GitHub Actions</a>;
   const removal = onRemoveWorktree !== undefined && <button className="remove-worktree-option" type="button" disabled={removeDisabledReason !== undefined} title={removeDisabledReason ?? 'Remove worktree'} onClick={() => choose(onRemoveWorktree)}><svg className="more-menu-icon action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg>Remove worktree…</button>;
-  return <><span className="more-wrap" ref={anchorRef}><button className={`more icon-button${configuredMenuBusy && configuredMenuColor !== undefined ? ` progress-border progress-${configuredMenuColor}` : ''}`} aria-busy={configuredMenuBusy || undefined} aria-label="More options" data-context-flyout aria-expanded={menuOpen} title="Workspace options" onClick={toggleMenu}>{configuredMenuBusy && <ProgressRing busy />}<span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg></button></span>{menuOpen && <FlyoutPortal onDismiss={() => setMenuOpen(false)}><div className="more-menu flyout-menu place-menu" ref={flyoutRef} style={style} aria-busy={loadingGithubActions || configuredMenuBusy}><ConfiguredButtonList slot="navMenu" className="configured-nav-menu" onSelect={() => setMenuOpen(false)} />{panelRows}{pinToggle}{githubActions}{removal}</div></FlyoutPortal>}</>;
+  return <><span className="more-wrap" ref={anchorRef}><button ref={cleanup?.triggerRef} type="button" className={`more icon-button${configuredMenuBusy && configuredMenuColor !== undefined ? ` progress-border progress-${configuredMenuColor}` : ''}`} aria-busy={configuredMenuBusy || undefined} aria-label="More options" aria-description={cleanup === undefined ? undefined : `${cleanup.checked} checked cleanup items`} data-context-flyout aria-expanded={menuOpen} title="Workspace options" onClick={toggleMenu}>{configuredMenuBusy && <ProgressRing busy />}<span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg>{cleanup !== undefined && cleanup.checked > 0 && <span className="cleanup-count checked cleanup-summary-count" aria-hidden="true">{cleanup.checked}</span>}</button></span>{menuOpen && <FlyoutPortal onDismiss={() => setMenuOpen(false)}><div className="more-menu flyout-menu place-menu" ref={flyoutRef} style={style} aria-busy={loadingGithubActions || configuredMenuBusy}>{cleanupRow}<ConfiguredButtonList slot="navMenu" className="configured-nav-menu" onSelect={() => setMenuOpen(false)} />{panelRows}{pinToggle}{githubActions}{removal}</div></FlyoutPortal>}</>;
 }
 
 // The Agent a guided review's change request is sent to: the shown Agent when it is the Worktree's,
@@ -7758,7 +7792,7 @@ function reviewGitActions(worktreeId: string | undefined, viewKey: string, revie
 // render the Workspace of a Place where Agents run: the Place's panels and toolbar, with the agent
 // panel showing the Agent chosen in its switcher. Only the agent panel follows the switcher; the
 // place panels stay open across an agent switch
-function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNotifications, cleanupControl, reviewCapability, review, onCloseReview, onReview, onDeleted, onSelectTarget, onNewWorktree, onNavigateWorktree, onOpenWorktreeStack, onOpenGithub, onPromptFocus, onOperationFeedback, launch, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason, worktreeLabel, schedulePrefill }: { agent: Agent; agents: readonly Agent[]; onSelectAgent: (agentId: string) => void; active: boolean; tabBar: ReactNode; renderNotifications: (content: ReactNode) => ReactNode; cleanupControl?: ReactNode; reviewCapability?: ReviewTourCapability; review?: ReviewButtonState; onCloseReview: (worktreeId: string) => void; onReview: (target: ReviewTarget) => void; onDeleted: () => Promise<void>; onSelectTarget: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onNavigateWorktree: (worktreeId: string) => void; onOpenWorktreeStack: (worktreeId: string) => void; onOpenGithub: OpenWorktree; onPromptFocus: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; launch?: ToolbarLaunch; pinned?: boolean; onTogglePin?: () => void; onRemoveWorktree?: () => void; removeDisabledReason?: string; worktreeLabel?: string; schedulePrefill?: SchedulePrefill }) {
+function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNotifications, cleanupControl, reviewCapability, review, onCloseReview, onReview, onDeleted, onSelectTarget, onNewWorktree, onNavigateWorktree, onOpenWorktreeStack, onOpenGithub, onPromptFocus, onOperationFeedback, launch, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason, worktreeLabel, schedulePrefill }: { agent: Agent; agents: readonly Agent[]; onSelectAgent: (agentId: string) => void; active: boolean; tabBar: ReactNode; renderNotifications: (content: ReactNode) => ReactNode; cleanupControl?: CleanupMenuState; reviewCapability?: ReviewTourCapability; review?: ReviewButtonState; onCloseReview: (worktreeId: string) => void; onReview: (target: ReviewTarget) => void; onDeleted: () => Promise<void>; onSelectTarget: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onNavigateWorktree: (worktreeId: string) => void; onOpenWorktreeStack: (worktreeId: string) => void; onOpenGithub: OpenWorktree; onPromptFocus: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; launch?: ToolbarLaunch; pinned?: boolean; onTogglePin?: () => void; onRemoveWorktree?: () => void; removeDisabledReason?: string; worktreeLabel?: string; schedulePrefill?: SchedulePrefill }) {
   // an Agent's Worktree label drives its feedback and power-menu copy; the server carries it on
   // the Worktree now, so it is resolved at the top level and passed in
   const displayLabel = worktreeLabel ?? agent.worktreeLabel ?? agentLabel(agent);
@@ -8441,7 +8475,7 @@ const GlobalLaunchContext = createContext<ToolbarLaunch | undefined>(undefined);
 // the carousel's position dots sit in the middle. `onOpenWorktreeStack` is a Process notice's
 // Open, which switches to another Worktree with its stack menu open. `agentCount` is the Agents
 // at the Place, which a minimized agent panel's Launch badge counts.
-function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeStack, conversations, git, onGitToggle, cleanupControl, menu }: { workspace?: WorkspaceState; agentCount?: number; launch?: ToolbarLaunch; onOpenWorktreeStack?: (worktreeId: string) => void; conversations?: ReactNode; git?: WorkspaceGitActions; onGitToggle?: () => void; cleanupControl?: ReactNode; menu?: PlaceMenuProps }) {
+function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeStack, conversations, git, onGitToggle, cleanupControl, menu }: { workspace?: WorkspaceState; agentCount?: number; launch?: ToolbarLaunch; onOpenWorktreeStack?: (worktreeId: string) => void; conversations?: ReactNode; git?: WorkspaceGitActions; onGitToggle?: () => void; cleanupControl?: CleanupMenuState; menu?: PlaceMenuProps }) {
   const phone = usePhoneLayout();
   const globalLaunch = useContext(GlobalLaunchContext);
   const visibleLaunch = launch ?? globalLaunch;
@@ -8487,10 +8521,9 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
     <ConfiguredButtonList slot="leftNav" className="configured-left-nav" buttonClassName="toolbar-button" />
     {phone && workspace?.carousel !== undefined && workspace.carousel.panels.length > 1 ? <PanelDots carousel={workspace.carousel} /> : <span className="toolbar-spacer" aria-hidden="true" />}
     <ConfiguredButtonList slot="rightNav" className="configured-right-nav" buttonClassName="toolbar-button" />
-    {cleanupControl}
     {workspace !== undefined && (hasGit ? <WorkspaceGitStatus workspace={workspace} actions={git} onToggle={onGitToggle} /> : place?.path !== undefined && <span className="toolbar-path" title={place.path}>{place.path}</span>)}
     {workspace !== undefined && <ProjectOpen url={place?.projectUrl} title={stackPlaceName(worktreeId, projects)?.worktree} stack={place?.stack} browserOpen={workspace.browser.open} onBrowserToggle={workspace.browser.toggle} {...(worktreeId === undefined ? {} : stackHandlers(worktreeId))} onStackLog={worktreeId === undefined ? undefined : () => stackLog(worktreeId)} onOpenStackPanel={worktreeId === undefined ? undefined : workspace.openStackPanel} worktreeId={worktreeId} onOpenWorktree={onOpenWorktreeStack} onStartNoticeTarget={startNoticeProcess} menuRequested={stackMenuRequested} />}
-    {menu !== undefined && <PlaceMenu {...menu} panels={menuPanels} />}
+    {(menu !== undefined || cleanupControl !== undefined) && <PlaceMenu {...menu} panels={menuPanels} cleanup={cleanupControl} />}
   </div></section>;
 }
 
@@ -8567,7 +8600,7 @@ const inactiveWorktreePresentation = (label: string, kind: AgentKind | undefined
 };
 
 // render an inactive worktree
-function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, transient = false, reviewCapability, review, onReview, onCloseReview, onLaunched, onOperationFeedback, onNewWorktree, onNavigateWorktree, onOpenWorktreeStack, onOpenGithub, onTogglePin, onRemove, removeDisabledReason, schedulePrefill }: { worktree: Worktree; tabBar: ReactNode; renderNotifications: (content: ReactNode) => ReactNode; cleanupControl?: ReactNode; transient?: boolean; reviewCapability?: ReviewTourCapability; review?: ReviewButtonState; onReview: (target: ReviewTarget) => void; onCloseReview: (worktreeId: string) => void; onLaunched: (agentId: string, worktree: Worktree, operationKey: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onNavigateWorktree: (worktreeId: string) => void; onOpenWorktreeStack: (worktreeId: string) => void; onOpenGithub: OpenWorktree; onTogglePin: () => void; onRemove?: () => void; removeDisabledReason?: string; schedulePrefill?: SchedulePrefill }) {
+function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, transient = false, reviewCapability, review, onReview, onCloseReview, onLaunched, onOperationFeedback, onNewWorktree, onNavigateWorktree, onOpenWorktreeStack, onOpenGithub, onTogglePin, onRemove, removeDisabledReason, schedulePrefill }: { worktree: Worktree; tabBar: ReactNode; renderNotifications: (content: ReactNode) => ReactNode; cleanupControl?: CleanupMenuState; transient?: boolean; reviewCapability?: ReviewTourCapability; review?: ReviewButtonState; onReview: (target: ReviewTarget) => void; onCloseReview: (worktreeId: string) => void; onLaunched: (agentId: string, worktree: Worktree, operationKey: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onNavigateWorktree: (worktreeId: string) => void; onOpenWorktreeStack: (worktreeId: string) => void; onOpenGithub: OpenWorktree; onTogglePin: () => void; onRemove?: () => void; removeDisabledReason?: string; schedulePrefill?: SchedulePrefill }) {
   const launchKey = launchOperationKey(worktree.id);
   const restartKey = restartOperationKey(worktree.id);
   const launching = usePendingOperation(launchKey);
@@ -8756,7 +8789,7 @@ function PlaceShellsAndPin({ place, noun = 'folder', onTogglePin }: { place: { l
 // render an agentless directory project or scratch place
 // beside an idle placeholder, and the toolbar with its folder pin in the ⋮ and, unless the Place is an
 // ad-hoc Scratch folder the console cannot launch into, a Launch button
-function PlaceCard({ place, tabBar, cleanupControl, transient = false, launchDisabled, launch, onLaunched, onTogglePin, onOperationFeedback, schedulePrefill }: { place: Place; tabBar: ReactNode; cleanupControl?: ReactNode; transient?: boolean; launchDisabled: boolean; launch?: PlaceLaunch; onLaunched: (agentId: string, place: Pick<Place, 'id' | 'label'>, operationKey: string) => void; onTogglePin: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; schedulePrefill?: SchedulePrefill }) {
+function PlaceCard({ place, tabBar, cleanupControl, transient = false, launchDisabled, launch, onLaunched, onTogglePin, onOperationFeedback, schedulePrefill }: { place: Place; tabBar: ReactNode; cleanupControl?: CleanupMenuState; transient?: boolean; launchDisabled: boolean; launch?: PlaceLaunch; onLaunched: (agentId: string, place: Pick<Place, 'id' | 'label'>, operationKey: string) => void; onTogglePin: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; schedulePrefill?: SchedulePrefill }) {
   const [running, setRunning] = useState(false);
   // launch a fresh agent at this Place and run one note on it, then hand the new agent off so
   // the tab switches to it (the Place's notes Run route launches as a Launch here would)
@@ -8806,7 +8839,7 @@ function PlaceCard({ place, tabBar, cleanupControl, transient = false, launchDis
 }
 
 // render a scratch or directory session before discovery publishes its agent identity
-function PendingSessionCard({ launch, tabBar, cleanupControl, retrying, onRetry, onDiscard, onOperationFeedback }: { launch: PendingSessionLaunch; tabBar: ReactNode; cleanupControl?: ReactNode; retrying: boolean; onRetry: (choice?: LaunchChoice) => void; onDiscard: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+function PendingSessionCard({ launch, tabBar, cleanupControl, retrying, onRetry, onDiscard, onOperationFeedback }: { launch: PendingSessionLaunch; tabBar: ReactNode; cleanupControl?: CleanupMenuState; retrying: boolean; onRetry: (choice?: LaunchChoice) => void; onDiscard: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   const processing = launch.phase !== 'failed';
   const kind = launch.kind ?? launch.resolution?.kind;
   let heading = `Starting ${kind === undefined ? 'agent' : agentKindLabel[kind]} at ${launch.label}…`;
@@ -9642,13 +9675,55 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const [openFolderPath, setOpenFolderPath] = useState<string>();
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [cleanupTargets, setCleanupTargets] = useState<CleanupTarget[]>([]);
-  const [cleanupChecked, setCleanupChecked] = useState<Set<string>>(() => new Set());
+  const [cleanupPreferenceSnapshot] = useState(savedCleanupChoices);
+  const [cleanupChoices, setCleanupChoices] = useState(cleanupPreferenceSnapshot.choices);
+  const [cleanupPreferenceWarning, setCleanupPreferenceWarning] = useState(cleanupPreferenceSnapshot.warning);
+  const cleanupChoicesEdited = useRef(false);
+  const latestCleanupVersion = useRef<CleanupVersion | undefined>(undefined);
+  // ignore delayed dashboard or HTTP snapshots superseded by a cleanup result
+  const applyCleanupTargets = useCallback((targets: CleanupTarget[], version?: CleanupVersion) => {
+    const latest = latestCleanupVersion.current;
+    // legacy snapshots cannot replace a known ordered result
+    if (latest !== undefined && (version === undefined || version.epoch < latest.epoch || version.epoch === latest.epoch && version.revision < latest.revision)) return;
+    if (version !== undefined) latestCleanupVersion.current = version;
+    setCleanupTargets(targets);
+  }, []);
+  // fresh suggestions never overwrite an explicit checkbox choice
+  const cleanupChecked = useMemo(() => new Set(cleanupTargets.filter(target => cleanupChoices.get(target.id) ?? (cleanupPreferenceSnapshot.warning === '' && target.kind !== 'closed-pr-branch')).map(target => target.id)), [cleanupChoices, cleanupTargets, cleanupPreferenceSnapshot.warning]);
+  // retain choices across dialog closure, browser reload and server rescans
+  useEffect(() => {
+    // do not overwrite unreadable preferences before an explicit checkbox choice
+    if (!cleanupChoicesEdited.current) return;
+    setCleanupPreferenceWarning(saveCleanupChoices(cleanupChoices));
+  }, [cleanupChoices]);
+  // recover preferences without turning fail-closed rows back on
+  const changeCleanupChoice = (id: string, checked: boolean) => {
+    cleanupChoicesEdited.current = true;
+    setCleanupChoices(current => {
+      const next = new Map(current);
+      // preserve every unchecked recovery default in the next successful write
+      if (cleanupPreferenceSnapshot.warning !== '') {
+        for (const target of cleanupTargets) if (!next.has(target.id)) next.set(target.id, false);
+      }
+      next.set(id, checked);
+      return next;
+    });
+  };
+  // badge counts use the cached dashboard scan without polling expensive discovery
+  useEffect(() => {
+    // older dashboard fixtures may not provide cached targets
+    if (data?.cleanupTargets !== undefined) applyCleanupTargets(data.cleanupTargets, data.cleanupVersion);
+  }, [data?.cleanupTargets, data?.cleanupVersion, applyCleanupTargets]);
   const [cleanupLoading, setCleanupLoading] = useState(false);
   // distinguish target reads from cleanup actions even when cached targets remain
   const [cleanupKind, setCleanupKind] = useState<ProgressKind>('loading');
   const [cleanupError, setCleanupError] = useState('');
   const cleanupTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const previousCleanupCount = useRef(0);
+  const cleanupDialogRef = useRef<HTMLDivElement | null>(null);
+  // focus the dialog before the next keyboard gesture
+  useLayoutEffect(() => {
+    if (cleanupOpen) cleanupDialogRef.current?.focus({ preventScroll: true });
+  }, [cleanupOpen]);
   const refreshInFlight = useRef(false);
   const dashboardPushFreshUntil = useRef(0);
   const dashboardPushSynchronized = useRef(false);
@@ -9833,7 +9908,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       // preserve newer navigation choices
       if (shouldActivate) setActivateAgentId(replacement.id);
     }
-    const content = JSON.stringify([nextPayload.agents, nextPayload.projects, nextPayload.places ?? [], nextPayload.cleanupPending ?? 0, nextPayload.reviewTour, nextPayload.codeReview, nextPayload.reviews, nextPayload.notesRevision, nextPayload.githubRevision, nextPayload.githubBadge, nextPayload.serverStartedAt, nextPayload.keys]);
+    const content = JSON.stringify([nextPayload.agents, nextPayload.projects, nextPayload.places ?? [], nextPayload.cleanupPending ?? 0, nextPayload.cleanupTargets ?? [], nextPayload.cleanupVersion, nextPayload.reviewTour, nextPayload.codeReview, nextPayload.reviews, nextPayload.notesRevision, nextPayload.githubRevision, nextPayload.githubBadge, nextPayload.serverStartedAt, nextPayload.keys]);
     if (content !== dashboardContent.current || pendingCompletions.current.size > 0) {
       dashboardContent.current = content;
       setData(nextPayload);
@@ -9868,7 +9943,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     void dismissNotification('runtime-cleanup');
     window.requestAnimationFrame(() => cleanupTriggerRef.current?.focus());
   }, []);
-  // load suggestions without preselecting unmerged closed PR work
+  // refresh suggestions without replacing manual checkbox choices
   const openCleanup = useCallback(async () => {
     setCleanupOpen(true);
     // reopening a cached list still performs a data read
@@ -9885,27 +9960,28 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
         : undefined;
       // refuse incomplete or unknown target lists
       if (targets === undefined || targets.length !== (payload as { targets: unknown[] }).targets.length) throw new Error();
-      setCleanupTargets(targets);
-      // require explicit selection before discarding closed PR work
-      setCleanupChecked(new Set(targets.filter(target => target.kind !== 'closed-pr-branch').map(target => target.id)));
+      const version: unknown = (payload as { version?: unknown }).version;
+      // malformed ordering metadata cannot establish an authoritative result
+      if (version !== undefined && !isCleanupVersion(version)) throw new Error();
+      applyCleanupTargets(targets, version);
     } catch {
-      setCleanupTargets([]);
-      setCleanupChecked(new Set());
+      // keep cached rows visible while a fresh read is unavailable
       setCleanupError('Unable to load cleanup targets.');
     } finally {
       setCleanupLoading(false);
     }
-  }, []);
-  // submit explicit choices and reset consent for unresolved closed PR branches
+  }, [applyCleanupTargets]);
+  // execute selected suggestions while keeping unchecked items available
   const resolveCleanup = useCallback(async () => {
     // serialize cleanup submissions
-    if (cleanupLoading) return;
+    if (cleanupLoading || cleanupChecked.size === 0) return;
+    const selected = [...cleanupChecked];
     // the submitted cleanup is an action rather than a list refresh
     setCleanupKind('working');
     setCleanupLoading(true);
     setCleanupError('');
     try {
-      const response = await request('/api/cleanup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ targetIds: [...cleanupChecked] }) });
+      const response = await request('/api/cleanup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ targetIds: selected }) });
       // reject failed cleanup requests
       if (!response.ok) throw new Error();
       const payload: unknown = await response.json();
@@ -9914,39 +9990,57 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
         : undefined;
       // refuse incomplete or unknown target lists
       if (targets === undefined || targets.length !== (payload as { targets: unknown[] }).targets.length) throw new Error();
-      // close only after every target is resolved
+      const version: unknown = (payload as { version?: unknown }).version;
+      // malformed ordering metadata cannot establish an authoritative result
+      if (version !== undefined && !isCleanupVersion(version)) throw new Error();
+      applyCleanupTargets(targets, version);
+      const remaining = new Set(targets.map(target => target.id));
+      // resolved resources must not retain old positive consent if their ids return
+      cleanupChoicesEdited.current = true;
+      setCleanupChoices(current => {
+        const next = new Map(current);
+        // unchecked choices remain remembered until the operator checks them
+        for (const id of selected) if (!remaining.has(id)) next.delete(id);
+        return next.size === current.size ? current : next;
+      });
+      // unchecked suggestions remain in the dialog without being treated as failures
       if (targets.length === 0) closeCleanup();
-      else {
-        setCleanupTargets(targets);
-        // require explicit selection before discarding closed PR work
-        setCleanupChecked(new Set(targets.filter(target => target.kind !== 'closed-pr-branch').map(target => target.id)));
-        setCleanupError('Some selected targets could not be cleaned up.');
-      }
+      else if (selected.some(id => remaining.has(id))) setCleanupError('Some selected targets could not be cleaned up.');
       await refresh();
     } catch {
-      setCleanupError('Cleanup failed. No unresolved targets were dismissed.');
+      setCleanupError('Cleanup failed. Your selections have been kept.');
     } finally {
       setCleanupLoading(false);
     }
-  }, [cleanupChecked, cleanupLoading, closeCleanup, refresh]);
-  useEffect(() => {
-    const count = data?.cleanupPending ?? 0;
-    if (count > 0 && previousCleanupCount.current === 0) void showNotification('system', 'Cleanup available', `${count} cleanup ${count === 1 ? 'target is' : 'targets are'} ready.`, 'runtime-cleanup', '/#cleanup');
-    if (count === 0 && previousCleanupCount.current > 0) void dismissNotification('runtime-cleanup');
-    previousCleanupCount.current = count;
-  }, [data?.cleanupPending]);
+  }, [cleanupChecked, cleanupLoading, closeCleanup, refresh, applyCleanupTargets]);
   useEffect(() => {
     const openFromHash = () => {
-      if (location.hash === '#cleanup' && (data?.cleanupPending ?? 0) > 0 && !cleanupOpen) void openCleanup();
+      if (location.hash === '#cleanup' && data !== undefined && !cleanupOpen) void openCleanup();
     };
     openFromHash();
     window.addEventListener('hashchange', openFromHash);
     return () => window.removeEventListener('hashchange', openFromHash);
-  }, [cleanupOpen, data?.cleanupPending, openCleanup]);
+  }, [cleanupOpen, data !== undefined, openCleanup]);
   useEffect(() => {
     if (!cleanupOpen) return;
+    // keep keyboard focus inside the modal while its controls load or change
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (isPromptKeyboardTarget(event.target) || event.key !== 'Escape' || cleanupLoading) return;
+      const dialog = cleanupDialogRef.current;
+      // contain forward and reverse navigation, including an empty loading dialog
+      if (event.key === 'Tab' && dialog !== null) {
+        const controls = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), a[href], [tabindex="0"]')).filter(control => control.getClientRects().length > 0);
+        const first = controls[0];
+        const last = controls.at(-1);
+        const focused = document.activeElement;
+        if (first === undefined) { event.preventDefault(); dialog.focus(); }
+        else if (!controls.some(control => control === focused) || event.shiftKey && focused === first || !event.shiftKey && focused === last) {
+          event.preventDefault();
+          (event.shiftKey ? last : first)?.focus();
+        }
+        return;
+      }
+      // checkboxes do not own Escape; a pending mutation still cannot be dismissed
+      if (event.key !== 'Escape' || cleanupLoading) return;
       event.preventDefault();
       closeCleanup();
     };
@@ -10814,8 +10908,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   };
   if (data === undefined) return <LoadingScreen label={unavailable ? 'Reconnecting to console' : 'Syncing console state'} />;
   const item = items[visibleActive];
-  const cleanupCount = data.cleanupPending ?? 0;
-  const cleanupControl = cleanupCount === 0 ? null : <button ref={cleanupTriggerRef} className="log-control page-arrow cleanup-toggle" aria-label={`Review ${cleanupCount} cleanup ${cleanupCount === 1 ? 'target' : 'targets'}`} title="Review cleanup" aria-haspopup="dialog" data-context-flyout aria-expanded={cleanupOpen} onPointerDown={event => event.preventDefault()} onClick={() => void openCleanup()}><svg className="broom-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m19.36 2.72 1.42 1.42-5.72 5.71c1.07 1.54 1.22 3.39.32 4.59L9.06 8.12c1.2-.9 3.05-.75 4.59.32l5.71-5.72ZM5.93 17.57c-2.01-2.01-3.24-4.41-3.58-6.65l4.88-2.09 7.44 7.44-2.09 4.88c-2.24-.34-4.64-1.57-6.65-3.58Z" /></svg><span className="saved-prompts-count cleanup-count" aria-hidden="true">{cleanupCount}</span></button>;
+  const cleanupControl: CleanupMenuState = { checked: cleanupChecked.size, unchecked: cleanupTargets.length - cleanupChecked.size, onOpen: () => { void openCleanup(); }, triggerRef: cleanupTriggerRef };
   const cleanupKindLabel: Record<CleanupTarget['kind'], string> = {
     'orphan-worker': 'Orphaned worker',
     'stale-agent': 'Stale agent',
@@ -10824,7 +10917,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     'merged-branch': 'Merged branch',
     'closed-pr-branch': 'Closed PR branch'
   };
-  const cleanupDialog = !cleanupOpen ? null : createPortal(<div className="dialog cleanup-dialog" role="dialog" aria-modal="true" aria-labelledby="cleanup-title"><div><header className="cleanup-header"><div><h2 id="cleanup-title">Cleanup</h2><p>Select items to clean up. Unchecked items will be dismissed.</p></div><button className="cleanup-close" type="button" aria-label="Close cleanup" disabled={cleanupLoading} onClick={closeCleanup}><PanelIcon path={panelIcons.close} /></button></header>{cleanupLoading && cleanupKind === 'loading' ? <CleanupSkeletons /> : cleanupTargets.length === 0 ? cleanupError ? null : <p className="cleanup-empty">No cleanup targets remain.</p> : <fieldset className="cleanup-targets" disabled={cleanupLoading}><legend className="sr-only">Cleanup targets</legend>{cleanupTargets.map(target => <label key={target.id} className="cleanup-target"><input type="checkbox" checked={cleanupChecked.has(target.id)} onChange={event => setCleanupChecked(current => { const next = new Set(current); if (event.target.checked) next.add(target.id); else next.delete(target.id); return next; })} /><span><strong><small>{cleanupKindLabel[target.kind]}</small>{target.label}</strong><span>{target.detail}</span></span></label>)}</fieldset>}{cleanupError && <p className="cleanup-error" role="alert">{cleanupError}</p>}<footer className="cleanup-actions"><span>{cleanupLoading && cleanupKind === 'loading' ? <Skeleton style={{ width: '7rem' }} /> : cleanupTargets.length === 0 ? 'Nothing selected' : `${cleanupChecked.size} of ${cleanupTargets.length} selected`}</span><button type="button" className={cleanupLoading && cleanupKind === 'working' ? 'progress-border progress-red' : undefined} aria-busy={cleanupLoading || undefined} disabled={cleanupLoading || cleanupError === 'Unable to load cleanup targets.'} onClick={() => void resolveCleanup()}><ProgressRing busy={cleanupLoading && cleanupKind === 'working'} />{cleanupLoading && cleanupKind === 'working' ? 'Working…' : cleanupChecked.size === 0 ? 'Dismiss all' : 'Cleanup'}</button></footer></div></div>, document.body);
+  const cleanupDialog = !cleanupOpen ? null : createPortal(<div ref={cleanupDialogRef} tabIndex={-1} className="dialog cleanup-dialog" role="dialog" aria-modal="true" aria-labelledby="cleanup-title"><div><header className="cleanup-header"><div><h2 id="cleanup-title">Cleanup</h2><p>Select items to clean up. Unchecked items stay in this list.</p></div><button className="cleanup-close" type="button" aria-label="Close cleanup" disabled={cleanupLoading} onClick={closeCleanup}><PanelIcon path={panelIcons.close} /></button></header>{cleanupLoading && cleanupKind === 'loading' ? <CleanupSkeletons /> : cleanupTargets.length === 0 ? cleanupError ? null : <p className="cleanup-empty">No cleanup targets remain.</p> : <fieldset className="cleanup-targets" disabled={cleanupLoading}><legend className="sr-only">Cleanup targets</legend>{cleanupTargets.map(target => <label key={target.id} className="cleanup-target"><input type="checkbox" checked={cleanupChecked.has(target.id)} onChange={event => { /* persist only an explicit checkbox choice */ changeCleanupChoice(target.id, event.target.checked); }} /><span><strong><small>{cleanupKindLabel[target.kind]}</small>{target.label}</strong><span>{target.detail}</span></span></label>)}</fieldset>}{cleanupPreferenceWarning && <p className="cleanup-error" role="alert">{cleanupPreferenceWarning}</p>}{cleanupError && <p className="cleanup-error" role="alert">{cleanupError}</p>}<footer className="cleanup-actions"><span>{cleanupLoading && cleanupKind === 'loading' ? <Skeleton style={{ width: '7rem' }} /> : cleanupTargets.length === 0 ? 'Nothing selected' : `${cleanupChecked.size} of ${cleanupTargets.length} selected`}</span><button type="button" className={cleanupLoading && cleanupKind === 'working' ? 'progress-border progress-red' : undefined} aria-busy={cleanupLoading || undefined} disabled={cleanupLoading || cleanupChecked.size === 0 || cleanupError === 'Unable to load cleanup targets.'} onClick={() => void resolveCleanup()}><ProgressRing busy={cleanupLoading && cleanupKind === 'working'} />{cleanupLoading && cleanupKind === 'working' ? 'Working…' : 'Cleanup'}</button></footer></div></div>, document.body);
   // the Agent the active tab's switcher shows
   const agent = currentAgentOf(item);
   const activeWorktreeId = item?.worktree?.id ?? agent?.worktreeId;

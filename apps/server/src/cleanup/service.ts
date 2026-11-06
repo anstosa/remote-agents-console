@@ -10,12 +10,15 @@ import { TmuxAdapter } from '../tmux/adapter.js';
 type DiscoverySnapshot = { refresh(force?: boolean): Promise<Agent[]> };
 type BranchCleanup = Pick<WorktreeManagementService, 'cleanupBranches' | 'deleteCleanupBranch'>;
 type CleanupAction = { target: CleanupTarget; socket?: SocketRef; paneId?: string; pid?: number; branch?: { projectId: string; name: string; reason: 'merged' | 'closed' } };
+export type CleanupVersion = { epoch: number; revision: number };
 
 const opaqueId = (kind: CleanupTargetKind, identity: string) => `cleanup-${createHash('sha256').update(`${kind}\0${identity}`).digest('base64url').slice(0, 24)}`;
 const paneIdentity = (pane: Pane) => `${pane.socket.fingerprint}:${pane.paneId}`;
 
 export class CleanupService {
   private readonly dismissed = new Set<string>();
+  private readonly versionEpoch = Date.now();
+  private versionRevision = 0;
   private current = new Map<string, CleanupAction>();
   private scanInFlight?: Promise<CleanupTarget[]>;
 
@@ -27,6 +30,11 @@ export class CleanupService {
     private readonly processInspector: ProcessInspector & HostProcessInspector = new ProcInspector(),
     private readonly branchCleanup?: BranchCleanup
   ) {}
+
+  // copy the current cache ordering metadata
+  get version(): CleanupVersion {
+    return { epoch: this.versionEpoch, revision: this.versionRevision };
+  }
 
   pending(): CleanupTarget[] {
     return [...this.current.values()].filter(candidate => !this.dismissed.has(candidate.target.id)).map(candidate => candidate.target);
@@ -41,19 +49,20 @@ export class CleanupService {
     return scan;
   }
 
+  // execute selected targets without hiding unchecked work
   async cleanup(targetIds: unknown): Promise<CleanupTarget[] | undefined> {
     if (!Array.isArray(targetIds) || targetIds.length > 500 || targetIds.some(id => typeof id !== 'string') || new Set(targetIds).size !== targetIds.length) return undefined;
     const pending = this.pending();
     const pendingIds = new Set(pending.map(target => target.id));
     if (targetIds.some(id => !pendingIds.has(id as string))) return undefined;
     const selected = new Set(targetIds as string[]);
-    await Promise.all(pending.map(async target => {
-      if (!selected.has(target.id)) {
-        this.dismissed.add(target.id);
-        return;
+    await Promise.all([...selected].map(async id => {
+      const action = this.current.get(id);
+      // suppress completed targets
+      if (action !== undefined && await this.execute(action).catch(() => false)) {
+        this.dismissed.add(id);
+        this.versionRevision += 1;
       }
-      const action = this.current.get(target.id);
-      if (action !== undefined && await this.execute(action).catch(() => false)) this.dismissed.add(target.id);
     }));
     return this.pending();
   }
@@ -134,6 +143,7 @@ export class CleanupService {
     const next = new Map(candidates.map(candidate => [candidate.target.id, candidate]));
     for (const id of this.dismissed) if (!next.has(id)) this.dismissed.delete(id);
     this.current = next;
+    this.versionRevision += 1;
     return this.pending();
   }
 

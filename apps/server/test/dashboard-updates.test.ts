@@ -66,4 +66,25 @@ describe('dashboard updates', () => {
 
     expect(seen.map(snapshot => snapshot.notesRevision)).toEqual([0, 1]);
   });
+
+  // observe target-only and version-only publications as separate transitions
+  it('publishes same-count cleanup target replacements and version-only changes', async () => {
+    // build one stable cleanup target
+    const target = (id: string) => ({ id, kind: 'stale-agent' as const, label: id, detail: 'old' });
+    let value = { generation: 1, places: [], adapters: {}, agents: [], projects: [], cleanupPending: 1, cleanupTargets: [target('cleanup-one')], cleanupVersion: { epoch: 1, revision: 1 }, reviewTour: { available: false, reason: 'generator_unavailable' }, reviews: [] } as DashboardPayload;
+    const updates = new DashboardUpdates<DashboardPayload>(dashboardFingerprint);
+    updates.setLoader(async () => value);
+    const seen: DashboardPayload[] = [];
+    updates.subscribe(snapshot => seen.push(snapshot));
+
+    await updates.refresh();
+    value = { ...value, cleanupTargets: [target('cleanup-two')] };
+    await updates.refresh();
+    value = { ...value, cleanupVersion: { epoch: 1, revision: 2 } };
+    await updates.refresh();
+
+    expect(seen.map(snapshot => [snapshot.cleanupTargets?.[0]?.id, snapshot.cleanupVersion?.revision])).toEqual([
+      ['cleanup-one', 1], ['cleanup-two', 1], ['cleanup-two', 2]
+    ]);
+  });
 });

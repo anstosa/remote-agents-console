@@ -279,7 +279,9 @@ test('uses skeleton rows for cleanup reads and working motion only for cleanup s
   });
 
   await page.goto('/');
-  const cleanupTrigger = page.getByRole('button', { name: 'Review 1 cleanup target' });
+  const more = page.getByRole('button', { name: 'More options' });
+  const cleanupTrigger = page.locator('.place-menu').getByRole('button', { name: 'Cleanup', exact: true });
+  await more.click();
   await cleanupTrigger.click();
   const dialog = page.getByRole('dialog', { name: 'Cleanup', exact: true });
   try {
@@ -297,6 +299,7 @@ test('uses skeleton rows for cleanup reads and working motion only for cleanup s
   await expect(dialog.getByRole('checkbox', { name: /Stale Codex agent/u })).toBeVisible();
 
   await dialog.getByRole('button', { name: 'Close cleanup' }).click();
+  await more.click();
   await cleanupTrigger.click();
   try {
     await expect.poll(() => cleanupReads).toBe(2);

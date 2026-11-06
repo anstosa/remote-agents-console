@@ -1,19 +1,17 @@
 import type { DashboardPayload } from '../dashboard/updates.js';
 import type { DashboardUpdates } from '../dashboard/updates.js';
-import type { CleanupNotification } from '../notifications.js';
 import type { CleanupTarget } from '../domain/models.js';
 
 type Scanner = { scan(): Promise<CleanupTarget[]> };
-type Notifier = { notify(message: CleanupNotification): Promise<unknown> };
 
 export class CleanupMonitor {
   private timer?: ReturnType<typeof setInterval>;
   private running?: Promise<void>;
 
+  // configure scan cadence and dashboard refresh
   constructor(
     private readonly cleanup: Scanner,
     private readonly dashboard: Pick<DashboardUpdates<DashboardPayload>, 'refresh'>,
-    private readonly push: Notifier,
     private readonly intervalMs = 60 * 60 * 1_000
   ) {}
 
@@ -28,18 +26,11 @@ export class CleanupMonitor {
     this.timer = undefined;
   }
 
+  // scan once and publish cached results
   private run(): Promise<void> {
     if (this.running !== undefined) return this.running;
-    const running = this.cleanup.scan().then(async targets => {
+    const running = this.cleanup.scan().then(async () => {
       await this.dashboard.refresh().catch(() => undefined);
-      if (targets.length === 0) return;
-      await this.push.notify({
-        kind: 'cleanup',
-        title: 'Cleanup available',
-        body: `${targets.length} cleanup ${targets.length === 1 ? 'target is' : 'targets are'} ready.`,
-        tag: 'runtime-cleanup',
-        url: '/#cleanup'
-      });
     }).catch(() => undefined).finally(() => {
       if (this.running === running) this.running = undefined;
     });

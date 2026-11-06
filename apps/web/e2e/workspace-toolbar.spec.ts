@@ -89,14 +89,14 @@ test('renders the same toolbar for a Worktree with and without an Agent', async 
   // with an Agent, Launch is the plain split: the kind mark and the verb
   await page.getByRole('tab', { name: /^Cora/u }).click();
   await expect(toolbar(page).locator('.launch-split.quiet .launch-primary')).toHaveText(/^\W*Launch$/u);
-  expect(await controlNames(page)).toEqual(['Launch Claude', 'Choose agent', 'Open a terminal', 'Notes (1)', 'Browser', 'Files', 'Code', 'Review 2 cleanup targets', 'Git status: feature/workspace-toolbar; 3 changes (1 staged file, 2 unstaged files)', 'Stack controls: healthy', 'More options']);
+  expect(await controlNames(page)).toEqual(['Launch Claude', 'Choose agent', 'Open a terminal', 'Notes (1)', 'Browser', 'Files', 'Code', 'Git status: feature/workspace-toolbar; 3 changes (1 staged file, 2 unstaged files)', 'Stack controls: healthy', 'More options']);
 
   // with none, Launch is the labelled primary, and the Conversations button stands in for the
   // agent panel that would carry it; the rest is unchanged
   await page.getByRole('tab', { name: /^Idle/u }).click();
   await expect(toolbar(page).locator('.launch-split:not(.quiet) .launch-primary')).toHaveText(/^\W*Launch Claude$/u);
   const idleNames = await controlNames(page);
-  expect(idleNames.filter(name => !name.startsWith('Conversations'))).toEqual(['Launch Claude', 'Choose agent', 'Open a terminal', 'Notes (0)', 'Files', 'Code', 'Review 2 cleanup targets', 'Git status: idle; clean', 'More options']);
+  expect(idleNames.filter(name => !name.startsWith('Conversations'))).toEqual(['Launch Claude', 'Choose agent', 'Open a terminal', 'Notes (0)', 'Files', 'Code', 'Git status: idle; clean', 'More options']);
   // the agentless view's own power and pin controls are gone
   await expect(page.getByRole('button', { name: 'Worktree power options' })).toHaveCount(0);
   await expect(page.locator('.place-pin')).toHaveCount(0);
@@ -116,7 +116,7 @@ test('the ⋮ holds the Place actions, and Remove waits until no Agent runs', as
 
   await page.getByRole('tab', { name: /^Idle/u }).click();
   await toolbar(page).getByRole('button', { name: 'More options' }).click();
-  await expect(menu.locator(':scope > button, :scope > a')).toHaveText(['GitHub Actions', 'Remove worktree…']);
+  await expect(menu.locator(':scope > button, :scope > a')).toHaveText(['Cleanup', 'GitHub Actions', 'Remove worktree…']);
   // GitHub Actions is looked up by Worktree, so it works with no Agent running
   await expect(menu.getByRole('link', { name: 'GitHub Actions' })).toHaveAttribute('href', 'https://github.com/octo/repo/actions');
   await expect(menu.getByRole('button', { name: 'Remove worktree…' })).toBeEnabled();
@@ -150,9 +150,9 @@ test('a Place without git shows its path instead of Code, git and stack', async 
     await expect(toolbar(page).getByRole('button', { name: 'Files' })).toBeVisible();
     await expect(toolbar(page).getByRole('button', { name: 'Browser' })).toHaveCount(0);
     await expect(toolbar(page).getByRole('button', { name: /^Launch/u }).first()).toBeEnabled();
-    // the ⋮ holds only the folder pin without a git checkout
+    // cleanup stays available beside the folder pin without a git checkout
     await toolbar(page).getByRole('button', { name: 'More options' }).click();
-    await expect(page.locator('.place-menu').getByRole('button')).toHaveText([/^(Pin|Unpin) folder$/u]);
+    await expect(page.locator('.place-menu').getByRole('button')).toHaveText(['Cleanup', /^(Pin|Unpin) folder$/u]);
     await page.keyboard.press('Escape');
   }
   // Launch on the Scratch Agent tab starts another Agent there

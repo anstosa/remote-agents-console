@@ -646,13 +646,14 @@ button.model-chip:hover, button.model-chip.active, .watches-chip:hover, .watches
 .log-control:disabled { pointer-events: none; }
 .mobile-terminal-keys { display: none; }
 .page-arrow svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
-.cleanup-toggle { overflow: visible; border-color: var(--yellow); color: var(--yellow); box-shadow: inset 0 0 1rem color-mix(in srgb, var(--yellow) 14%, transparent), 0 0 .8rem color-mix(in srgb, var(--yellow) 42%, transparent); animation: cleanup-glow 1.6s ease-in-out infinite; }
-.cleanup-toggle:hover { border-color: var(--yellow); color: var(--yellow); }
-.cleanup-toggle .broom-icon { fill: currentColor; stroke: none; }
-.cleanup-count { background: var(--yellow); color: var(--crust); }
 .cleanup-empty-view { position: relative; }
-.cleanup-standalone { position: absolute; right: var(--edge); bottom: var(--edge); margin: 0; }
-.cleanup-standalone .page-arrow { display: grid; width: 2.6rem; min-height: 2.6rem; padding: .25rem; place-items: center; }
+.cleanup-menu-row .broom-icon { fill: currentColor; stroke: none; }
+.cleanup-badges { display: inline-flex; align-items: center; gap: .3rem; margin-left: auto; }
+.cleanup-count { display: inline-flex; flex: 0 0 auto; min-width: 1.1rem; height: 1.1rem; align-items: center; justify-content: center; border-radius: 999px; padding: 0 .25rem; font: 700 .65rem/1 var(--font-mono); }
+.cleanup-count.unchecked { background: var(--overlay-1); color: var(--crust); }
+.cleanup-count.checked { background: var(--yellow); color: var(--crust); }
+.more:has(.cleanup-summary-count) { position: relative; overflow: visible; }
+.cleanup-summary-count { position: absolute; top: -.35rem; right: -.35rem; }
 .notes-control { position: relative; z-index: 3; }
 .notes-toggle { overflow: visible; }
 .notes-toggle.active { border-color: var(--yellow); color: var(--yellow); }
@@ -1687,9 +1688,9 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 @keyframes cleanup-glow { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.22); box-shadow: inset 0 0 1rem color-mix(in srgb, var(--cleanup-glow-color, var(--yellow)) 20%, transparent), 0 0 1.1rem color-mix(in srgb, var(--cleanup-glow-color, var(--yellow)) 68%, transparent); } }
 @keyframes settings-update-glow { 0%, 100% { filter: brightness(.92); box-shadow: inset 0 0 .35rem color-mix(in srgb, var(--mauve) 18%, transparent), 0 0 .25rem color-mix(in srgb, var(--mauve) 28%, transparent); } 50% { filter: brightness(1.3); box-shadow: inset 0 0 .9rem color-mix(in srgb, var(--mauve) 42%, transparent), 0 0 1rem color-mix(in srgb, var(--mauve) 78%, transparent); } }
 /* retain static attention colors when motion is reduced */
-@media (prefers-reduced-motion: reduce) { .cleanup-toggle, .notes-toggle.unread-queued-prompts, .voice-soundwave i { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .notes-toggle.unread-queued-prompts, .voice-soundwave i { animation: none; } }
 /* the Reduced motion setting stills the same animations regardless of the OS */
-:root[data-motion="reduced"] .cleanup-toggle, :root[data-motion="reduced"] .notes-toggle.unread-queued-prompts, :root[data-motion="reduced"] .voice-soundwave i { animation: none; }
+:root[data-motion="reduced"] .notes-toggle.unread-queued-prompts, :root[data-motion="reduced"] .voice-soundwave i { animation: none; }
 @media (max-width: 600px) {
   :root { --edge: .75rem; }
   .tabs button { font-size: .75rem; padding: .3rem .45rem; }
@@ -1784,7 +1785,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* let the glow escape while labels retain their own overflow clipping */
 .tabs button[role='tab'].progress-border, .workspace-sheet-row.progress-border { overflow: visible; }
 /* loading replaces attention pulses without moving the host or its contents */
-.cleanup-toggle.progress-border, .notes-toggle.unread-queued-prompts.progress-border { animation: none; filter: none; }
+.notes-toggle.unread-queued-prompts.progress-border { animation: none; filter: none; }
 /* apply the glow outside the masked child so it follows the same moving highlight */
 .updates-in-progress > .update-progress-ring, .progress-border > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; display: block; width: auto; height: auto; min-width: 0; max-width: none; margin: 0; padding: 0; overflow: visible; border-radius: inherit; pointer-events: none; filter: var(--progress-indicator-filter, drop-shadow(0 0 .3rem var(--progress-ring-color, var(--mauve)))); }
 .update-progress-ring::before { content: ''; display: var(--progress-border-display, block); position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: var(--progress-border-animation, var(--progress-orbit-animation, update-border-orbit 2s ease-in-out infinite)); }

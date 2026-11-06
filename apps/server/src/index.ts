@@ -62,7 +62,7 @@ const app = await buildApp(config, { control, tmux, discovery, push, notificatio
 await attestBoot(settingsInstallation, config, applicationContent, undefined, applicationMigration);
 // honor the configured cadence while overlapping refreshes coalesce
 const dashboardTimer = setInterval(() => void dashboardUpdates.refresh().catch(() => {}), dashboardPollMs);
-const cleanupMonitor = new CleanupMonitor(cleanup, dashboardUpdates, push);
+const cleanupMonitor = new CleanupMonitor(cleanup, dashboardUpdates);
 app.addHook('onClose', async () => { clearInterval(dashboardTimer); cleanupMonitor.stop(); notifications.stop(); });
 void dashboardUpdates.refresh().catch(() => {});
 cleanupMonitor.start();

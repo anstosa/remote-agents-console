@@ -1,4 +1,5 @@
-import type { Agent, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree } from '../domain/models.js';
+import type { Agent, CleanupTarget, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree } from '../domain/models.js';
+import type { CleanupVersion } from '../cleanup/service.js';
 import type { LaunchResolution } from '../launch/resolution.js';
 import type { StackState } from '../worktree-commands/service.js';
 import type { ReviewTourCapability, StoredReviewTourSummary } from '../review-tour/contracts.js';
@@ -24,6 +25,8 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
   // Project's, or the Scratch Place's own falling back to the Scratch group's)
   places: Array<DashboardPlace & { launch?: LaunchResolution }>;
   cleanupPending: number;
+  cleanupTargets?: CleanupTarget[];
+  cleanupVersion?: CleanupVersion;
   notesRevision?: number;
   // moves when the GitHub data views read over HTTP changes, so they read it again
   githubRevision?: number;
@@ -42,7 +45,7 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
 };
 
 // fingerprint every dashboard field that drives browser refreshes
-export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.notesRevision, dashboard.githubRevision, dashboard.githubBadge, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.buttons]);
+export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.cleanupTargets, dashboard.cleanupVersion, dashboard.notesRevision, dashboard.githubRevision, dashboard.githubBadge, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.buttons]);
 
 export class DashboardUpdates<T = DashboardPayload> {
   private loader?: () => Promise<T>;

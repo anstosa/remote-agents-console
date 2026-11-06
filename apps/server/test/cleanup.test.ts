@@ -89,7 +89,7 @@ describe('runtime cleanup', () => {
     expect(targets.find(target => target.kind === 'stale-agent')?.detail).toContain('old omx');
   });
 
-  it('cleans selected targets, dismisses unchecked targets, and leaves failures pending until they disappear', async () => {
+  it('cleans only selected targets while unchecked targets and failures stay pending', async () => {
     let panes = [pane('%3', '$orphan', 300, { path: '/repo/.omx/team/demo/worktrees/worker-2' }), pane('%5', '$stale', 500)];
     const closed: string[] = [];
     const service = new CleanupService(
@@ -106,14 +106,51 @@ describe('runtime cleanup', () => {
     const orphan = initial.find(target => target.kind === 'orphan-worker')!;
     const stale = initial.find(target => target.kind === 'stale-agent')!;
 
-    await expect(service.cleanup([orphan.id])).resolves.toEqual([orphan]);
+    await expect(service.cleanup([orphan.id])).resolves.toEqual([orphan, stale]);
     expect(closed).toEqual(['%3']);
-    expect(service.pending()).toEqual([orphan]);
+
+    await expect(service.cleanup([stale.id])).resolves.toEqual([orphan]);
+    expect(closed).toEqual(['%3', '%5']);
 
     panes = [];
     await expect(service.scan()).resolves.toEqual([]);
     panes = [pane('%3', '$orphan', 300, { path: '/repo/.omx/team/demo/worktrees/worker-2' }), pane('%5', '$stale', 500)];
     await expect(service.scan()).resolves.toEqual(expect.arrayContaining([orphan, stale]));
+  });
+
+  it('versions completed scans and successful actions without advancing cached reads, unchecked targets, or failures', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_234);
+    let succeeds = false;
+    const service = new CleanupService(
+      { refresh: async () => [] },
+      { find: async () => [socket] },
+      { listPanes: async () => [pane('%5', '$stale', 500)], close: async () => succeeds, terminateHostProcess: async () => true },
+      { recognizeAgent: async (pid: number) => ({ kind: 'codex' as const, pid, wrapped: false }), listProcesses: async () => [] }
+    );
+
+    try {
+      const constructed = service.version;
+      expect(constructed).toEqual({ epoch: 1_234, revision: 0 });
+      expect(service.version).not.toBe(constructed);
+
+      const [target] = await service.scan();
+      expect(service.version).toEqual({ epoch: 1_234, revision: 1 });
+      service.pending();
+      expect(service.version).toEqual({ epoch: 1_234, revision: 1 });
+
+      await expect(service.cleanup([])).resolves.toEqual([target]);
+      expect(service.version).toEqual({ epoch: 1_234, revision: 1 });
+      await expect(service.cleanup([target!.id])).resolves.toEqual([target]);
+      expect(service.version).toEqual({ epoch: 1_234, revision: 1 });
+
+      succeeds = true;
+      await expect(service.cleanup([target!.id])).resolves.toEqual([]);
+      expect(service.version).toEqual({ epoch: 1_234, revision: 2 });
+      await service.scan();
+      expect(service.version).toEqual({ epoch: 1_234, revision: 3 });
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('issues no adapter teardown when killing panes: cleanup only closes them', async () => {
@@ -183,7 +220,7 @@ describe('runtime cleanup', () => {
     expect(closed!.id).not.toBe(merged!.id);
     expect(closed!.kind).toBe('closed-pr-branch');
     await expect(service.cleanup([merged!.id])).resolves.toBeUndefined();
-    await expect(service.cleanup([])).resolves.toEqual([]);
+    await expect(service.cleanup([])).resolves.toEqual([closed]);
     expect(deletes).toBe(0);
   });
 
