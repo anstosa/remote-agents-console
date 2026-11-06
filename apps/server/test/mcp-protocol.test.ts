@@ -95,6 +95,15 @@ describe('MCP stateless protocol validation', () => {
       expect(response.json().result.protocolVersion).toBe('2025-06-18');
     } finally { await app.close(); }
   });
+  // Pi's MCP client sends a progress token in `_meta` on every tool call
+  it('accepts request metadata on tools/call but not a non-object one', async () => {
+    const { app, gateway, call } = await fixture();
+    try {
+      expect((await call({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_instances', arguments: {}, _meta: { progressToken: 1 } } })).json()).toHaveProperty('result');
+      expect((await call({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_instances', _meta: 'bad' } })).json().error.code).toBe(-32602);
+      expect(gateway.call).toHaveBeenCalledTimes(1);
+    } finally { await app.close(); }
+  });
   // tool notifications must not trigger mutations or ordinary tool reads
   it('acknowledges notifications without dispatch and refuses unknown or invalid calls', async () => {
     const { app, gateway, call } = await fixture();

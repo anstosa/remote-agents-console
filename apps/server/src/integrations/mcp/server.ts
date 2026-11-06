@@ -132,7 +132,7 @@ async function dispatch(request: JsonRpcRequest, principal: IntegrationPrincipal
   if (request.method === 'tools/call') {
     const params = request.params;
     // require one bounded tool name
-    if (!isRecord(params) || typeof params.name !== 'string' || params.name.length === 0 || params.name.length > 100 || params.arguments !== undefined && !isRecord(params.arguments) || Object.keys(params).some(key => key !== 'name' && key !== 'arguments')) return rpcError(id, -32602, 'Invalid params');
+    if (!isRecord(params) || typeof params.name !== 'string' || params.name.length === 0 || params.name.length > 100 || params.arguments !== undefined && !isRecord(params.arguments) || params._meta !== undefined && !isRecord(params._meta) || Object.keys(params).some(key => key !== 'name' && key !== 'arguments' && key !== '_meta')) return rpcError(id, -32602, 'Invalid params');
     const definition = gateway.listTools(principal).find(tool => tool.name === params.name);
     const args = { ...(params.arguments as Record<string, unknown> | undefined) };
     const instanceId = args.instance_id;
