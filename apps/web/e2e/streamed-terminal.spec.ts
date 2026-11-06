@@ -1039,3 +1039,39 @@ test('a tap focuses the terminal textarea so the soft keyboard opens', async ({ 
     await context.close();
   }
 });
+
+// The agent pane's selection surface rewrites its row spans whenever the viewport scrolls; a
+// touch that started on one of those spans keeps targeting it after it is detached, so the
+// gesture must keep scrolling instead of stopping after the first row.
+test('a real touch swipe over agent output keeps scrolling after the first row re-renders', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL: baseURL ?? undefined, ...MOBILE });
+  const page = await context.newPage();
+  try {
+    await setup(page, { width: '340px', height: '420px', scrollback: 500, preferNativeMouseSelection: true });
+    await drive(page, 'pushSize', 40, 12);
+    let payload = '';
+    for (let line = 1; line <= 80; line += 1) payload += `line-${String(line).padStart(2, '0')} ${'x'.repeat(30)}\r\n`;
+    await drive(page, 'pushBytes', payload);
+    await expect.poll(() => drive(page, 'baseY')).toBeGreaterThan(0);
+    const box = (await page.locator('#term .xterm-screen').boundingBox())!;
+    const x = box.x + 40;
+    const y = box.y + 20;
+    // the swipe must start on surface text, the node a phone's finger lands on
+    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('.terminal-selection-row') !== null, { x, y })).toBe(true);
+    const base = await drive<number>(page, 'viewportY');
+    const cdp = await context.newCDPSession(page);
+    const touch = (type: string, point?: { x: number; y: number }) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: point === undefined ? [] : [point] });
+    await touch('touchStart', { x, y });
+    for (let step = 1; step <= 40; step += 1) {
+      await touch('touchMove', { x, y: y + step * 5 });
+      await page.waitForTimeout(16);
+    }
+    await page.waitForTimeout(100);
+    await touch('touchEnd');
+    const cell = box.height / 12;
+    // 200px of finger travel is roughly a dozen rows; one row means the gesture was lost
+    expect(base - await drive<number>(page, 'viewportY')).toBeGreaterThanOrEqual(Math.floor(200 / cell) - 2);
+  } finally {
+    await context.close();
+  }
+});

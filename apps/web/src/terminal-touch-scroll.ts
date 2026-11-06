@@ -2,9 +2,12 @@ import type { Terminal as XTerm } from '@xterm/xterm';
 
 // xterm.js 6.0 has no touch history scrolling of its own, so the console owns it: a
 // one-finger drag over a pane with scrollback moves the browser's scrollback. The
-// listeners are capture-phase and non-passive so they run before xterm and can
-// swallow the gesture. In the alternate screen or while the program tracks the mouse,
-// translate vertical drags into wheel events for xterm to encode for the program.
+// listeners are non-passive so they can swallow the gesture, and the move and end
+// listeners sit on the node the finger landed on: scrolling re-renders the selection
+// surface's row spans, and the browser keeps sending the rest of a touch to its start
+// node even after that node is detached, where a listener on this element never hears it.
+// In the alternate screen or while the program tracks the mouse, translate vertical
+// drags into wheel events for xterm to encode for the program.
 // xterm does not forward touch events itself. A drag that sets off sideways is left to
 // the browser too, so it swipes the phone's panel carousel. The wheel stays native
 // (xterm handles it with `scrollOnUserInput` off).
@@ -39,9 +42,10 @@ export const attachTerminalTouchScroll = (element: HTMLElement, terminal: XTerm)
   // track one finger in both normal and full-screen programs
   const start = (event: TouchEvent) => {
     // leave selection handles and multi-finger gestures to the browser
-    if (event.touches.length !== 1 || hasSelection()) { gesture = undefined; return; }
+    if (event.touches.length !== 1 || hasSelection()) { gesture = undefined; follow(undefined); return; }
     const touch = event.touches[0]!;
     gesture = { id: touch.identifier, startX: touch.clientX, startY: touch.clientY, lastY: touch.clientY, remainder: 0, vertical: false };
+    follow(event.target ?? undefined);
   };
 
   // consume only direction-locked vertical drags
@@ -92,19 +96,25 @@ export const attachTerminalTouchScroll = (element: HTMLElement, terminal: XTerm)
   const end = (event: TouchEvent) => {
     if (gesture !== undefined && !Array.from(event.touches).some(candidate => candidate.identifier === gesture!.id)) {
       gesture = undefined;
+      follow(undefined);
     }
   };
 
   const options = { capture: true, passive: false } as const;
+  let followed: EventTarget | undefined;
+  const follow = (target: EventTarget | undefined) => {
+    followed?.removeEventListener('touchmove', move as EventListener, options);
+    followed?.removeEventListener('touchend', end as EventListener, options);
+    followed?.removeEventListener('touchcancel', end as EventListener, options);
+    followed = target;
+    followed?.addEventListener('touchmove', move as EventListener, options);
+    followed?.addEventListener('touchend', end as EventListener, options);
+    followed?.addEventListener('touchcancel', end as EventListener, options);
+  };
   element.addEventListener('touchstart', start, options);
-  element.addEventListener('touchmove', move, options);
-  element.addEventListener('touchend', end, options);
-  element.addEventListener('touchcancel', end, options);
 
   return () => {
     element.removeEventListener('touchstart', start, options);
-    element.removeEventListener('touchmove', move, options);
-    element.removeEventListener('touchend', end, options);
-    element.removeEventListener('touchcancel', end, options);
+    follow(undefined);
   };
 };

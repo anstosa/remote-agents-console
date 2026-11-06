@@ -29,7 +29,7 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
 // mount the scripted pane with optional codex transcript controls
 export const renderStreamedTerminal = async (
   container: HTMLElement,
-  options: { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; loadingKind?: 'agent' | 'terminal' } = {}
+  options: { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; loadingKind?: 'agent' | 'terminal'; preferNativeMouseSelection?: boolean } = {}
 ): Promise<void> => {
   container.style.width = options.width ?? '640px';
   container.style.height = options.height ?? '320px';
@@ -41,6 +41,7 @@ export const renderStreamedTerminal = async (
   handle = mountStreamedTerminal(container, {
     scrollback: options.scrollback,
     codexScrollControls: options.codexScrollControls,
+    preferNativeMouseSelection: options.preferNativeMouseSelection,
     // Long by default so an `exit` status can be asserted before a reconnect fires.
     reconnectDelayMs: options.reconnectDelayMs ?? 60_000,
     // Stands in for the panel's sticky mobile modifiers so the transform seam is testable.
