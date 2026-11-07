@@ -175,7 +175,8 @@ export class DavoRuntime {
         const tools = this.responseTools();
         const instructions = 'Initialize only the supplied retained context. Return exactly READY as text. Do not speak, call tools, or perform any user action. This is a transport readiness check, not an admitted user request.';
         const metadata = { davo_phase: 'readiness', readiness_id: readinessId };
-        const framing = { conversation: 'none', tools, instructions, tool_choice: 'none', output_modalities: ['text'], max_output_tokens: 16, metadata };
+        // allow provider completion within a bounded readiness budget
+        const framing = { conversation: 'none', tools, instructions, tool_choice: 'none', output_modalities: ['text'], max_output_tokens: 256, metadata };
         const projection = buildLiveContext(state, { currentTurn: 'Initialize retained chat context without taking action.', reservedBytes: utf8Bytes(JSON.stringify(framing)) + 1024 });
         const readinessResponse = { ...framing, input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: projection.text }] }] };
         // reject oversized actual envelopes before releasing inference instructions
@@ -341,9 +342,10 @@ export class DavoRuntime {
     // a stale browser cannot stop a newer transport
     if (this.activeOwner !== ownerId) return;
     // an old close receipt may clean its own call but cannot clear newer state
-    if (!this.live.matches(input.voiceSessionId, input.generation)) { await this.calls.stop(input); return; }
-    this.fence();
-    await this.calls.stop(input);
+    if (this.live.matches(input.voiceSessionId, input.generation)) this.fence();
+    const stopped = await this.calls.stop(input);
+    // never acknowledge ambiguous provider cleanup as complete
+    if (!stopped.ok) throw new Error(stopped.code);
   }
 
   // enforce cutoff and lease loss even when browser javascript is frozen

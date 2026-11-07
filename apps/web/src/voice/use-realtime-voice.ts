@@ -34,6 +34,7 @@ const deleteTimeoutMilliseconds = 4_000;
 const projectionTimeoutMilliseconds = 4_000;
 const receiptRetryMilliseconds = 750;
 const readinessTimeoutMilliseconds = 15_000;
+const cleanupTimeoutMilliseconds = 20_000;
 const heartbeatMilliseconds = 10_000;
 
 // manage one replaceable audio transport over durable Davo history
@@ -162,12 +163,11 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     const currentPeer = peer.current;
     const currentStream = stream.current;
     const currentAudio = audio.current;
+    const currentSession = session.current;
     channel.current = undefined;
     peer.current = undefined;
     stream.current = undefined;
     audio.current = undefined;
-    currentChannel?.close();
-    currentPeer?.close();
     currentStream?.getTracks().forEach(track => track.stop());
     // detach remote output immediately
     if (currentAudio !== undefined) currentAudio.srcObject = null;
@@ -195,16 +195,20 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     setMuted(false);
     stopMeter();
     setState(nextState);
-  }, [stopMeter]);
+    // retire only captured resources after bounded server hangup
+    const retire = () => { currentChannel?.close(); currentPeer?.close(); };
+    // an unregistered local transport needs no provider cleanup
+    if (currentSession === undefined) { retire(); return Promise.resolve(true); }
+    return request('/api/realtime/session/stop', { ...json({ voiceSessionId: currentSession.voiceSessionId, generation: currentSession.generation }, true), signal: AbortSignal.timeout(cleanupTimeoutMilliseconds) })
+      .then(response => response.ok, () => false)
+      .finally(retire);
+  }, [request, stopMeter]);
 
   // stop provider control and local media
   const stop = useCallback(() => {
     desiredOpen.current = false;
-    const current = session.current;
-    closeLocal('idle');
-    // request exact server hangup independently of local closure
-    if (current !== undefined) void request('/api/realtime/session/stop', json({ voiceSessionId: current.voiceSessionId, generation: current.generation }, true));
-  }, [closeLocal, request]);
+    void closeLocal('idle');
+  }, [closeLocal]);
 
   // finish one exact active turn without adopting later callbacks
   const finishTurn = useCallback(async (expectedSession: ActiveSession, expectedTurn: ActiveTurn, responseId?: string): Promise<boolean> => {
@@ -222,27 +226,30 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     // never rotate a replacement transport
     if (session.current !== expectedSession || channel.current !== expectedChannel) return;
     const reopen = desiredOpen.current;
-    closeLocal('idle');
+    const cleanup = closeLocal('idle');
     const closedAttempt = attempt.current;
     // close provider control before any successor
-    await request('/api/realtime/session/stop', json({ voiceSessionId: expectedSession.voiceSessionId, generation: expectedSession.generation })).catch(() => undefined);
+    const closed = await cleanup;
+    // never apply old cleanup results to a replacement transport
+    if (attempt.current !== closedAttempt) return;
+    // an uncertain cleanup grants no automatic reopen
+    if (!closed) { desiredOpen.current = false; setError('Davo provider cleanup is uncertain. Try again later.'); setState('error'); return; }
     // reopen only after exact server cleanup
     if (reopen && attempt.current === closedAttempt) window.setTimeout(() => {
       // require the queued reopen to still own an empty transport
       if (attempt.current !== closedAttempt || !desiredOpen.current || session.current !== undefined || channel.current !== undefined) return;
       void startRef.current();
     }, 0);
-  }, [closeLocal, request]);
+  }, [closeLocal]);
 
   // stop one exact transport while durable admission recovers
   const stopForPendingAdmission = useCallback((expectedSession: ActiveSession, expectedChannel: RTCDataChannel): void => {
     // never stop a successor for an old pending receipt
     if (session.current !== expectedSession || channel.current !== expectedChannel) return;
     desiredOpen.current = false;
-    closeLocal('error');
+    void closeLocal('error');
     setError('Davo storage is recovering. Try again shortly.');
-    void request('/api/realtime/session/stop', json({ voiceSessionId: expectedSession.voiceSessionId, generation: expectedSession.generation }, true)).catch(() => undefined);
-  }, [closeLocal, request]);
+  }, [closeLocal]);
 
   // fence one committed raw item until provider deletion
   const quarantineRawItem = useCallback((expectedSession: ActiveSession, expectedChannel: RTCDataChannel, itemId: string): void => {
@@ -669,10 +676,15 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
   // start one server-owned WebRTC projection
   const start = useCallback(async () => {
     desiredOpen.current = true;
-    closeLocal('connecting');
+    const cleanup = closeLocal('connecting');
     const token = attempt.current;
     setError(undefined);
     setState('connecting');
+    const closed = await cleanup;
+    // discard replaced cleanup before opening
+    if (token !== attempt.current) return;
+    // preserve uncertainty before any successor negotiation
+    if (!closed) { setError('Davo provider cleanup is uncertain. Try again later.'); setState('error'); return; }
     const snapshot = await conversation.refresh();
     // discard history completion after a newer start
     if (token !== attempt.current) return;
@@ -816,9 +828,7 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     } catch (failure) {
       // never let an older start failure close a successor
       if (token !== attempt.current || startedSession !== undefined && session.current !== startedSession) return;
-      const current = startedSession;
-      closeLocal('error');
-      if (current !== undefined) void request('/api/realtime/session/stop', json({ voiceSessionId: current.voiceSessionId, generation: current.generation }, true));
+      void closeLocal('error');
       setError(failure instanceof Error ? failure.message : 'Davo could not start listening.');
     }
   }, [closeLocal, connectMeter, conversation, handlePayload, request, rotate, stop, target.agentId, target.worktreeId]);

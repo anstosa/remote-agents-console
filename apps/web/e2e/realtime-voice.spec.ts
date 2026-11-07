@@ -16,6 +16,8 @@ async function installMedia(page: import('@playwright/test').Page): Promise<void
     class MockPeerConnection extends EventTarget {
       connectionState: RTCPeerConnectionState = 'new';
       ontrack: ((event: RTCTrackEvent) => void) | null = null;
+      // expose each exact peer for retirement checks
+      constructor() { super(); Object.assign(window, { davoPeer: this }); }
       // expose one provider data channel
       createDataChannel() {
         const data = new MockDataChannel();
@@ -80,7 +82,7 @@ async function completeTranscript(page: import('@playwright/test').Page, itemId:
 }
 
 // open one minimal provider-readiness fixture
-async function openReadinessFixture(page: import('@playwright/test').Page, tools: string[], extraItems: Array<{ id?: string; surface: 'conversation.item.done' | 'response.output_item.done'; tools: string[] }> = [], options: { admission?: 'receipt' | 'pending-202' | 'pending-body' | 'retry-pending'; deferContinuation?: boolean; deferFirstAdmission?: boolean; includeWorktree?: boolean } = {}) {
+async function openReadinessFixture(page: import('@playwright/test').Page, tools: string[], extraItems: Array<{ id?: string; surface: 'conversation.item.done' | 'response.output_item.done'; tools: string[] }> = [], options: { admission?: 'receipt' | 'pending-202' | 'pending-body' | 'retry-pending'; deferContinuation?: boolean; deferFirstAdmission?: boolean; includeWorktree?: boolean; deferStop?: boolean; stopStatus?: number } = {}) {
   await installMedia(page);
   const readyBodies: unknown[] = [];
   const openBodies: unknown[] = [];
@@ -91,8 +93,10 @@ async function openReadinessFixture(page: import('@playwright/test').Page, tools
   const continueBodies: unknown[] = [];
   let releaseAdmission = () => undefined;
   let releaseContinuation = () => undefined;
+  let releaseStop = () => undefined;
   const admissionGate = new Promise<void>(resolve => { releaseAdmission = resolve; });
   const continuationGate = new Promise<void>(resolve => { releaseContinuation = resolve; });
+  const stopGate = new Promise<void>(resolve => { releaseStop = resolve; });
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -108,7 +112,13 @@ async function openReadinessFixture(page: import('@playwright/test').Page, tools
     if (path === '/api/realtime/negotiate') return route.fulfill({ json: { sdp: 'fixture-answer', generation: 4, readinessId: 'readiness-1', readinessResponse: { conversation: 'none', input: [], instructions: 'Return READY only', tools: [{ type: 'mcp', server_label: 'rac', allowed_tools: ['delegate_request', 'select_worktree'] }], tool_choice: 'none', output_modalities: ['text'], metadata: { davo_phase: 'readiness', readiness_id: 'readiness-1' } } } });
     if (path === '/api/davo/session/ready') { readyBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
     if (path === '/api/realtime/session/heartbeat') return route.fulfill({ json: { serverNow: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() } });
-    if (path === '/api/realtime/session/stop') { stopBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
+    // retain the peer until exact server cleanup settles
+    if (path === '/api/realtime/session/stop') {
+      stopBodies.push(request.postDataJSON());
+      // hold only the first exact cleanup receipt
+      if (options.deferStop && stopBodies.length === 1) await stopGate;
+      return route.fulfill({ status: options.stopStatus ?? 200, json: options.stopStatus === 503 ? { error: 'davo_provider_hangup_ambiguous' } : { ok: true } });
+    }
     if (path === '/api/davo/responses/bind') { bindBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
     if (path === '/api/davo/responses/continue') {
       continueBodies.push(request.postDataJSON());
@@ -136,8 +146,59 @@ async function openReadinessFixture(page: import('@playwright/test').Page, tools
   await page.getByRole('button', { name: 'Open Davo' }).click();
   await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { davoChannel?: EventTarget }).davoChannel))).toBe(true);
   await completeReadiness(page, 'provider-session-1', 'readiness-response-1', 'mcp-list-1', tools, extraItems);
-  return { assistantBodies, bindBodies, continueBodies, openBodies, readyBodies, stopBodies, transcriptBodies, releaseAdmission, releaseContinuation };
+  return { assistantBodies, bindBodies, continueBodies, openBodies, readyBodies, stopBodies, transcriptBodies, releaseAdmission, releaseContinuation, releaseStop };
 }
+
+// preserve server cleanup authority without retaining local audio authority
+test('retires only the captured peer after server hangup while capture stops immediately', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree'], [], { deferStop: true });
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  await page.evaluate(() => Object.assign(window, { retiringChannel: (window as unknown as { davoChannel: EventTarget }).davoChannel, retiringPeer: (window as unknown as { davoPeer: EventTarget }).davoPeer }));
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  expect(await page.evaluate(() => (window as unknown as { davoTrack: { stopped: boolean } }).davoTrack.stopped)).toBe(true);
+  expect(await page.evaluate(() => (window as unknown as { retiringChannel: { readyState: string } }).retiringChannel.readyState)).toBe('open');
+  expect(await page.evaluate(() => (window as unknown as { retiringPeer: { connectionState: string } }).retiringPeer.connectionState)).not.toBe('closed');
+  // an open old channel still has no admission authority
+  await page.evaluate(() => (window as unknown as { retiringChannel: EventTarget }).retiringChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'late-retired', transcript: 'Never admit this retired input' }) })));
+  await page.getByRole('button', { name: 'Open listening' }).click();
+  // deliver readiness only after the successor channel actually exists
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: EventTarget; retiringChannel: EventTarget }).davoChannel !== (window as unknown as { retiringChannel: EventTarget }).retiringChannel)).toBe(true);
+  await completeReadiness(page, 'provider-session-2', 'readiness-response-2', 'mcp-list-2', ['delegate_request', 'select_worktree']);
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  fixture.releaseStop();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { retiringChannel: { readyState: string } }).retiringChannel.readyState)).toBe('closed');
+  expect(await page.evaluate(() => (window as unknown as { retiringPeer: { connectionState: string } }).retiringPeer.connectionState)).toBe('closed');
+  expect(await page.evaluate(() => (window as unknown as { davoChannel: { readyState: string } }).davoChannel.readyState)).toBe('open');
+  expect(fixture.transcriptBodies).toEqual([]);
+  expect(fixture.openBodies).toHaveLength(2);
+});
+
+// preserve the safety fence after an uncertain hangup
+test('does not reopen automatically after server cleanup fails', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree'], [], { stopStatus: 503 });
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  // trigger an exact transport rotation without a raw item identity
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.committed' }) })));
+  await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  await page.waitForTimeout(100);
+  expect(fixture.openBodies).toHaveLength(1);
+  expect(await page.evaluate(() => (window as unknown as { davoChannel: { readyState: string } }).davoChannel.readyState)).toBe('closed');
+  expect(await page.evaluate(() => (window as unknown as { davoTrack: { stopped: boolean } }).davoTrack.stopped)).toBe(true);
+});
+
+// bound transport retention even when the cleanup receipt never arrives
+test('retires a stopped peer when exact cleanup times out', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree'], [], { deferStop: true });
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  // trigger rotation while the server receipt remains pending
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.committed' }) })));
+  await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  expect(await page.evaluate(() => (window as unknown as { davoTrack: { stopped: boolean } }).davoTrack.stopped)).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { readyState: string } }).davoChannel.readyState), { timeout: 25_000 }).toBe('closed');
+  expect(fixture.openBodies).toHaveLength(1);
+  fixture.releaseStop();
+});
 
 test('deletes every raw item after readiness and keeps muted microphone transport enabled', async ({ page }) => {
   await installMedia(page);
@@ -160,7 +221,7 @@ test('deletes every raw item after readiness and keeps muted microphone transpor
     if (url.pathname === '/api/davo/conversation') return route.fulfill({ json: { conversationId: 'conversation-1', generation: 4, revision: '11111111-1111-4111-8111-111111111111', retainedFrom: '2026-11-03T08:00:00.000Z', serverNow: new Date().toISOString(), retentionCutoffAt: new Date(Date.now() + 3_600_000).toISOString(), nextSequence: 2 + backgroundPhase, hasMore: false, pendingChoices: [], messages: [{ id: 'baseline-message', sequence: 1, kind: 'status', text: 'Listening ready', createdAt: new Date(Date.now() - 60_000).toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() }, ...(backgroundPhase >= 1 ? [{ id: 'failed-background-message', sequence: 2, kind: 'assistant', text: 'Dropped projection update', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() }] : []), ...(backgroundPhase >= 2 ? [{ id: 'background-message', sequence: 3, kind: 'assistant', text: 'A retained background update', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() }] : [])] } });
     // create one server-owned pending negotiation
     if (url.pathname === '/api/realtime/session') return route.fulfill({ json: { negotiationId: 'negotiation-1', model: 'gpt-realtime-2.1', conversationId: 'conversation-1', generation: 4, contextRevision: '22222222-2222-4222-8222-222222222222', serverNow: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), retentionCutoffAt: new Date(Date.now() + 3_600_000).toISOString() } });
-    if (url.pathname === '/api/realtime/negotiate') return route.fulfill({ json: { sdp: 'fixture-answer', generation: 4, readinessId: 'readiness-1', readinessResponse: { conversation: 'none', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Retained context seed' }] }], instructions: 'Return READY only; no tools', tools: [{ type: 'mcp', server_label: 'rac', allowed_tools: ['delegate_request', 'select_worktree'] }, { type: 'function', name: 'select_worktree' }], tool_choice: 'none', output_modalities: ['text'], max_output_tokens: 16, metadata: { davo_phase: 'readiness', readiness_id: 'readiness-1' } } } });
+    if (url.pathname === '/api/realtime/negotiate') return route.fulfill({ json: { sdp: 'fixture-answer', generation: 4, readinessId: 'readiness-1', readinessResponse: { conversation: 'none', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Retained context seed' }] }], instructions: 'Return READY only; no tools', tools: [{ type: 'mcp', server_label: 'rac', allowed_tools: ['delegate_request', 'select_worktree'] }, { type: 'function', name: 'select_worktree' }], tool_choice: 'none', output_modalities: ['text'], max_output_tokens: 256, metadata: { davo_phase: 'readiness', readiness_id: 'readiness-1' } } } });
     if (url.pathname === '/api/davo/session/ready') { readyBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
     if (url.pathname === '/api/realtime/session/heartbeat') return route.fulfill({ json: { serverNow: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() } });
     if (url.pathname === '/api/realtime/session/stop') { stopBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }

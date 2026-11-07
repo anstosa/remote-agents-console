@@ -91,6 +91,7 @@ describe('DavoRuntime', () => {
     const oldVoice = { voiceSessionId: 'voice_old_12345678901234567890', generation: snapshot.generation };
     const first = await runtime.open('owner', oldVoice);
     const negotiation = await runtime.negotiate('owner', { ...oldVoice, negotiationId: first.negotiationId, sdp: 'v=0\r\noffer' });
+    expect(negotiation.readinessResponse.max_output_tokens).toBe(256);
     await expect(runtime.admit('owner', { ...oldVoice, providerSessionId: 'session', providerItemId: 'premature', text: 'Do not admit before readiness' })).rejects.toThrow('davo_voice_inactive');
     expect(() => runtime.acknowledgeReady('owner', { ...oldVoice, readinessId: negotiation.readinessId, responseId: 'ready', importedTools: ['list_agents'] })).toThrow('davo_provider_not_ready');
     const current = { ...oldVoice, voiceSessionId: 'voice_new_12345678901234567890' };
@@ -102,6 +103,23 @@ describe('DavoRuntime', () => {
     expect(accepted.ok).toBe(true);
     expect((await runtime.conversation()).messages.map(message => message.text)).toEqual(['The new session still works.']);
     await runtime.stop('owner', current);
+  });
+
+  // surface exact provider uncertainty after local revocation
+  it('reports ambiguous provider cleanup after revoking the exact voice session', async () => {
+    const { runtime, store, provider } = await fixture();
+    const snapshot = await runtime.conversation();
+    const voice = { voiceSessionId: 'voice_stop_fail_123456789012345', generation: snapshot.generation };
+    const opened = await runtime.open('owner', voice);
+    await runtime.negotiate('owner', { ...voice, negotiationId: opened.negotiationId, sdp: 'v=0\r\noffer' });
+    provider.mockResolvedValueOnce(new Response(null, { status: 404 }));
+
+    await expect(runtime.stop('owner', voice)).rejects.toThrow('davo_provider_hangup_ambiguous');
+    expectNegotiationFenced(runtime);
+    expect((await store.read())).toMatchObject({ providerCalls: [], providerQuarantineUntil: expect.any(String) });
+    const callsAfterFailure = provider.mock.calls.length;
+    await expect(runtime.stop('owner', voice)).resolves.toBeUndefined();
+    expect(provider).toHaveBeenCalledTimes(callsAfterFailure);
   });
 
   it('requires exact duplicate-free provider readiness tools', async () => {

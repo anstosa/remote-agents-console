@@ -346,7 +346,10 @@ export class DavoProviderCalls {
           signal: AbortSignal.timeout(this.requestTimeoutMs)
         });
         // treat only documented HTTP success as severed
-        if (!response.ok) return this.quarantine(dispatching);
+        if (!response.ok) {
+          console.warn('[davo] provider hangup rejected', { status: response.status });
+          return this.quarantine(dispatching);
+        }
       } catch (error) {
         // retry only explicit pre-transport proof
         if (error instanceof ProviderRequestNotSentError && dispatching.hangup.state === 'dispatching' && dispatching.hangup.definitelyNotSentRetries === 0) {
@@ -363,6 +366,7 @@ export class DavoProviderCalls {
             return { ok: false, code: 'davo_store_unavailable' };
           }
         }
+        console.warn('[davo] provider hangup transport failed');
         return this.quarantine(dispatching);
       }
       try {

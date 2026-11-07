@@ -351,6 +351,34 @@ describe('DavoProviderCalls', () => {
     expect(store.state().providerQuarantineUntil).toBeUndefined();
   });
 
+  // keep hangup failure diagnostics content-free
+  it.each(['transport', 'rejection'] as const)('logs content-free %s hangup diagnostics without retrying ambiguity', async failure => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // isolate global warning capture
+    try {
+      const store = persistence({ providerCalls: [call({ callId: 'rtc_private_diagnostic' })] });
+      // keep private provider details out of diagnostics
+      const provider = vi.fn(async () => {
+        // select one failure boundary
+        if (failure === 'transport') throw new Error('private socket error with standard-key and SDP');
+        return new Response('private provider body with standard-key and SDP', { status: 404 });
+      });
+      const calls = new DavoProviderCalls({ apiKey: 'standard-key', persistence: store.port, fetch: provider as typeof fetch });
+
+      await expect(calls.stop({ voiceSessionId: 'voice-1', generation: 7 })).resolves.toEqual({ ok: false, code: 'davo_provider_hangup_ambiguous' });
+      // require the fixed diagnostic shape
+      expect(warning.mock.calls).toEqual(failure === 'transport'
+        ? [['[davo] provider hangup transport failed']]
+        : [['[davo] provider hangup rejected', { status: 404 }]]);
+      expect(store.state()).toEqual({ providerCalls: [], providerQuarantineUntil: '2026-11-05T23:00:00.000Z' });
+      await expect(calls.stop({ voiceSessionId: 'voice-1', generation: 7 })).resolves.toEqual({ ok: true, status: 'absent' });
+      expect(provider).toHaveBeenCalledTimes(1);
+    } finally {
+      // restore global warning state
+      warning.mockRestore();
+    }
+  });
+
   it('recovers dispatching as ambiguity without replay', async () => {
     const store = persistence({ providerCalls: [call({ callId: 'rtc_crashed123', hangup: { state: 'dispatching', attemptId: 'attempt-1', attemptedAt: '2026-11-05T22:05:00.000Z', definitelyNotSentRetries: 0 } })] });
     const provider = vi.fn();
