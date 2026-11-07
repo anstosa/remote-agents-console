@@ -19,6 +19,15 @@ const drive = <T = unknown>(page: Page, name: string, ...args: unknown[]): Promi
     return (module as Record<string, (...a: unknown[]) => unknown>)[name]!(...args) as T;
   }, { name, args });
 
+// run fixture calls back to back in the page, then report connects made in the next 200 ms
+const afterInPage = (page: Page, ...calls: unknown[][]): Promise<number> =>
+  page.evaluate(async calls => {
+    const module = await import('/e2e/streamed-terminal-fixture.ts') as Record<string, (...a: unknown[]) => unknown>;
+    for (const [name, ...args] of calls) module[name as string]!(...args);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    return module.connectCalls!() as number;
+  }, calls);
+
 const setup = async (page: Page, options: Record<string, unknown> = {}) => {
   await page.goto('/');
   // Clear the app's DOM but keep the <head> the app injected: the Catppuccin palette
@@ -380,10 +389,13 @@ test('Ctrl+H and Ctrl+L reach the pane as vim expects them', async ({ page }) =>
 });
 
 test('an exit keeps the terminal mounted and shows a status', async ({ page }) => {
-  await setup(page, { reconnectDelayMs: 60_000 });
+  await setup(page, { reconnectDelayMs: 1000 });
   await drive(page, 'pushSize', 40, 10);
   await drive(page, 'pushBytes', 'before-exit\r\n');
-  await drive(page, 'pushExit', 'pane closed');
+  await expect.poll(() => drive(page, 'screenText')).toContain('before-exit');
+  // even a stream that stayed up waits the delay after an exit, so its reason stays up
+  await page.waitForTimeout(1100);
+  expect(await afterInPage(page, ['pushExit', 'pane closed'])).toBe(1);
   await expect(page.locator('#term')).toHaveAttribute('data-status', 'pane closed');
   const status = page.locator('#term .streamed-terminal-status');
   await expect(status.locator('.streamed-terminal-status-message')).toHaveText('pane closed');
@@ -391,6 +403,16 @@ test('an exit keeps the terminal mounted and shows a status', async ({ page }) =
   await expect(status.locator('.output-skeleton')).toBeHidden();
   await expect(status).not.toHaveAttribute('aria-busy', 'true');
   expect(await drive(page, 'terminalMounted')).toBe(true);
+});
+
+test('a Terminal panel exit followed by the server close does not reconnect before unmount', async ({ page }) => {
+  await setup(page, { reconnectDelayMs: 1000, captureExit: true });
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'before-exit\r\n');
+  await expect.poll(() => drive(page, 'screenText')).toContain('before-exit');
+  await page.waitForTimeout(1100);
+  expect(await afterInPage(page, ['pushExit', 'pane closed'], ['pushClose', 1011, ''])).toBe(1);
+  await expect(page.locator('#term')).toHaveAttribute('data-exited', 'pane closed');
 });
 
 test('never types a reply back into the pane for device queries', async ({ page }) => {
@@ -588,6 +610,37 @@ test('a socket loss reconnects and re-seeds without keeping a stale line', async
   await expect.poll(() => drive(page, 'screenText')).toContain('AFTER-RECONNECT');
   expect(await drive<string>(page, 'screenText')).not.toContain('STALE-LINE');
   await expect(status).toBeHidden();
+});
+
+test('a stream that stayed up reconnects at once and other failures wait unless the page returns', async ({ page }) => {
+  await setup(page, { reconnectDelayMs: 1000 });
+  const status = page.locator('#term .streamed-terminal-status');
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'LIVE\r\n');
+  await expect(status).toBeHidden();
+  await page.waitForTimeout(1100);
+  expect(await afterInPage(page, ['pushClose', 1006, 'lost'])).toBe(2);
+  // a retry that fails again before any seed waits the delay
+  expect(await afterInPage(page, ['pushClose', 1008, ''])).toBe(2);
+  await expect(status).toContainText('Reconnecting…');
+  // returning to the page or the network fires the pending retry now
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(() => drive(page, 'connectCalls')).toBe(3);
+  expect(await afterInPage(page, ['pushClose', 1006, 'lost'])).toBe(3);
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(() => drive(page, 'connectCalls')).toBe(4);
+  // a stream that seeds then fails at once is retried no faster than the delay
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'BRIEF\r\n');
+  await expect(status).toBeHidden();
+  expect(await afterInPage(page, ['pushClose', 1011, ''])).toBe(4);
+  await expect.poll(() => drive(page, 'connectCalls'), { timeout: 2000 }).toBe(5);
+  // staying up after a fresh seed earns the immediate retry again
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'BACK\r\n');
+  await expect(status).toBeHidden();
+  await page.waitForTimeout(1100);
+  expect(await afterInPage(page, ['pushClose', 1006, 'lost'])).toBe(6);
 });
 
 test('blocks cached links and jump controls behind a reconnect skeleton', async ({ page }) => {

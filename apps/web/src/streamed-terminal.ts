@@ -40,7 +40,8 @@ export interface StreamedTerminalOptions {
   // Rewrite terminal input before it is sent, so the panel's sticky mobile modifiers
   // (Ctrl, Alt, …) apply to typed keys as they do in the Log viewer. Identity by default.
   transformInput?: (data: string) => string;
-  // How long a lost stream shows its status before re-subscribing.
+  // The wait between reconnect attempts. A stream that stayed up this long after its seed
+  // re-subscribes at once; any other loss (and an `exit`) waits this long.
   reconnectDelayMs?: number;
   // The status notice changed: its text while the stream is lost or refreshing, undefined
   // once a fresh seed lands (a panel header can mirror it).
@@ -257,6 +258,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   const maxQueuedBytes = 256 * 1024;
   const maxQueuedFrames = 1024;
   let reconnectTimer: number | undefined;
+  // when the current stream's seed was parsed; undefined until then
+  let seededAt: number | undefined;
   let overlayFrame: number | undefined;
   let viewportFrame: number | undefined;
   // retained placeholder output must never authorize a shortcut on a replacement stream
@@ -410,6 +413,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
         // only the current parsed seed can reveal output and restore app-owned controls
         if (wasSeed && connection === source && generation === outputGeneration) {
           parsedSeedGeneration = generation;
+          seededAt = performance.now();
           hideStatus();
         }
         scheduleOverlayRender();
@@ -469,10 +473,20 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     if (current !== undefined) { try { current.close(); } catch { /* already closing */ } }
     // Keep the terminal mounted as its own placeholder with a status, then re-subscribe.
     showStatus(reason);
-    if (reconnectTimer === undefined) {
-      reconnectTimer = window.setTimeout(() => { reconnectTimer = undefined; subscribe(); }, reconnectDelayMs);
-    }
+    // a refusing server (a lost control lease) never seeds, and one that seeds then fails is
+    // retried no faster than the delay
+    const delivered = seededAt !== undefined && performance.now() - seededAt >= reconnectDelayMs;
+    if (reconnectTimer === undefined) reconnectTimer = window.setTimeout(reconnect, delivered ? 0 : reconnectDelayMs);
   };
+  const reconnect = () => {
+    if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+    subscribe();
+  };
+  // a phone back from the background, or a network back up, retries now rather than after the delay
+  const reconnectPending = () => { if (reconnectTimer !== undefined && !document.hidden) reconnect(); };
+  document.addEventListener('visibilitychange', reconnectPending);
+  window.addEventListener('online', reconnectPending);
 
   const handleFrame = (frame: PaneServerFrame) => {
     switch (frame.type) {
@@ -480,7 +494,11 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       case 'size': case 'reseed': queueOutput(frame); break;
       // A pane that ended closes a Terminal panel (its onExit); the Agent panel supplies
       // none and shows the status + reconnects on a fresh control client, as before.
-      case 'exit': if (options.onExit) options.onExit(frame.reason); else handleDisconnect(frame.reason); break;
+      // the pane is gone: keep the reason up, and give a closing Terminal panel time to unmount
+      case 'exit':
+        seededAt = undefined;
+        if (options.onExit) options.onExit(frame.reason); else handleDisconnect(frame.reason);
+        break;
       case 'question': options.onQuestion?.(frame.question); break;
       case 'metadata': options.onMetadata?.(frame.metadata); break;
       // the browser allows the write only shortly after a keypress in this tab (the yank), so
@@ -500,6 +518,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     pendingByteCount = 0;
     // Keep the current screen as the placeholder; the fresh seed clears it when it lands.
     awaitingSeed = true;
+    seededAt = undefined;
     invalidateCodexFollowState();
     connection = options.connect({
       onOpen: () => sendViewport(),
@@ -518,9 +537,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     if (needsFreshSeed) {
       handleDisconnect('Refreshing output…');
       // refresh immediately rather than waiting for the normal reconnect delay
-      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
-      reconnectTimer = undefined;
-      subscribe();
+      reconnect();
       return;
     }
     // synchronous control frames may precede the next asynchronous byte write
@@ -743,6 +760,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       disposed = true;
       clearQueuedOutput();
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      document.removeEventListener('visibilitychange', reconnectPending);
+      window.removeEventListener('online', reconnectPending);
       if (overlayFrame !== undefined) window.cancelAnimationFrame(overlayFrame);
       if (viewportFrame !== undefined) window.cancelAnimationFrame(viewportFrame);
       firstViewportSub?.dispose();

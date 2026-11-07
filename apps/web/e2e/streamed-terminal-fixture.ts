@@ -30,7 +30,7 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
 // mount the scripted pane with optional codex transcript controls
 export const renderStreamedTerminal = async (
   container: HTMLElement,
-  options: { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; loadingKind?: 'agent' | 'terminal'; preferNativeMouseSelection?: boolean } = {}
+  options: { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; captureExit?: boolean; loadingKind?: 'agent' | 'terminal'; preferNativeMouseSelection?: boolean } = {}
 ): Promise<void> => {
   container.style.width = options.width ?? '640px';
   container.style.height = options.height ?? '320px';
@@ -43,12 +43,15 @@ export const renderStreamedTerminal = async (
     scrollback: options.scrollback,
     codexScrollControls: options.codexScrollControls,
     preferNativeMouseSelection: options.preferNativeMouseSelection,
-    // Long by default so an `exit` status can be asserted before a reconnect fires.
+    // Long by default so a status can be asserted before a reconnect fires: only a stream
+    // that stayed up this long after its seed reconnects at once, and an `exit` never does.
     reconnectDelayMs: options.reconnectDelayMs ?? 60_000,
     // Stands in for the panel's sticky mobile modifiers so the transform seam is testable.
     transformInput: options.upperCaseInput ? data => data.toUpperCase() : undefined,
     // capture plain-link routing while leaving modified activations on their native path
     onOpenUrl: options.captureOpenUrls ? url => { openedUrls.push(url); return true; } : undefined,
+    // stands in for a Terminal panel, which closes on exit
+    onExit: options.captureExit ? reason => { container.dataset.exited = reason; } : undefined,
     onQuestion: question => questions.push(question),
     // expose both placeholder variants before output arrives
     ...(options.loadingKind === undefined ? {} : { loadingKind: options.loadingKind }),
