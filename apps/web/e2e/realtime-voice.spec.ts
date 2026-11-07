@@ -1,672 +1,588 @@
 import { expect, test } from '@playwright/test';
 
-// keep the fixture call entry point enabled through authenticated session refreshes
 const enabledDavo = { enabled: true, available: true, name: 'Davo', context: '' };
 
-test('opens Davo with the selected canonical context', async ({ page }) => {
-  const longWorktreeLabel = `Very long worktree label ${'x'.repeat(120)}`;
+// install inspectable browser media primitives
+async function installMedia(page: import('@playwright/test').Page): Promise<void> {
   await page.addInitScript(() => {
-    class MockWebSocket {
-      static readonly CONNECTING = 0;
-      static readonly OPEN = 1;
-      static readonly CLOSED = 3;
-      readyState = MockWebSocket.CONNECTING;
-      onopen: ((event: Event) => void) | null = null;
-      onclose: ((event: CloseEvent) => void) | null = null;
-      onerror: ((event: Event) => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      // open every fixture socket asynchronously
-      constructor(_url: string | URL) { window.setTimeout(() => { this.readyState = MockWebSocket.OPEN; this.onopen?.(new Event('open')); }); }
-      // ignore fixture writes
-      send() {}
-      // close one fixture socket
-      close() { this.readyState = MockWebSocket.CLOSED; this.onclose?.(new CloseEvent('close')); }
-    }
-    Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockWebSocket });
-  });
-  let realtimeHeaders: Record<string, string> = {};
-  let realtimeBody: unknown;
-  let renamedClient: unknown;
-  let renamedServer: unknown;
-  let updateStarted = false;
-  let currentServerName = 'Framework';
-  const updateTargetSha = '2'.repeat(40);
-  await page.route('**/api/**', async route => {
-    const request = route.request();
-    const url = new URL(request.url());
-    // restore one authenticated browser session
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', davo: enabledDavo, server: { name: currentServerName, url: 'https://framework.santosa.dev', remotes: [] } } });
-    // persist one renamed client
-    if (url.pathname === '/api/auth/device-name') {
-      renamedClient = request.postDataJSON();
-      return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Office Mac', davo: enabledDavo, server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
-    }
-    // persist one renamed server
-    if (url.pathname === '/api/server/name') {
-      renamedServer = request.postDataJSON();
-      currentServerName = 'Garage Server';
-      return route.fulfill({ json: { name: currentServerName, server: { name: currentServerName, url: 'https://framework.santosa.dev', remotes: [] } } });
-    }
-    // launch one host update
-    if (url.pathname === '/api/server/update' && request.method() === 'POST') {
-      updateStarted = true;
-      return route.fulfill({ status: 202, json: { id: 'server_update_operation_1234', kind: 'update', state: 'queued' } });
-    }
-    // preview one exact host update
-    if (url.pathname === '/api/server/update-preview') return route.fulfill({ json: { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha: updateTargetSha, fastForwardable: true, commitCount: 1, commits: [{ sha: updateTargetSha, subject: 'Update server settings', author: 'Ansel', authoredAt: '2026-08-27T12:00:00-07:00' }], commitsTruncated: false, filesTruncated: false, advisory: { required: false, reasons: [] } } });
-    // expose the reviewed update entry point
-    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: true } });
-    // expose an empty account store
-    if (url.pathname === '/api/codex/accounts') return route.fulfill({ json: { accounts: [] } });
-    // retain the progress state
-    if (url.pathname === '/api/server/update/server_update_operation_1234') return route.fulfill({ json: { id: 'server_update_operation_1234', kind: 'update', state: 'running' } });
-    // provide one selected worktree and other open worktrees
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } }, agents: [
-      { id: 'agent-cora', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', unread: false },
-      { id: 'agent-skills', paneId: '%2', sessionId: 'socket:$2', socketFingerprint: 'socket', home: '/worktrees/skills', worktreeId: 'skills', worktreeLabel: 'Skills', title: 'Ready', unread: false },
-      { id: 'agent-ferry', paneId: '%3', sessionId: 'socket:$3', socketFingerprint: 'socket', home: '/worktrees/ferry', worktreeId: 'ferry-fyi', worktreeLabel: 'Ferry FYI', title: 'Ready', unread: false },
-      { id: 'agent-ferry-review', paneId: '%4', sessionId: 'socket:$4', socketFingerprint: 'socket', home: '/worktrees/ferry-review', worktreeId: 'ferry-fyi', worktreeLabel: 'Ferry FYI', title: 'Review', unread: false },
-      { id: 'agent-skills-copy', paneId: '%5', sessionId: 'socket:$5', socketFingerprint: 'socket', home: '/worktrees/skills-copy', worktreeId: 'skills-copy', worktreeLabel: 'Skills', title: 'Ready', unread: false },
-      { id: 'agent-long-label', paneId: '%6', sessionId: 'socket:$6', socketFingerprint: 'socket', home: '/worktrees/long-label', worktreeId: 'long-label', worktreeLabel: longWorktreeLabel, title: 'Ready', unread: false }
-    ], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
-    if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
-    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (url.pathname === '/api/agents/agent-cora/saved-prompts') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-cora/queued-prompts') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-cora/prompt-history') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-cora/commands') return route.fulfill({ json: { commands: [] } });
-    if (url.pathname === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [] } });
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    // capture the selected context before simulating missing provider setup
-    if (url.pathname === '/api/realtime/session') {
-      realtimeHeaders = request.headers();
-      realtimeBody = request.postDataJSON();
-      return route.fulfill({ status: 503, json: { error: 'Realtime voice is unavailable.' } });
-    }
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
-  });
-
-  await page.goto('/');
-  const settings = page.getByRole('button', { name: 'Global settings' });
-  await expect(page.locator('.tabs > .server-switcher-settings-wrap').getByRole('button', { name: 'Global settings' })).toBeVisible();
-  await expect(settings).toHaveText('');
-  await expect(settings.locator('svg')).toHaveCount(1);
-  await expect.poll(() => settings.evaluate(button => { const box = button.getBoundingClientRect(); return Math.abs(box.width - box.height); })).toBeLessThanOrEqual(1);
-  await settings.click();
-  const settingsPage = page.getByRole('dialog', { name: 'Settings' });
-  const clientCard = settingsPage.getByRole('group', { name: 'Name', exact: true });
-  await expect(clientCard).toContainText('Test device');
-  await expect(settingsPage.getByRole('button', { name: 'Rename browser name' })).toBeVisible();
-  await expect(settingsPage.getByRole('group', { name: 'Server' })).toHaveCount(0);
-  await expect(settingsPage.getByRole('button', { name: 'Rename Server' })).toHaveCount(0);
-  await expect(settingsPage.getByRole('button', { name: '+ Add account' })).toHaveCount(0);
-  await expect(settingsPage.getByRole('button', { name: 'Update Server' })).toHaveCount(0);
-  await settingsPage.getByRole('button', { name: 'Rename browser name' }).click();
-  await expect(settingsPage).toBeVisible();
-  const renameDialog = page.getByRole('dialog', { name: 'Rename browser' });
-  await expect(renameDialog).toBeVisible();
-  await renameDialog.getByLabel('Name', { exact: true }).fill('Office Mac');
-  await renameDialog.getByRole('button', { name: 'Done', exact: true }).click();
-  await expect(renameDialog).toHaveCount(0);
-  expect(renamedClient).toBeUndefined();
-  await expect(settingsPage.getByRole('group', { name: 'Name', exact: true })).toContainText('Office Mac');
-  await settingsPage.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await expect.poll(() => renamedClient).toEqual({ deviceName: 'Office Mac' });
-  expect(renamedClient).toEqual({ deviceName: 'Office Mac' });
-  await expect(settingsPage.getByRole('group', { name: 'Name', exact: true })).toContainText('Office Mac');
-  await settingsPage.getByRole('button', { name: 'Close settings' }).click();
-  const serverSelector = page.getByRole('button', { name: /^Switch server/u });
-  await expect(serverSelector).toHaveAccessibleName(/update available/u);
-  await serverSelector.click();
-  const serverDetails = page.getByRole('group', { name: 'Current server details' });
-  await expect(serverDetails).toContainText('Framework');
-  await expect(serverDetails).toContainText('framework.santosa.dev');
-  await expect(serverDetails.getByRole('button', { name: 'View upstream update' })).toBeVisible();
-  await serverDetails.getByRole('button', { name: 'Rename Server' }).click();
-  const serverRenameDialog = page.getByRole('dialog', { name: 'Rename Server' });
-  await serverRenameDialog.getByLabel('Server name').fill('Garage Server');
-  await serverRenameDialog.getByRole('button', { name: 'Save' }).click();
-  await expect(serverRenameDialog).toHaveCount(0);
-  expect(renamedServer).toEqual({ name: 'Garage Server' });
-  const callTrigger = page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' });
-  // the server selector leads the row, then Call and settings
-  await expect(page.locator('.tab-row-lead > :first-child')).toHaveClass(/server-selector/u);
-  await expect(page.locator('.tab-row-lead > :nth-child(2)')).toHaveAttribute('aria-label', 'Call Davo');
-  await expect(callTrigger.locator('span')).toHaveText('Call Davo');
-  await expect(callTrigger.locator('span')).toBeVisible();
-  await expect(callTrigger.locator('svg')).toHaveCount(1);
-  await callTrigger.click();
-  await expect(page.getByRole('heading', { name: 'Davo' })).toBeVisible();
-  const context = page.getByRole('region', { name: 'Davo connection context' });
-  await expect(context.locator('.voice-context-active > small')).toHaveText('Active worktree');
-  await expect(context.locator('.voice-context-active > strong')).toHaveText('Cora');
-  await expect(context.locator('.voice-context-active > span')).toHaveText('Agent · Cora');
-  await expect(context.locator('.voice-context-server > small')).toHaveText('Server / instance');
-  await expect(context.locator('.voice-context-server > strong')).toHaveText('Garage Server');
-  await expect(context.locator('.voice-context-server > span')).toHaveText('framework.santosa.dev');
-  await expect(context.locator('.voice-context-open > small')).toHaveText('Other open worktrees');
-  await expect(context.locator('.voice-context-open li')).toHaveText(['Ferry FYI', 'Skills · skills', 'Skills · skills-copy', longWorktreeLabel]);
-  await expect(context.locator('.voice-context-open')).not.toContainText('Cora');
-  // contain long labels in the narrow mobile dialog
-  await page.setViewportSize({ width: 320, height: 700 });
-  const mobileContextMetrics = await context.evaluate(element => {
-    const dialog = element.closest('.voice-dialog')?.firstElementChild;
-    const card = element.querySelector('.voice-context-open');
-    const chip = element.querySelector('.voice-context-open li:last-child');
-    return {
-      dialogContained: dialog !== null && dialog.scrollWidth <= dialog.clientWidth,
-      chipContained: card !== null && chip !== null && chip.getBoundingClientRect().right <= card.getBoundingClientRect().right + 1,
-      // require the context chip to grow rather than truncate its long label
-      chipExpanded: chip !== null && chip.scrollWidth <= chip.clientWidth && chip.scrollHeight <= chip.clientHeight && getComputedStyle(chip).whiteSpace === 'normal' && chip.clientHeight > parseFloat(getComputedStyle(chip).fontSize) * 2
-    };
-  });
-  expect(mobileContextMetrics).toEqual({ dialogContained: true, chipContained: true, chipExpanded: true });
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await expect(page.locator('.voice-dialog').getByRole('alert')).toHaveText('Davo is not configured on this server.');
-  // clear a stale history filter when retrying in place
-  const historySearch = page.getByRole('searchbox', { name: 'Search Davo history' });
-  await historySearch.fill('stale filter');
-  await page.locator('.voice-dialog').getByRole('button', { name: 'Call Davo' }).click();
-  await expect(historySearch).toHaveValue('');
-  await expect(page.locator('.voice-dialog').getByRole('alert')).toHaveText('Davo is not configured on this server.');
-  expect(realtimeHeaders['x-csrf-token']).toBe('voice-csrf');
-  expect(realtimeBody).toMatchObject({ worktreeId: 'cora', agentId: 'agent-cora', voiceSessionId: expect.any(String) });
-  await settings.click();
-  await expect(settingsPage.getByRole('group', { name: 'Server' })).toHaveCount(0);
-  await expect(settingsPage.getByRole('button', { name: 'Update Server' })).toHaveCount(0);
-  await settingsPage.getByRole('button', { name: 'Close settings' }).click();
-  await serverSelector.click();
-  await expect(serverDetails).toContainText('Garage Server');
-  await serverDetails.getByRole('button', { name: 'View upstream update' }).click();
-  const updateDialog = page.getByRole('dialog', { name: 'Review update' });
-  await updateDialog.getByRole('button', { name: 'Update', exact: true }).click();
-  await expect(updateDialog).toContainText('Pulling the reviewed revision, rebuilding, and restarting…');
-  expect(updateStarted).toBe(true);
-});
-
-test('shows graceful Davo context fallbacks without worktree or instance data', async ({ page }) => {
-  await page.addInitScript(() => {
-    class MockWebSocket {
-      static readonly OPEN = 1;
-      readyState = MockWebSocket.OPEN;
-      onopen: ((event: Event) => void) | null = null;
-      onclose: ((event: CloseEvent) => void) | null = null;
-      onerror: ((event: Event) => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      // open the fixture connection
-      constructor(_url: string | URL) { window.setTimeout(() => this.onopen?.(new Event('open'))); }
-      // ignore fixture writes
-      send() {}
-      // close the fixture connection
-      close() { this.onclose?.(new CloseEvent('close')); }
-    }
-    Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockWebSocket });
-  });
-  await page.route('**/api/**', async route => {
-    const url = new URL(route.request().url());
-    // restore a session without instance metadata
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', davo: enabledDavo, server: { name: '   ', url: '', remotes: [] } } });
-    // provide one scratch agent without a worktree
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-scratch', sessionId: 'socket:$1', home: '/tmp', title: 'Scratch', unread: false }], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
-    if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
-    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    // return empty agent resources
-    if (/^\/api\/agents\/agent-scratch\/(?:saved-prompts|queued-prompts|prompt-history|commands)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [], commands: [] } });
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/realtime/session') return route.fulfill({ status: 503, json: { error: 'Realtime voice is unavailable.' } });
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
-  });
-
-  await page.goto('/');
-  await page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' }).click();
-  const context = page.getByRole('region', { name: 'Davo connection context' });
-  await expect(context.locator('.voice-context-active > strong')).toHaveText('No worktree selected');
-  await expect(context.locator('.voice-context-server > strong')).toHaveText('Unavailable');
-  await expect(context.locator('.voice-context-server > span')).toHaveCount(0);
-  await expect(context.locator('.voice-context-open > .voice-context-fallback')).toHaveText('None');
-});
-
-test('mobile swaps between an ongoing Davo call and the main UI', async ({ page }) => {
-  await page.addInitScript(() => {
-    class MockWebSocket {
-      static readonly CONNECTING = 0;
-      static readonly OPEN = 1;
-      readyState = MockWebSocket.CONNECTING;
-      onopen: ((event: Event) => void) | null = null;
-      onclose: ((event: CloseEvent) => void) | null = null;
-      onerror: ((event: Event) => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      // open every fixture socket asynchronously
-      constructor(_url: string | URL) { window.setTimeout(() => { this.readyState = MockWebSocket.OPEN; this.onopen?.(new Event('open')); }); }
-      // ignore fixture writes
-      send() {}
-      // close one fixture socket
-      close() { this.onclose?.(new CloseEvent('close')); }
-    }
-    Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockWebSocket });
-    const wakeLockState = { requests: 0, releases: 0, forceRelease: async () => {} };
-    class MockWakeLockSentinel extends EventTarget {
-      released = false;
-      // release one held fixture lock
-      async release() {
-        // preserve idempotent browser behavior
-        if (this.released) return;
-        this.released = true;
-        wakeLockState.releases += 1;
-        this.dispatchEvent(new Event('release'));
-      }
-    }
-    let currentSentinel: MockWakeLockSentinel | undefined;
-    // simulate one user-agent initiated release
-    wakeLockState.forceRelease = async () => currentSentinel?.release();
-    // expose wake-lock activity to the test
-    Object.defineProperty(window, 'davoWakeLockState', { configurable: true, value: wakeLockState });
-    Object.defineProperty(navigator, 'wakeLock', { configurable: true, value: {
-      // provide one fresh fixture lock
-      request: async () => {
-        wakeLockState.requests += 1;
-        currentSentinel = new MockWakeLockSentinel();
-        return currentSentinel;
-      }
-    } });
-  });
-  await page.setViewportSize({ width: 390, height: 844 });
-  let releaseCredential!: () => void;
-  const credentialRelease = new Promise<void>(resolve => { releaseCredential = resolve; });
-  let credentialRequested!: () => void;
-  const credentialRequest = new Promise<void>(resolve => { credentialRequested = resolve; });
-  await page.route('**/api/**', async route => {
-    const url = new URL(route.request().url());
-    // restore one authenticated browser session
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', davo: enabledDavo, server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
-    // provide one selected agent and worktree
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-cora', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', unread: false }], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
-    if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
-    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (url.pathname === '/api/agents/agent-cora/saved-prompts' || url.pathname === '/api/agents/agent-cora/queued-prompts' || url.pathname === '/api/agents/agent-cora/prompt-history' || url.pathname === '/api/agents/agent-cora/skills' || url.pathname === '/api/worktrees/cora/notes') return route.fulfill({ json: { prompts: [], skills: [], notes: [] } });
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/realtime/session') {
-      credentialRequested();
-      await credentialRelease;
-      return route.fulfill({ json: { ok: true, clientSecret: { value: 'ek_testcredential' }, model: 'gpt-realtime-2.1' } }).catch(() => undefined);
-    }
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
-  });
-
-  await page.goto('/');
-  expect(await page.evaluate(() => (window as unknown as { davoWakeLockState: { requests: number } }).davoWakeLockState.requests)).toBe(0);
-  await page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' }).click();
-  await credentialRequest;
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoWakeLockState: { requests: number } }).davoWakeLockState.requests)).toBe(1);
-  const ongoingCall = page.getByRole('button', { name: 'Ongoing Davo call', exact: true });
-  await expect(ongoingCall).toHaveAttribute('aria-pressed', 'true');
-  // the phone shows Call as an icon only
-  await expect(ongoingCall.locator('span')).toBeHidden();
-  expect(await ongoingCall.evaluate(element => getComputedStyle(element).color)).toBe('rgb(166, 227, 161)');
-  await page.getByRole('button', { name: 'Ongoing Davo call — show main UI' }).click();
-  await expect(page.getByRole('heading', { name: 'Davo' })).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoWakeLockState: { releases: number } }).davoWakeLockState.releases)).toBe(1);
-  const hiddenCall = page.getByRole('button', { name: 'Show ongoing Davo call' });
-  await expect(hiddenCall).toHaveAttribute('aria-pressed', 'false');
-  await expect(hiddenCall).toHaveClass(/active/u);
-  await hiddenCall.click();
-  await expect(page.getByRole('heading', { name: 'Davo' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Calling...' })).toBeVisible();
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoWakeLockState: { requests: number } }).davoWakeLockState.requests)).toBe(2);
-  // release while the page is hidden
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoWakeLockState: { releases: number } }).davoWakeLockState.releases)).toBe(2);
-  // reacquire after returning visibly
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoWakeLockState: { requests: number } }).davoWakeLockState.requests)).toBe(3);
-  // release for navigation and restore from page cache
-  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })));
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoWakeLockState: { releases: number } }).davoWakeLockState.releases)).toBe(3);
-  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoWakeLockState: { requests: number } }).davoWakeLockState.requests)).toBe(4);
-  // recover once from a user-agent initiated release
-  await page.evaluate(() => (window as unknown as { davoWakeLockState: { forceRelease: () => Promise<void> } }).davoWakeLockState.forceRelease());
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoWakeLockState: { requests: number } }).davoWakeLockState.requests)).toBe(5);
-  releaseCredential();
-});
-
-test('waits for MCP tools and requests a spoken follow-up after tool completion', async ({ page }) => {
-  await page.addInitScript(() => {
-    class MockWebSocket {
-      static readonly CONNECTING = 0;
-      static readonly OPEN = 1;
-      readyState = MockWebSocket.CONNECTING;
-      onopen: ((event: Event) => void) | null = null;
-      onclose: ((event: CloseEvent) => void) | null = null;
-      onerror: ((event: Event) => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      // open every fixture socket asynchronously
-      constructor(_url: string | URL) { window.setTimeout(() => { this.readyState = MockWebSocket.OPEN; this.onopen?.(new Event('open')); }); }
-      // ignore fixture writes
-      send() {}
-      // close one fixture socket
-      close() { this.onclose?.(new CloseEvent('close')); }
-    }
     class MockDataChannel extends EventTarget {
       readyState: RTCDataChannelState = 'open';
       readonly sent: string[] = [];
-      // retain client events for assertions
+      // capture one provider command
       send(value: string) { this.sent.push(value); }
-      // close the fixture channel
+      // close one provider projection
       close() { this.readyState = 'closed'; }
     }
-    const audioTrack = { enabled: true, stop: () => undefined };
-    const media = { getTracks: () => [audioTrack], getAudioTracks: () => [audioTrack] } as unknown as MediaStream;
     class MockPeerConnection extends EventTarget {
       connectionState: RTCPeerConnectionState = 'new';
       ontrack: ((event: RTCTrackEvent) => void) | null = null;
-      // expose one inspectable provider channel
+      // expose one provider data channel
       createDataChannel() {
         const data = new MockDataChannel();
-        (window as unknown as { davoChannel?: MockDataChannel }).davoChannel = data;
+        Object.assign(window, { davoChannel: data });
         window.setTimeout(() => data.dispatchEvent(new Event('open')));
         return data as unknown as RTCDataChannel;
       }
-      // accept the fixture microphone track
+      // accept one microphone track
       addTrack() { return {} as RTCRtpSender; }
-      // return one fixture offer
+      // create one bounded fixture offer
       async createOffer() { return { type: 'offer' as const, sdp: 'fixture-offer' }; }
       // accept fixture descriptions
       async setLocalDescription() {}
       async setRemoteDescription() {}
-      // close the fixture peer
+      // close one fixture peer
       close() { this.connectionState = 'closed'; }
     }
-    Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockWebSocket });
     Object.defineProperty(window, 'RTCPeerConnection', { configurable: true, value: MockPeerConnection });
-    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => media } });
-    const play = HTMLMediaElement.prototype.play;
-    // count hang-up playback without requiring an audio device
-    HTMLMediaElement.prototype.play = function () {
-      // intercept only Davo's disconnect sound
-      if (this.classList.contains('voice-hangup-sound')) {
-        (window as unknown as { davoHangupPlays?: number }).davoHangupPlays = ((window as unknown as { davoHangupPlays?: number }).davoHangupPlays ?? 0) + 1;
-        return Promise.resolve();
-      }
-      return play.call(this);
-    };
-    (window as unknown as { davoTrack?: typeof audioTrack }).davoTrack = audioTrack;
+    // create one fresh microphone per transport
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => {
+      const track = {
+        enabled: true,
+        stopped: false,
+        // record one exact microphone stop
+        stop() { this.stopped = true; }
+      };
+      const media = { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
+      Object.assign(window, { davoTrack: track });
+      return media;
+    } } });
+    HTMLMediaElement.prototype.play = async () => undefined;
   });
-  await page.route('https://api.openai.com/v1/realtime/calls?**', route => route.fulfill({ status: 200, body: 'fixture-answer' }));
+}
+
+// complete one exact fixture readiness response
+async function completeReadiness(page: import('@playwright/test').Page, providerSessionId: string, responseId: string, itemId: string, tools: string[], extraItems: Array<{ id?: string; surface: 'conversation.item.done' | 'response.output_item.done'; tools: string[] }> = []): Promise<void> {
+  await page.evaluate(({ providerId, readyResponseId, readyItemId, importedTools, importedItems }) => {
+    const channel = (window as unknown as { davoChannel: EventTarget & { sent: string[] } }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.created', session: { id: providerId } }) }));
+    const deliver = () => {
+      // wait until the client sends its exact readiness request
+      if (!channel.sent.map(JSON.parse).some(event => event.type === 'response.create' && event.response?.metadata?.davo_phase === 'readiness')) { window.setTimeout(deliver, 10); return; }
+      const item = { id: readyItemId, type: 'mcp_list_tools', server_label: 'rac', tools: importedTools.map(name => ({ name })) };
+      channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'mcp_list_tools.completed', item_id: readyItemId }) }));
+      channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.done', item }) }));
+      for (const extra of importedItems) {
+        const other = { ...item, id: extra.id ?? item.id, tools: extra.tools.map(name => ({ name })) };
+        channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(extra.surface === 'response.output_item.done' ? { type: extra.surface, response_id: readyResponseId, item: other } : { type: extra.surface, item: other }) }));
+      }
+      channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.created', response: { id: readyResponseId, metadata: { davo_phase: 'readiness', readiness_id: 'readiness-1' } } }) }));
+      channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.done', response: { id: readyResponseId, status: 'completed' } }) }));
+    };
+    deliver();
+  }, { providerId: providerSessionId, readyResponseId: responseId, readyItemId: itemId, importedTools: tools, importedItems: extraItems });
+}
+
+// delete one finalized provider transcript before admission
+async function completeTranscript(page: import('@playwright/test').Page, itemId: string, transcript: string): Promise<void> {
+  await page.evaluate(({ id, text }) => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: id, transcript: text }) })), { id: itemId, text: transcript });
+  await expect.poll(() => page.evaluate(id => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === id), itemId)).toBe(true);
+  await page.evaluate(id => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: id }) })), itemId);
+}
+
+// open one minimal provider-readiness fixture
+async function openReadinessFixture(page: import('@playwright/test').Page, tools: string[], extraItems: Array<{ id?: string; surface: 'conversation.item.done' | 'response.output_item.done'; tools: string[] }> = [], options: { admission?: 'receipt' | 'pending-202' | 'pending-body' | 'retry-pending'; deferContinuation?: boolean; deferFirstAdmission?: boolean; includeWorktree?: boolean } = {}) {
+  await installMedia(page);
+  const readyBodies: unknown[] = [];
+  const openBodies: unknown[] = [];
+  const stopBodies: unknown[] = [];
+  const transcriptBodies: unknown[] = [];
+  const bindBodies: unknown[] = [];
+  const assistantBodies: unknown[] = [];
+  const continueBodies: unknown[] = [];
+  let releaseAdmission = () => undefined;
+  let releaseContinuation = () => undefined;
+  const admissionGate = new Promise<void>(resolve => { releaseAdmission = resolve; });
+  const continuationGate = new Promise<void>(resolve => { releaseContinuation = resolve; });
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'davo-csrf', active: true, deviceName: 'Test browser', davo: enabledDavo, server: { name: 'Framework', url: 'https://framework.example', remotes: [] } } });
+    // expose one selectable worktree only when requested
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: options.includeWorktree ? [{ id: 'agent-cora', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready' }] : [], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
+    if (path === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
+    // authorize one shared pane stream
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (path === '/api/davo/conversation') return route.fulfill({ json: { conversationId: 'conversation-1', generation: 4, revision: '11111111-1111-4111-8111-111111111111', retainedFrom: '2026-11-03T08:00:00.000Z', serverNow: new Date().toISOString(), retentionCutoffAt: new Date(Date.now() + 3_600_000).toISOString(), nextSequence: 1, hasMore: false, pendingChoices: [], messages: [] } });
+    if (path === '/api/realtime/session') { openBodies.push(request.postDataJSON()); return route.fulfill({ json: { negotiationId: 'negotiation-1', model: 'gpt-realtime-2.1', conversationId: 'conversation-1', generation: 4, contextRevision: '22222222-2222-4222-8222-222222222222', serverNow: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), retentionCutoffAt: new Date(Date.now() + 3_600_000).toISOString() } }); }
+    if (path === '/api/realtime/negotiate') return route.fulfill({ json: { sdp: 'fixture-answer', generation: 4, readinessId: 'readiness-1', readinessResponse: { conversation: 'none', input: [], instructions: 'Return READY only', tools: [{ type: 'mcp', server_label: 'rac', allowed_tools: ['delegate_request', 'select_worktree'] }], tool_choice: 'none', output_modalities: ['text'], metadata: { davo_phase: 'readiness', readiness_id: 'readiness-1' } } } });
+    if (path === '/api/davo/session/ready') { readyBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
+    if (path === '/api/realtime/session/heartbeat') return route.fulfill({ json: { serverNow: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() } });
+    if (path === '/api/realtime/session/stop') { stopBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
+    if (path === '/api/davo/responses/bind') { bindBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
+    if (path === '/api/davo/responses/continue') {
+      continueBodies.push(request.postDataJSON());
+      // hold one old continuation across transport replacement
+      if (options.deferContinuation) await continuationGate;
+      return route.fulfill({ json: { messageId: 'message-old', turnId: 'turn-old', generation: 4, response: { conversation: 'none', input: [], tools: [], output_modalities: ['audio'], metadata: { fixture_continuation: 'old' } } } });
+    }
+    if (path === '/api/davo/transcripts/assistant') { assistantBodies.push(request.postDataJSON()); return route.fulfill({ json: { id: 'assistant-fixture' } }); }
+    if (path === '/api/davo/transcripts/user') {
+      transcriptBodies.push(request.postDataJSON());
+      const first = transcriptBodies.length === 1;
+      // hold only the old session's first admission receipt
+      if (first && options.deferFirstAdmission) await admissionGate;
+      // expose pending through the response status
+      if (first && options.admission === 'pending-202') return route.fulfill({ status: 202, json: { ok: true, pending: true, messageId: 'message-pending', generation: 4 } });
+      // expose pending through the response body
+      if (first && options.admission === 'pending-body') return route.fulfill({ json: { ok: true, pending: true, messageId: 'message-pending', generation: 4 } });
+      // exercise pending detection after the exact-receipt retry
+      if (options.admission === 'retry-pending') return route.fulfill({ json: first ? { ok: true } : { ok: true, pending: true, messageId: 'message-pending', generation: 4 } });
+      return route.fulfill({ json: { messageId: first ? 'message-old' : 'message-new', turnId: first ? 'turn-old' : 'turn-new', generation: 4, response: { conversation: 'none', input: [], tools: [], output_modalities: ['audio'], metadata: { fixture_admission: first ? 'old' : 'new' } } } });
+    }
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open Davo' }).click();
+  await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { davoChannel?: EventTarget }).davoChannel))).toBe(true);
+  await completeReadiness(page, 'provider-session-1', 'readiness-response-1', 'mcp-list-1', tools, extraItems);
+  return { assistantBodies, bindBodies, continueBodies, openBodies, readyBodies, stopBodies, transcriptBodies, releaseAdmission, releaseContinuation };
+}
+
+test('deletes every raw item after readiness and keeps muted microphone transport enabled', async ({ page }) => {
+  await installMedia(page);
+  const transcriptBodies: unknown[] = [];
+  const assistantBodies: Array<Record<string, unknown>> = [];
+  const finishBodies: unknown[] = [];
+  const readyBodies: unknown[] = [];
+  const stopBodies: unknown[] = [];
+  let backgroundPhase = 0;
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
-    // restore one authenticated browser session
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', davo: enabledDavo, server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
-    // provide two selectable active worktrees
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-cora', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 1, title: 'Ready', unread: false }, { id: 'agent-ferry', paneId: '%2', sessionId: 'socket:$2', socketFingerprint: 'socket', home: '/worktrees/ferry-fyi', worktreeId: 'ferry-fyi', worktreeLabel: 'Ferry FYI', worktreeOrder: 2, title: 'Ready', unread: false }], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
+    // restore one authenticated dashboard
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'davo-csrf', active: true, deviceName: 'Test browser', davo: enabledDavo, server: { name: 'Framework', url: 'https://framework.example', remotes: [] } } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
+    // authorize one shared pane stream
     if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (/^\/api\/agents\/(?:agent-cora|agent-ferry)\/(?:saved-prompts|queued-prompts|prompt-history|skills)$/u.test(url.pathname) || /^\/api\/worktrees\/(?:cora|ferry-fyi)\/notes$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [], skills: [], notes: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    // provide one browser-safe provider credential
-    if (url.pathname === '/api/realtime/session') return route.fulfill({ json: { ok: true, clientSecret: { value: 'ek_fixturecredential' }, model: 'gpt-realtime-2.1' } });
-    if (url.pathname === '/api/realtime/session/heartbeat' || url.pathname === '/api/realtime/session/stop') return route.fulfill({ json: { ok: true } });
+    if (url.pathname === '/api/davo/conversation') return route.fulfill({ json: { conversationId: 'conversation-1', generation: 4, revision: '11111111-1111-4111-8111-111111111111', retainedFrom: '2026-11-03T08:00:00.000Z', serverNow: new Date().toISOString(), retentionCutoffAt: new Date(Date.now() + 3_600_000).toISOString(), nextSequence: 2 + backgroundPhase, hasMore: false, pendingChoices: [], messages: [{ id: 'baseline-message', sequence: 1, kind: 'status', text: 'Listening ready', createdAt: new Date(Date.now() - 60_000).toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() }, ...(backgroundPhase >= 1 ? [{ id: 'failed-background-message', sequence: 2, kind: 'assistant', text: 'Dropped projection update', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() }] : []), ...(backgroundPhase >= 2 ? [{ id: 'background-message', sequence: 3, kind: 'assistant', text: 'A retained background update', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() }] : [])] } });
+    // create one server-owned pending negotiation
+    if (url.pathname === '/api/realtime/session') return route.fulfill({ json: { negotiationId: 'negotiation-1', model: 'gpt-realtime-2.1', conversationId: 'conversation-1', generation: 4, contextRevision: '22222222-2222-4222-8222-222222222222', serverNow: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), retentionCutoffAt: new Date(Date.now() + 3_600_000).toISOString() } });
+    if (url.pathname === '/api/realtime/negotiate') return route.fulfill({ json: { sdp: 'fixture-answer', generation: 4, readinessId: 'readiness-1', readinessResponse: { conversation: 'none', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Retained context seed' }] }], instructions: 'Return READY only; no tools', tools: [{ type: 'mcp', server_label: 'rac', allowed_tools: ['delegate_request', 'select_worktree'] }, { type: 'function', name: 'select_worktree' }], tool_choice: 'none', output_modalities: ['text'], max_output_tokens: 16, metadata: { davo_phase: 'readiness', readiness_id: 'readiness-1' } } } });
+    if (url.pathname === '/api/davo/session/ready') { readyBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
+    if (url.pathname === '/api/realtime/session/heartbeat') return route.fulfill({ json: { serverNow: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() } });
+    if (url.pathname === '/api/realtime/session/stop') { stopBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
+    if (url.pathname === '/api/davo/transcripts/user') {
+      transcriptBodies.push(request.postDataJSON());
+      return route.fulfill({ json: { messageId: 'message-1', turnId: 'turn-1', generation: 4, response: { conversation: 'none', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'retained projection' }] }], tools: [], instructions: 'fixture', output_modalities: ['audio'] } } });
+    }
+    if (url.pathname === '/api/davo/transcripts/assistant') {
+      assistantBodies.push(request.postDataJSON() as Record<string, unknown>);
+      // force one ambiguous pair before exact retry reconciliation
+      if (assistantBodies.length <= 2) return route.fulfill({ status: 503, json: { error: 'davo_store_unavailable' } });
+      return route.fulfill({ json: { id: `assistant-${assistantBodies.length}` } });
+    }
+    if (url.pathname === '/api/davo/responses/bind') return route.fulfill({ json: { ok: true } });
+    if (url.pathname === '/api/davo/responses/finish') { finishBodies.push(request.postDataJSON()); return route.fulfill({ json: { ok: true } }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
   await page.goto('/');
-  await page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' }).click();
-  const calling = page.getByRole('button', { name: 'Calling...' });
-  await expect(calling).toBeVisible();
-  const chatArea = page.locator('.voice-transcript-shell');
-  await expect(chatArea).toHaveClass(/progress-border/u);
-  await expect(chatArea).toHaveClass(/progress-green/u);
-  await expect(chatArea).toHaveClass(/progress-loading/u);
-  await expect(calling).not.toHaveClass(/progress-/u);
-  await expect(page.locator('.voice-tool-status')).not.toHaveClass(/progress-/u);
-  await expect(page.locator('.tab-row-lead .server-switcher-voice')).toBeHidden();
-  // capture the voice-area loading ring on demand
-  if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/voice-desktop.png` });
-  // keep Davo at phone width beside the usable desktop UI
-  const split = await page.evaluate(() => {
-    const voice = document.querySelector<HTMLElement>('.voice-dialog')?.getBoundingClientRect();
-    const panel = document.querySelector<HTMLElement>('.console > .panel')?.getBoundingClientRect();
-    const output = document.querySelector<HTMLElement>('.log')?.getBoundingClientRect();
-    const buttons = document.querySelector<HTMLElement>('.tab-row-lead')?.getBoundingClientRect();
-    return { voiceLeft: voice?.left, voiceRight: voice?.right, voiceWidth: voice?.width, panelLeft: panel?.left, outputLeft: output?.left, outputRight: output?.right, buttonsLeft: buttons?.left, viewportWidth: window.innerWidth };
-  });
-  expect(split.voiceLeft).toBe(0);
-  expect(split.voiceWidth).toBe(390);
-  expect(split.panelLeft).toBe(split.voiceRight);
-  expect(split.outputLeft).toBe(split.voiceRight);
-  expect(split.outputRight).toBe(split.viewportWidth);
-  expect(split.buttonsLeft).toBeGreaterThanOrEqual(split.voiceRight ?? 0);
-  await expect(page.getByLabel('Live log')).toBeVisible();
-  // verify centered symmetric call controls
-  const callButtonStyle = await calling.evaluate(button => { const style = getComputedStyle(button); return { left: style.paddingLeft, right: style.paddingRight, alignment: style.justifyContent }; });
-  expect(callButtonStyle.left).toBe(callButtonStyle.right);
-  expect(callButtonStyle.alignment).toBe('center');
-  expect(await page.locator('audio.voice-ringing').evaluate(audio => ({ autoplay: (audio as HTMLAudioElement).autoplay, loop: (audio as HTMLAudioElement).loop, source: (audio as HTMLAudioElement).getAttribute('src') }))).toEqual({ autoplay: true, loop: true, source: '/davo-ring.wav' });
-  await expect(page.getByText('Loading Davo tools…')).toBeVisible();
+  await page.getByRole('button', { name: 'Open Davo' }).click();
+  await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { davoChannel?: EventTarget }).davoChannel))).toBe(true);
   expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(false);
-  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'mcp_list_tools.completed' }) })));
-  await expect(page.getByRole('button', { name: 'Hang up' })).toBeVisible();
-  await expect(chatArea).not.toHaveClass(/progress-/u);
-  await expect(page.locator('audio.voice-ringing')).toHaveCount(0);
-  expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(true);
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string; response?: { instructions?: string; tools?: unknown[] } }).find(value => value.type === 'response.create'))).toMatchObject({ response: { instructions: expect.stringMatching(/caller.*active worktree is Cora/u), tools: [] } });
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.created', session: { id: 'provider-session-1' } }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'response.create' && event.response?.metadata?.davo_phase === 'readiness'))).toBe(true);
+  expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(false);
+  await page.evaluate(() => {
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    const item = { id: 'mcp-list-1', type: 'mcp_list_tools', server_label: 'rac', tools: [{ name: 'delegate_request' }, { name: 'select_worktree' }] };
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'mcp_list_tools.in_progress' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'mcp_list_tools.completed', item_id: 'mcp-list-1' }) }));
+    // stage the official import item before response.created
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.done', response_id: 'readiness-response-1', item }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.created', response: { id: 'readiness-response-1', metadata: { davo_phase: 'readiness', readiness_id: 'readiness-1' } } }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.done', response: { id: 'readiness-response-1', status: 'completed' } }) }));
+  });
+  await expect.poll(() => readyBodies.length).toBe(1);
+  expect(readyBodies[0]).toMatchObject({ generation: 4, readinessId: 'readiness-1', responseId: 'readiness-response-1', importedTools: ['delegate_request', 'select_worktree'] });
+  await expect(page.getByRole('button', { name: 'Close' })).toBeVisible();
+
   const mute = page.getByRole('button', { name: 'Mute' });
   await mute.click();
-  await expect(page.getByRole('button', { name: 'Unmute' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByRole('button', { name: 'Hang up' })).toBeVisible();
-  expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(false);
-  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_started' }) })));
-  await expect.poll(() => page.evaluate(() => Number(getComputedStyle(document.documentElement).getPropertyValue('--davo-input-level')))).toBe(0);
-  await page.getByRole('button', { name: 'Unmute' }).click();
-  await expect(mute).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('button', { name: 'Muted — say Davo' })).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(true);
-  await expect(page.locator('.voice-soundwave i')).toHaveCount(56);
+
+  // ambient muted speech is deleted and never admitted
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'ambient-1', transcript: 'unrelated room speech' }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'ambient-1'))).toBe(true);
+  expect(transcriptBodies).toHaveLength(0);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'ambient-1' }) })));
+  await page.waitForTimeout(20);
+  expect(transcriptBodies).toHaveLength(0);
+
+  // assistant name echo during output cannot wake muted listening
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.started' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_started' }) }));
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.started' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_started', item_id: 'echo-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'echo-1', transcript: 'Davo' }) }));
   });
-  const voiceSurface = page.locator('.voice-dialog > div');
-  await expect.poll(() => voiceSurface.evaluate(element => Number(element.style.getPropertyValue('--davo-level')))).toBeGreaterThan(.2);
-  await expect.poll(() => voiceSurface.evaluate(element => Number(element.style.getPropertyValue('--mic-level')))).toBeGreaterThan(.17);
-  await expect.poll(() => page.locator('.voice-soundwave.davo').evaluate(element => Number(getComputedStyle(element).opacity))).toBeGreaterThan(.2);
-  await expect.poll(() => page.locator('.voice-soundwave.mic').evaluate(element => Number(getComputedStyle(element).opacity))).toBeGreaterThan(.17);
-  const waveEdges = await page.evaluate(() => ({ davo: document.querySelector<HTMLElement>('.voice-soundwave.davo')?.getBoundingClientRect().left, mic: document.querySelector<HTMLElement>('.voice-soundwave.mic')?.getBoundingClientRect().right, surface: document.querySelector<HTMLElement>('.voice-dialog > div')?.getBoundingClientRect() }));
-  expect(waveEdges.davo).toBeLessThan(waveEdges.surface?.left ?? 0);
-  expect(waveEdges.mic).toBeGreaterThan(waveEdges.surface?.right ?? 0);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'echo-1'))).toBe(true);
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_stopped' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.stopped' }) }));
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'echo-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_stopped' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.stopped' }) }));
   });
+  await expect(page.getByRole('button', { name: 'Muted — say Davo' })).toBeVisible();
+  expect(transcriptBodies).toHaveLength(0);
+
+  // exact-name wake is deleted and only changes logical mute
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'wake-1', transcript: 'Davo.' }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'wake-1'))).toBe(true);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'wake-1' }) })));
+  await expect(mute).toBeVisible();
+  expect(transcriptBodies).toHaveLength(0);
+
+  // output beginning after speech start also discards that raw item
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'unintelligible-1', delta: 'Unclear partial' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.failed', item_id: 'unintelligible-1', error: { code: 'audio_unintelligible' } }) }));
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_started', item_id: 'reverse-overlap-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.started' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'reverse-overlap-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'reverse-overlap-1', transcript: 'Approve the reverse overlap' }) }));
   });
-  await expect(page.getByText('Unclear partial')).toHaveCount(0);
-  await expect(page.locator('.voice-dialog').getByRole('alert')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'reverse-overlap-1'))).toBe(true);
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'spoken-1', delta: 'Give me ' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'spoken-1', delta: 'a sitrep' }) }));
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'reverse-overlap-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_stopped' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.stopped' }) }));
   });
-  await expect(page.locator('.voice-user > span')).toHaveText('Give me a sitrep');
-  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'spoken-1', transcript: 'Give me a sitrep, please.' }) })));
-  await expect(page.locator('.voice-user > span')).toHaveText('Give me a sitrep, please.');
-  await expect(page.locator('.voice-user')).toHaveCount(1);
-  await expect(page.locator('.voice-user > time')).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/gu);
-  // merge one successful MCP lifecycle into a detailed row
+  await page.waitForTimeout(20);
+  expect(transcriptBodies).toHaveLength(0);
+
+  // overlapped user speech is deleted but never admitted
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.added', item: { id: 'mcp-list-instances', type: 'mcp_call', status: 'in_progress', name: 'list_instances', arguments: JSON.stringify({ scope: 'all', include_status: true }) } }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call_arguments.done', item_id: 'mcp-list-instances', arguments: JSON.stringify({ scope: 'all', include_status: true }) }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.in_progress', item_id: 'mcp-list-instances' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.done', item: { id: 'mcp-list-instances', type: 'mcp_call', status: 'completed', name: 'list_instances', arguments: JSON.stringify({ scope: 'all', include_status: true }), output: JSON.stringify({ count: 2, instances: ['Cora', 'Ferry FYI'], summary: '2 instances online', detail: 'x'.repeat(20_000) }) } }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.completed', item_id: 'mcp-list-instances' }) }));
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.started' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_started', item_id: 'overlap-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'overlap-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'overlap-1', transcript: 'Approve the change' }) }));
   });
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string }).filter(value => value.type === 'response.create').length)).toBe(2);
-  const listTool = page.locator('.voice-tool').filter({ hasText: 'list_instances' });
-  await expect(listTool).toHaveCount(1);
-  await expect(listTool).not.toHaveAttribute('open', '');
-  await expect(listTool.locator('summary')).toContainText('2 instances online');
-  await expect(listTool.locator('summary > b')).toHaveText('Done');
-  await expect(listTool.locator('summary > time')).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/gu);
-  await listTool.locator('summary').click();
-  await expect(listTool.getByText('Req', { exact: true })).toBeVisible();
-  await expect(listTool.getByText('Result', { exact: true })).toBeVisible();
-  await expect(listTool.locator('pre')).toContainText(['"include_status": true', '"Ferry FYI"']);
-  await expect(listTool.locator('pre').last()).toContainText('[truncated]');
-  expect(await listTool.locator('pre').last().textContent()).toHaveLength(8_192);
-  // retain incomplete calls without reporting success
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'overlap-1'))).toBe(true);
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.done', item: { id: 'mcp-partial', type: 'mcp_call', status: 'incomplete', name: 'inspect_logs', output: JSON.stringify({ summary: 'Provider interrupted the result' }) } }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.completed', name: 'uncorrelated_tool' }) }));
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'overlap-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_stopped' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.stopped' }) }));
   });
-  const partialTool = page.locator('.voice-tool').filter({ hasText: 'inspect_logs' });
-  await expect(partialTool.locator('summary > b')).toHaveText('Partial');
-  await expect(page.locator('.voice-tool').filter({ hasText: 'uncorrelated_tool' })).toHaveCount(0);
-  // wait for every concurrent tool before requesting one follow-up
+  await page.waitForTimeout(20);
+  expect(transcriptBodies).toHaveLength(0);
+
+  // unmuted speech is admitted only after delete acknowledgement
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'request-1', transcript: 'Check the current work' }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'request-1'))).toBe(true);
+  expect(transcriptBodies).toHaveLength(0);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'request-1' }) })));
+  await expect.poll(() => transcriptBodies.length).toBe(1);
+  expect(transcriptBodies[0]).toMatchObject({ generation: 4, providerSessionId: 'provider-session-1', providerItemId: 'request-1', text: 'Check the current work' });
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'response.create'))).toBe(true);
+
+  // rapid second input is quarantined while the first turn remains active
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'rapid-1', transcript: 'Approve something else' }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'rapid-1'))).toBe(true);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'rapid-1' }) })));
+  await page.waitForTimeout(20);
+  expect(transcriptBodies).toHaveLength(1);
+
+  // bind and persist foreground speech before retiring its exact turn
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.created', response: { id: 'foreground-1' } }) })));
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_audio_transcript.delta', response_id: 'foreground-1', delta: 'Durable answer' }) })));
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.done', response: { id: 'foreground-1', status: 'completed' } }) })));
+  await expect.poll(() => assistantBodies.length).toBe(2);
+  expect(finishBodies).toHaveLength(0);
+  await expect.poll(() => assistantBodies.length).toBe(3);
+  await expect.poll(() => finishBodies.length).toBe(1);
+  expect(assistantBodies).toHaveLength(3);
+  expect(assistantBodies.every(body => body.responseId === 'foreground-1' && body.text === 'Durable answer')).toBe(true);
+
+  // a failed projected send clears its latch for a later retained reply
+  await page.evaluate(() => { (window as unknown as { davoChannel: { readyState: RTCDataChannelState } }).davoChannel.readyState = 'closed'; });
+  backgroundPhase = 1;
+  await expect(page.getByText('Dropped projection update')).toBeVisible({ timeout: 5_000 });
+  await page.waitForTimeout(50);
+  await page.evaluate(() => { (window as unknown as { davoChannel: { readyState: RTCDataChannelState } }).davoChannel.readyState = 'open'; });
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_started', item_id: 'projection-blocker' }) })));
+  backgroundPhase = 2;
+  await expect(page.getByText('A retained background update')).toBeVisible({ timeout: 5_000 });
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).filter(event => event.type === 'response.create' && JSON.stringify(event.response).includes('Speak this update exactly once')).length)).toBe(0);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.speech_stopped' }) })));
+  // project a later retained reply and keep it active through response.created
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).filter(event => event.type === 'response.create' && JSON.stringify(event.response).includes('Speak this update exactly once')).length), { timeout: 5_000 }).toBe(1);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.created', response: { id: 'projection-1' } }) })));
+
+  // new input cancels and waits for the exact projected response completion
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'request-2', transcript: 'Start the next task' }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'request-2'))).toBe(true);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'request-2' }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'response.cancel' && event.response_id === 'projection-1'))).toBe(true);
+  expect(transcriptBodies).toHaveLength(1);
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.added', item: { id: 'mcp-concurrent-a', type: 'mcp_call', status: 'in_progress', name: 'concurrent_a' } }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.added', item: { id: 'mcp-concurrent-b', type: 'mcp_call', status: 'in_progress', name: 'concurrent_b' } }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.in_progress', item_id: 'mcp-concurrent-a' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.in_progress', item_id: 'mcp-concurrent-b' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.completed', item_id: 'mcp-concurrent-a' }) }));
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_audio_transcript.delta', response_id: 'projection-1', delta: 'stale projection text' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.done', response: { id: 'projection-1', status: 'cancelled' } }) }));
   });
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string }).filter(value => value.type === 'response.create').length)).toBe(2);
-  await expect(page.locator('.voice-tool-status')).toContainText('concurrent_b');
-  await expect(chatArea).toHaveClass(/progress-border/u);
-  await expect(chatArea).toHaveClass(/progress-peach/u);
-  await expect(chatArea).not.toHaveClass(/progress-loading/u);
-  await expect(page.locator('.voice-tool-status')).not.toHaveClass(/progress-/u);
+  await expect.poll(() => transcriptBodies.length).toBe(2);
+
+  // stale projection deltas cannot contaminate the new foreground final
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.completed', item_id: 'mcp-concurrent-b' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.completed', item_id: 'mcp-concurrent-b' }) }));
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.created', response: { id: 'foreground-2' } }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_audio_transcript.delta', response_id: 'projection-1', delta: 'wrong text' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_audio_transcript.delta', response_id: 'foreground-2', delta: 'Exact next answer' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.done', response: { id: 'foreground-2', status: 'completed' } }) }));
   });
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string }).filter(value => value.type === 'response.create').length)).toBe(3);
-  await expect(page.locator('.voice-tool-status')).toHaveCount(0);
-  await expect(chatArea).not.toHaveClass(/progress-/u);
-  // retain one failed MCP lifecycle with its error detail
+  await expect.poll(() => finishBodies.length).toBe(2);
+  expect(assistantBodies.at(-1)).toMatchObject({ responseId: 'foreground-2', text: 'Exact next answer' });
+
+  await page.getByRole('button', { name: 'Close' }).click();
+  await expect.poll(() => stopBodies.length).toBe(1);
+  expect(stopBodies[0]).toMatchObject({ generation: 4, voiceSessionId: expect.any(String) });
+});
+
+test('accepts the conversation readiness surface without repeating the audio lifecycle', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree'], [{ surface: 'response.output_item.done', tools: ['delegate_request', 'select_worktree'] }]);
+  await expect.poll(() => fixture.readyBodies.length).toBe(1);
+  expect(fixture.readyBodies[0]).toMatchObject({ importedTools: ['delegate_request', 'select_worktree'] });
+  await expect(page.getByRole('button', { name: 'Close' })).toBeVisible();
+});
+
+for (const invalid of [
+  { name: 'extra', tools: ['delegate_request', 'select_worktree', 'raw_mutation'], extraItems: [] },
+  { name: 'duplicate', tools: ['delegate_request', 'select_worktree', 'delegate_request'], extraItems: [] },
+  { name: 'conflicting', tools: ['delegate_request', 'select_worktree'], extraItems: [{ surface: 'response.output_item.done' as const, tools: ['delegate_request', 'raw_mutation'] }] },
+  { name: 'a second item with forbidden tools', tools: ['delegate_request', 'select_worktree'], extraItems: [{ id: 'mcp-list-2', surface: 'response.output_item.done' as const, tools: ['delegate_request', 'select_worktree', 'raw_mutation'] }] },
+  { name: 'a second item with an identical catalog', tools: ['delegate_request', 'select_worktree'], extraItems: [{ id: 'mcp-list-2', surface: 'response.output_item.done' as const, tools: ['delegate_request', 'select_worktree'] }] }
+]) {
+  test(`rejects ${invalid.name} provider readiness imports`, async ({ page }) => {
+    const fixture = await openReadinessFixture(page, invalid.tools, invalid.extraItems);
+    await expect(page.getByText('Davo provider readiness failed.')).toBeVisible();
+    expect(fixture.readyBodies).toHaveLength(0);
+    expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(false);
+    await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  });
+}
+
+test('does not run an old queued reopen after a successor starts', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree']);
+  await expect.poll(() => fixture.readyBodies.length).toBe(1);
+  await page.clock.install();
+  await page.clock.pauseAt(await page.evaluate(() => Date.now()));
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.added', item: { id: 'mcp-read-file', type: 'mcp_call', status: 'in_progress', name: 'read_file', arguments: JSON.stringify({ path: '/private/notes.txt' }) } }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.failed', item_id: 'mcp-read-file' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.done', item: { id: 'mcp-read-file', type: 'mcp_call', status: 'failed', name: 'read_file', arguments: JSON.stringify({ path: '/private/notes.txt' }), error: { type: 'mcp_execution_error', message: 'Permission denied' } } }) }));
+    const original = window.setTimeout.bind(window);
+    let heldReopen: (() => void) | undefined;
+    Object.assign(window, {
+      hasHeldQueuedReopen: false,
+      releaseQueuedReopen: () => {
+        const reopen = heldReopen;
+        heldReopen = undefined;
+        // release only the captured reopen through the installed clock
+        if (reopen !== undefined) original(reopen, 0);
+      }
+    });
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...arguments_: unknown[]) => {
+      // hold only the first queued zero-delay reopen
+      if (timeout === 0 && heldReopen === undefined && typeof handler === 'function') {
+        heldReopen = () => handler(...arguments_);
+        Object.assign(window, { hasHeldQueuedReopen: true });
+        return 1;
+      }
+      return original(handler, timeout, ...arguments_);
+    }) as typeof window.setTimeout;
   });
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string }).filter(value => value.type === 'response.create').length)).toBe(4);
-  const failedTool = page.locator('.voice-tool').filter({ hasText: 'read_file' });
-  await expect(failedTool).toHaveCount(1);
-  await expect(failedTool.locator('summary')).toContainText('Permission denied');
-  await expect(failedTool.locator('summary > b')).toHaveText('Error');
-  await failedTool.locator('summary').click();
-  await expect(failedTool.locator('dt').filter({ hasText: /^Error$/u })).toBeVisible();
-  // search across speech and collapsed raw tool details
-  const historySearch = page.getByRole('searchbox', { name: 'Search Davo history' });
-  await historySearch.fill('/private/notes.txt');
-  await expect(failedTool).toBeVisible();
-  await expect(listTool).toHaveCount(0);
-  await historySearch.fill('sitrep');
-  await expect(page.locator('.voice-user')).toHaveCount(1);
-  await expect(page.locator('.voice-tool')).toHaveCount(0);
-  await historySearch.fill('');
-  // send one completed fixture command
-  const sendVoiceCommand = (transcript: string, itemId: string) => page.evaluate(({ text, id }) => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: id, transcript: text }) }));
-  }, { text: transcript, id: itemId });
-  // route only the exact visible-surface mute command
-  await sendVoiceCommand('unmute', 'command-unmute');
-  await expect(page.getByRole('button', { name: 'Mute' })).toHaveAttribute('aria-pressed', 'false');
-  await sendVoiceCommand('mute', 'command-mute');
-  await expect(page.getByRole('button', { name: 'Unmute' })).toHaveAttribute('aria-pressed', 'true');
-  expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(false);
-  await sendVoiceCommand('mute', 'command-mute-replay');
-  await expect(page.getByRole('button', { name: 'Unmute' })).toHaveAttribute('aria-pressed', 'true');
-  expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(false);
-  await sendVoiceCommand('mute the agent', 'command-mute-agent');
-  await expect(page.getByRole('button', { name: 'Unmute' })).toHaveAttribute('aria-pressed', 'true');
-  await page.getByRole('button', { name: 'Unmute' }).click();
-  // ignore mute commands while the ongoing call surface is hidden
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole('button', { name: 'Ongoing Davo call — show main UI' }).click();
-  await expect(page.locator('.voice-dialog')).toHaveCount(0);
-  await sendVoiceCommand('mute', 'command-hidden-mute');
-  await page.getByRole('button', { name: 'Show ongoing Davo call' }).click();
-  await expect(page.getByRole('button', { name: 'Mute' })).toHaveAttribute('aria-pressed', 'false');
-  expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(true);
-  await page.setViewportSize({ width: 1280, height: 720 });
-  // switch Davo and the browser to one resolved worktree
-  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.function_call_arguments.done', name: 'select_worktree', call_id: 'select-ferry', arguments: JSON.stringify({ worktree_id: 'ferry-fyi' }) }) })));
-  await expect(page.getByRole('tab', { name: /Ferry FYI/u })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.locator('.voice-context-active > strong')).toHaveText('Ferry FYI');
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string; item?: { type?: string; call_id?: string; output?: string } }).find(value => value.type === 'conversation.item.create' && value.item?.call_id === 'select-ferry'))).toMatchObject({ item: { type: 'function_call_output', call_id: 'select-ferry', output: expect.stringContaining('Ferry FYI') } });
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string }).filter(value => value.type === 'response.create').length)).toBe(5);
-  const assistantMessages = await page.locator('.voice-assistant').count();
-  // cancel a bare interruption without replying
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.committed' }) })));
+  await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { hasHeldQueuedReopen: boolean }).hasHeldQueuedReopen)).toBe(true);
+  await expect(page.getByRole('button', { name: 'Open listening' })).toBeEnabled();
+  await page.evaluate(() => Object.assign(window, { oldDavoChannel: (window as unknown as { davoChannel: EventTarget }).davoChannel }));
+  await page.getByRole('button', { name: 'Open listening' }).click();
+  await expect.poll(() => page.evaluate(() => {
+    const state = window as unknown as { davoChannel?: EventTarget; oldDavoChannel?: EventTarget };
+    return state.davoChannel !== undefined && state.davoChannel !== state.oldDavoChannel;
+  })).toBe(true);
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'interrupt-1', transcript: 'Shut up.' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.created', response: { id: 'interrupted-response' } }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.started' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_audio_transcript.done', transcript: 'All right.' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'error', error: { code: 'response_cancel_not_active' } }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.done', response: { id: 'interrupted-response', status: 'cancelled' } }) }));
+    const successor = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    successor.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.created', session: { id: 'provider-session-2' } }) }));
   });
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string }).filter(value => value.type === 'response.cancel').length)).toBeGreaterThanOrEqual(2);
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string }).filter(value => value.type === 'output_audio_buffer.clear').length)).toBeGreaterThanOrEqual(2);
-  await expect(page.locator('.voice-assistant')).toHaveCount(assistantMessages);
-  await expect(page.locator('.voice-dialog').getByRole('alert')).toHaveCount(0);
-  await page.addStyleTag({ content: '.voice-transcript { max-height: 8rem; }' });
+  expect(fixture.openBodies).toHaveLength(2);
+  await page.clock.runFor(1);
+  expect(await page.evaluate(() => (window as unknown as { davoChannel: { readyState: RTCDataChannelState } }).davoChannel.readyState)).toBe('open');
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new Event('open')));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'response.create' && event.response?.metadata?.davo_phase === 'readiness'))).toBe(true);
+  await completeReadiness(page, 'provider-session-2', 'readiness-response-2', 'mcp-list-2', ['delegate_request', 'select_worktree']);
+  await page.clock.runFor(20);
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  await page.evaluate(() => Object.assign(window, { successorDavoChannel: (window as unknown as { davoChannel: EventTarget }).davoChannel }));
+  await page.evaluate(() => (window as unknown as { releaseQueuedReopen: () => void }).releaseQueuedReopen());
+  await page.clock.runFor(1);
+  expect(fixture.openBodies).toHaveLength(2);
+  expect(fixture.stopBodies).toHaveLength(1);
+  expect(await page.evaluate(() => {
+    const state = window as unknown as { davoChannel?: EventTarget; successorDavoChannel?: EventTarget };
+    return state.davoChannel === state.successorDavoChannel;
+  })).toBe(true);
+  expect(await page.evaluate(() => (window as unknown as { davoChannel: { readyState: RTCDataChannelState } }).davoChannel.readyState)).toBe('open');
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  const staleCommands = await page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).filter(event => event.type === 'response.cancel'));
+  expect(staleCommands).toEqual([]);
+});
+
+test('does not rotate a ready successor when an old deletion wait expires', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree']);
+  await expect.poll(() => fixture.readyBodies.length).toBe(1);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'old-delete-wait', transcript: 'Old request' }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'old-delete-wait'))).toBe(true);
+  await page.evaluate(() => Object.assign(window, { oldDavoChannel: (window as unknown as { davoChannel: EventTarget }).davoChannel }));
+  await page.getByRole('button', { name: 'Close' }).click();
+  await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  await page.getByRole('button', { name: 'Open listening' }).click();
+  await expect.poll(() => page.evaluate(() => {
+    const state = window as unknown as { davoChannel?: EventTarget; oldDavoChannel?: EventTarget };
+    return state.davoChannel !== undefined && state.davoChannel !== state.oldDavoChannel;
+  })).toBe(true);
+  await completeReadiness(page, 'provider-session-2', 'readiness-response-2', 'mcp-list-2', ['delegate_request', 'select_worktree']);
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  await page.waitForTimeout(4_200);
+  expect(fixture.stopBodies).toHaveLength(1);
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+});
+
+test('does not send an old worktree continuation through a ready successor', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree'], [], { deferContinuation: true, includeWorktree: true });
+  const fallbackRelease = setTimeout(fixture.releaseContinuation, 8_000);
+  await expect.poll(() => fixture.readyBodies.length).toBe(1);
+  await completeTranscript(page, 'old-continuation', 'Switch worktrees');
+  await expect.poll(() => fixture.transcriptBodies.length).toBe(1);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'response.create' && event.response?.metadata?.fixture_admission === 'old'))).toBe(true);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.created', response: { id: 'foreground-old' } }) })));
+  await expect.poll(() => fixture.bindBodies.length).toBe(1);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.function_call_arguments.done', name: 'select_worktree', response_id: 'foreground-old', call_id: 'call-old', arguments: JSON.stringify({ worktree_id: 'cora' }) }) })));
+  await expect.poll(() => fixture.continueBodies.length).toBe(1);
+  await page.evaluate(() => Object.assign(window, { oldDavoChannel: (window as unknown as { davoChannel: EventTarget }).davoChannel }));
+  await page.getByRole('button', { name: 'Close' }).click();
+  await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  await page.getByRole('button', { name: 'Open listening' }).click();
+  await expect.poll(() => page.evaluate(() => {
+    const state = window as unknown as { davoChannel?: EventTarget; oldDavoChannel?: EventTarget };
+    return state.davoChannel !== undefined && state.davoChannel !== state.oldDavoChannel;
+  })).toBe(true);
+  await completeReadiness(page, 'provider-session-2', 'readiness-response-2', 'mcp-list-2', ['delegate_request', 'select_worktree']);
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  clearTimeout(fallbackRelease);
+  fixture.releaseContinuation();
+  await page.waitForTimeout(100);
+  const staleCommands = await page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).filter(event => event.type === 'response.cancel' || event.type === 'response.create' && event.response?.metadata?.fixture_continuation === 'old'));
+  expect(staleCommands).toEqual([]);
+  expect(fixture.stopBodies).toHaveLength(1);
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+});
+
+// reject either official pending admission representation
+for (const pending of [
+  { name: 'http 202', admission: 'pending-202' as const },
+  { name: 'pending body', admission: 'pending-body' as const }
+]) {
+  test(`stops listening without inference for a ${pending.name} admission`, async ({ page }) => {
+    const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree'], [], { admission: pending.admission });
+    await expect.poll(() => fixture.readyBodies.length).toBe(1);
+    await completeTranscript(page, `pending-${pending.admission}`, 'Wait for storage');
+    await expect(page.getByText('Davo storage is recovering. Try again shortly.')).toBeVisible();
+    await expect.poll(() => fixture.stopBodies.length).toBe(1);
+    expect(fixture.stopBodies[0]).toMatchObject({ generation: 4, voiceSessionId: expect.any(String) });
+    await page.waitForTimeout(100);
+    expect(fixture.transcriptBodies).toHaveLength(1);
+    expect(fixture.bindBodies).toHaveLength(0);
+    expect(fixture.assistantBodies).toHaveLength(0);
+    expect(await page.evaluate(() => (window as unknown as { davoTrack: { stopped: boolean } }).davoTrack.stopped)).toBe(true);
+    const foregroundResponses = await page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).filter(event => event.type === 'response.create' && event.response?.metadata?.davo_phase !== 'readiness'));
+    expect(foregroundResponses).toEqual([]);
+  });
+}
+
+test('stops without inference when the exact receipt retry returns pending', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree'], [], { admission: 'retry-pending' });
+  await expect.poll(() => fixture.readyBodies.length).toBe(1);
+  await completeTranscript(page, 'retry-pending', 'Wait for retry storage');
+  await expect(page.getByText('Davo storage is recovering. Try again shortly.')).toBeVisible();
+  await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  expect(fixture.transcriptBodies).toHaveLength(2);
+  expect(fixture.bindBodies).toHaveLength(0);
+  expect(fixture.assistantBodies).toHaveLength(0);
+  const foregroundResponses = await page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).filter(event => event.type === 'response.create' && event.response?.metadata?.davo_phase !== 'readiness'));
+  expect(foregroundResponses).toEqual([]);
+});
+
+test('does not stop a successor when an old pending admission resolves', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree'], [], { admission: 'pending-202', deferFirstAdmission: true });
+  const fallbackRelease = setTimeout(fixture.releaseAdmission, 8_000);
+  await expect.poll(() => fixture.readyBodies.length).toBe(1);
+  await completeTranscript(page, 'old-pending', 'Old pending request');
+  await expect.poll(() => fixture.transcriptBodies.length).toBe(1);
+  await page.getByRole('button', { name: 'Close' }).click();
+  await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  await page.getByRole('button', { name: 'Open listening' }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoTrack: { stopped: boolean } }).davoTrack.stopped)).toBe(false);
+  await completeReadiness(page, 'provider-session-2', 'readiness-response-2', 'mcp-list-2', ['delegate_request', 'select_worktree']);
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  clearTimeout(fallbackRelease);
+  fixture.releaseAdmission();
+  await page.waitForTimeout(100);
+  expect(fixture.stopBodies).toHaveLength(1);
+  expect(fixture.transcriptBodies).toHaveLength(1);
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  expect(await page.evaluate(() => (window as unknown as { davoTrack: { stopped: boolean } }).davoTrack.stopped)).toBe(false);
+});
+
+test('discards a held admission receipt after transport replacement', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree'], [], { deferFirstAdmission: true });
+  const fallbackRelease = setTimeout(fixture.releaseAdmission, 8_000);
+  await expect.poll(() => fixture.readyBodies.length).toBe(1);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'old-admission', transcript: 'Old request' }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'old-admission'))).toBe(true);
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    // fill enough history to require scrolling
-    for (let index = 1; index <= 20; index += 1) data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: `Voice message ${index}` }) }));
+    const current = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    current.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'old-admission' }) }));
+    Object.assign(window, { oldDavoChannel: current });
   });
-  await expect(page.getByText('Voice message 20')).toBeVisible();
-  await expect.poll(() => page.locator('.voice-transcript').evaluate(element => Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop))).toBeLessThanOrEqual(1);
-  // do not infer hangup from a casual goodbye
+  await expect.poll(() => fixture.transcriptBodies.length).toBe(1);
+  await page.getByRole('button', { name: 'Close' }).click();
+  await expect.poll(() => fixture.stopBodies.length).toBe(1);
+  await page.getByRole('button', { name: 'Open listening' }).click();
+  await expect.poll(() => page.evaluate(() => {
+    const state = window as unknown as { davoChannel?: EventTarget; oldDavoChannel?: EventTarget };
+    return state.davoChannel !== undefined && state.davoChannel !== state.oldDavoChannel;
+  })).toBe(true);
+  await completeReadiness(page, 'provider-session-2', 'readiness-response-2', 'mcp-list-2', ['delegate_request', 'select_worktree']);
+  // the successor must become ready before the old receipt resolves
+  await expect(page.getByRole('button', { name: 'Mute' })).toBeEnabled();
+  clearTimeout(fallbackRelease);
+  fixture.releaseAdmission();
+  await page.waitForTimeout(100);
+  const oldResponses = await page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).filter(event => event.type === 'response.create' && event.response?.metadata?.fixture_admission === 'old'));
+  expect(oldResponses).toEqual([]);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'new-admission', transcript: 'New request' }) })));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'conversation.item.delete' && event.item_id === 'new-admission'))).toBe(true);
+  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.deleted', item_id: 'new-admission' }) })));
+  await expect.poll(() => fixture.transcriptBodies.length).toBe(2);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).some(event => event.type === 'response.create' && event.response?.metadata?.fixture_admission === 'new'))).toBe(true);
+});
+
+test('rotates when an earlier committed raw item has no transcript terminal event', async ({ page }) => {
+  const fixture = await openReadinessFixture(page, ['delegate_request', 'select_worktree']);
+  await expect.poll(() => fixture.readyBodies.length).toBe(1);
   await page.evaluate(() => {
-    const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'goodbye-1', transcript: 'Goodbye.' }) }));
-    data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.stopped', response_id: 'goodbye-response' }) }));
+    const channel = (window as unknown as { davoChannel: EventTarget }).davoChannel;
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'missing-terminal-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'later-item-1' }) }));
+    channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'later-item-1', transcript: 'Do not admit this' }) }));
   });
-  await expect(page.getByRole('button', { name: 'Hang up' })).toBeVisible();
-  expect(await page.evaluate(() => (window as unknown as { davoHangupPlays?: number }).davoHangupPlays ?? 0)).toBe(0);
-  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'hangup-1', transcript: 'Davo, hang up please.' }) })));
-  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_audio_transcript.done', transcript: 'Cheers, Ansel.' }) })));
-  await expect(page.getByText('Cheers, Ansel.')).toBeVisible();
-  await expect(page.locator('.voice-assistant > strong')).toHaveText('Davo');
-  await expect(page.getByRole('button', { name: 'Hang up' })).toBeVisible();
-  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'output_audio_buffer.stopped', response_id: 'goodbye-1' }) })));
-  const dialogCall = page.locator('.voice-dialog').getByRole('button', { name: 'Call Davo' });
-  await expect(dialogCall).toBeVisible();
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoHangupPlays?: number }).davoHangupPlays ?? 0)).toBe(1);
-  await expect(page.locator('.voice-dialog')).toHaveCount(0, { timeout: 2_500 });
-  await page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' }).click();
-  await expect(page.getByText('Loading Davo tools…')).toBeVisible();
-  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'mcp_list_tools.completed' }) })));
-  await page.getByRole('button', { name: 'Hang up' }).click();
-  await expect(dialogCall).toBeVisible();
-  await expect.poll(() => page.evaluate(() => (window as unknown as { davoHangupPlays?: number }).davoHangupPlays ?? 0)).toBe(2);
-  await expect(page.locator('.voice-dialog')).toHaveCount(0, { timeout: 2_500 });
-  // keep unexpected provider disconnects visible
-  await page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' }).click();
-  await expect(page.getByText('Loading Davo tools…')).toBeVisible();
-  await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'mcp_list_tools.completed' }) })));
-  await page.evaluate(() => { const data = (window as unknown as { davoChannel: EventTarget }).davoChannel; data.dispatchEvent(new Event('close')); });
-  await expect(page.locator('.voice-dialog').getByRole('alert')).toHaveText('Davo disconnected. Call again to reconnect.');
-  await page.waitForTimeout(2_100);
-  await expect(page.locator('.voice-dialog')).toBeVisible();
-  expect(await page.evaluate(() => (window as unknown as { davoHangupPlays?: number }).davoHangupPlays ?? 0)).toBe(2);
+  await expect.poll(() => fixture.stopBodies.length, { timeout: 5_000 }).toBeGreaterThan(0);
+  expect(fixture.transcriptBodies).toHaveLength(0);
+  const foregroundResponses = await page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(JSON.parse).filter(event => event.type === 'response.create' && event.response?.metadata?.davo_phase !== 'readiness'));
+  expect(foregroundResponses).toEqual([]);
 });

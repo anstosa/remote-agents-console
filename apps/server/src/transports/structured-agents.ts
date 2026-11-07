@@ -34,7 +34,7 @@ export type HolderLaunch = { program: string; args: string[]; env: Record<string
  * role (the Conductor's). `access` is the hash of the console MCP token its current process holds,
  * while it runs.
  */
-export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator' | { conductor: string } | { davo: string }; role?: 'conductor'; access?: string; launchedAt: number; version?: string; processGeneration?: number; lifecycleCommand?: { commandId: string; expectedGeneration: number; effectGeneration?: number } };
+export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator' | { conductor: string } | { davo: string }; role?: 'conductor'; access?: string; launchedAt: number; version?: string; processGeneration?: number; turnRevision?: number; turnEventRevision?: number; turnState?: 'idle' | 'working' | 'unknown'; turnNativeId?: string; turnNativeRevision?: number; turnConversationId?: string; turnUncertain?: boolean; lifecycleCommand?: { commandId: string; expectedGeneration: number; effectGeneration?: number } };
 /**
  * What a launch starts: one process of `kind` at `place`, for the Agent `id`, on a new
  * Conversation (on `model` when Allowed models are configured) or resuming the Conversation `resume`,
@@ -191,6 +191,10 @@ const transcriptText = (item: TranscriptItem): string | undefined => {
   }
 };
 const nonNegativeInt = (value: unknown): boolean => value === undefined || Number.isSafeInteger(value) && (value as number) >= 0;
+// bound one persisted content-free native item id
+const validNativeTurnId = (value: unknown): boolean => value === undefined || typeof value === 'string' && value.length > 0 && value.length <= 4_096 && !value.includes('\0');
+// distinguish structured native marks from pane completion signatures
+export const structuredTurnMarkPrefix = 'rac-structured-turn:';
 const sandboxGenerationPattern = /^[0-9a-f]{64}$/u;
 const isStoredRecord = (value: unknown): value is StructuredRecord => {
   const record = value as Partial<StructuredRecord> | null;
@@ -211,6 +215,13 @@ const isStoredRecord = (value: unknown): value is StructuredRecord => {
   return typeof record === 'object' && record !== null && typeof record.id === 'string' && typeof record.kind === 'string' && typeof record.placeId === 'string' && typeof record.home === 'string'
     && validOrigin
     && nonNegativeInt(record.processGeneration)
+    && nonNegativeInt(record.turnRevision)
+    && nonNegativeInt(record.turnEventRevision)
+    && (record.turnState === undefined || record.turnState === 'idle' || record.turnState === 'working' || record.turnState === 'unknown')
+    && validNativeTurnId(record.turnNativeId)
+    && nonNegativeInt(record.turnNativeRevision)
+    && validNativeTurnId(record.turnConversationId)
+    && (record.turnUncertain === undefined || typeof record.turnUncertain === 'boolean')
     && validMarker
     && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && validTmuxSocket && validHost && validSandboxGeneration && (holder.host !== true || typeof tmuxSocket === 'string') && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
 };
@@ -263,7 +274,7 @@ export class StructuredAgents {
     if (model !== undefined && entry === undefined && !(configured === undefined && nativeDefaultValidated === true)) return undefined;
     const records = await this.load();
     const origin: StructuredRecord['origin'] = workerOwner !== undefined ? { davo: workerOwner.id } : spawnedBy !== undefined ? { conductor: spawnedBy } : 'operator';
-    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin, ...(role === undefined ? {} : { role }), launchedAt: Date.now(), processGeneration: 0 };
+    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin, ...(role === undefined ? {} : { role }), launchedAt: Date.now(), processGeneration: 0, turnRevision: 0, turnEventRevision: 0, turnState: 'idle' };
     const live = this.idle();
     records.push(record);
     this.live.set(record.id, live);
@@ -465,6 +476,11 @@ export class StructuredAgents {
     await this.adopt(record, live, started);
     // persist one durable effect generation only after a new process was adopted
     record.processGeneration = (record.processGeneration ?? 0) + 1;
+    record.turnState = 'idle';
+    record.turnUncertain = false;
+    delete record.turnNativeId;
+    delete record.turnNativeRevision;
+    delete record.turnConversationId;
     // bind the observed generation to the command that caused it
     if (commandId !== undefined) record.lifecycleCommand = { commandId, expectedGeneration: record.processGeneration - 1, effectGeneration: record.processGeneration };
     await this.save();
@@ -511,7 +527,13 @@ export class StructuredAgents {
       // its state may have arrived before it was adopted
       this.restartOffPin(record, live);
       // lines the holder could no longer replay may have held a question, which then waits unseen
-      if ((attached.dropped ?? 0) > 0) this.notice(live, `The console missed ${attached.dropped} lines of this Agent's output while it restarted. If a question was asked then, it is waiting unseen: cancel the Turn if it does not finish.`, 'warning');
+      if ((attached.dropped ?? 0) > 0) {
+        record.turnEventRevision = (record.turnEventRevision ?? 0) + 1;
+        record.turnState = 'unknown';
+        record.turnUncertain = true;
+        await this.save();
+        this.notice(live, `The console missed ${attached.dropped} lines of this Agent's output while it restarted. If a question was asked then, it is waiting unseen: cancel the Turn if it does not finish.`, 'warning');
+      }
     }));
   }
 
@@ -640,6 +662,8 @@ export class StructuredAgents {
       const connection = live.connection;
       const delivery = await connection.deliver(prompt);
       if (delivery !== 'started') { live.queuedNext = undefined; live.labelNext = undefined; }
+      // bind a successful native delivery even before its echoed start event
+      if (delivery === 'started') this.observeTurnEvent(record, { type: 'started' });
       // a process that went with the prompt unanswered refused nothing: the queue waits for a resume
       return delivery === 'refused' && live.connection !== connection ? 'busy' : delivery;
     } finally { live.busy = false; }
@@ -695,6 +719,22 @@ export class StructuredAgents {
     return record?.lifecycle === 'live' && live?.connection !== undefined ? live as Live & { connection: StructuredConnection } : undefined;
   }
 
+  // expose one content-free durable native turn frontier
+  private async turnMark(id: string): Promise<{ baselineCompletion?: string }> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    // omit a mark for a vanished structured target
+    if (record === undefined) return {};
+    const frontier = {
+      processGeneration: record.processGeneration ?? 0,
+      conversationId: record.conversationId ?? null,
+      turnRevision: record.turnRevision ?? 0,
+      turnEventRevision: record.turnEventRevision ?? 0,
+      state: record.turnState ?? 'idle',
+      uncertain: record.turnUncertain === true
+    };
+    return { baselineCompletion: `${structuredTurnMarkPrefix}${JSON.stringify(frontier)}` };
+  }
+
   private closeQuestion(live: Live, questionId: string): void {
     const before = live.questions.length;
     live.questions = live.questions.filter(candidate => candidate.id !== questionId);
@@ -715,7 +755,7 @@ export class StructuredAgents {
     },
     gate: async () => 'none',
     held: () => false,
-    mark: async () => ({}),
+    mark: async agent => await this.turnMark(agent.id),
     deliver: async (id, prompt, _attachments, options) => {
       const delivery = await this.deliver(id, prompt, { queued: options.waited === true, ...(options.sender?.label === undefined ? {} : { label: options.sender.label }) });
       if (delivery === undefined) return { status: 'refused' };
@@ -724,7 +764,7 @@ export class StructuredAgents {
     },
     observe: async agent => {
       const live = this.live.get(agent.id);
-      return live?.working === true ? { type: 'started', mark: {} } : live?.turn;
+      return live?.working === true ? { type: 'started', mark: await this.turnMark(agent.id) } : live?.turn;
     },
     // work the queue adopted while a reattached Agent resynced ended without a Turn: release it
     externalReset: async id => { const live = this.live.get(id); return live !== undefined && !live.working && live.resyncing !== true; },
@@ -944,6 +984,79 @@ export class StructuredAgents {
     return this.live.get(id)?.transcript.find(item => item.id === itemId);
   }
 
+  // advance one unique native turn state transition
+  private observeTurnEvent(record: StructuredRecord, turn: TurnEvent): void {
+    const state = turn.type === 'started' ? 'working' : 'idle';
+    // deduplicate holder replay of the last durable transition
+    if (record.turnState === state) return;
+    record.turnEventRevision = (record.turnEventRevision ?? 0) + 1;
+    record.turnState = state;
+    // assign one monotonic identity at every distinct turn start
+    if (state === 'working') record.turnRevision = (record.turnRevision ?? 0) + 1;
+    void this.save();
+  }
+
+  // bind the active turn to its exact native user item
+  private observeNativePrompt(record: StructuredRecord, nativeId: string): void {
+    const currentIdentified = record.turnNativeRevision === (record.turnRevision ?? 0);
+    const missedStart = record.turnState !== 'working' || currentIdentified && record.turnNativeId !== nativeId;
+    // recover a start whose protocol event was unavailable
+    if (missedStart) {
+      record.turnRevision = (record.turnRevision ?? 0) + 1;
+      record.turnEventRevision = (record.turnEventRevision ?? 0) + 1;
+      record.turnState = 'working';
+    }
+    const changed = record.turnNativeId !== nativeId || record.turnConversationId !== record.conversationId || record.turnUncertain === true;
+    record.turnNativeId = nativeId;
+    record.turnNativeRevision = record.turnRevision ?? 0;
+    record.turnConversationId = record.conversationId;
+    record.turnUncertain = false;
+    // persist only a newly proven native identity
+    if (changed || missedStart) void this.save();
+  }
+
+  // recover the latest exact native turn identity from bounded history
+  private observeTurnHistory(record: StructuredRecord, live: Live, items: readonly TranscriptItem[]): void {
+    let promptIndex = -1;
+    let settledIndex = -1;
+    // locate only stable user and terminal item identities
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]!;
+      if (item.kind === 'message' && item.role === 'user' && item.steer !== true) promptIndex = index;
+      if (item.kind === 'settled') settledIndex = index;
+    }
+    // history without a native prompt cannot resolve missed activity
+    if (promptIndex < 0) return;
+    const nativeId = items[promptIndex]!.id;
+    // reject the previous head replayed before the current active prompt identity
+    if (record.turnState === 'working' && record.turnNativeRevision !== (record.turnRevision ?? 0) && nativeId === record.turnNativeId) return;
+    // reject a stale same-conversation snapshot that omits the durable native head
+    if (record.turnNativeId !== undefined && record.turnNativeRevision === (record.turnRevision ?? 0) && record.turnConversationId === record.conversationId && !items.some(item => item.id === record.turnNativeId)) return;
+    const exactState = settledIndex > promptIndex ? 'idle' : live.working ? 'working' : undefined;
+    const changedIdentity = record.turnNativeId !== nativeId;
+    const changedConversation = record.turnConversationId !== record.conversationId;
+    const currentIdentified = record.turnNativeRevision === (record.turnRevision ?? 0);
+    const changedState = exactState !== undefined && record.turnState !== exactState;
+    // one changed stable head proves at least one missed turn
+    if (changedIdentity && !(record.turnState === 'working' && !currentIdentified)) {
+      record.turnRevision = (record.turnRevision ?? 0) + 1;
+      record.turnEventRevision = (record.turnEventRevision ?? 0) + 1;
+    }
+    record.turnNativeId = nativeId;
+    record.turnNativeRevision = record.turnRevision ?? 0;
+    record.turnConversationId = record.conversationId;
+    // clear uncertainty only when history also proves the latest turn state
+    const resolved = exactState !== undefined && record.turnUncertain === true;
+    // retain a missed native terminal transition
+    if (changedState) record.turnEventRevision = (record.turnEventRevision ?? 0) + 1;
+    // adopt only the state proven by native history
+    if (exactState !== undefined) record.turnState = exactState;
+    // release only a fully proven replay gap
+    if (resolved) record.turnUncertain = false;
+    // persist every recovered frontier change
+    if (changedIdentity || changedConversation || changedState || resolved) void this.save();
+  }
+
   private observe(record: StructuredRecord, live: Live, generation: number, event: StructuredEvent): void {
     if (this.live.get(record.id) !== live || live.generation !== generation) return;
     switch (event.type) {
@@ -983,6 +1096,7 @@ export class StructuredAgents {
         }
         break;
       case 'turn':
+        this.observeTurnEvent(record, event.turn);
         live.working = event.turn.type === 'started';
         if (event.turn.type !== 'started') { live.turn = event.turn; live.resyncing = false; this.endScripts(live); this.idlePoint(record, live); this.restartOffPin(record, live); }
         break;
@@ -1008,6 +1122,7 @@ export class StructuredAgents {
           if (live.labelNext !== undefined) item = { ...item, label: live.labelNext };
           live.queuedNext = undefined;
           live.labelNext = undefined;
+          this.observeNativePrompt(record, item.id);
         }
         if (item.kind === 'tool' && item.source !== undefined && item.parentId === undefined) this.watchScript(record, live, item);
         const index = live.transcript.findIndex(candidate => candidate.id === item.id);
@@ -1029,6 +1144,7 @@ export class StructuredAgents {
         // history protocols provide no source time, so record bounded server observation explicitly
         live.observedAt = new Map(live.transcript.map(item => [item.id, live.observedAt.get(item.id) ?? new Date().toISOString()]));
         live.prompt = event.items.filter((item): item is Extract<TranscriptItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'user' && item.steer !== true).at(-1)?.text;
+        this.observeTurnHistory(record, live, event.items);
         break;
       case 'status':
         if (event.text === undefined) live.status.delete(event.key); else live.status.set(event.key, event.text);
@@ -1073,6 +1189,12 @@ export class StructuredAgents {
     }
     live.turn = { type: 'exited' };
     live.working = false;
+    // persist the exact terminal transition of an interrupted native turn
+    if (record.turnState !== 'idle') {
+      record.turnEventRevision = (record.turnEventRevision ?? 0) + 1;
+      record.turnState = 'idle';
+      void this.save();
+    }
     live.questions = [];
     live.steers = [];
     live.connection = undefined;

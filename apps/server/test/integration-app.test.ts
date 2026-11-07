@@ -65,10 +65,13 @@ describe('application integration surfaces', () => {
     vi.stubEnv('RAC_INTEGRATION_STATE_FILE', join(root, 'policy.json'));
     vi.stubEnv('RAC_INTEGRATION_AUDIT_FILE', join(root, 'audit.jsonl'));
     vi.stubEnv('RAC_OPENAI_API_KEY', 'test-key');
+    vi.stubEnv('RAC_DAVO_STATE_FILE', join(root, 'davo.json'));
+    vi.stubEnv('RAC_PROMPT_OPERATIONS_FILE', join(root, 'operations.json'));
+    vi.stubEnv('RAC_DAVO_PUSH_ATTEMPTS_FILE', join(root, 'push-attempts.json'));
     // preserve documented blank optional secrets
     vi.stubEnv('RAC_REALTIME_MCP_TOKEN', ' ');
     vi.stubEnv('RAC_INTEGRATION_FEDERATION_SECRET', ' ');
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ value: 'ek_testcredential' }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => String(url).includes('/realtime/calls') ? new Response('v=0\r\nanswer', { status: 201, headers: { location: '/v1/realtime/calls/rtc_integration_test' } }) : new Response(JSON.stringify({ value: 'ek_testcredential' }), { status: 200, headers: { 'content-type': 'application/json' } })));
     const config: ValidatedConfig = {
       listen: { host: '127.0.0.1', port: 8787 },
       name: 'Remote Agents',
@@ -105,24 +108,33 @@ describe('application integration surfaces', () => {
       expect(inactiveRealtime.statusCode).toBe(423);
       // establish explicit ownership before exercising the voice lifecycle
       await control.take('browser-session');
-      const realtime = await app.inject({ method: 'POST', url: '/api/realtime/session', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId } });
+      const snapshot = await app.inject({ method: 'GET', url: '/api/davo/conversation', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}` } });
+      const generation = snapshot.json().generation;
+      const audioHeaders = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' };
+      const realtime = await app.inject({ method: 'POST', url: '/api/realtime/session', headers: audioHeaders, payload: { voiceSessionId, generation } });
       expect(realtime.statusCode).toBe(200);
-      const fetchMock = vi.mocked(globalThis.fetch);
-      const provider = JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body));
-      const bearer = provider.session.tools[0].authorization as string;
+      expect(JSON.stringify(realtime.json())).not.toContain('ek_testcredential');
+      const negotiated = await app.inject({ method: 'POST', url: '/api/realtime/negotiate', headers: audioHeaders, payload: { voiceSessionId, generation, negotiationId: realtime.json().negotiationId, sdp: 'v=0\r\noffer' } });
+      expect(negotiated.statusCode).toBe(200);
+      const ready = await app.inject({ method: 'POST', url: '/api/davo/session/ready', headers: audioHeaders, payload: { voiceSessionId, generation, readinessId: negotiated.json().readinessId, responseId: 'readiness-response', importedTools: negotiated.json().readinessResponse.tools[0].allowed_tools } });
+      expect(ready.statusCode).toBe(200);
+      const admitted = await app.inject({ method: 'POST', url: '/api/davo/transcripts/user', headers: audioHeaders, payload: { voiceSessionId, generation, providerSessionId: 'session-test', providerItemId: 'item-test', text: 'What is running?' } });
+      expect(admitted.statusCode).toBe(200);
+      const bearer = admitted.json().response.tools[0].authorization as string;
       const mcpHeaders = { host: 'agents.example.com', 'mcp-protocol-version': '2025-06-18', authorization: `Bearer ${bearer}` };
       const listed = await app.inject({ method: 'POST', url: '/mcp', headers: mcpHeaders, payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' } });
       expect(listed.statusCode).toBe(200);
       const names = listed.json().result.tools.map((tool: { name: string }) => tool.name);
-      expect(names).toEqual(expect.arrayContaining(['get_agent_runtime', 'list_agent_models', 'list_conversations', 'restart_agent', 'get_lifecycle_command', 'get_launch_options', 'launch_agent', 'queue_prompt_with_attachments', 'relay_agent_question_answer', 'get_comparison', 'list_comparison_commits', 'ask_review', 'ask_comparison', 'create_pull_request_review_draft', 'get_files_capabilities', 'begin_file_upload', 'download_file_chunk', 'get_note', 'list_notes', 'create_note', 'schedule_note', 'list_configured_actions', 'spawn_agent', 'close_agent', 'create_worktree', 'watch_pull_request', 'get_watch_events']));
+      expect(names).toEqual(expect.arrayContaining(['get_agent_runtime', 'list_agent_models', 'list_conversations', 'get_comparison', 'list_notes', 'bind_davo_target', 'delegate_request', 'relay_agent_question_answer', 'answer_davo_choice']));
+      expect(names).toEqual(expect.not.arrayContaining(['queue_prompt', 'restart_agent', 'launch_agent', 'begin_file_upload', 'create_note', 'spawn_agent', 'create_worktree', 'create_pull_request_review_draft']));
       expect(names).not.toContain('watch_command');
       const denied = await app.inject({ method: 'POST', url: '/mcp', headers: mcpHeaders, payload: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'watch_command', arguments: { command: 'echo unsafe', description: 'unavailable', request_id: 'request-denied-command' } } } });
       expect(denied.json().error.code).toBe(-32602);
       const activeStatus = await app.inject({ method: 'GET', url: '/api/integrations/status', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}` } });
       expect(activeStatus.json()).toMatchObject({ control: { voiceActive: true } });
-      const heartbeat = await app.inject({ method: 'POST', url: '/api/realtime/session/heartbeat', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId } });
+      const heartbeat = await app.inject({ method: 'POST', url: '/api/realtime/session/heartbeat', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId, generation } });
       expect(heartbeat.statusCode).toBe(200);
-      const stopped = await app.inject({ method: 'POST', url: '/api/realtime/session/stop', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId } });
+      const stopped = await app.inject({ method: 'POST', url: '/api/realtime/session/stop', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId, generation } });
       expect(stopped.statusCode).toBe(200);
       const stoppedStatus = await app.inject({ method: 'GET', url: '/api/integrations/status', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}` } });
       expect(stoppedStatus.json()).toMatchObject({ control: { voiceActive: false } });

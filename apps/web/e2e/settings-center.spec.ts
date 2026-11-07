@@ -12053,7 +12053,7 @@ test("preserves saved voice identity when refresh fails and the old call button 
     .getByRole("button", { name: "Close settings", exact: true })
     .click();
   await page
-    .getByRole("button", { name: "Call Davo", exact: true })
+    .getByRole("button", { name: "Open Davo", exact: true })
     .click({ button: "right" });
   await page
     .getByRole("menuitem", { name: "Disable Davo", exact: true })

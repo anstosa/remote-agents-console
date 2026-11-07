@@ -1,5 +1,5 @@
-import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { useRealtimeVoice, type ToolTranscriptEntry, type TranscriptEntry } from './use-realtime-voice.js';
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { useRealtimeVoice, type DavoMessage } from './use-realtime-voice.js';
 import './loading.css';
 
 type Request = (url: string, init?: RequestInit) => Promise<Response>;
@@ -8,26 +8,13 @@ type VoiceContext = { server?: string; serverUrl?: string; worktree?: string; ag
 type VoiceContextDetails = { server: string; serverLocation?: string; activeWorktree: string; agent?: string; openWorktrees?: VoiceWorktree[] };
 type WorktreeSelection = { worktreeId: string; worktreeLabel: string };
 
-// provide staggered waveform positions
 const soundwaveBars = Array.from({ length: 28 }, (_, index) => index);
 const mobileWakeLockMedia = '(max-width: 600px), (pointer: coarse)';
-const historyClock = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const historyClock = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
 
-// format one compact history timestamp
-function historyTime(timestamp: number): string {
-  return historyClock.format(timestamp);
-}
-
-// summarize one retained tool detail
-function detailSummary(detail: string): string {
-  const compact = detail.replace(/\s+/gu, ' ').trim();
-  return compact.length <= 120 ? compact : `${compact.slice(0, 117)}…`;
-}
-
-// format retained JSON details for reading
-function formattedDetail(detail: string): string {
-  try { return JSON.stringify(JSON.parse(detail), null, 2); }
-  catch { return detail; }
+// format one retained timestamp
+function historyTime(timestamp: string): string {
+  return historyClock.format(Date.parse(timestamp));
 }
 
 // format one server location
@@ -46,271 +33,174 @@ function formatVoiceContext(context: VoiceContext): VoiceContextDetails {
   const agent = context.agent?.trim();
   const location = serverLocation(context.serverUrl);
   let openWorktrees: VoiceWorktree[] | undefined;
-  // preserve canonical worktree identities when context is available
+  // preserve canonical worktree identities
   if (context.openWorktrees !== undefined) {
     const worktrees = new Map<string, VoiceWorktree>();
-    // normalize and deduplicate live worktrees by identifier
+    // normalize distinct visible worktrees
     for (const worktree of context.openWorktrees) {
       const id = worktree.id.trim();
-      // skip malformed and active entries
       if (id === '' || id === context.worktreeId) continue;
       worktrees.set(id, { id, label: worktree.label.trim() || id });
     }
-    const labelCounts = new Map<string, number>();
-    // include the active label when detecting ambiguous names
-    if (context.worktreeId !== undefined) labelCounts.set(activeWorktree, 1);
-    // count distinct worktrees sharing one visible label
-    for (const worktree of worktrees.values()) labelCounts.set(worktree.label, (labelCounts.get(worktree.label) ?? 0) + 1);
+    const counts = new Map<string, number>();
+    if (context.worktreeId !== undefined) counts.set(activeWorktree, 1);
+    // count ambiguous labels
+    for (const worktree of worktrees.values()) counts.set(worktree.label, (counts.get(worktree.label) ?? 0) + 1);
     openWorktrees = [...worktrees.values()]
-      .map(worktree => labelCounts.get(worktree.label) === 1 ? worktree : { ...worktree, label: `${worktree.label} · ${worktree.id}` })
+      .map(worktree => counts.get(worktree.label) === 1 ? worktree : { ...worktree, label: `${worktree.label} · ${worktree.id}` })
       .sort((left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id));
   }
   return { server, activeWorktree, ...(agent ? { agent } : {}), ...(location === undefined ? {} : { serverLocation: location }), ...(openWorktrees === undefined ? {} : { openWorktrees }) };
 }
 
-// match one searchable history entry
-function matchesHistory(entry: TranscriptEntry, query: string): boolean {
-  const timestamp = new Date(entry.timestamp);
-  // include every retained tool field in search
-  const details = entry.role === 'tool'
-    ? [entry.role, entry.name, entry.status, entry.text, entry.request, entry.result, entry.error, timestamp.toISOString(), historyTime(entry.timestamp)]
-    : [entry.role, entry.text, timestamp.toISOString(), historyTime(entry.timestamp)];
-  return details.filter(detail => detail !== undefined).join(' ').toLocaleLowerCase().includes(query);
+// match one searchable durable message
+function matchesHistory(message: DavoMessage, query: string): boolean {
+  return [message.kind, message.text, message.createdAt, historyTime(message.createdAt)].join(' ').toLocaleLowerCase().includes(query);
 }
 
-// render one grouped tool lifecycle
-const ToolHistoryEntry = memo(function ToolHistoryEntry({ entry }: { entry: ToolTranscriptEntry }) {
-  const [open, setOpen] = useState(false);
-  const headline = detailSummary(entry.error ?? entry.result ?? entry.request ?? entry.text);
-  const time = new Date(entry.timestamp);
-  const statusLabel = entry.status === 'running' ? 'Run' : entry.status === 'completed' ? 'Done' : entry.status === 'incomplete' ? 'Partial' : 'Error';
-  const rows = [
-    { label: 'Req', value: entry.request },
-    { label: 'Result', value: entry.result },
-    { label: 'Error', value: entry.error }
-  ];
-  return <details className={`voice-tool voice-tool-${entry.status}`} onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary><time dateTime={time.toISOString()} title={time.toLocaleString()}>{historyTime(entry.timestamp)}</time><strong>{entry.name}</strong><b>{statusLabel}</b><span>{headline}</span></summary>
-    {open && <dl>{rows.map(row => {
-      // omit unavailable lifecycle sections
-      if (row.value === undefined) return null;
-      const summary = detailSummary(row.value);
-      const formatted = formattedDetail(row.value);
-      return <div key={row.label}><dt>{row.label}</dt><dd><span>{summary}</span>{formatted === summary ? null : <pre>{formatted}</pre>}</dd></div>;
-    })}</dl>}
-  </details>;
-});
-
-// hold the screen while mobile voice is visible
-function useMobileScreenWakeLock(active: boolean) {
+// hold the screen while mobile listening is visible
+function useMobileScreenWakeLock(active: boolean): void {
   useEffect(() => {
     // degrade when inactive or unsupported
     if (!active || !('wakeLock' in navigator)) return;
     const mobile = window.matchMedia(mobileWakeLockMedia);
     let disposed = false;
-    let pageActive = true;
-    let acquiring = false;
-    let releaseRecoveries = 0;
     let wakeLock: WakeLockSentinel | undefined;
-    // release the currently held lock
+    // release the current lock
     const release = async () => {
       const current = wakeLock;
       wakeLock = undefined;
-      // skip absent or already released locks
-      if (current === undefined || current.released) return;
-      await current.release().catch(() => undefined);
+      if (current !== undefined && !current.released) await current.release().catch(() => undefined);
     };
-    // acquire one visible mobile lock
+    // acquire only for a visible mobile surface
     const acquire = async () => {
-      // serialize requests and require a visible mobile page
-      if (disposed || acquiring || wakeLock !== undefined || !pageActive || document.visibilityState !== 'visible' || !mobile.matches) return;
-      acquiring = true;
+      if (disposed || wakeLock !== undefined || document.visibilityState !== 'visible' || !mobile.matches) return;
       try {
         const current = await navigator.wakeLock.request('screen');
-        // release requests resolved after visibility changed
-        if (disposed || !pageActive || document.visibilityState !== 'visible' || !mobile.matches) {
-          await current.release().catch(() => undefined);
-          return;
-        }
+        // discard stale acquisition
+        if (disposed || document.visibilityState !== 'visible' || !mobile.matches) { await current.release().catch(() => undefined); return; }
         wakeLock = current;
-        // forget locks released by the browser
-        current.addEventListener('release', () => {
-          // preserve a newer lock
-          if (wakeLock !== current) return;
-          wakeLock = undefined;
-          // retry one unexpected visible-page release
-          if (!disposed && pageActive && document.visibilityState === 'visible' && mobile.matches && releaseRecoveries === 0) {
-            releaseRecoveries += 1;
-            void acquire();
-          }
-        }, { once: true });
-      } catch { /* Wake lock denial must not interrupt voice. */ }
-      finally { acquiring = false; }
+      } catch {
+        // wake lock denial never interrupts audio
+      }
     };
-    // match the lock to current page state
+    // match the current page state
     const sync = () => {
-      // hold only while fully visible on mobile
-      if (pageActive && document.visibilityState === 'visible' && mobile.matches) {
-        releaseRecoveries = 0;
-        void acquire();
-      } else void release();
-    };
-    // release before navigation or suspension
-    const hidePage = () => {
-      pageActive = false;
-      void release();
-    };
-    // restore after back-forward cache return
-    const showPage = () => {
-      pageActive = true;
-      sync();
+      if (document.visibilityState === 'visible' && mobile.matches) void acquire();
+      else void release();
     };
     document.addEventListener('visibilitychange', sync);
-    window.addEventListener('pagehide', hidePage);
-    window.addEventListener('pageshow', showPage);
     mobile.addEventListener('change', sync);
     sync();
-    // remove listeners and release on close
+    // release on surface removal
     return () => {
       disposed = true;
       document.removeEventListener('visibilitychange', sync);
-      window.removeEventListener('pagehide', hidePage);
-      window.removeEventListener('pageshow', showPage);
       mobile.removeEventListener('change', sync);
       void release();
     };
   }, [active]);
 }
 
-export type VoiceDialogProps = { name: string; open: boolean; callRequest: number; context: VoiceContext; request: Request; onClose: () => void; onSelectWorktree?: (worktreeId: string) => WorktreeSelection | undefined; onActiveChange?: (active: boolean) => void };
+export type VoiceDialogProps = { name: string; open: boolean; openRequest: number; context: VoiceContext; request: Request; onHide: () => void; onSelectWorktree?: (worktreeId: string) => WorktreeSelection | undefined; onActiveChange?: (active: boolean) => void };
 
-// render the responsive voice orchestration surface
-export function VoiceDialog({ name, open, callRequest, context, request, onClose, onSelectWorktree, onActiveChange }: VoiceDialogProps) {
+// render persistent audio-only Davo history
+export function VoiceDialog({ name, open, openRequest, context, request, onHide, onSelectWorktree, onActiveChange }: VoiceDialogProps) {
   const assistantName = name.trim() || 'Davo';
-  const voice = useRealtimeVoice(request, { ...(context.worktreeId === undefined ? {} : { worktreeId: context.worktreeId }), ...(context.worktree === undefined ? {} : { worktreeLabel: context.worktree }), ...(context.agentId === undefined ? {} : { agentId: context.agentId }) }, onSelectWorktree, open, assistantName);
-  useMobileScreenWakeLock(open);
+  const voice = useRealtimeVoice(request, { ...(context.worktreeId === undefined ? {} : { worktreeId: context.worktreeId }), ...(context.worktree === undefined ? {} : { worktreeLabel: context.worktree }), ...(context.agentId === undefined ? {} : { agentId: context.agentId }) }, onSelectWorktree, assistantName);
+  const active = voice.state === 'connecting' || voice.state === 'connected';
+  useMobileScreenWakeLock(open && active);
   const connection = formatVoiceContext(context);
   const [historyQuery, setHistoryQuery] = useState('');
-  const closeButton = useRef<HTMLButtonElement>(null);
+  const hideButton = useRef<HTMLButtonElement>(null);
   const transcript = useRef<HTMLElement>(null);
-  const hangupSound = useRef<HTMLAudioElement>(null);
-  const previousVoiceState = useRef(voice.state);
-  const handledCallRequest = useRef(callRequest);
-  // clear stale filters for each requested or retried call
+  const handledOpenRequest = useRef(openRequest);
+
+  // start each explicit open request once
   useEffect(() => {
-    // reset only when a fresh connection begins
-    if (voice.state === 'connecting') setHistoryQuery('');
-  }, [voice.state]);
-  // focus the dialog close control after opening
-  useEffect(() => {
-    // focus only the fullscreen mobile toggle
-    if (open && window.matchMedia('(max-width: 600px)').matches) closeButton.current?.focus();
-  }, [open]);
-  // start each explicitly requested call once
-  useEffect(() => {
-    // ignore visibility toggles and handled requests
-    if (!open || callRequest === handledCallRequest.current) return;
-    handledCallRequest.current = callRequest;
+    if (!open || openRequest === handledOpenRequest.current) return;
+    handledOpenRequest.current = openRequest;
     void voice.start();
-  }, [callRequest, open, voice.start]);
-  // publish the visible voice mutation gate
-  useEffect(() => { onActiveChange?.(voice.state === 'connecting' || voice.state === 'connected'); }, [onActiveChange, voice.state]);
-  // publish live levels to the mobile call control
+  }, [open, openRequest, voice.start]);
+
+  // focus the mobile hide control
+  useEffect(() => {
+    if (open && window.matchMedia('(max-width: 600px)').matches) hideButton.current?.focus();
+  }, [open]);
+
+  // publish global audio activity
+  useEffect(() => { onActiveChange?.(active); }, [active, onActiveChange]);
+
+  // publish directional levels to the compact trigger
   useEffect(() => {
     const root = document.documentElement;
     root.style.setProperty('--davo-output-level', voice.outputLevel.toFixed(3));
     root.style.setProperty('--davo-input-level', voice.inputLevel.toFixed(3));
-    root.style.setProperty('--davo-call-level', Math.max(voice.outputLevel, voice.inputLevel).toFixed(3));
+    root.style.setProperty('--davo-activity-level', Math.max(voice.outputLevel, voice.inputLevel).toFixed(3));
   }, [voice.inputLevel, voice.outputLevel]);
-  // remove global audio levels after unmounting
+
+  // remove global levels after unmount
   useEffect(() => () => {
     document.documentElement.style.removeProperty('--davo-output-level');
     document.documentElement.style.removeProperty('--davo-input-level');
-    document.documentElement.style.removeProperty('--davo-call-level');
+    document.documentElement.style.removeProperty('--davo-activity-level');
   }, []);
-  // follow each new transcript update
+
+  // follow newly retained messages
   useEffect(() => {
     const history = transcript.current;
-    // keep the newest message visible
     if (history !== null) history.scrollTop = history.scrollHeight;
-  }, [voice.transcript]);
-  // finish and dismiss each established call
-  useEffect(() => {
-    const previous = previousVoiceState.current;
-    previousVoiceState.current = voice.state;
-    // ignore setup, errors, and non-call transitions
-    if (previous !== 'connected' || voice.state !== 'idle' || !voice.endedIntentionally) return;
-    const sound = hangupSound.current;
-    // skip playback after the dialog audio element unmounts
-    if (sound === null) return;
-    sound.currentTime = 0;
-    void sound.play().catch(() => undefined);
-    const dismissal = window.setTimeout(onClose, 2_000);
-    // cancel dismissal when another call starts
-    return () => window.clearTimeout(dismissal);
-  }, [onClose, voice.endedIntentionally, voice.state]);
-  // hide without ending the ongoing call
-  const close = () => onClose();
-  const normalizedHistoryQuery = historyQuery.trim().toLocaleLowerCase();
-  // filter without deleting retained history
-  const visibleTranscript = useMemo(() => {
-    // retain every entry for an empty search
-    if (normalizedHistoryQuery === '') return voice.transcript;
-    return voice.transcript.filter(entry => matchesHistory(entry, normalizedHistoryQuery));
-  }, [normalizedHistoryQuery, voice.transcript]);
+  }, [voice.conversation.messages]);
+
+  const normalizedQuery = historyQuery.trim().toLocaleLowerCase();
+  const visibleMessages = useMemo(() => normalizedQuery === '' ? voice.conversation.messages : voice.conversation.messages.filter(message => matchesHistory(message, normalizedQuery)), [normalizedQuery, voice.conversation.messages]);
   let history: ReactNode;
   // explain a new empty conversation
-  if (voice.transcript.length === 0) history = <p className="voice-history-empty">Ask about agents, worktrees, branches, prompts, reviews, files, or stack status.</p>;
-  // explain an empty search without discarding history
-  else if (visibleTranscript.length === 0) history = <p className="voice-history-empty">No history matches “{historyQuery.trim()}”.</p>;
-  // render compact speech and grouped tools
-  else history = visibleTranscript.map(entry => {
-    // render tool lifecycle detail separately
-    if (entry.role === 'tool') return <ToolHistoryEntry key={entry.id} entry={entry} />;
-    const time = new Date(entry.timestamp);
-    return <p key={entry.id} className={`voice-${entry.role}`}><strong>{entry.role === 'user' ? 'You' : assistantName}</strong><time dateTime={time.toISOString()} title={time.toLocaleString()}>{historyTime(entry.timestamp)}</time><span>{entry.text}</span></p>;
+  if (voice.conversation.loading && voice.conversation.messages.length === 0) history = <p className="voice-history-empty">Loading retained history…</p>;
+  else if (voice.conversation.messages.length === 0) history = <p className="voice-history-empty">Speak while listening is open. There is no typed message box.</p>;
+  else if (visibleMessages.length === 0) history = <p className="voice-history-empty">No history matches “{historyQuery.trim()}”.</p>;
+  else history = visibleMessages.map(message => {
+    const role = message.kind === 'user' ? 'user' : 'assistant';
+    const time = new Date(message.createdAt);
+    return <p key={message.id} className={`voice-${role} voice-${message.kind}`}><strong>{message.kind === 'user' ? 'You' : message.kind === 'assistant' ? assistantName : message.kind}</strong><time dateTime={time.toISOString()} title={time.toLocaleString()}>{historyTime(message.createdAt)}</time><span>{message.text}</span></p>;
   });
+
   let openWorktrees: ReactNode;
-  // show missing server context explicitly
+  // show missing context explicitly
   if (connection.openWorktrees === undefined) openWorktrees = <span className="voice-context-fallback">Unavailable</span>;
-  // distinguish an empty open-worktree list
   else if (connection.openWorktrees.length === 0) openWorktrees = <span className="voice-context-fallback">None</span>;
-  // render the other live worktrees for scanning
   else openWorktrees = <ul>{connection.openWorktrees.map(worktree => <li key={worktree.id} title={worktree.label}>{worktree.label}</li>)}</ul>;
-  // keep the dialog absent from the accessibility tree while closed
+
+  // keep hidden history mounted but absent from accessibility
   if (!open) return null;
   const soundwaveStyle = { '--mic-level': voice.inputLevel.toFixed(3), '--davo-level': voice.outputLevel.toFixed(3) } as CSSProperties;
-  // let connection setup win over overlapping tool work
-  const chatProgressClass = voice.state === 'connecting'
-    ? ' progress-border progress-green progress-loading'
-    : voice.state === 'connected' && voice.toolStatus ? ' progress-border progress-peach' : '';
-  const chatBusy = chatProgressClass !== '';
+  const busy = voice.state === 'connecting';
+  const status = voice.state === 'connected' ? voice.muted ? `Muted — say ${assistantName}` : 'Listening' : voice.state === 'connecting' ? 'Opening listening…' : 'Listening is off';
+
   return <div className="dialog voice-dialog" role="dialog" aria-modal={window.matchMedia('(max-width: 600px)').matches} aria-labelledby="voice-title">
     <div style={soundwaveStyle}>
       <div className="voice-soundwaves" aria-hidden="true"><div className="voice-soundwave davo">{soundwaveBars.map(index => <i key={index} style={{ animationDelay: `${index * -47}ms` }} />)}</div><div className="voice-soundwave mic">{soundwaveBars.map(index => <i key={index} style={{ animationDelay: `${index * -47}ms` }} />)}</div></div>
-      <header><div><small>OPENAI REALTIME</small><h2 id="voice-title">{assistantName}</h2></div><button ref={closeButton} className="voice-view-toggle" type="button" aria-label={`Ongoing ${assistantName} call — show main UI`} onClick={close}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.69 2.8a2 2 0 0 1-.45 2.11L8.08 9.9a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.33 1.84.56 2.8.69A2 2 0 0 1 22 16.92Z" /></svg></button></header>
+      <header><div><small>OPENAI REALTIME</small><h2 id="voice-title">{assistantName}</h2></div><button ref={hideButton} className="voice-view-toggle" type="button" aria-label={`Show main UI while ${assistantName} remains available`} onClick={onHide}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg></button></header>
       <section className="voice-context" aria-label={`${assistantName} connection context`}>
         <div className="voice-context-card voice-context-active"><small>Active worktree</small><strong>{connection.activeWorktree}</strong>{connection.agent && <span>Agent · {connection.agent}</span>}</div>
         <div className="voice-context-card voice-context-server"><small>Server / instance</small><strong>{connection.server}</strong>{connection.serverLocation && <span>{connection.serverLocation}</span>}</div>
         <div className="voice-context-card voice-context-open"><small>Other open worktrees</small>{openWorktrees}</div>
       </section>
-      <div className={`voice-transcript-shell${chatProgressClass}`} aria-busy={chatBusy || undefined}>
-        {/* keep the border outside the independently scrolling transcript */}
-        {chatBusy && <span className="update-progress-ring" aria-hidden="true" />}
+      <div className={`voice-transcript-shell${busy ? ' progress-border progress-green progress-loading' : ''}`} aria-busy={busy || undefined}>
+        {busy && <span className="update-progress-ring" aria-hidden="true" />}
         <section ref={transcript} className="voice-transcript" aria-live="polite">
-          <div className="voice-history-toolbar"><strong>History</strong><label className="voice-history-search"><span className="sr-only">Search {assistantName} history</span><input type="search" value={historyQuery} placeholder="Search history" onChange={event => setHistoryQuery(event.target.value)} /></label></div>
+          <div className="voice-history-toolbar"><strong>Recent history</strong><label className="voice-history-search"><span className="sr-only">Search {assistantName} history</span><input type="search" value={historyQuery} placeholder="Search history" onChange={event => setHistoryQuery(event.target.value)} /></label></div>
+          {voice.conversation.snapshot?.hasMore && <button type="button" className="voice-load-older" disabled={voice.conversation.loadingOlder} onClick={() => void voice.conversation.loadOlder()}>{voice.conversation.loadingOlder ? 'Loading…' : 'Load older'}</button>}
+          {voice.conversation.snapshot?.pendingChoices.map(choice => <section key={`${choice.requestId}:${choice.choiceId}`} className="voice-pending-choice" aria-label="Pending voice question"><strong>{choice.question}</strong>{choice.options.length > 0 && <ul>{choice.options.map(option => <li key={option}>{option}</li>)}</ul>}<small>Answer by voice while listening is open.</small></section>)}
           {history}
         </section>
       </div>
-      {voice.toolStatus && <p className="voice-tool-status" aria-busy="true">{voice.toolStatus}</p>}
       {voice.error && <p className="auth-error" role="alert">{voice.error}</p>}
-      {voice.state === 'connecting' && <audio className="voice-ringing" src="/davo-ring.wav" autoPlay loop aria-hidden="true" />}
-      <audio ref={hangupSound} className="voice-hangup-sound" src="/davo-hangup.wav" preload="auto" aria-hidden="true" />
       <footer>
         {voice.state === 'idle' || voice.state === 'error'
-          ? <button type="button" className="voice-start" onClick={() => void voice.start()}>Call {assistantName}</button>
-          : <div className="voice-call-actions"><button type="button" className="voice-mute" aria-pressed={voice.muted} disabled={voice.state === 'connecting'} onClick={voice.toggleMute}>{voice.muted ? 'Unmute' : 'Mute'}</button><button type="button" className="voice-stop" aria-busy={voice.state === 'connecting' || undefined} disabled={voice.state === 'connecting'} onClick={voice.stop}>{voice.state === 'connecting' ? 'Calling...' : 'Hang up'}</button></div>}
-        <small>Hanging up does not cancel agent work.</small>
+          ? <button type="button" className="voice-start" onClick={() => void voice.start()}>Open listening</button>
+          : <div className="voice-actions"><button type="button" className="voice-mute" aria-pressed={voice.muted} disabled={busy} onClick={voice.toggleMute}>{voice.muted ? `Muted — say ${assistantName}` : 'Mute'}</button><button type="button" className="voice-stop" disabled={busy} onClick={voice.stop}>Close</button></div>}
+        <small>{status}. {voice.muted ? 'Microphone audio is still sent to OpenAI for exact-name wake detection.' : 'Closing stops microphone and audio output without canceling eligible agent work.'}</small>
       </footer>
     </div>
   </div>;

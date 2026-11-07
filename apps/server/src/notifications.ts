@@ -43,7 +43,8 @@ export type ScheduleNotification = {
   worktreeId?: string;
 };
 export type ConductorNotification = { kind: 'conductor'; title: string; body: string; tag: string; url: string };
-export type PushMessage = AgentNotification | CleanupNotification | ReviewNotification | ScheduleNotification | ConductorNotification;
+export type DavoNotification = { kind: 'davo'; title: 'Davo update'; body: 'Your request is complete' | 'Your input is needed'; tag: string; url: '/#davo' };
+export type PushMessage = AgentNotification | CleanupNotification | ReviewNotification | ScheduleNotification | ConductorNotification | DavoNotification;
 
 type NotificationDelivery = (notification: AgentNotification) => void | Promise<void>;
 
@@ -64,6 +65,17 @@ export const agentNotificationTag = (agent: Pick<Agent, 'id'>) => agentLogicalTa
 // build one review-ready push payload
 export function reviewNotification(worktreeId: string, projectName: string, worktreeName: string): ReviewNotification {
   return { kind: 'review', title: `Review ready in ${projectName}`, body: `${worktreeName} is ready for review`, tag: `review-ready-${worktreeId}`, url: `/#worktree=${encodeURIComponent(worktreeId)}`, worktreeId };
+}
+
+// build one generic event-bound Davo outcome payload
+export function davoNotification(eventId: string, outcome: 'done' | 'choice'): DavoNotification {
+  return {
+    kind: 'davo',
+    title: 'Davo update',
+    body: outcome === 'done' ? 'Your request is complete' : 'Your input is needed',
+    tag: `davo-${eventId}`,
+    url: '/#davo'
+  };
 }
 
 // build one skipped/failed scheduled-Run push payload. The url deep-links to the agent when the Run has a
@@ -141,7 +153,7 @@ export class AgentNotificationCoordinator {
 
   // track each agent independently even when several share one workspace; a `quiet` Turn (one
   // another Agent or the console started) still marks its end unread but pushes nothing
-  observe(agent: Agent, hasQueuedPrompt = false, context?: AgentNotificationContext, quiet = false): void {
+  observe(agent: Agent, hasQueuedPrompt = false, context?: AgentNotificationContext, quiet = false, davoOwned = false): void {
     const key = agent.id;
     const current = agentPresentationAttentionState(agent);
     const previous = this.states.get(key);
@@ -180,7 +192,8 @@ export class AgentNotificationCoordinator {
     if (notification.kind === 'question') {
       const event = this.eventFor(agent, notification, agent.question?.id ?? randomUUID(), revision);
       this.events.set(key, event);
-      this.deliverSafely({ ...notification, ...event });
+      // davo surfaces only an exact correlated human choice through its own outbox
+      if (!davoOwned) this.deliverSafely({ ...notification, ...event });
       return;
     }
 
@@ -299,7 +312,7 @@ export class AgentNotificationCoordinator {
 export function pushNotifications(events: ConsoleEvents, coordinator: AgentNotificationCoordinator, deliver: (message: PushMessage) => Promise<void>): void {
   const send = (message: PushMessage) => { void deliver(message).catch(() => undefined); };
   events.on('agents', ({ agents }) => {
-    for (const { agent, queued, context, quiet } of agents) coordinator.observe(agent, queued, context, quiet);
+    for (const { agent, queued, context, quiet, davoOwned } of agents) coordinator.observe(agent, queued, context, quiet, davoOwned);
     coordinator.retain(agents.map(({ agent }) => agent));
   });
   events.on('review-ready', ({ worktreeId, projectName, worktreeName }) => send(reviewNotification(worktreeId, projectName, worktreeName)));

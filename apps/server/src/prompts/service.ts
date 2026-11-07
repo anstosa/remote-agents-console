@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { DiscoveryService } from '../discovery/service.js';
 import { TmuxAdapter } from '../tmux/adapter.js';
 import { adapterFor } from '../adapters/registry.js';
@@ -6,17 +7,20 @@ import type { AgentKind } from '../adapters/types.js';
 import type { PromptCalendarLifecycle } from '../google-calendar/lifecycle.js';
 import type { Agent } from '../domain/models.js';
 import type { PromptHistoryService } from '../prompt-history/service.js';
-import { agentAttentionState } from '../notifications.js';
-import { promptScope, QueuedPromptService, senderOf, type PromptSender, type QueuedPrompt, type QueuedPromptOrigin, type QueuedPromptSummary } from './queue.js';
+import { agentAttentionState, type AgentAttentionState } from '../notifications.js';
+import { promptScope, QueuedPromptService, senderOf, type PromptSender, type QueuedPrompt, type QueuedPromptOrigin, type QueuedPromptSummary, type StablePromptIdentity } from './queue.js';
+import { PromptOperationLedger, type AgentActivitySnapshot, type PromptOperationIdentity, type PromptOperationRecord } from './operations.js';
 import { validPrompt, type PromptAttachment } from './validation.js';
 import { updateAdvisorPendingLabel } from '../update-advisor.js';
 import { isFullGitSha } from '../git/revision.js';
 import { answerCaptureGraceMs, reportsOwnState, TmuxTransport, type AdapterView, type AttachmentStagingWorkspace, type Delivery, type DeliveryOptions, type FailedDraft, type RecoveredAnswer, type SendIntent, type TmuxTurnEvent, type TurnMark, type TurnWatch } from '../transports/tmux.js';
+import { structuredTurnMarkPrefix } from '../transports/structured-agents.js';
 import type { PromptHistoryEntry } from '../prompt-history/service.js';
 import type { AgentTransport, Gate, InterruptOutcome, QuestionAnswer } from '../transports/transport.js';
 export { maxPromptAttachmentBytes, promptAttachmentBytes, validPromptAttachments, type PromptAttachment } from './validation.js';
 export { promptScope } from './queue.js';
 export type { AttachmentStagingWorkspace } from '../transports/tmux.js';
+export type { AgentActivitySnapshot, PromptOperationIdentity, PromptOperationRecord } from './operations.js';
 
 // where a halted queue's prompts are drained: each queued prompt is handed to this sink, in order,
 // and removed only when the sink reports it durable. The console wires it to the notes store; a
@@ -55,10 +59,11 @@ export interface TurnTransport extends Pick<AgentTransport, 'answer' | 'interrup
 }
 type TurnDelivery = Delivery | { status: 'busy' };
 // how a prompt is delivered (`waited`: it waited in the queue behind earlier work)
-type TurnDeliveryOptions = Omit<DeliveryOptions, 'discovered'> & { discovered?: { agent: Agent }; waited?: true; sender?: PromptSender };
+type TurnDeliveryOptions = Omit<DeliveryOptions, 'discovered'> & { discovered?: { agent: Agent }; waited?: true; sender?: PromptSender; identity?: StablePromptIdentity };
 /** The structured Agents' Transport, which says which Agents are its own. */
 export type StructuredTurnTransport = TurnTransport & { owns(agentId: string): Promise<boolean> };
-type PromptPhase = TurnMark & { state: 'awaiting-start' | 'working' | 'awaiting-answer' | 'halted'; changedAt: number; requestId?: string; historyEntryId?: string; historyPrompt?: string; failedDraft?: FailedDraft; sender?: PromptSender };
+type PromptPhase = TurnMark & { state: 'awaiting-start' | 'working' | 'awaiting-answer' | 'halted'; changedAt: number; requestId?: string; historyEntryId?: string; historyPrompt?: string; failedDraft?: FailedDraft; sender?: PromptSender; operationKey?: string; davoRequestId?: string };
+type SubmitRequestResult = { accepted: boolean; requestId?: string; promptId?: string; failure?: 'target-missing' | 'queue-rejected' | 'queue-conflict' | 'invalid' };
 /**
  * How a queued prompt's Turn, or the prompt itself, ended: its Turn completed, failed, was
  * interrupted, or its Agent's process exited under it; it never went out (it became a Note, or was
@@ -79,6 +84,32 @@ export interface PromptDispatchHooks {
   /** An Agent restarted as another, whose queue it carries on. */
   handedOver(fromAgentId: string, toAgentId: string): Promise<void>;
 }
+
+export type PromptLifecycleEvent = {
+  agentId: string;
+  promptId: string;
+  sender: PromptSender;
+  operationKey?: string;
+  davoRequestId?: string;
+};
+
+export interface PromptLifecycleObserver {
+  queued?(event: PromptLifecycleEvent): void | Promise<void>;
+  delivered?(event: PromptLifecycleEvent & { historyEntryId?: string }): void | Promise<void>;
+  ended?(event: Omit<PromptLifecycleEvent, 'agentId' | 'sender'> & { agentId?: string; sender?: PromptSender; outcome: PromptOutcome; answer?: string }): void | Promise<void>;
+  handedOver?(event: { fromAgentId: string; toAgentId: string }): void | Promise<void>;
+}
+
+export type PromptPublicationInput = PromptOperationIdentity & {
+  text: string;
+  attachments?: PromptAttachment[];
+};
+
+export type PromptPublicationResult =
+  | { kind: 'published'; operation: PromptOperationRecord; replayed: boolean }
+  | { kind: 'conflict' | 'capacity' | 'expired' | 'invalid' | 'unavailable' }
+  | { kind: 'unknown'; operation: PromptOperationRecord }
+  | { kind: 'rejected'; reason: 'activity_changed' | 'activity_pending' | 'lease_rejected' | 'target_missing' | 'queue_rejected' };
 // the outcome a tracked request's settling means for its prompt
 const outcomeOf = (state: 'complete' | 'failed' | 'interrupted', error: string | undefined): PromptOutcome => {
   if (state === 'complete') return 'completed';
@@ -90,6 +121,11 @@ const outcomeOf = (state: 'complete' | 'failed' | 'interrupted', error: string |
     default: return state === 'interrupted' ? 'interrupted' : 'failed';
   }
 };
+
+// derive one content-free stable native observation key
+const turnObservationKey = (attention: AgentAttentionState, mark: TurnMark): string => JSON.stringify({ attention: attention === 'finished' ? 'idle' : 'active', baselineCompletion: mark.baselineCompletion ?? null, rolloutBaseline: mark.rolloutBaseline ?? null });
+// identify a native event gap without parsing any transcript content
+const uncertainStructuredMark = (mark: TurnMark): boolean => mark.baselineCompletion?.startsWith(structuredTurnMarkPrefix) === true && mark.baselineCompletion.includes('"uncertain":true');
 
 /**
  * The queue policy: what to dispatch and when, the cancel policy, and a halted or departed
@@ -118,6 +154,12 @@ export class PromptService {
   private sweptAt = -Infinity;
   private lifecycleMutationVersion = 0;
   private dispatchHooks?: PromptDispatchHooks;
+  private operations?: PromptOperationLedger;
+  private readonly lifecycleObservers = new Set<PromptLifecycleObserver>();
+  private readonly activitySerializers = new Map<string, Promise<void>>();
+  private readonly notifiedTerminalOperations = new Set<string>();
+  private readonly externalActivityEffects = new AsyncLocalStorage<ReadonlySet<string>>();
+  private readonly davoOwnedTurns = new Map<string, { operationKey: string; promptId: string }>();
   // who sent the latest prompt each Agent's Turn started from, when not the operator
   private readonly senders = new Map<string, PromptSender>();
 
@@ -132,6 +174,290 @@ export class PromptService {
   /** Report queued prompts' dispatches and ends to `hooks`, which may also hold some back. */
   useDispatches(hooks: PromptDispatchHooks): void { this.dispatchHooks = hooks; }
 
+  // attach explicit durable operation storage without changing legacy construction
+  useOperations(operations: PromptOperationLedger): void { this.operations = operations; }
+
+  // add one independent lifecycle observer beside dispatch policy
+  observePromptLifecycle(observer: PromptLifecycleObserver): () => void {
+    this.lifecycleObservers.add(observer);
+    // remove only this exact observer
+    return () => { this.lifecycleObservers.delete(observer); };
+  }
+
+  // begin tracking one explicitly eligible Davo target
+  async watchActivity(agentId: string, expiresAt: string): Promise<AgentActivitySnapshot | undefined> {
+    return await this.serializeActivity(agentId, async () => {
+      const operations = this.operations;
+      if (operations === undefined) return undefined;
+      const transport = await this.transportFor(agentId);
+      const target = await transport.target(agentId);
+      // require a real native baseline before tracking this target
+      if (target === undefined) return undefined;
+      const mark = await transport.mark(target.agent);
+      const watched = await operations.watchActivity(agentId, expiresAt, { key: turnObservationKey(agentAttentionState(target.agent), mark), pending: agentAttentionState(target.agent) !== 'finished' });
+      return watched;
+    });
+  }
+
+  // read one tracked target frontier without creating ordinary-agent state
+  async activitySnapshot(agentId: string): Promise<AgentActivitySnapshot | undefined> {
+    return await this.operations?.activitySnapshot(agentId);
+  }
+
+  // report only an exactly verified current Davo turn
+  davoOwned(agentId: string): boolean { return this.davoOwnedTurns.has(agentId); }
+
+  // clear one exact Davo notification owner on intervening activity
+  private clearDavoOwnership(agentId: string): void {
+    this.davoOwnedTurns.delete(agentId);
+    // clear only the sender marker this ownership supplied
+    if (this.senders.get(agentId)?.label === 'davo') this.senders.delete(agentId);
+  }
+
+  // persist an external mutation before running its byte-preserving effect
+  async withExternalActivity<T>(agentId: string, effect: () => T | Promise<T>, accepted?: (result: T) => boolean): Promise<T> {
+    // recover durable tracking before any external effect
+    if (await this.operations?.activitySnapshot(agentId) === undefined) return await effect();
+    // nested effects reuse only their actual asynchronous caller's stamp
+    if (this.externalActivityEffects.getStore()?.has(agentId)) return await effect();
+    return await this.serializeActivity(agentId, async () => {
+      await this.operations?.beginExternalActivity(agentId);
+      return await this.externalActivityEffects.run(new Set([...(this.externalActivityEffects.getStore() ?? []), agentId]), async () => {
+        const result = await effect();
+        // clear only a caller-proven successful non-turn mutation
+        if (accepted?.(result) === true) {
+          this.clearDavoOwnership(agentId);
+          await this.operations?.confirmExternalActivity(agentId);
+        } else if (result === true) {
+          // exact pane delivery is an intervening manual input
+          this.clearDavoOwnership(agentId);
+        }
+        return result;
+      });
+    });
+  }
+
+  // advance only an uncorrelated observed turn
+  async observeExternalTurn(agentId: string, observationKey: string, correlatedPromptId?: string, turnStarted = false): Promise<AgentActivitySnapshot | undefined> {
+    // consult persisted eligibility before native observation
+    if (await this.operations?.activitySnapshot(agentId) === undefined) return undefined;
+    return await this.serializeActivity(agentId, async () => {
+      const operations = this.operations;
+      // ignore the exact PromptService-owned Davo turn
+      if (operations !== undefined && correlatedPromptId !== undefined) {
+        const correlated = await this.findOperationByPrompt(correlatedPromptId);
+        if (correlated?.agentId === agentId && correlated.state === 'published') {
+          await operations.setObservationBaseline(agentId, observationKey, turnStarted);
+          return await operations.confirmExternalActivity(agentId);
+        }
+      }
+      const before = await operations?.activitySnapshot(agentId);
+      const after = await operations?.observeExternalTurn(agentId, observationKey, turnStarted);
+      // changed uncorrelated evidence ends prior ownership
+      if (before !== undefined && after !== undefined && (after.epoch !== before.epoch || after.pending !== before.pending)) this.clearDavoOwnership(agentId);
+      return after;
+    });
+  }
+
+  // recover one exact operation without presentation-history inference
+  async lookupOperation(operationKey: string): Promise<PromptOperationRecord | undefined> {
+    const operation = await this.operations?.lookup(operationKey);
+    // wait for an in-process publication before declaring recovery ambiguity
+    if (operation === undefined) return undefined;
+    return await this.serializeActivity(operation.agentId, async () => {
+      const current = await this.operations?.lookup(operationKey);
+      return current === undefined ? undefined : await this.reconcileOperation(current);
+    });
+  }
+
+  // publish one exact idempotent prompt under the target activity serializer
+  async publishOperation(input: PromptPublicationInput, leaseGuard: () => boolean | Promise<boolean>): Promise<PromptPublicationResult> {
+    return await this.serializeActivity(input.agentId, async () => {
+      const operations = this.operations;
+      // require every durable publication dependency
+      if (operations === undefined || this.queued === undefined || this.history === undefined) return { kind: 'unavailable' };
+      const prepared = await operations.prepare(input);
+      // return immutable identity failures without side effects
+      if (prepared.kind === 'conflict' || prepared.kind === 'capacity' || prepared.kind === 'expired' || prepared.kind === 'invalid') return { kind: prepared.kind };
+      let operation = prepared.operation;
+      // reconcile every replay before considering another enqueue
+      if (operation.state !== 'prepared') {
+        operation = await this.reconcileOperation(operation);
+        if (operation.state === 'published') return { kind: 'published', operation, replayed: true };
+        return { kind: 'unknown', operation };
+      }
+      const activity = await operations.activitySnapshot(input.agentId);
+      // require the exact nonpending target frontier
+      if (activity?.pending) return { kind: 'rejected', reason: 'activity_pending' };
+      if (activity === undefined || activity.epoch !== input.expectedActivityEpoch) return { kind: 'rejected', reason: 'activity_changed' };
+      const publishing = await operations.transition(input.operationKey, ['prepared'], 'publishing');
+      // fail closed on concurrent ledger mutation
+      if (publishing === undefined) return { kind: 'unknown', operation: (await operations.lookup(input.operationKey)) ?? operation };
+      const claimed = await operations.beginPublicationActivity(input.agentId, input.operationKey, input.expectedActivityEpoch);
+      // restore prepared when no enqueue could begin
+      if (claimed === undefined) {
+        await operations.transition(input.operationKey, ['publishing'], 'prepared');
+        const current = await operations.activitySnapshot(input.agentId);
+        return { kind: 'rejected', reason: current?.pending ? 'activity_pending' : 'activity_changed' };
+      }
+      let guardAccepted: boolean;
+      try { guardAccepted = await leaseGuard(); }
+      catch { guardAccepted = false; }
+      // re-open a proven no-effect attempt after authority rejection
+      if (!guardAccepted) {
+        await operations.transition(input.operationKey, ['publishing'], 'prepared');
+        await operations.abandonPublicationActivity(input.agentId, input.operationKey, input.expectedActivityEpoch);
+        return { kind: 'rejected', reason: 'lease_rejected' };
+      }
+      const identity: StablePromptIdentity = { id: input.promptId, operationKey: input.operationKey, davoRequestId: input.davoRequestId };
+      let submitted: Awaited<ReturnType<PromptService['submitRequest']>>;
+      try {
+        submitted = await this.submitRequest(input.agentId, input.text, input.attachments ?? [], undefined, true, { label: 'davo' }, identity);
+      } catch {
+        const unknown = await operations.transition(input.operationKey, ['publishing'], 'unknown', claimed.epoch) ?? publishing;
+        return { kind: 'unknown', operation: unknown };
+      }
+      // keep conflicting durable evidence non-replayable
+      if (!submitted.accepted) {
+        if (submitted.failure === 'queue-conflict') {
+          const unknown = await operations.transition(input.operationKey, ['publishing'], 'unknown', claimed.epoch) ?? publishing;
+          return { kind: 'unknown', operation: unknown };
+        }
+        // roll back only a proven no-enqueue result
+        await operations.transition(input.operationKey, ['publishing'], 'prepared');
+        await operations.abandonPublicationActivity(input.agentId, input.operationKey, input.expectedActivityEpoch);
+        return { kind: 'rejected', reason: submitted.failure === 'target-missing' ? 'target_missing' : 'queue_rejected' };
+      }
+      const published = await operations.transition(input.operationKey, ['publishing'], 'published', claimed.epoch);
+      // preserve ambiguity when the final durable commit is unavailable
+      if (published === undefined) {
+        const unknown = await operations.transition(input.operationKey, ['publishing'], 'unknown', claimed.epoch) ?? await operations.lookup(input.operationKey) ?? publishing;
+        return { kind: 'unknown', operation: unknown };
+      }
+      await operations.confirmPublicationActivity(input.agentId, input.operationKey);
+      this.davoOwnedTurns.set(input.agentId, { operationKey: input.operationKey, promptId: input.promptId });
+      return { kind: 'published', operation: published, replayed: prepared.kind === 'existing' };
+    });
+  }
+
+  // reconcile publishing ambiguity from exact durable queue or full history evidence
+  private async reconcileOperation(operation: PromptOperationRecord): Promise<PromptOperationRecord> {
+    const operations = this.operations;
+    // preserve an authoritative terminal publication
+    if (operations === undefined || operation.state === 'published' || operation.state === 'prepared') {
+      if (operation.state === 'published') await operations?.confirmPublicationActivity(operation.agentId, operation.operationKey);
+      return operation;
+    }
+    const scope = promptScope(operation.agentId);
+    const queued = await this.queued?.findExact(scope, operation.operationKey, operation.promptId);
+    const history = queued === undefined ? await this.history?.findExact(scope, operation.operationKey, operation.promptId) : undefined;
+    // exact durable evidence proves the original publication only
+    if (queued !== undefined || history !== undefined) {
+      const published = await operations.transition(operation.operationKey, ['publishing', 'unknown'], 'published', operation.publicationActivityEpoch);
+      if (published !== undefined) {
+        await operations.confirmPublicationActivity(operation.agentId, operation.operationKey);
+        return published;
+      }
+    }
+    // recovered in-flight state is non-replayable unknown
+    if (operation.state === 'publishing') return await operations.transition(operation.operationKey, ['publishing'], 'unknown', operation.publicationActivityEpoch) ?? operation;
+    return operation;
+  }
+
+  // find one active operation by stable prompt identity
+  private async findOperationByPrompt(promptId: string): Promise<PromptOperationRecord | undefined> {
+    const operation = await this.operations?.lookupByPrompt(promptId);
+    return operation === undefined ? undefined : await this.reconcileOperation(operation);
+  }
+
+  // serialize all activity-sensitive effects for one target
+  private async serializeActivity<T>(agentId: string, effect: () => T | Promise<T>): Promise<T> {
+    const previous = this.activitySerializers.get(agentId) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(effect);
+    const settled = operation.then(() => undefined, () => undefined);
+    this.activitySerializers.set(agentId, settled);
+    try { return await operation; }
+    finally {
+      // delete only the latest target serializer
+      if (this.activitySerializers.get(agentId) === settled) this.activitySerializers.delete(agentId);
+    }
+  }
+
+  // stamp and serialize one ordinary prompt source against Davo continuation
+  private async runPromptSource<T>(agentId: string, effect: () => T | Promise<T>, accepted: (result: T) => boolean, preserveDavo = false): Promise<T> {
+    // an outer lifecycle serializer already owns this exact asynchronous effect
+    if (this.externalActivityEffects.getStore()?.has(agentId)) return await effect();
+    // leave untracked agents outside durable activity state
+    if (await this.operations?.activitySnapshot(agentId) === undefined) return await effect();
+    const stamped = await this.serializeActivity(agentId, async () => await this.operations?.beginExternalActivity(agentId));
+    const result = await effect();
+    // retain failed or ambiguous attempts as pending divergence
+    if (stamped !== undefined && accepted(result)) {
+      // clear only an actually accepted unrelated source
+      if (!preserveDavo) this.clearDavoOwnership(agentId);
+      await this.serializeActivity(agentId, async () => { await this.operations?.confirmExternalActivity(agentId); });
+    }
+    return result;
+  }
+
+  // establish one managed or preexisting native turn baseline without divergence
+  private async baselineTransportObservation(transport: TurnTransport, agent: Pick<Agent, 'id' | 'attention' | 'kind'>, pending: boolean, knownMark?: TurnMark, resolveUnknown = false): Promise<void> {
+    // recover persisted eligibility before observing native activity
+    if (await this.operations?.activitySnapshot(agent.id) === undefined) return;
+    await this.serializeActivity(agent.id, async () => {
+      const mark = knownMark ?? await transport.mark(agent);
+      await this.operations?.setObservationBaseline(agent.id, turnObservationKey(agentAttentionState(agent), mark), pending);
+      // exact owned history resolves a recovered native event gap
+      if (resolveUnknown) await this.operations?.confirmExternalActivity(agent.id);
+    });
+  }
+
+  // advance one watched target only for uncorrelated native evidence
+  private async observeTransportActivity(transport: TurnTransport, agent: Pick<Agent, 'id' | 'attention' | 'kind'>, turnStarted: boolean, knownMark?: TurnMark): Promise<void> {
+    // recover persisted eligibility before observing native activity
+    if (await this.operations?.activitySnapshot(agent.id) === undefined) return;
+    await this.serializeActivity(agent.id, async () => {
+      const mark = knownMark ?? await transport.mark(agent);
+      const before = await this.operations?.activitySnapshot(agent.id);
+      const after = await this.operations?.observeExternalTurn(agent.id, turnObservationKey(agentAttentionState(agent), mark), turnStarted, uncertainStructuredMark(mark));
+      // any changed native frontier ends prior Davo ownership
+      if (before !== undefined && after !== undefined && (after.epoch !== before.epoch || after.pending !== before.pending)) this.clearDavoOwnership(agent.id);
+    });
+  }
+
+  // verify one restarted busy turn against operation and native frontiers
+  private async recoverDavoOwnership(agent: Pick<Agent, 'id' | 'attention'>, entry: PromptHistoryEntry, mark: TurnMark): Promise<boolean> {
+    const operations = this.operations;
+    // require complete stable Davo history identity
+    if (operations === undefined || entry.operationKey === undefined || entry.davoRequestId === undefined) return false;
+    const operationKey = entry.operationKey;
+    const davoRequestId = entry.davoRequestId;
+    return await this.serializeActivity(agent.id, async () => {
+      // retain a dropped native replay as pending ambiguity
+      if (uncertainStructuredMark(mark)) {
+        await operations.observeExternalTurn(agent.id, turnObservationKey(agentAttentionState(agent), mark), true, true);
+        this.clearDavoOwnership(agent.id);
+        return false;
+      }
+      const operation = await operations.lookup(operationKey);
+      const latest = await operations.latestPublished(agent.id);
+      const before = await operations.activitySnapshot(agent.id);
+      // bind only the exact latest published prompt at its publication frontier
+      if (operation?.state !== 'published' || operation.promptId !== entry.id || operation.davoRequestId !== davoRequestId || operation.agentId !== agent.id || latest?.promptId !== entry.id || before === undefined || before.pending || operation.publicationActivityEpoch !== before.epoch) {
+        this.clearDavoOwnership(agent.id);
+        return false;
+      }
+      const after = await operations.observeExternalTurn(agent.id, turnObservationKey(agentAttentionState(agent), mark), true);
+      const exact = after !== undefined && after.epoch === before.epoch && after.pending === before.pending;
+      // preserve sender state only for unchanged exact native evidence
+      if (exact) {
+        this.davoOwnedTurns.set(agent.id, { operationKey: operation.operationKey, promptId: operation.promptId });
+        this.senders.set(agent.id, senderOf(entry));
+      } else this.clearDavoOwnership(agent.id);
+      return exact;
+    });
+  }
+
   /**
    * Whether the Turn an Agent last started is one the operator need not hear finish (ADR 0019):
    * one the console started on its behalf, or one the Conductor that spawned it dispatched. A Turn
@@ -139,7 +465,7 @@ export class PromptService {
    */
   quiet(agent: Pick<Agent, 'id' | 'spawnedBy'>): boolean {
     const sender = this.senders.get(agent.id);
-    return sender?.label !== undefined || sender?.from !== undefined && sender.from === agent.spawnedBy;
+    return this.davoOwned(agent.id) || sender?.label !== undefined || sender?.from !== undefined && sender.from === agent.spawnedBy;
   }
 
   /** The queued prompt whose Turn the Agent is on now, and who sent it. */
@@ -150,7 +476,7 @@ export class PromptService {
 
   /** Queue a prompt from `sender` (another Agent, or the console), answering its queued prompt's id. */
   async submitFrom(agentId: string, prompt: string, sender: PromptSender, attachments: PromptAttachment[] = []): Promise<string | undefined> {
-    return (await this.submitRequest(agentId, prompt, attachments, undefined, false, sender)).promptId;
+    return await this.runPromptSource(agentId, async () => (await this.submitRequest(agentId, prompt, attachments, undefined, false, sender)).promptId, promptId => promptId !== undefined);
   }
 
   /** The Transport an Agent is driven over: structured for the structured Agents, tmux otherwise. */
@@ -175,13 +501,15 @@ export class PromptService {
   // (a Run reusing a pane): it flows into the completion baseline so the answer is
   // read from the fresh thread's rollout, not the reset pane's stale one.
   async submit(agentId: string, prompt: string, attachments: PromptAttachment[] = [], resetAt?: number): Promise<boolean> {
-    return (await this.submitRequest(agentId, prompt, attachments, resetAt, false)).accepted;
+    return await this.runPromptSource(agentId, async () => (await this.submitRequest(agentId, prompt, attachments, resetAt, false)).accepted, accepted => accepted);
   }
 
   // submit one prompt and expose its exact process-local lifecycle identity
   async submitTracked(agentId: string, prompt: string, attachments: PromptAttachment[] = []): Promise<{ requestId: string } | undefined> {
-    const result = await this.submitRequest(agentId, prompt, attachments, undefined, true);
-    return result.accepted && result.requestId !== undefined ? { requestId: result.requestId } : undefined;
+    return await this.runPromptSource(agentId, async () => {
+      const result = await this.submitRequest(agentId, prompt, attachments, undefined, true);
+      return result.accepted && result.requestId !== undefined ? { requestId: result.requestId } : undefined;
+    }, result => result !== undefined);
   }
 
   // return one immutable request lifecycle snapshot
@@ -194,29 +522,35 @@ export class PromptService {
   }
 
   // share ordinary and tracked prompt admission without changing legacy results
-  private async submitRequest(agentId: string, prompt: string, attachments: PromptAttachment[], resetAt: number | undefined, tracked: boolean, sender: PromptSender = {}): Promise<{ accepted: boolean; requestId?: string; promptId?: string }> {
-    if (!validPrompt(prompt, attachments)) return { accepted: false };
+  private async submitRequest(agentId: string, prompt: string, attachments: PromptAttachment[], resetAt: number | undefined, tracked: boolean, sender: PromptSender = {}, identity?: StablePromptIdentity): Promise<SubmitRequestResult> {
+    // reject invalid content before any durable effect
+    if (!validPrompt(prompt, attachments)) return { accepted: false, failure: 'invalid' };
     const releaseMutation = this.beginAgentMutation(agentId);
     const transport = await this.transportFor(agentId);
     const first = await transport.target(agentId);
     // release reservations for vanished targets
     if (!first) {
       releaseMutation?.();
-      return { accepted: false };
+      return { accepted: false, failure: 'target-missing' };
     }
     const scope = promptScope(agentId);
     const origin: QueuedPromptOrigin = { home: first.agent.home, ...(first.agent.placeId === undefined ? {} : { placeId: first.agent.placeId }) };
+    let queueFailure: SubmitRequestResult['failure'];
     // queue the prompt durably, admitting it to the Calendar and tracking it before anything can dispatch it
     const enqueue = async (queued: QueuedPromptService): Promise<QueuedPromptSummary | undefined> => {
-      const added = await queued.enqueue(scope, prompt, attachments, origin, sender);
+      const stable = identity === undefined ? undefined : await queued.putIfAbsent(scope, prompt, attachments, origin, identity);
+      if (stable?.kind === 'conflict') queueFailure = 'queue-conflict';
+      else if (stable !== undefined && stable.kind !== 'inserted' && stable.kind !== 'existing') queueFailure = 'queue-rejected';
+      const added = stable === undefined ? await queued.enqueue(scope, prompt, attachments, origin, sender) : stable.kind === 'inserted' || stable.kind === 'existing' ? stable.prompt : undefined;
       if (added === undefined) return undefined;
       // a record that cannot be kept loses only the report: the prompt is queued
       if (sender.from !== undefined) await this.dispatchHooks?.queued(agentId, added.id, senderOf(sender)).catch(error => { console.error('[prompts] a dispatch could not be recorded:', error); });
+      await this.notifyQueued(agentId, added, senderOf(sender));
       await this.admitCalendar(transport, added.id, agentId, first.agent.kind, added.createdAt, prompt, attachments);
       if (tracked) this.trackQueuedRequest(added.id, agentId, prompt);
       return added;
     };
-    const queuedAnswer = (queued: QueuedPromptSummary | undefined) => ({ accepted: queued !== undefined, ...(queued === undefined ? {} : { promptId: queued.id }), ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) });
+    const queuedAnswer = (queued: QueuedPromptSummary | undefined): SubmitRequestResult => ({ accepted: queued !== undefined, ...(queued === undefined ? { failure: queueFailure ?? 'queue-rejected' } : { promptId: queued.id }), ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) });
     // queue work arriving during a restart handoff
     if (releaseMutation === undefined || this.restartLocks.has(scope)) {
       releaseMutation?.();
@@ -239,7 +573,7 @@ export class PromptService {
       if (this.queued !== undefined) {
         const queued = await enqueue(this.queued);
         // stop before paste when durable storage is unavailable
-        if (queued === undefined) return { accepted: false };
+        if (queued === undefined) return { accepted: false, failure: 'queue-rejected' };
         // delivery may remain queued without rejecting the accepted request
         await this.dispatch(transport, agentId, scope, resetAt, false);
         return queuedAnswer(queued);
@@ -248,10 +582,10 @@ export class PromptService {
       if (requestId !== undefined) await this.admitCalendar(transport, requestId, agentId, first.agent.kind, new Date().toISOString(), prompt, attachments);
       // direct deployments still receive a unique process-local identity
       if (requestId !== undefined) this.trackQueuedRequest(requestId, agentId, prompt);
-      const accepted = await this.send(transport, agentId, prompt, attachments, { discovered: first, resetAt, ...(requestId === undefined ? {} : { queuedPromptId: requestId }) }) === 'submitted';
+      const accepted = await this.send(transport, agentId, prompt, attachments, { discovered: first, resetAt, ...(requestId === undefined ? {} : { queuedPromptId: requestId }), ...(identity === undefined ? {} : { identity }), sender }) === 'submitted';
       // failed direct delivery has no durable queue to retain it
       if (!accepted && requestId !== undefined) this.settleTrackedRequest(requestId, 'failed', 'prompt submission failed');
-      return { accepted, ...(accepted && requestId !== undefined ? { requestId } : {}) };
+      return { accepted, ...(accepted && requestId !== undefined ? { requestId } : {}), ...(accepted ? {} : { failure: 'queue-rejected' as const }) };
     } finally {
       releaseMutation();
     }
@@ -275,12 +609,60 @@ export class PromptService {
   // (a queued prompt's dispatch hears every end, tracked or not, but an edit, which ends nothing)
   private settleTrackedRequest(requestId: string | undefined, state: 'complete' | 'failed' | 'interrupted', error?: string, answer?: string): void {
     if (requestId === undefined) return;
-    if (error !== 'queue_updated') this.dispatchHooks?.ended(requestId, outcomeOf(state, error), answer);
+    if (error !== 'queue_updated') {
+      const outcome = outcomeOf(state, error);
+      this.dispatchHooks?.ended(requestId, outcome, answer);
+      void this.notifyEnded(requestId, outcome, answer);
+    }
     const current = this.trackedRequests.get(requestId);
     if (current === undefined || current.terminalAt !== undefined) return;
     const next: StoredPromptRequest = { ...current, state, ...(error === undefined ? {} : { error }), terminalAt: Date.now() };
     this.trackedRequests.set(requestId, next);
     this.pruneTrackedRequests();
+  }
+
+  // report a durable queue row without letting observers affect delivery
+  private async notifyQueued(agentId: string, prompt: QueuedPromptSummary, sender: PromptSender): Promise<void> {
+    const event: PromptLifecycleEvent = { agentId, promptId: prompt.id, sender, ...(prompt.operationKey === undefined ? {} : { operationKey: prompt.operationKey }), ...(prompt.davoRequestId === undefined ? {} : { davoRequestId: prompt.davoRequestId }) };
+    await this.operations?.recordLifecycle(prompt.id, { state: 'queued' }).catch(() => undefined);
+    await this.notifyLifecycle('queued', event);
+  }
+
+  // report exact delivery and stable history identity
+  private async notifyDelivered(agentId: string, promptId: string, sender: PromptSender, historyEntryId: string | undefined, identity: StablePromptIdentity | undefined): Promise<void> {
+    const event: PromptLifecycleEvent & { historyEntryId?: string } = { agentId, promptId, sender, ...(historyEntryId === undefined ? {} : { historyEntryId }), ...(identity === undefined ? {} : { operationKey: identity.operationKey, davoRequestId: identity.davoRequestId }) };
+    await this.operations?.recordLifecycle(promptId, { state: 'delivered', ...(historyEntryId === undefined ? {} : { historyEntryId }) }).catch(() => undefined);
+    await this.notifyLifecycle('delivered', event);
+  }
+
+  // report one terminal lifecycle without retaining answer content in operations
+  private async notifyEnded(promptId: string, outcome: PromptOutcome, answer?: string): Promise<void> {
+    const operation = await this.operations?.lookupByPrompt(promptId).catch(() => undefined);
+    // emit one terminal callback per durable operation
+    if (operation?.lifecycle?.state === 'ended' || operation !== undefined && this.notifiedTerminalOperations.has(operation.operationKey)) return;
+    await this.operations?.recordLifecycle(promptId, { state: 'ended', outcome }).catch(() => undefined);
+    if (operation !== undefined) {
+      this.notifiedTerminalOperations.add(operation.operationKey);
+      // bound process-local observer deduplication by the durable operation cap
+      if (this.notifiedTerminalOperations.size > 4_096) this.notifiedTerminalOperations.delete(this.notifiedTerminalOperations.values().next().value!);
+    }
+    const request = this.trackedRequests.get(promptId);
+    const event = { promptId, outcome, ...(answer === undefined ? {} : { answer }), ...(request === undefined ? {} : { agentId: request.agentId }), ...(operation === undefined ? {} : { operationKey: operation.operationKey, davoRequestId: operation.davoRequestId, agentId: operation.agentId, sender: { label: 'davo' as const } }) };
+    await this.notifyLifecycle('ended', event);
+  }
+
+  // isolate every additive observer failure
+  private async notifyLifecycle<K extends keyof PromptLifecycleObserver>(method: K, event: Parameters<NonNullable<PromptLifecycleObserver[K]>>[0]): Promise<void> {
+    const pending: Promise<unknown>[] = [];
+    // invoke every observer independently
+    for (const observer of this.lifecycleObservers) {
+      const handler = observer[method] as ((value: typeof event) => void | Promise<void>) | undefined;
+      // skip observers without this phase
+      if (handler === undefined) continue;
+      try { pending.push(Promise.resolve(handler.call(observer, event))); }
+      catch { /* observer isolation */ }
+    }
+    await Promise.allSettled(pending);
   }
 
   // retain every active request while bounding terminal memory
@@ -310,16 +692,18 @@ export class PromptService {
 
   // start a new Conversation on the Agent with its CLI's own reset command
   async submitReset(agentId: string, command: string): Promise<boolean> {
-    return await this.transport.newConversation(agentId, command);
+    return await this.runPromptSource(agentId, async () => await this.transport.newConversation(agentId, command), accepted => accepted);
   }
 
   // submit one server-owned advisor prompt directly
   async submitUpdateAdvisor(agentId: string, targetSha: string, prompt: string): Promise<boolean> {
     // require one exact pending advisor and valid generated prompt
     if (!isFullGitSha(targetSha) || !validPrompt(prompt, [])) return false;
-    const target = await this.transport.target(agentId);
-    if (target === undefined || target.agent.displayLabel !== updateAdvisorPendingLabel(targetSha)) return false;
-    return await this.send(this.transport, agentId, prompt, [], { discovered: target, submission: 'confirmed-enter' }) === 'submitted';
+    return await this.runPromptSource(agentId, async () => {
+      const target = await this.transport.target(agentId);
+      if (target === undefined || target.agent.displayLabel !== updateAdvisorPendingLabel(targetSha)) return false;
+      return await this.send(this.transport, agentId, prompt, [], { discovered: target, submission: 'confirmed-enter' }) === 'submitted';
+    }, accepted => accepted);
   }
 
   // mark one advisor reusable only after its initial prompt is scheduled
@@ -475,16 +859,22 @@ export class PromptService {
       // mark the prompt as started
       if (phase?.state === 'awaiting-start' || phase?.state === 'awaiting-answer') {
         const started = await transport.observe(agent, phase);
-        this.phases.set(scope, { ...phase, state: 'working', changedAt: Date.now(), ...(started?.type === 'started' ? started.mark : {}) });
+        const mark = started?.type === 'started' ? started.mark : undefined;
+        this.phases.set(scope, { ...phase, state: 'working', changedAt: Date.now(), ...(mark ?? {}) });
+        await this.baselineTransportObservation(transport, agent, true, mark);
       }
       const waiting = phase === undefined ? await this.queued?.list(scope) : undefined;
       // inspect queued or restart-orphaned work
-      if (phase === undefined && ((waiting?.length ?? 0) > 0 || restartedEntry !== undefined)) {
+      if (phase === undefined && ((waiting?.length ?? 0) > 0 || restartedEntry !== undefined || await this.operations?.activitySnapshot(agent.id) !== undefined)) {
         const mark = await transport.mark(agent);
-        // adopt an unanswered entry only with rollout completion tracking
-        const recoveringEntry = mark.rolloutBaseline === undefined ? undefined : restartedEntry;
+        const davoRecovered = restartedEntry?.operationKey === undefined ? false : await this.recoverDavoOwnership(agent, restartedEntry, mark);
+        // adopt Davo history only after exact native proof
+        const recoveringEntry = restartedEntry?.operationKey !== undefined ? davoRecovered ? restartedEntry : undefined : mark.rolloutBaseline === undefined ? undefined : restartedEntry;
         // retain terminal reconciliation when rollout tracking is unavailable
-        if ((waiting?.length ?? 0) > 0 || recoveringEntry !== undefined) this.phases.set(scope, { state: 'working', changedAt: Date.now(), ...(recoveringEntry === undefined ? {} : { historyEntryId: recoveringEntry.id, historyPrompt: recoveringEntry.text }), ...mark });
+        if ((waiting?.length ?? 0) > 0 || recoveringEntry !== undefined) this.phases.set(scope, { state: 'working', changedAt: Date.now(), ...(recoveringEntry === undefined ? {} : { historyEntryId: recoveringEntry.id, historyPrompt: recoveringEntry.text, ...(recoveringEntry.operationKey === undefined || recoveringEntry.davoRequestId === undefined ? {} : { requestId: recoveringEntry.id, sender: senderOf(recoveringEntry), operationKey: recoveringEntry.operationKey, davoRequestId: recoveringEntry.davoRequestId }) }), ...mark });
+        // correlated restart recovery and managed queued work keep their own baseline
+        if (recoveringEntry?.operationKey !== undefined) await this.baselineTransportObservation(transport, agent, true, mark, true);
+        else if (restartedEntry?.operationKey === undefined) await this.observeTransportActivity(transport, agent, true, mark);
       }
       return;
     }
@@ -495,6 +885,7 @@ export class PromptService {
       if (event?.type === 'exited') {
         this.settleTrackedRequest(phase.requestId, 'failed', 'agent_exited');
         this.phases.delete(scope);
+        await this.baselineTransportObservation(transport, agent, false);
         return;
       }
       const completion: PromptCompletion = event === undefined || event.type === 'started' ? 'pending' : event.type === 'settled' ? await this.persistAnswer(scope, phase.historyEntryId, event.message) : 'failed';
@@ -518,6 +909,7 @@ export class PromptService {
           if (anchored) {
             this.phases.delete(scope);
             this.resetDelivered(scope);
+            await this.baselineTransportObservation(transport, agent, false);
           }
         } finally { this.dispatching.delete(scope); }
         if (anchored) await this.dispatch(transport, agent.id, scope);
@@ -527,6 +919,7 @@ export class PromptService {
       if (completion !== 'completed') {
         this.settleTrackedRequest(phase.requestId, 'failed', 'prompt_failed');
         this.phases.set(scope, { ...phase, state: 'halted', changedAt: Date.now() });
+        await this.baselineTransportObservation(transport, agent, false);
         // clear the halt after every queued prompt is durable
         if (await this.saveQueued(scope)) this.phases.delete(scope);
         return;
@@ -539,9 +932,14 @@ export class PromptService {
       // release completed prompts
       this.settleTrackedRequest(phase.requestId, 'complete', undefined, answer);
       this.phases.delete(scope);
+      await this.baselineTransportObservation(transport, agent, false);
     }
     // recover answer tracking lost across restarts
-    if (phase === undefined && !this.reconciled.has(scope) && !await this.reconcile(transport, agent.id, scope)) return;
+    if (phase === undefined) {
+      if (!this.reconciled.has(scope) && !await this.reconcile(transport, agent.id, scope)) return;
+      // idle history alone cannot prove which native turn just ended
+      await this.observeTransportActivity(transport, agent, false);
+    }
     await this.dispatch(transport, agent.id, scope);
   }
 
@@ -604,7 +1002,7 @@ export class PromptService {
 
   // advance a Turn-less prompt: no answer to capture, so completion is the
   // working -> finished transition and the durable queue is released on finished
-  private async observeTurnless(transport: TurnTransport, agent: Pick<Agent, 'id' | 'attention'>, scope: string, reported: boolean): Promise<void> {
+  private async observeTurnless(transport: TurnTransport, agent: Pick<Agent, 'id' | 'attention' | 'kind'>, scope: string, reported: boolean): Promise<void> {
     const busy = agentAttentionState(agent) !== 'finished';
     const phase = this.phases.get(scope);
     // retry a failed queue transfer without dispatching
@@ -614,6 +1012,9 @@ export class PromptService {
       return;
     }
     if (busy) {
+      // managed work was already counted at its mutation boundary
+      if (phase !== undefined) await this.baselineTransportObservation(transport, agent, true);
+      else await this.observeTransportActivity(transport, agent, true);
       // the working report the reported-state machine was waiting for
       if (phase?.state === 'awaiting-start') this.phases.set(scope, { ...phase, state: 'working', changedAt: Date.now() });
       // adopt externally started work once prompts are queued
@@ -628,13 +1029,17 @@ export class PromptService {
         if (Date.now() - phase.changedAt < reportedWorkingGraceMs) return;
         this.settleTrackedRequest(phase.requestId, 'failed', 'prompt_did_not_start');
         this.phases.set(scope, { ...phase, state: 'halted', changedAt: Date.now() });
+        await this.baselineTransportObservation(transport, agent, false);
         if (await this.saveQueued(scope)) this.phases.delete(scope);
         return;
       }
       // working -> finished: the prompt completed; its history entry stays answerless
       this.settleTrackedRequest(phase.requestId, 'complete');
       this.phases.delete(scope);
+      await this.baselineTransportObservation(transport, agent, false);
     }
+    // an idle native mark can prove a whole externally completed turn was missed
+    if (phase === undefined) await this.observeTransportActivity(transport, agent, false);
     await this.dispatch(transport, agent.id, scope);
   }
 
@@ -669,12 +1074,18 @@ export class PromptService {
   // a restarted Agent carries on in its replacement pane: queued prompts and history follow it.
   // Call while the restart lock still holds the departing Agent's scope.
   async handOver(fromAgentId: string, toAgentId: string): Promise<void> {
+    await this.runPromptSource(fromAgentId, async () => await this.handOverNow(fromAgentId, toAgentId), moved => moved);
+  }
+
+  // move one exact agent scope after its durable activity stamp
+  private async handOverNow(fromAgentId: string, toAgentId: string): Promise<boolean> {
     const from = promptScope(fromAgentId);
     const to = promptScope(toAgentId);
     // prompts that cannot move stay with the departed scope and drain into Notes
-    if (this.queued !== undefined && !await this.queued.moveScope(from, to)) return;
+    if (this.queued !== undefined && !await this.queued.moveScope(from, to)) return false;
     await this.calendar?.handOver(fromAgentId, toAgentId).catch(() => undefined);
     await this.dispatchHooks?.handedOver(fromAgentId, toAgentId).catch(() => undefined);
+    await this.notifyLifecycle('handedOver', { fromAgentId, toAgentId });
     // only queued requests have exact transfer identity during a restart handoff
     for (const [requestId, request] of this.trackedRequests) {
       if (request.agentId !== fromAgentId || request.terminalAt !== undefined) continue;
@@ -683,10 +1094,12 @@ export class PromptService {
     }
     await this.history?.moveScope(from, to);
     await this.forget(from);
+    return true;
   }
 
   private async forget(scope: string): Promise<void> {
     this.departedSince.delete(scope);
+    this.davoOwnedTurns.delete(scope.slice(promptScope('').length));
     this.senders.delete(scope.slice(promptScope('').length));
     this.settleTrackedRequest(this.phases.get(scope)?.requestId, 'interrupted', 'agent_departed');
     this.phases.delete(scope);
@@ -729,7 +1142,8 @@ export class PromptService {
       const prompt = await this.queued?.next(scope, hooks === undefined ? undefined : candidate => hooks.admits(agentId, candidate));
       // consume only after the adapter confirms submission
       if (prompt !== undefined) {
-        const status = await this.send(transport, agentId, prompt.text, prompt.attachments ?? [], { durable: true, resetAt, queuedPromptId: prompt.id, sender: senderOf(prompt), ...(waited ? { waited: true as const } : {}) });
+        const identity = prompt.operationKey === undefined || prompt.davoRequestId === undefined ? undefined : { id: prompt.id, operationKey: prompt.operationKey, davoRequestId: prompt.davoRequestId };
+        const status = await this.send(transport, agentId, prompt.text, prompt.attachments ?? [], { durable: true, resetAt, queuedPromptId: prompt.id, sender: senderOf(prompt), ...(identity === undefined ? {} : { identity }), ...(waited ? { waited: true as const } : {}) });
         // exact tracked failures halt instead of replaying on a later observation; a busy Agent
         // keeps the prompt queued for its next settle
         if (status !== 'submitted' && status !== 'busy' && this.trackedRequests.has(prompt.id)) {
@@ -751,7 +1165,7 @@ export class PromptService {
     const intent = requestId === undefined || calendar === undefined ? {} : { intent: (send: SendIntent) => calendar.beforeSend({ id: requestId, agentId, submittedAt: send.sentAt, ...send }) };
     // hold the scope so a quick second submit queues behind this one while its draft renders
     const delivery = await transport.deliver(agentId, prompt, attachments, { ...options, ...intent }, historyPrompt => {
-      this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt, ...(options.sender === undefined ? {} : { sender: options.sender }) });
+      this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt, ...(options.sender === undefined ? {} : { sender: options.sender }), ...(options.identity === undefined ? {} : { operationKey: options.identity.operationKey, davoRequestId: options.identity.davoRequestId }) });
     });
     // a rejected target cannot leave an admitted interval eligible for later delivery
     if (delivery.status === 'held' && delivery.intended === true && requestId !== undefined) await calendar?.invalid(requestId, 'missing_lifecycle_evidence').catch(() => undefined);
@@ -760,6 +1174,8 @@ export class PromptService {
     if (delivery.status !== 'submitted') return delivery.status;
     this.markTrackedRequestSubmitted(requestId);
     const sender = options.sender ?? {};
+    // every accepted prompt replaces prior turn ownership
+    this.clearDavoOwnership(agentId);
     this.senders.set(agentId, sender);
     if (delivery.instant) {
       this.settleTrackedRequest(requestId, 'complete');
@@ -769,11 +1185,12 @@ export class PromptService {
       return 'submitted';
     }
     // track real prompts and their answers rather than reset commands
-    const entry = await this.history?.record(scope, delivery.prompt, sender).catch(() => undefined);
+    const entry = await this.history?.record(scope, delivery.prompt, sender, options.identity).catch(() => undefined);
     // monitor managed prompt completion
-    if (this.queued !== undefined || requestId !== undefined) this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt: delivery.prompt, ...(entry === undefined ? {} : { historyEntryId: entry.id }), ...(delivery.rolloutBaseline === undefined ? {} : { rolloutBaseline: delivery.rolloutBaseline }), sender });
+    if (this.queued !== undefined || requestId !== undefined) this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt: delivery.prompt, ...(entry === undefined ? {} : { historyEntryId: entry.id }), ...(delivery.rolloutBaseline === undefined ? {} : { rolloutBaseline: delivery.rolloutBaseline }), sender, ...(options.identity === undefined ? {} : { operationKey: options.identity.operationKey, davoRequestId: options.identity.davoRequestId }) });
     // recorded before the prompt leaves the queue, so a restart never takes a Turn that ran for one that did not
     if (requestId !== undefined) await this.dispatchHooks?.delivered(agentId, requestId, sender, entry?.id).catch(() => undefined);
+    if (requestId !== undefined) await this.notifyDelivered(agentId, requestId, sender, entry?.id, options.identity);
     return 'submitted';
   }
 
@@ -814,31 +1231,45 @@ export class PromptService {
   }
 
   // answer the current question directly without queueing a new agent turn
-  async answerQuestion(agentId: string, questionId: string, answer: QuestionAnswer): Promise<boolean> {
-    return await (await this.transportFor(agentId)).answer(agentId, questionId, answer);
+  async answerQuestion(agentId: string, questionId: string, answer: QuestionAnswer, mayAnswer: () => boolean = () => true, preserveDavo = false): Promise<boolean> {
+    return await this.runPromptSource(agentId, async () => {
+      const transport = await this.transportFor(agentId);
+      // revalidate actual live consent after durable activity stamping
+      if (!mayAnswer()) return false;
+      return await transport.answer(agentId, questionId, answer);
+    }, accepted => accepted, preserveDavo);
   }
 
   // Redirect a working Agent at once, where its Transport can steer. A steer is not queued;
   // history keeps it as its own entry, with no answer.
   async steer(agentId: string, prompt: string, expected?: { promptId: string; from: string }): Promise<'sent' | 'unsupported' | 'refused'> {
-    // reserve owned-Turn mutations so a browser input cannot replace their authorized Turn
-    if (this.ownedTurnMutations.has(agentId)) return 'refused';
-    // expected identity is checked again inside the transport at its final dispatch boundary
-    const current = () => expected === undefined || this.inFlight(agentId)?.promptId === expected.promptId && this.inFlight(agentId)?.sender.from === expected.from;
-    if (!current()) return 'refused';
-    if (expected !== undefined) this.ownedTurnMutations.add(agentId);
-    try {
-      const transport = await this.transportFor(agentId);
-      const outcome = transport.steer === undefined ? 'unsupported' : !current() ? 'refused' : await transport.steer(agentId, prompt, current);
-      // record only an actual steer in history
-      if (outcome === 'sent') await this.history?.record(promptScope(agentId), prompt).catch(() => undefined);
-      return outcome;
-    } finally { this.ownedTurnMutations.delete(agentId); }
+    return await this.runPromptSource(agentId, async () => {
+      // reserve owned-Turn mutations so a browser input cannot replace their authorized Turn
+      if (this.ownedTurnMutations.has(agentId)) return 'refused';
+      // expected identity is checked again inside the transport at its final dispatch boundary
+      const current = () => expected === undefined || this.inFlight(agentId)?.promptId === expected.promptId && this.inFlight(agentId)?.sender.from === expected.from;
+      if (!current()) return 'refused';
+      if (expected !== undefined) this.ownedTurnMutations.add(agentId);
+      try {
+        const transport = await this.transportFor(agentId);
+        const outcome = transport.steer === undefined ? 'unsupported' : !current() ? 'refused' : await transport.steer(agentId, prompt, current);
+        // record only an actual steer in history
+        if (outcome === 'sent') await this.history?.record(promptScope(agentId), prompt).catch(() => undefined);
+        return outcome;
+      } finally { this.ownedTurnMutations.delete(agentId); }
+    }, outcome => outcome === 'sent');
   }
 
   // interrupt a working Agent, holding the in-flight prompt's queue rather than releasing it;
   // `returned` hears the steers it dropped
   async cancel(agentId: string, returned?: (steers: string[]) => void, expected?: { promptId: string; from: string }): Promise<InterruptOutcome> {
+    // avoid recursive serialization when pane input already stamped Ctrl+C
+    if (this.externalActivityEffects.getStore()?.has(agentId)) return await this.cancelNow(agentId, returned, expected);
+    return await this.runPromptSource(agentId, async () => await this.cancelNow(agentId, returned, expected), outcome => outcome === 'ok');
+  }
+
+  // perform one interrupt after its caller owns the activity boundary
+  private async cancelNow(agentId: string, returned?: (steers: string[]) => void, expected?: { promptId: string; from: string }): Promise<InterruptOutcome> {
     const scope = promptScope(agentId);
     // refuse concurrent input or a stale dispatch before any interrupt can be sent
     if (this.ownedTurnMutations.has(agentId)) return 'not-working';
@@ -861,6 +1292,13 @@ export class PromptService {
   // stop one Agent; closing it makes every accepted tracked request terminal. A structured
   // Agent's queue becomes Notes at once; a pane's departs with it after the departure grace.
   async close(agentId: string): Promise<boolean> {
+    // reuse an outer manual activity stamp when one exists
+    if (this.externalActivityEffects.getStore()?.has(agentId)) return await this.closeNow(agentId);
+    return await this.runPromptSource(agentId, async () => await this.closeNow(agentId), closed => closed);
+  }
+
+  // close one exact transport after its caller owns the activity boundary
+  private async closeNow(agentId: string): Promise<boolean> {
     const transport = await this.transportFor(agentId);
     if (!await transport.close(agentId)) return false;
     for (const [requestId, request] of this.trackedRequests) {
@@ -868,6 +1306,7 @@ export class PromptService {
     }
     // the Turn it was on ends with it, tracked or not
     this.settleTrackedRequest(this.phases.get(promptScope(agentId))?.requestId, 'interrupted', 'agent_closed');
+    this.davoOwnedTurns.delete(agentId);
     this.senders.delete(agentId);
     if (transport === this.structured) await this.saveQueued(promptScope(agentId));
     return true;

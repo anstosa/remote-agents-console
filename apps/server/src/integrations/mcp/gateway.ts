@@ -175,6 +175,8 @@ export class IntegrationGateway {
   // gate (its configuration), independent of the integrations', calls only what it may, and its
   // writes and dangerous tools are held by its own scopes alone
   private enabled(definition: IntegrationTool, principal: IntegrationPrincipal): boolean {
+    // realtime mutations require exact admitted-turn davo contracts
+    if (principal.authentication === 'realtime' && definition.risk !== 'read' && !['bind_davo_target', 'delegate_request', 'relay_agent_question_answer', 'answer_davo_choice'].includes(definition.name)) return false;
     // audience policy precedes scopes and feature gates
     if (definition.audiences !== undefined && !definition.audiences.includes(principal.authentication)) return false;
     const developer = definition.audiences !== undefined;

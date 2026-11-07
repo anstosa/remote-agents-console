@@ -40,10 +40,10 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
   await page.getByRole('dialog', { name: 'Workspaces' }).getByRole('button', { name: /^📱 Remote Agents/u }).click();
   await expect(dropdown).toContainText('📱 Remote Agents');
   await expect(page.getByLabel('Live log')).toBeVisible();
-  // the phone tab row opens on the server selector, an icon-only Call and settings
+  // the phone tab row opens on the server selector, icon-only listening and settings
   const lead = page.locator('.tabs > .tab-row-lead');
-  await expect(lead.getByRole('button', { name: 'Call Davo' }).locator('svg')).toBeVisible();
-  await expect(lead.getByRole('button', { name: 'Call Davo' }).locator('span')).toBeHidden();
+  await expect(lead.getByRole('button', { name: 'Open Davo' }).locator('svg')).toBeVisible();
+  await expect(lead.getByRole('button', { name: 'Open Davo' }).locator('span')).toBeHidden();
   await expect(lead.locator('.server-selector-name')).toBeHidden();
   // the phone toolbar keeps Launch, Terminal and Notes; Browser and Code move into its ⋮, and a
   // Workspace with one panel shows no position dots

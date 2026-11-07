@@ -19,7 +19,7 @@ describe('RealtimeService', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
-  it('mints a scoped MCP-enabled browser client secret', async () => {
+  it('mints a tool-free session with automatic responses disabled', async () => {
     const provider = vi.fn(async () => new Response(JSON.stringify({ value: 'ek_ephemeral-client-secret', expires_at: 1_800_000_000 }), { status: 200, headers: { 'content-type': 'application/json' } }));
     const service = new RealtimeService({ apiKey: 'provider-key', fetch: provider as typeof fetch });
 
@@ -35,30 +35,18 @@ describe('RealtimeService', () => {
         type: 'realtime',
         model: 'gpt-realtime-2.1',
         audio: { input: { transcription: { model: 'gpt-4o-mini-transcribe' } }, output: { voice: 'cedar' } },
-        tools: [{ type: 'mcp', server_label: 'remote_agents', server_url: request.mcpUrl, authorization: request.mcpAuthorization, allowed_tools: request.allowedTools, require_approval: 'never' }, { type: 'function', name: 'select_worktree', parameters: { required: ['worktree_id'] } }]
+        tools: []
       }
     });
     expect(body.session.instructions).toContain('Your name is Davo');
     expect(body.session.instructions).toContain('caller is Ansel');
     expect(body.session.instructions).toContain('broad Australian accent');
     expect(body.session.instructions).toContain('casual Australian profanity');
-    expect(body.session.instructions).toContain('at most five words');
-    expect(body.session.instructions).toContain('only the final answer may be longer');
-    expect(body.session.instructions).toContain('reply with no more than four words');
-    expect(body.session.instructions).toContain('another bare interruption');
-    expect(body.session.instructions).toContain('produce no reply');
-    expect(body.session.instructions).toContain('status update, sitrep, roll call');
-    expect(body.session.instructions).toContain('Maintain one selected worktree');
-    expect(body.session.instructions).toContain('call select_worktree');
-    expect(body.session.instructions).toContain('report every active worktree');
-    expect(body.session.instructions).toContain('Do not limit an unscoped report to the selected worktree');
-    expect(body.session.instructions).toContain('adjacent related prompt group and its result');
-    expect(body.session.instructions).toContain('Never include branch, Git, stack, pull-request');
-    expect(body.session.instructions).toContain('execution requests, not questions');
-    expect(body.session.instructions).toContain('inspect the named or current worktree');
-    expect(body.session.instructions).toContain('submit the caller’s requested outcome as a queue_prompt');
-    expect(body.session.instructions).toContain('Never replace an execution request with instructions');
-    expect(body.session.instructions).toContain('explicitly asks how, asks for a plan');
+    expect(body.session.audio.input.turn_detection).toMatchObject({ create_response: false, interrupt_response: false });
+    expect(body.session.instructions).toContain('persistent engineering partner');
+    expect(body.session.instructions).toContain('ambient audio');
+    expect(body.session.instructions).toContain('bind_davo_target');
+    expect(body.session.instructions).toContain('Never infer approval');
     expect(body.session.instructions).toContain('worktree_id=cora');
   });
 
@@ -96,5 +84,28 @@ describe('RealtimeService', () => {
     expect(first.session.instructions).not.toContain('broad Australian accent');
     expect(second.session.instructions).toContain('Your name is Morgan');
     expect(second.session.instructions).not.toContain('Speak plainly and keep the tone dry.');
+  });
+
+  it('exports the same bounded foreground instructions used for session minting', async () => {
+    const provider = vi.fn(async () => new Response(JSON.stringify({ value: 'ek_ephemeral-client-secret' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const service = new RealtimeService({ apiKey: 'provider-key', fetch: provider as typeof fetch, settings: () => ({ name: 'Riley', context: 'Keep the configured foreground style.' }) });
+
+    const instructions = service.instructions(request.context);
+    expect(instructions).toContain('Your name is Riley');
+    expect(instructions).toContain('Keep the configured foreground style.');
+    expect(instructions).toContain('persistent engineering partner');
+    expect(instructions).toContain('worktree_id=cora');
+    await expect(service.create(request)).resolves.toMatchObject({ ok: true });
+    const body = JSON.parse(String(provider.mock.calls[0]![1].body));
+    expect(body.session.instructions).toBe(instructions);
+  });
+
+  it('rejects oversized configured instructions without minting', async () => {
+    const provider = vi.fn();
+    const service = new RealtimeService({ apiKey: 'provider-key', fetch: provider as typeof fetch, settings: () => ({ name: 'Riley', context: 'x'.repeat(8 * 1024) }) });
+
+    expect(() => service.instructions(request.context)).toThrowError('davo_context_capacity');
+    await expect(service.create(request)).resolves.toEqual({ ok: false, code: 'invalid_request' });
+    expect(provider).not.toHaveBeenCalled();
   });
 });

@@ -2375,7 +2375,7 @@ function ServerSelector() {
   return <><button ref={anchorRef} type="button" className={`server-switcher-button server-selector${updateAvailable ? ' updates-available' : ''}${updateInProgress ? ' updates-in-progress progress-border progress-mauve' : ''}`} aria-busy={updateInProgress || undefined} aria-label={selectorLabel} aria-description={shownLabel} title={selectorLabel} data-context-flyout aria-expanded={open} onClick={() => setOpen(value => !value)}><ProgressRing busy={updateInProgress} /><span className="flyout-caret" aria-hidden="true" /><img src={serverIconPath(server.icon)} alt="" /><span className="server-selector-name">{server.name}</span><svg className="server-selector-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg><i className={`server-switcher-attention ${shownAttention}`} aria-hidden="true" title={shownLabel} /></button>{open && <FlyoutPortal onDismiss={() => setOpen(false)}><div className="more-menu flyout-menu server-menu" ref={flyoutRef} style={style} role="group" aria-label="Remote Agents servers"><div className="server-menu-details" role="group" aria-label="Current server details"><small>CURRENT SERVER</small><strong>{settings?.serverName ?? server.name}</strong><span>{serverHostLabel(settings?.serverUrl ?? server.url)}</span><span className="server-menu-revision" role={revisionLoading ? 'status' : undefined} aria-busy={revisionLoading || undefined} aria-label={revisionLoading ? 'Loading server revision' : revision === undefined ? 'Server revision unavailable' : `Server revision ${revision.sha.slice(0, 7)}, committed ${updateCommitDate(revision.committedAt)}`}><span className={revisionLoading ? 'server-menu-revision-skeleton' : undefined}>{revisionLoading ? <><Skeleton /><Skeleton /></> : revisionLabel}</span></span><span className={`server-menu-update-state${updateAvailable ? ' available' : ''}`}>{updateLabel}</span>{settings !== undefined && <div className="server-menu-actions"><button type="button" aria-label="Rename Server" onClick={rename}>Rename</button>{updateAvailable && <button type="button" className={`server-menu-update${updateInProgress ? " progress-border progress-mauve" : " update-attention"}`} aria-busy={updateInProgress || undefined} aria-label={settings.serverUpdateMinimized ? 'Reopen server update' : 'View upstream update'} onClick={showUpdate}><ProgressRing busy={updateInProgress} />{settings.serverUpdateMinimized ? 'Reopen update' : 'View update'}</button>}</div>}</div><hr className="more-menu-divider" />{targets.map(target => <ServerTargetLink key={target.url} target={target} current={target.url === server.url} className="server-menu-item" onSelectCurrent={() => setOpen(false)} />)}</div></FlyoutPortal>}</>;
 }
 
-// lead the tab row with the server selector and the always-visible Call button
+// lead the tab row with the server selector and listening control
 function TabRowLead() {
   const voice = useContext(VoiceTriggerContext);
   const settings = useContext(ClientSettingsContext);
@@ -2393,13 +2393,13 @@ function TabRowLead() {
     } catch { setDisableError('Unable to disable Davo. Try again.'); }
     finally { setDisabling(false); }
   };
-  // keep right-click separate from starting a voice call
+  // keep right-click separate from opening listening
   const voiceMenu = (event: React.MouseEvent<HTMLButtonElement>) => openContextMenu(event, {
     label: 'Davo options',
     items: [{ type: 'action', id: 'disable-davo', label: 'Disable Davo', disabled: disabling || settings === undefined, onSelect: disableDavo }]
   });
-  const voiceLabel = voice?.active ? voice.visible ? `Ongoing ${voice.name} call` : `Show ongoing ${voice.name} call` : `Call ${voice?.name ?? 'voice assistant'}`;
-  return <div className="tab-row-lead"><ServerSelector />{voice && <button type="button" className={`server-switcher-button server-switcher-voice${voice.active ? ' active' : ''}`} aria-label={voiceLabel} aria-pressed={voice.visible} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={voiceMenu} onClick={voice.open}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.69 2.8a2 2 0 0 1-.45 2.11L8.08 9.9a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.33 1.84.56 2.8.69A2 2 0 0 1 22 16.92Z" /></svg><span>{voice.active ? 'Ongoing' : `Call ${voice.name}`}</span></button>}{disableError && <span role="alert">{disableError}</span>}<ConfiguredButtonList slot="tabLead" className="tab-lead-buttons" /></div>;
+  const voiceLabel = voice?.active ? voice.visible ? `${voice.name} listening` : `Show ${voice.name} listening` : `Open ${voice?.name ?? 'voice assistant'}`;
+  return <div className="tab-row-lead"><ServerSelector />{voice && <button type="button" className={`server-switcher-button server-switcher-voice${voice.active ? ' active' : ''}`} aria-label={voiceLabel} aria-pressed={voice.visible} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={voiceMenu} onClick={voice.open}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 11a7 7 0 0 0 14 0M12 18v4M8 22h8" /></svg><span>{voice.active ? 'Listening' : `Open ${voice.name}`}</span></button>}{disableError && <span role="alert">{disableError}</span>}<ConfiguredButtonList slot="tabLead" className="tab-lead-buttons" /></div>;
 }
 
 // reveal credentials only after choosing login without replacing a workspace destination
@@ -9810,21 +9810,37 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const [dashboardGeneration, setDashboardGeneration] = useState<number>();
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
-  const [voiceCallRequest, setVoiceCallRequest] = useState(0);
+  const [voiceOpenRequest, setVoiceOpenRequest] = useState(0);
   // close only the voice surface
   const closeVoice = useCallback(() => setVoiceOpen(false), []);
-  // open, call, or reveal the shared voice surface
+  // open or reveal the shared voice surface
   const openVoice = useCallback(() => {
-    // toggle only an ongoing mobile call
+    // toggle only active mobile listening
     if (voiceActive) {
       if (window.matchMedia('(max-width: 600px)').matches) setVoiceOpen(current => !current);
       else setVoiceOpen(true);
       return;
     }
     setVoiceOpen(true);
-    setVoiceCallRequest(current => current + 1);
+    setVoiceOpenRequest(current => current + 1);
   }, [voiceActive]);
-  // remove the call surface as soon as voice is disabled
+  // open retained davo chat from a generic done or choice notification
+  useEffect(() => {
+    // disabled installations never start microphone negotiation
+    if (!davo.enabled) return;
+    // process only the explicit davo deep link
+    const revealDavo = () => {
+      // preserve ordinary worktree and agent hash routing
+      if (window.location.hash !== '#davo') return;
+      setVoiceOpen(true);
+      setVoiceOpenRequest(current => current + 1);
+    };
+    revealDavo();
+    window.addEventListener('hashchange', revealDavo);
+    // release only this conversation's listener
+    return () => { window.removeEventListener('hashchange', revealDavo); };
+  }, [davo.enabled]);
+  // remove the audio surface as soon as voice is disabled
   useEffect(() => {
     // retain state while voice remains enabled
     if (davo.enabled) return;
@@ -11260,7 +11276,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     return { target: { scratch: true }, kind: fallbackKind(data.scratchLaunch?.kind), runsOnText: 'Scratch', ...rows };
   };
   const voiceContext = { server: serverInfo.name, serverUrl: serverInfo.url, openWorktrees: otherOpenWorktrees(data.agents, activeWorktreeId, worktreeLabelById), ...(activeWorktreeId === undefined ? {} : { worktreeId: activeWorktreeId, worktree: worktrees.find(worktree => worktree.id === activeWorktreeId)?.label ?? agent?.worktreeLabel ?? (agent === undefined ? activeWorktreeId : agentLabel(agent)) }), ...(agent === undefined ? {} : { agentId: agent.id, agent: activeWorktree?.label ?? agent.worktreeLabel ?? agentLabel(agent) }) };
-  const voiceDialog = davo.enabled ? <VoiceDialog name={davo.name} open={voiceOpen} callRequest={voiceCallRequest} context={voiceContext} request={request} onClose={closeVoice} onSelectWorktree={selectVoiceWorktree} onActiveChange={setVoiceActive} /> : null;
+  const voiceDialog = davo.enabled ? <VoiceDialog name={davo.name} open={voiceOpen} openRequest={voiceOpenRequest} context={voiceContext} request={request} onHide={closeVoice} onSelectWorktree={selectVoiceWorktree} onActiveChange={setVoiceActive} /> : null;
   // scoped minimize errors never leak into a different workspace
   const visibleOperationFeedback = (operationFeedback?.workspaceKey === undefined || operationFeedback.workspaceKey === activeItemKey)
     && (operationFeedback?.worktreeId === undefined || operationFeedback.worktreeId === activeWorktreeId) ? operationFeedback : undefined;

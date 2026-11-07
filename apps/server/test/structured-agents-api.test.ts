@@ -2638,18 +2638,20 @@ describe('the Conductor\'s Watches', () => {
     expect(event).toMatch(new RegExp(`^\\[RAC event\\] Watch ${id} #1 "the build log": it printed:`, 'u'));
     expect(event).toMatch(/<<<untrusted-[0-9a-f]+\ncompiling\nlinked\ndone\nuntrusted-[0-9a-f]+>>>/u);
     windows.print('warning: slow');
-    await vi.waitFor(async () => expect(await told()).toHaveLength(2), { timeout: 2_000 });
+    await vi.waitFor(async () => expect((await told()).at(-1)).toContain(`Watch ${id} #2 "the build log": it printed:`), { timeout: 2_000 });
+    windows.print('shutdown pending');
 
-    // a deploy: the command kept running in its window, and the next console reads on from line 4
+    // a deploy flushes buffered output, keeps the command running, and reads on from line 5
     const deployed = await deploy(fakeAgent());
     expect(windows.opened).toHaveLength(1);
-    expect(windows.connects).toEqual([{ pane: '%1', from: 0 }, { pane: '%1', from: 4 }]);
+    expect(windows.connects).toEqual([{ pane: '%1', from: 0 }, { pane: '%1', from: 5 }]);
     windows.print('deployed');
-    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toContain(`Watch ${id} #3 "the build log": it printed:`), { timeout: 2_000 });
+    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toContain(`Watch ${id} #4 "the build log": it printed:`), { timeout: 2_000 });
     expect((await deployed.told()).filter(text => text.includes('\ndeployed\n'))).toHaveLength(1);
+    expect((await deployed.told()).filter(text => text.includes('\nshutdown pending\n'))).toHaveLength(1);
     expect((await deployed.told()).filter(text => text.includes('compiling'))).toHaveLength(0);
     windows.exit('%1', 2);
-    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toBe(`[RAC event] Watch ${id} #4 "the build log": the command exited with status 2, so this Watch ends.`), { timeout: 2_000 });
+    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toBe(`[RAC event] Watch ${id} #5 "the build log": the command exited with status 2, so this Watch ends.`), { timeout: 2_000 });
     await vi.waitFor(() => expect(windows.closed).toEqual(['%1']));
     await deployed.app.close();
   });

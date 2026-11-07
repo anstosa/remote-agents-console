@@ -300,9 +300,10 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
       if (release === undefined) { transport.close(1008); return; }
       const isInterrupt = bytes.length === 1 && bytes[0] === 0x03;
       try {
-        const ok = isInterrupt
+        // stamp manual bytes durably before their exact pane effect
+        const ok = await prompts.withExternalActivity(id, async () => isInterrupt
           ? await prompts.cancel(id).then(outcome => outcome === 'not-working' ? paneClient.sendInput(pane, bytes) : outcome === 'ok')
-          : await paneClient.sendInput(pane, bytes);
+          : await paneClient.sendInput(pane, bytes));
         if (!ok) await refused();
       } finally {
         release();

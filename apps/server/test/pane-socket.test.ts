@@ -127,6 +127,8 @@ function fakePrompts() {
     releases: () => releases,
     cancels: () => cancels,
     prompts: {
+      // preserve unwatched fixture input through the durable activity boundary
+      withExternalActivity: async (_id: string, effect: () => unknown | Promise<unknown>) => await effect(),
       beginAgentMutation: () => { mutations += 1; return () => { releases += 1; }; },
       cancel: async () => { cancels += 1; return cancelOutcome; },
       observe: async () => {},
@@ -460,6 +462,48 @@ describe('pane stream input', () => {
     // the Agent's own pane takes the mutation lock and releases it, exactly as the input socket does
     await waitFor(() => prompts.releases() > 0);
     expect(prompts.mutations()).toBe(1);
+    expect(prompts.releases()).toBe(1);
+  });
+
+  // preserve durable authority after moving input into multiplexed pane sessions
+  it.each(['hi', '\x03'])('waits for durable external activity before agent input %j', async input => {
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const prompts = fakePrompts();
+    let releaseActivity!: () => void;
+    // hold the durable stamp ahead of either possible pane effect
+    const ready = new Promise<void>(resolve => { releaseActivity = resolve; });
+    // model the prompt service's durable-before-effect boundary
+    const activity = vi.fn(async (_id: string, effect: () => unknown | Promise<unknown>) => { await ready; return await effect(); });
+    Object.assign(prompts.prompts, { withExternalActivity: activity });
+    const conn = await connect(stream.provider, { tmux, prompts: prompts.prompts });
+    conn.send({ type: 'input', data: encode(input) });
+    await waitFor(() => activity.mock.calls.length === 1);
+    expect(activity.mock.calls[0]![0]).toBe('agent-1');
+    expect(stream.inputs).toHaveLength(0);
+    expect(prompts.cancels()).toBe(0);
+    expect(prompts.releases()).toBe(0);
+    releaseActivity();
+    await waitFor(() => prompts.releases() === 1);
+    expect(stream.inputs.map(bytes => bytes.toString('utf8'))).toEqual(input === 'hi' ? ['hi'] : []);
+    expect(prompts.cancels()).toBe(input === '\x03' ? 1 : 0);
+  });
+
+  // a failed durable stamp must not type or cancel an agent turn
+  it.each(['hi', '\x03'])('fails closed when external activity cannot be recorded for %j', async input => {
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const prompts = fakePrompts();
+    // reject before the supplied effect can run
+    const activity = vi.fn(async () => { throw new Error('activity store unavailable'); });
+    Object.assign(prompts.prompts, { withExternalActivity: activity });
+    const conn = await connect(stream.provider, { tmux, prompts: prompts.prompts });
+    conn.send({ type: 'input', data: encode(input) });
+    await waitFor(() => conn.closeCode() !== undefined);
+    expect(conn.closeCode()).toBe(1011);
+    expect(activity).toHaveBeenCalledTimes(1);
+    expect(stream.inputs).toHaveLength(0);
+    expect(prompts.cancels()).toBe(0);
     expect(prompts.releases()).toBe(1);
   });
 

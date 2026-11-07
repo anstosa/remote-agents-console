@@ -7,14 +7,16 @@ import { maxStoredAttachmentFootprintBytes, promptAttachmentBytes, promptAttachm
 // where the queuing Agent ran, so its prompts can still become Notes after it is gone
 export type QueuedPromptOrigin = { home: string; placeId?: string };
 /** The console's own prompts to an Agent, each of which starts a Turn it did not ask for (ADR 0019). */
-export const promptLabels = ['report', 'event', 'run'] as const;
+export const promptLabels = ['report', 'event', 'run', 'davo'] as const;
 export type PromptLabel = typeof promptLabels[number];
 /** Who sent a prompt, when not the operator: another Agent (`from`, its id), or the console (`label`). */
 export type PromptSender = { from?: string; label?: PromptLabel };
-export type QueuedPrompt = { id: string; text: string; createdAt: string; attachments?: PromptAttachment[]; origin?: QueuedPromptOrigin } & PromptSender;
+export type StablePromptIdentity = { id: string; operationKey: string; davoRequestId: string };
+export type QueuedPrompt = { id: string; text: string; createdAt: string; attachments?: PromptAttachment[]; origin?: QueuedPromptOrigin; operationKey?: string; davoRequestId?: string } & PromptSender;
 // queued prompts and history belong to the Agent they were sent to, never to a sibling at its Worktree
 export const promptScope = (agentId: string) => `agent:${agentId}`;
-export type QueuedPromptSummary = { id: string; text: string; createdAt: string; attachments?: Array<{ name: string; size: number }> } & PromptSender;
+export type QueuedPromptSummary = { id: string; text: string; createdAt: string; attachments?: Array<{ name: string; size: number }>; operationKey?: string; davoRequestId?: string } & PromptSender;
+export type StableQueueResult = { kind: 'inserted' | 'existing'; prompt: QueuedPromptSummary } | { kind: 'conflict' | 'capacity' | 'invalid' };
 type StoredQueues = Record<string, QueuedPrompt[]>;
 
 const maxScopes = 500;
@@ -24,6 +26,7 @@ const maxStoredTextLength = 10_000_000;
 const maxStoredAttachmentBytes = 100 * 1024 * 1024;
 const validScope = (value: string) => value.length > 0 && value.length <= 4096 && !value.includes('\0');
 const validId = (value: string) => /^[A-Za-z0-9_-]{12,64}$/u.test(value);
+const validCorrelation = (value: string) => value.length > 0 && value.length <= 256 && !value.includes('\0');
 const validSender = ({ from, label }: { from?: unknown; label?: unknown }): boolean => (from === undefined || typeof from === 'string' && validScope(from)) && (label === undefined || (promptLabels as readonly unknown[]).includes(label));
 // the sender fields a prompt carries, and none it does not
 export const senderOf = ({ from, label }: PromptSender): PromptSender => ({ ...(from === undefined ? {} : { from }), ...(label === undefined ? {} : { label }) });
@@ -34,15 +37,26 @@ const validOrigin = (value: unknown): value is QueuedPromptOrigin => {
 };
 const parsePrompt = (value: unknown): QueuedPrompt | undefined => {
   if (value === null || typeof value !== 'object') return undefined;
-  const prompt = value as { id?: unknown; text?: unknown; createdAt?: unknown; attachments?: unknown; origin?: unknown; from?: unknown; label?: unknown };
+  const prompt = value as { id?: unknown; text?: unknown; createdAt?: unknown; attachments?: unknown; origin?: unknown; from?: unknown; label?: unknown; operationKey?: unknown; davoRequestId?: unknown };
   if (typeof prompt.id !== 'string' || !validId(prompt.id) || typeof prompt.text !== 'string' || typeof prompt.createdAt !== 'string' || !Number.isFinite(Date.parse(prompt.createdAt))) return undefined;
   const rawAttachments = prompt.attachments ?? [];
   if (!Array.isArray(rawAttachments)) return undefined;
   const attachments = rawAttachments.filter((attachment): attachment is PromptAttachment => attachment !== null && typeof attachment === 'object' && typeof (attachment as { name?: unknown }).name === 'string' && typeof (attachment as { data?: unknown }).data === 'string');
-  if (attachments.length !== rawAttachments.length || !validPrompt(prompt.text, attachments) || prompt.origin !== undefined && !validOrigin(prompt.origin) || !validSender(prompt)) return undefined;
-  return { id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...senderOf(prompt as PromptSender), ...(attachments.length === 0 ? {} : { attachments }), ...(prompt.origin === undefined ? {} : { origin: { home: prompt.origin.home, ...(prompt.origin.placeId === undefined ? {} : { placeId: prompt.origin.placeId }) } }) };
+  const correlated = typeof prompt.operationKey === 'string' && validCorrelation(prompt.operationKey) && typeof prompt.davoRequestId === 'string' && validCorrelation(prompt.davoRequestId) && prompt.label === 'davo';
+  const uncorrelated = prompt.operationKey === undefined && prompt.davoRequestId === undefined;
+  if (attachments.length !== rawAttachments.length || !validPrompt(prompt.text, attachments) || prompt.origin !== undefined && !validOrigin(prompt.origin) || !validSender(prompt) || !correlated && !uncorrelated) return undefined;
+  return { id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...senderOf(prompt as PromptSender), ...(correlated ? { operationKey: prompt.operationKey as string, davoRequestId: prompt.davoRequestId as string } : {}), ...(attachments.length === 0 ? {} : { attachments }), ...(prompt.origin === undefined ? {} : { origin: { home: prompt.origin.home, ...(prompt.origin.placeId === undefined ? {} : { placeId: prompt.origin.placeId }) } }) };
 };
-const summarize = (prompt: QueuedPrompt): QueuedPromptSummary => ({ id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...senderOf(prompt), ...(prompt.attachments === undefined ? {} : { attachments: prompt.attachments.map(attachment => ({ name: attachment.name, size: promptAttachmentBytes(attachment)! })) }) });
+const summarize = (prompt: QueuedPrompt): QueuedPromptSummary => ({ id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...senderOf(prompt), ...(prompt.operationKey === undefined ? {} : { operationKey: prompt.operationKey }), ...(prompt.davoRequestId === undefined ? {} : { davoRequestId: prompt.davoRequestId }), ...(prompt.attachments === undefined ? {} : { attachments: prompt.attachments.map(attachment => ({ name: attachment.name, size: promptAttachmentBytes(attachment)! })) }) });
+// compare the immutable durable prompt payload
+const sameStablePrompt = (prompt: QueuedPrompt, scope: string, text: string, attachments: PromptAttachment[], origin: QueuedPromptOrigin | undefined, identity: StablePromptIdentity): boolean => prompt.id === identity.id
+  && prompt.operationKey === identity.operationKey
+  && prompt.davoRequestId === identity.davoRequestId
+  && prompt.label === 'davo'
+  && prompt.text === text
+  && JSON.stringify(prompt.attachments ?? []) === JSON.stringify(attachments)
+  && JSON.stringify(prompt.origin) === JSON.stringify(origin)
+  && validScope(scope);
 // sum every durable queue budget across all scopes
 const totals = (stored: StoredQueues) => Object.values(stored).flat().reduce((value, prompt) => ({ text: value.text + prompt.text.length, attachments: value.attachments + (prompt.attachments ?? []).reduce((sum, attachment) => sum + (promptAttachmentBytes(attachment) ?? 0), 0), attachmentFootprint: value.attachmentFootprint + promptAttachmentsStorageFootprint(prompt.attachments ?? []) }), { text: 0, attachments: 0, attachmentFootprint: 0 });
 
@@ -84,6 +98,44 @@ export class QueuedPromptService {
       }
       return summarize(prompt);
     });
+  }
+
+  // insert one caller-stable Davo prompt or return its exact prior row
+  async putIfAbsent(scope: string, text: string, attachments: PromptAttachment[], origin: QueuedPromptOrigin, identity: StablePromptIdentity): Promise<StableQueueResult> {
+    // require the complete stable correlation tuple
+    if (!validScope(scope) || !validPrompt(text, attachments) || !validOrigin(origin) || !validId(identity.id) || !validCorrelation(identity.operationKey) || !validCorrelation(identity.davoRequestId)) return { kind: 'invalid' };
+    return await this.mutate(stored => {
+      const all = Object.entries(stored).flatMap(([candidateScope, prompts]) => prompts.map(prompt => ({ candidateScope, prompt })));
+      const existing = all.find(candidate => candidate.prompt.id === identity.id || candidate.prompt.operationKey === identity.operationKey);
+      // replay only the exact same scoped prompt bytes
+      if (existing !== undefined) return existing.candidateScope === scope && sameStablePrompt(existing.prompt, scope, text, attachments, origin, identity)
+        ? { kind: 'existing' as const, prompt: summarize(existing.prompt) }
+        : { kind: 'conflict' as const };
+      // preserve every existing scope and prompt at capacity
+      if (stored[scope] === undefined && Object.keys(stored).length >= maxScopes) return { kind: 'capacity' as const };
+      const queue = stored[scope] ?? [];
+      if (queue.length >= maxPromptsPerScope || queue.filter(candidate => candidate.label !== undefined).length >= maxLabelledPerScope) return { kind: 'capacity' as const };
+      const prompt: QueuedPrompt = { ...identity, text, createdAt: new Date().toISOString(), label: 'davo', ...(attachments.length === 0 ? {} : { attachments }), origin };
+      queue.push(prompt);
+      stored[scope] = queue;
+      const size = totals(stored);
+      // roll back aggregate storage overflow
+      if (size.text > maxStoredTextLength || size.attachments > maxStoredAttachmentBytes || size.attachmentFootprint > this.attachmentFootprintLimit) {
+        queue.pop();
+        if (queue.length === 0) delete stored[scope];
+        return { kind: 'capacity' as const };
+      }
+      return { kind: 'inserted' as const, prompt: summarize(prompt) };
+    }, result => result.kind === 'inserted');
+  }
+
+  // find one exact stable prompt beyond the presentation list
+  async findExact(scope: string, operationKey: string, promptId: string): Promise<QueuedPrompt | undefined> {
+    // reject malformed exact lookup
+    if (!validScope(scope) || !validCorrelation(operationKey) || !validId(promptId)) return undefined;
+    await this.mutation;
+    const prompt = (await this.read())[scope]?.find(candidate => candidate.operationKey === operationKey && candidate.id === promptId);
+    return prompt === undefined ? undefined : structuredClone(prompt);
   }
 
   async update(scope: string, id: string, text: string): Promise<QueuedPromptSummary | undefined> {

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,8 +19,10 @@ vi.mock('web-push', async importOriginal => {
 
 import { PushService } from '../src/push-service.js';
 import { PushDiagnostics } from '../src/push-diagnostics.js';
+import { davoNotification } from '../src/notifications.js';
 
 const savedEnvironment = {
+  attemptsFile: process.env.RAC_DAVO_PUSH_ATTEMPTS_FILE,
   file: process.env.RAC_PUSH_SUBSCRIPTIONS_FILE,
   privateKey: process.env.RAC_VAPID_PRIVATE_KEY,
   publicKey: process.env.RAC_VAPID_PUBLIC_KEY
@@ -56,10 +58,12 @@ const enabledService = async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rac-push-'));
   fixtureDirectories.push(directory);
   const file = join(directory, 'subscriptions.json');
+  const attemptsFile = join(directory, 'davo-attempts.json');
   process.env.RAC_PUSH_SUBSCRIPTIONS_FILE = file;
+  process.env.RAC_DAVO_PUSH_ATTEMPTS_FILE = attemptsFile;
   const service = new PushService();
   await service.initialize();
-  return { file, service };
+  return { attemptsFile, file, service };
 };
 
 // build one provider-shaped failure
@@ -82,10 +86,34 @@ const waitForCalls = async (count: number) => {
 
 // exercise delivery and storage contracts
 describe('PushService', () => {
+  // preserve private permissions when a stale temporary inode already exists
+  it('privatizes an existing Davo attempt next inode', async () => {
+    const { attemptsFile, service } = await enabledService();
+    await writeFile(`${attemptsFile}.next`, 'stale');
+    await chmod(`${attemptsFile}.next`, 0o666);
+    await service.notifyDavo('private-attempt', davoNotification('private-attempt', 'done'), '2030-01-04T11:00:00.000Z');
+    expect((await stat(attemptsFile)).mode & 0o777).toBe(0o600);
+  });
+
+  // do not deliver before storage establishes private permissions
+  it('rejects a Davo attempt when temporary chmod fails', async () => {
+    const { attemptsFile, service } = await enabledService();
+    await service.subscribe(subscription('private-mode'));
+    const probe = await open(`${attemptsFile}.probe`, 'w');
+    const prototype = Object.getPrototypeOf(probe) as { chmod: (mode: number) => Promise<void> };
+    await probe.close();
+    const failure = vi.spyOn(prototype, 'chmod').mockRejectedValueOnce(new Error('permission failure'));
+    try {
+      await expect(service.notifyDavo('private-failure', davoNotification('private-failure', 'done'), '2030-01-04T11:00:00.000Z')).rejects.toThrow();
+      expect(webpush.sendNotification).not.toHaveBeenCalled();
+    } finally { failure.mockRestore(); }
+  });
+
   // reset provider state and isolate credentials
   beforeEach(() => {
     webpush.sendNotification.mockReset();
     webpush.setVapidDetails.mockReset();
+    delete process.env.RAC_DAVO_PUSH_ATTEMPTS_FILE;
     delete process.env.RAC_PUSH_SUBSCRIPTIONS_FILE;
     delete process.env.RAC_VAPID_PRIVATE_KEY;
     delete process.env.RAC_VAPID_PUBLIC_KEY;
@@ -98,6 +126,9 @@ describe('PushService', () => {
     // remove every isolated subscription store
     for (const directory of fixtureDirectories.splice(0)) await rm(directory, { force: true, recursive: true });
     // restore the caller's environment
+    if (savedEnvironment.attemptsFile === undefined) delete process.env.RAC_DAVO_PUSH_ATTEMPTS_FILE;
+    else process.env.RAC_DAVO_PUSH_ATTEMPTS_FILE = savedEnvironment.attemptsFile;
+    // restore the caller's subscription path
     if (savedEnvironment.file === undefined) delete process.env.RAC_PUSH_SUBSCRIPTIONS_FILE;
     else process.env.RAC_PUSH_SUBSCRIPTIONS_FILE = savedEnvironment.file;
     // restore the caller's private key
@@ -533,5 +564,90 @@ describe('PushService', () => {
 
     await expect(service.notify(eventMessage('diagnostic-failure'))).resolves.toBeUndefined();
     expect(webpush.sendNotification).toHaveBeenCalledOnce();
+  });
+  it('records one durable certainty attempt per Davo subscription without retrying or persisting payload secrets', async () => {
+    const { attemptsFile, service } = await enabledService();
+    const accepted = subscription('davo-accepted-secret');
+    const uncertain = subscription('davo-uncertain-secret');
+    await service.subscribe(accepted);
+    await service.subscribe(uncertain);
+    webpush.sendNotification
+      .mockResolvedValueOnce({ statusCode: 201, body: '', headers: {} })
+      .mockRejectedValueOnce(providerFailure(503, {}, { body: 'provider-secret' }));
+    const message = davoNotification('event-1', 'done');
+
+    await expect(service.notifyDavo('event-1', message, '2030-01-04T11:00:00.000Z')).resolves.toEqual({ definitelyNotSent: 0, acceptedAtLeastOnce: 1, ambiguous: 1 });
+    expect(webpush.sendNotification).toHaveBeenCalledTimes(2);
+    await expect(service.notifyDavo('event-1', message, '2030-01-04T11:00:00.000Z')).resolves.toEqual({ definitelyNotSent: 0, acceptedAtLeastOnce: 1, ambiguous: 1 });
+    expect(webpush.sendNotification).toHaveBeenCalledTimes(2);
+
+    const serialized = await readFile(attemptsFile, 'utf8');
+    expect(serialized).not.toContain(message.title);
+    expect(serialized).not.toContain(message.body);
+    expect(serialized).not.toContain(accepted.endpoint);
+    expect(serialized).not.toContain(accepted.keys.auth);
+    expect(serialized).not.toContain(uncertain.endpoint);
+    expect(serialized).not.toContain('provider-secret');
+    expect(JSON.parse(serialized)).toMatchObject({ events: [{ eventId: 'event-1', targets: [{ state: 'accepted' }, { state: 'ambiguous' }] }] });
+    expect((await stat(attemptsFile)).mode & 0o777).toBe(0o600);
+  });
+
+  it('rejects a changed Davo body or expiry under the same event id', async () => {
+    const { service } = await enabledService();
+    await service.subscribe(subscription('davo-conflict'));
+    webpush.sendNotification.mockResolvedValue({ statusCode: 201, body: '', headers: {} });
+    const message = davoNotification('event-conflict', 'choice');
+    await service.notifyDavo('event-conflict', message, '2030-01-04T11:00:00.000Z');
+
+    await expect(service.notifyDavo('event-conflict', { ...message, body: 'changed' }, '2030-01-04T11:00:00.000Z')).rejects.toMatchObject({ code: 'davo_push_conflict' });
+    await expect(service.notifyDavo('event-conflict', message, '2030-01-05T11:00:00.000Z')).rejects.toMatchObject({ code: 'davo_push_conflict' });
+    expect(webpush.sendNotification).toHaveBeenCalledOnce();
+  });
+
+  it('recovers a dispatching Davo target as ambiguous and never retries it', async () => {
+    const { attemptsFile, service } = await enabledService();
+    await service.subscribe(subscription('davo-crash'));
+    let resolveProvider!: (result: { statusCode: number; body: string; headers: Record<string, string> }) => void;
+    webpush.sendNotification.mockImplementationOnce(async () => await new Promise(resolve => { resolveProvider = resolve; }));
+    const message = davoNotification('event-crash', 'done');
+    const first = service.notifyDavo('event-crash', message, '2030-01-04T11:00:00.000Z');
+    await waitForCalls(1);
+    expect(JSON.parse(await readFile(attemptsFile, 'utf8'))).toMatchObject({ events: [{ targets: [{ state: 'dispatching' }] }] });
+
+    const recovered = new PushService();
+    await expect(recovered.notifyDavo('event-crash', message, '2030-01-04T11:00:00.000Z')).resolves.toEqual({ definitelyNotSent: 0, acceptedAtLeastOnce: 0, ambiguous: 1 });
+    expect(webpush.sendNotification).toHaveBeenCalledOnce();
+    resolveProvider({ statusCode: 201, body: '', headers: {} });
+    await expect(first).resolves.toEqual({ definitelyNotSent: 0, acceptedAtLeastOnce: 0, ambiguous: 1 });
+    expect(webpush.sendNotification).toHaveBeenCalledOnce();
+  });
+
+  it('reports ready snapshot targets as definitely not sent when exact subscription credentials are gone', async () => {
+    const { attemptsFile, file, service } = await enabledService();
+    const missing = subscription('davo-missing');
+    await service.subscribe(missing);
+    const digest = createHash('sha256').update(JSON.stringify(missing)).digest('base64url');
+    await writeFile(attemptsFile, JSON.stringify({ schemaVersion: 1, events: [{ eventId: 'event-ready', messageDigest: createHash('sha256').update(JSON.stringify(davoNotification('event-ready', 'done'))).digest('base64url'), createdAt: '2030-01-01T12:00:00.000Z', expiresAt: '2030-01-04T11:00:00.000Z', targets: [{ subscriptionDigest: digest, state: 'ready', updatedAt: '2030-01-01T12:00:00.000Z' }] }] }));
+    await writeFile(file, '{}');
+
+    await expect(service.notifyDavo('event-ready', davoNotification('event-ready', 'done'), '2030-01-04T11:00:00.000Z')).resolves.toEqual({ definitelyNotSent: 1, acceptedAtLeastOnce: 0, ambiguous: 0 });
+    expect(webpush.sendNotification).not.toHaveBeenCalled();
+  });
+
+  it('blocks at 4,096 active Davo events without eviction and admits after exact expiry pruning', async () => {
+    const { attemptsFile, service } = await enabledService();
+    const digest = createHash('sha256').update('message').digest('base64url');
+    const events = Array.from({ length: 4_096 }, (_, index) => ({ eventId: `event-${index}`, messageDigest: digest, createdAt: '2030-01-01T12:00:00.000Z', expiresAt: '2030-01-04T11:00:00.000Z', targets: [] }));
+    await writeFile(attemptsFile, JSON.stringify({ schemaVersion: 1, events }));
+
+    await expect(service.notifyDavo('event-overflow', davoNotification('event-overflow', 'done'), '2030-01-04T11:00:00.000Z')).rejects.toMatchObject({ code: 'davo_push_capacity' });
+    expect((JSON.parse(await readFile(attemptsFile, 'utf8')) as { events: unknown[] }).events).toHaveLength(4_096);
+
+    events[0]!.expiresAt = '2020-01-01T00:00:00.000Z';
+    await writeFile(attemptsFile, JSON.stringify({ schemaVersion: 1, events }));
+    await expect(service.notifyDavo('event-overflow', davoNotification('event-overflow', 'done'), '2030-01-04T11:00:00.000Z')).resolves.toEqual({ definitelyNotSent: 0, acceptedAtLeastOnce: 0, ambiguous: 0 });
+    const stored = JSON.parse(await readFile(attemptsFile, 'utf8')) as { events: Array<{ eventId: string }> };
+    expect(stored.events).toHaveLength(4_096);
+    expect(stored.events.some(event => event.eventId === 'event-overflow')).toBe(true);
   });
 });

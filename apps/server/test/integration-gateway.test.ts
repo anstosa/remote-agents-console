@@ -276,16 +276,17 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
       if (stage === 'missing-id') return { status: 'ok', sections: [], comments: [], review: { url: 'https://github.com/acme/repo/pull/7/files', pullRequest: { number: 7, url: 'https://github.com/acme/repo/pull/7' } } };
       throw new PullRequestReviewError('github_failed', true, `/private/${stage}: provider detail`);
     } });
-    const tools = createAgentTools({ create_pull_request_review_draft: port });
+    // exercise replay through a synthetic admitted-tool alias without exposing raw review mutation
+    const tools = createAgentTools({ create_pull_request_review_draft: port }).map(tool => tool.name === 'create_pull_request_review_draft' ? { ...tool, name: 'delegate_request' } : tool);
     const instance = await fixture(undefined, {}, tools);
     try {
       const credential = instance.control.startVoiceLease('browser-session', 'draft-session-123456789', ['github:write'])!;
       const davo = instance.control.authenticateRealtimeBearer(credential.bearer)!;
       const args = { repository: 'acme/repo', number: 7, fingerprint, body: 'review', request_id: `request-review-${stage}` };
-      const result = await instance.gateway.call(davo, 'create_pull_request_review_draft', args);
+      const result = await instance.gateway.call(davo, 'delegate_request', args);
       expect(result.structuredContent).toMatchObject({ contract_version: 'v2', error: { code: 'unknown_outcome' } });
       expect(JSON.stringify(result)).not.toContain('/private/');
-      const replay = await instance.gateway.call(davo, 'create_pull_request_review_draft', args);
+      const replay = await instance.gateway.call(davo, 'delegate_request', args);
       expect(replay.structuredContent).toMatchObject({ replayed: true, error: { code: 'unknown_outcome' } });
       expect(posts).toBe(1);
       const stored = JSON.parse(await readFile(join(instance.root, 'policy.json'), 'utf8'));
@@ -330,21 +331,21 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
     } finally { await rm(instance.root, { recursive: true, force: true }); }
   });
   // explicit audience projections supersede the old Conductor-only marker, never OAuth policy
-  it('allows a re-audienced legacy tool for Davo without exposing it to OAuth', async () => {
+  it('blocks re-audienced raw mutations for Davo without changing OAuth isolation', async () => {
     const tool = { ...internalTool('spawn_agent', 'write'), conductorOnly: true as const, contractVersion: 'v1' as const };
     const instance = await fixture(undefined, {}, [tool]);
     try {
       const credential = instance.control.startVoiceLease('browser-session', 'worker-session-123456789', ['files:write'])!;
       const davo = instance.control.authenticateRealtimeBearer(credential.bearer)!;
-      expect(instance.gateway.listTools(davo).map(item => item.name)).toContain('spawn_agent');
-      expect((await instance.gateway.call(davo, 'spawn_agent', { request_id: 'request-worker-audience' })).structuredContent).toMatchObject({ ok: true, contract_version: 'v1' });
+      expect(instance.gateway.listTools(davo).map(item => item.name)).not.toContain('spawn_agent');
+      expect((await instance.gateway.call(davo, 'spawn_agent', { request_id: 'request-worker-audience' })).structuredContent).toMatchObject({ ok: false, error: { code: 'tool_disabled' } });
       expect(instance.gateway.listTools({ ...principal, scopes: ['files:write'] }).map(item => item.name)).not.toContain('spawn_agent');
     } finally { await rm(instance.root, { recursive: true, force: true }); }
   });
   // unexpected domain failures cannot disclose implementation details or deny a possible effect
   it('sanitizes unexpected domain exceptions and preserves mutation uncertainty', async () => {
     let effects = 0;
-    const write = internalTool('internal_crash', 'write', async () => { effects += 1; throw new Error('/sensitive/path secret'); });
+    const write = internalTool('delegate_request', 'write', async () => { effects += 1; throw new Error('/sensitive/path secret'); });
     const read = internalTool('internal_read_crash', 'read', async () => { throw new Error('/sensitive/path secret'); });
     const instance = await fixture(undefined, {}, [write, read]);
     try {
@@ -365,7 +366,7 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
   // invalid post-effect output must retain uncertainty and a valid replay envelope
   it('reports unknown_outcome for an invalid mutation result without repeating its effect', async () => {
     let effects = 0;
-    const tool = internalTool('internal_bad_write', 'write', async () => { effects += 1; return developerSuccess({ private: 'invalid result' }); });
+    const tool = internalTool('delegate_request', 'write', async () => { effects += 1; return developerSuccess({ private: 'invalid result' }); });
     const instance = await fixture(undefined, {}, [tool]);
     try {
       const credential = instance.control.startVoiceLease('browser-session', 'invalid-output-session-1234', ['files:write'])!;
@@ -383,7 +384,7 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
   // offset and prefix retries must not fill the generic durable claim store
   it('dispatches domain cursors without generic idempotency records', async () => {
     let calls = 0;
-    const tool = internalTool('domain_cursor', 'write', async () => { calls += 1; return developerSuccess({ accepted: true }); }, true);
+    const tool = internalTool('bind_davo_target', 'write', async () => { calls += 1; return developerSuccess({ accepted: true }); }, true);
     const instance = await fixture(undefined, {}, [tool]);
     instance.policy.claim = async () => { throw new Error('generic claim must not run'); };
     try {
@@ -408,8 +409,8 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
         const davo: IntegrationPrincipal = { authentication: 'realtime', subjectId: 'owner', leaseKey: 'lease', audience: principal.audience, scopes: ['files:read', 'files:write', 'agents:control', 'admin:dangerous'] };
         const names = instance.gateway.listTools(davo).map(tool => tool.name);
         expect(names.includes('internal_read')).toBe(read);
-        expect(names.includes('internal_write')).toBe(write && voiceWrite);
-        expect(names.includes('internal_danger')).toBe(dangerous && voiceWrite);
+        expect(names.includes('internal_write')).toBe(false);
+        expect(names.includes('internal_danger')).toBe(false);
         const conductor: IntegrationPrincipal = { ...davo, authentication: 'conductor' };
         const conductorNames = instance.gateway.listTools(conductor).map(tool => tool.name);
         expect(conductorNames.includes('internal_read')).toBe(read);

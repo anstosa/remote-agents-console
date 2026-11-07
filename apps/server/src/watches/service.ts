@@ -73,8 +73,8 @@ const maxDavoEventBytes = 8 * 1024;
 const davoTokenTtlMs = 5 * 60_000;
 // an owner missing from the dashboard this long is gone, and its Watches with it
 const goneAfterMs = 30_000;
-// a command's connection: the line it was read from, the lines its events took since, those waiting (their size, and how many more were not kept), lines the holder no longer had, and when its last events went
-type Run = { channel: LineChannel; base: number; taken: number; lines: string[]; bytes: number; skipped: number; lost: number; timer?: NodeJS.Timeout; recent: number[] };
+// a command's connection: its Watch, the line it was read from, the lines its events took since, those waiting (their size, and how many more were not kept), lines the holder no longer had, and when its last events went
+type Run = { watch: CommandWatch; channel: LineChannel; base: number; taken: number; lines: string[]; bytes: number; skipped: number; lost: number; timer?: NodeJS.Timeout; recent: number[] };
 export type WatchRefusal = { refused: string; code?: 'owner_presence_capacity' | 'owner_presence_unavailable' };
 type DavoAckResult = { watch_id: string; acknowledged_through: number; ended: boolean; removed: boolean };
 type VerifiedPageToken = { first: number; last: number; count: number; digest: string; expiresAt: number; finalResult?: DavoAckResult };
@@ -170,15 +170,17 @@ export class Watches {
     nextDavo();
   }
 
-  /** stop polling and reading after already-started Watch publication is durable */
+  /** stop polling and reading after started publication and buffered command output are durable */
   close(): Promise<void> {
     // share one graceful shutdown frontier across repeated callers
     if (this.closing !== undefined) return this.closing;
+    // start each pending command publication before fencing new Watch work
+    const publications = [...this.runs.values()].map(run => this.batch(run.watch, run));
     this.closed = true;
     clearTimeout(this.timer);
     clearTimeout(this.davoTimer);
     for (const id of [...this.runs.keys()]) this.unread(id);
-    this.closing = this.drainPublications();
+    this.closing = Promise.all(publications).then(() => this.drainPublications());
     return this.closing;
   }
 
@@ -659,7 +661,7 @@ export class Watches {
       }
       if (connected === undefined) return false;
       if (watch.ended === true) { connected.channel.close(); await commands.close(holder); return true; }
-      const run: Run = { channel: connected.channel, base: connected.from, taken: 0, lines: [], bytes: 0, skipped: 0, lost: Math.max(0, connected.from - watch.read), recent: [] };
+      const run: Run = { watch, channel: connected.channel, base: connected.from, taken: 0, lines: [], bytes: 0, skipped: 0, lost: Math.max(0, connected.from - watch.read), recent: [] };
       this.runs.set(id, run);
       const failed = (error: unknown) => { console.error(`[watches] ${watch.id}:`, error); };
       connected.channel.onLine(line => {

@@ -103,6 +103,15 @@ import { IntegrationPolicyService } from './integrations/policy/service.js';
 import { IntegrationAuditService } from './integrations/audit/service.js';
 import { IntegrationGateway, registerMcpServer } from './integrations/mcp/index.js';
 import { RealtimeService } from './integrations/realtime/service.js';
+import { DavoStore, type DavoGenerationFenceOutcome } from './davo/store.js';
+import { davoNotificationMatchesRequest } from './davo/contracts.js';
+import { DavoRuntime } from './davo/runtime.js';
+import { registerDavoRoutes } from './davo/routes.js';
+import { createDavoBridge } from './davo/bridge.js';
+import { DavoRealtimeTextClient } from './davo/realtime-client.js';
+import { PromptOperationLedger } from './prompts/operations.js';
+import { davoNotification } from './notifications.js';
+import { retentionWindow } from './davo/retention.js';
 import { FederationAdmissionService, RemoteControllerPresenceService, federationForwarder } from './integrations/federation/index.js';
 import { IntegrationControlService } from './integrations/control/index.js';
 import type { DeveloperTool } from './integrations/mcp/developer-tool.js';
@@ -227,7 +236,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     workspace: serverCheckout(),
     hostWorkspace: serverCheckoutOnHost(config.projects, process.env.RAC_HOST_REPOSITORY?.trim() || process.env.RAC_HOST_WORKSPACE)
   };
-  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const github: GithubService = deps.github ?? new GithubService({ request: deps.githubRequest, projects: (): readonly Project[] => discovery.projectsNow(), worktrees: () => discovery.worktreesNow() }); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, github, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory, config.launchHome); const tickets = deps.tickets ?? new TicketStore(); const launch: LaunchService = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId), undefined, async (place, kind, options) => await structuredAgents.launch(place, kind, options) !== undefined); const structuredAgents: StructuredAgents = deps.structuredAgents ?? new StructuredAgents(holderProcesses(launch, config.adapters, kind => launch.adapterFiles(kind)), { allowedModels: kind => config.adapters[kind]?.allowedModels }); discovery.useStructuredAgents?.(structuredAgents); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const transport = deps.prompts?.transport ?? new TmuxTransport(discovery, tmux, { begin: agentId => prompts.beginAgentMutation(agentId), version: agentId => prompts.mutationVersion(agentId), busy: agentId => prompts.mutating(agentId), restored: async (scope, deliveredPromptId) => await prompts.resetRestored(scope, deliveredPromptId) }, queuedPrompts.resets, undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, async (agentId, to) => await switchByRestart(agentId, to)); const prompts: PromptService = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, undefined, undefined, calendarLifecycle, transport, structuredAgents.turns); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const pushDiagnostics = deps.pushDiagnostics ?? (push as Partial<Pick<PushService, 'diagnostics'>>).diagnostics; const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery, github); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, github, prSwitch, () => discovery.worktreesNow()); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner, request => {
+  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const github: GithubService = deps.github ?? new GithubService({ request: deps.githubRequest, projects: (): readonly Project[] => discovery.projectsNow(), worktrees: () => discovery.worktreesNow() }); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, github, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory, config.launchHome); const tickets = deps.tickets ?? new TicketStore(); const launch: LaunchService = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId), undefined, async (place, kind, options) => await structuredAgents.launch(place, kind, options) !== undefined); const structuredAgents: StructuredAgents = deps.structuredAgents ?? new StructuredAgents(holderProcesses(launch, config.adapters, kind => launch.adapterFiles(kind)), { allowedModels: kind => config.adapters[kind]?.allowedModels }); discovery.useStructuredAgents?.(structuredAgents); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const transport = deps.prompts?.transport ?? new TmuxTransport(discovery, tmux, { begin: agentId => prompts.beginAgentMutation(agentId), version: agentId => prompts.mutationVersion(agentId), busy: agentId => prompts.mutating(agentId), restored: async (scope, deliveredPromptId) => await prompts.resetRestored(scope, deliveredPromptId) }, queuedPrompts.resets, undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, async (agentId, to) => await prompts.withExternalActivity(agentId, async () => await switchByRestart(agentId, to), result => result.status === 'switched')); const prompts: PromptService = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, undefined, undefined, calendarLifecycle, transport, structuredAgents.turns); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const pushDiagnostics = deps.pushDiagnostics ?? (push as Partial<Pick<PushService, 'diagnostics'>>).diagnostics; const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery, github); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, github, prSwitch, () => discovery.worktreesNow()); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner, request => {
     // reviews share model enforcement but never manual security
     const selected = resolveReviewLaunchModel(request.kind, config.adapters[request.kind], request);
     return selected === undefined ? request : { ...request, model: selected.model, ...(selected.effort === undefined ? {} : { effort: selected.effort }) };
@@ -334,6 +343,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // derive peer forwarding independently of the legacy saved toggle
   const integrationConfig = structuredClone(integrationConfigForRemotes(config.integrations, config.remoteServers));
   let developerTools: DeveloperTool[] = [];
+  let davoToolDefinitions: DeveloperTool[] = [];
   let developerPolicy: IntegrationPolicyService | undefined;
   let currentConductorPlaces: (() => PlaceScope) | undefined;
   let developerOrchestration: OrchestrationService | undefined;
@@ -554,7 +564,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     };
   };
   // one snapshot's Agents as the console events publish them
-  const observedAgents = (discovered: { agents: Agent[] } & Parameters<typeof notificationContextForAgent>[1], queuedCounts: ReadonlyMap<string, number>) => ({ type: 'agents' as const, agents: discovered.agents.map(agent => ({ agent, queued: (queuedCounts.get(agent.id) ?? 0) > 0, context: notificationContextForAgent(agent, discovered), quiet: prompts.quiet?.(agent) ?? false })) });
+  const observedAgents = (discovered: { agents: Agent[] } & Parameters<typeof notificationContextForAgent>[1], queuedCounts: ReadonlyMap<string, number>) => ({ type: 'agents' as const, agents: discovered.agents.map(agent => ({ agent, queued: (queuedCounts.get(agent.id) ?? 0) > 0, context: notificationContextForAgent(agent, discovered), quiet: prompts.quiet?.(agent) ?? false, davoOwned: prompts.davoOwned?.(agent.id) ?? false })) });
   // count prompts before dispatch starts
   const queuedPromptCounts = async (agents: Agent[]) => new Map(await Promise.all(agents.map(async agent => {
     // suppress false completion alerts on storage errors
@@ -726,7 +736,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const federationSecret = process.env.RAC_INTEGRATION_FEDERATION_SECRET?.trim() || instanceStatusSecret;
     developerOrchestration = orchestration;
     const integrationGateway = new IntegrationGateway({ config: integrationConfig, instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, developerTools: () => developerTools, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret, config.publicOrigin.origin) } : {}) });
-    const realtimeScopes: IntegrationScope[] = ['status:read', 'logs:read', 'files:read', 'github:read', ...(integrationConfig.realtime.writeToolsEnabled ? ['prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write', 'files:write', 'github:write', 'actions:invoke', ...(integrationConfig.mcp.dangerousEnabled ? ['admin:dangerous'] : [])] as IntegrationScope[] : [])];
+    // freeze live authority to approved reads and the four prompt-scoped davo operations
+    const realtimeScopes: IntegrationScope[] = ['status:read', 'logs:read', 'files:read', 'github:read', ...(integrationConfig.realtime.writeToolsEnabled ? ['prompts:write'] as IntegrationScope[] : [])];
     const conductorConfig = config.conductor;
     // the Conductor's scope: the configured Projects and any Place whose Workspace exists
     const conductorPlaces = (): PlaceScope => {
@@ -805,39 +816,113 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         session(request);
         return { enabled: true, mcp: integrationConfig.mcp, control: integrationControl.snapshot(), realtime: { enabled: integrationConfig.realtime.enabled, available: integrationConfig.realtime.enabled && realtime.available(), writeToolsEnabled: integrationConfig.realtime.writeToolsEnabled } };
       });
-      app.post('/api/realtime/session', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
-        const local = controlled(request, true);
-        // keep voice disabled unless both the feature and provider are configured
-        if (!integrationConfig.realtime.enabled || !realtime.available()) return reply.code(503).send({ error: 'Realtime voice is unavailable.' });
-        const requestedContext = body(request);
-        // accept only canonical selected-target identifiers
-        if ((requestedContext.worktreeId !== undefined && (typeof requestedContext.worktreeId !== 'string' || requestedContext.worktreeId.length > 240)) || (requestedContext.agentId !== undefined && (typeof requestedContext.agentId !== 'string' || requestedContext.agentId.length > 240)) || typeof requestedContext.voiceSessionId !== 'string' || !/^[A-Za-z0-9_-]{20,64}$/u.test(requestedContext.voiceSessionId)) return reply.code(400).send({ error: 'invalid voice context' });
-        // activate mutation access only for this voice session
-        const credential = integrationControl.startVoiceLease(local.id, requestedContext.voiceSessionId, realtimeScopes);
-        // never share a credential between leases or controlling browsers
-        if (credential === undefined) return reply.code(409).send({ error: 'voice session stopped' });
-        await reconcileDeveloperTransfers?.();
-        const principal = integrationControl.authenticateRealtimeBearer(credential.bearer)!;
-        const allowedTools = integrationGateway.listTools({ ...principal, audience: resource }).map(tool => tool.name);
-        const result = await realtime.create({ subject: local.id, mcpUrl: resource, mcpAuthorization: credential.bearer, allowedTools, context: { instanceId: config.publicOrigin.origin, ...(requestedContext.worktreeId === undefined ? {} : { worktreeId: requestedContext.worktreeId as string }), ...(requestedContext.agentId === undefined ? {} : { agentId: requestedContext.agentId as string }) } });
-        // revoke access when provider setup fails
-        if (!result.ok) { integrationControl.stopVoice(local.id, requestedContext.voiceSessionId); await reconcileDeveloperTransfers?.(); }
-        return result.ok ? reply.send(result) : reply.code(result.code === 'invalid_request' ? 400 : 502).send({ error: result.code });
+      const davoOperations = new PromptOperationLedger(process.env.RAC_PROMPT_OPERATIONS_FILE ?? '.data/prompt-operations.json');
+      // send only durably claimed cutoff hangups before retiring private handles
+      const davoStore: DavoStore = new DavoStore({ file: process.env.RAC_DAVO_STATE_FILE, onFence: async (fence): Promise<DavoGenerationFenceOutcome> => { davoRuntime.fence(); const outcome = await davoRuntime.calls.closeFenced(fence.providerCalls); await Promise.allSettled([push.pruneDavoAttempts(), davoOperations.pruneExpired()]); return outcome; } });
+      const davoRuntime = new DavoRuntime({ store: davoStore, control: integrationControl, realtime, apiKey: process.env.RAC_OPENAI_API_KEY, mcpUrl: resource, instanceId: config.publicOrigin.origin, scopes: realtimeScopes, selectWorktree: async id => (await orchestration.worktreeStatus(id)).ok, allowedTools: () => {
+        const lease = integrationControl.currentLease();
+        // advertise only the exact current realtime principal
+        if (lease === undefined) return [];
+        return integrationGateway.listTools({ authentication: 'realtime', subjectId: lease.stableOwnerKey, stableOwnerKey: lease.stableOwnerKey, leaseKey: lease.leaseKey, audience: resource, scopes: realtimeScopes }).map(tool => tool.name);
+      } });
+      const davoBridge = createDavoBridge({ runtime: davoRuntime, prompts, operations: davoOperations, history: promptHistory, canWrite: () => integrationConfig.enabled && integrationConfig.realtime.enabled && integrationConfig.realtime.writeToolsEnabled && integrationConfig.mcp.writeEnabled, ...(federation === undefined ? {} : { remote: { peers: config.remoteServers.map(remote => remote.url.origin), secret: federationSecret, epoch: federation.destinationEpoch } }), instanceId: config.publicOrigin.origin, audit: integrationAudit, evaluator: new DavoRealtimeTextClient({ apiKey: process.env.RAC_OPENAI_API_KEY, settings: () => ({ name: integrationConfig.realtime.name, context: integrationConfig.realtime.context }), isGenerationCurrent: generation => generation === davoStore.currentGeneration }), target: async id => {
+        const agent = (await discovery.dashboard()).agents.find(candidate => candidate.id === id);
+        // davo delegates only to ordinary operator worktree agents, never another manager's workers
+        if (agent?.worktreeId === undefined || agent.structured?.role === 'conductor' || agent.spawnedBy !== undefined || await structuredAgents.workerOwner(id) !== undefined) return undefined;
+        const projectId = agent.projectId ?? projectIdOf(agent.worktreeId);
+        // only this installation's configured project or opened worktree is eligible
+        if (!config.projects.some(project => project.id === projectId) && !discovery.worktreesNow().some(worktree => worktree.id === agent.worktreeId)) return undefined;
+        return { agentId: agent.id, worktreeId: agent.worktreeId, projectId, placeId: agent.placeId ?? agent.worktreeId, ...(agent.conversationId === undefined ? {} : { conversationId: agent.conversationId }), processGeneration: await structuredAgents.processGeneration(id) ?? 0, ...(agent.structured?.model?.id === undefined ? {} : { modelId: agent.structured.model.id }) };
+      }, question: async id => { const result = await orchestration.agentStatus(id); return result.ok ? result.value.question : undefined; }, answerQuestion: async (id, questionId, answer, mayAnswer, preserveDavo) => await prompts.answerQuestion(id, questionId, 'index' in answer ? answer.index : 'text' in answer ? answer.text : answer, mayAnswer, preserveDavo) });
+      davoToolDefinitions = davoBridge.tools;
+      app.post('/api/davo/continuation', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (request, reply) => {
+        browser(request);
+        // only configured signed peers can reach continuation grants
+        if (davoBridge.remote === undefined) return reply.code(404).send({ error: 'davo_remote_unavailable' });
+        try { const result = await davoBridge.remote.handle(request.body as never); davoRuntime.metrics.count('remote_receipts'); davoRuntime.metrics.count('receipt_resigns'); if (result.body.kind === 'rebind-receipt') davoRuntime.metrics.count('remote_rebinds'); return result; }
+        catch { davoRuntime.metrics.count('remote_rejections'); return reply.code(401).send({ error: 'davo_remote_unavailable' }); }
       });
-      app.post('/api/realtime/session/heartbeat', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
-        const local = controlled(request, true);
-        const voiceSessionId = body(request).voiceSessionId;
-        // renew only the active voice browser
-        if (typeof voiceSessionId !== 'string' || !/^[A-Za-z0-9_-]{20,64}$/u.test(voiceSessionId) || !integrationControl.heartbeatVoice(local.id, voiceSessionId)) return reply.code(409).send({ error: 'voice mode inactive' });
-        return { ok: true };
-      });
-      app.post('/api/realtime/session/stop', async request => {
-        const local = session(request, true);
-        const voiceSessionId = body(request).voiceSessionId;
-        // stop only one canonical browser voice session
-        if (typeof voiceSessionId === 'string' && /^[A-Za-z0-9_-]{20,64}$/u.test(voiceSessionId)) { integrationControl.stopVoice(local.id, voiceSessionId); await reconcileDeveloperTransfers?.(); }
-        return { ok: true };
-      });
+      registerDavoRoutes(app, { runtime: davoRuntime, subject: (request, write) => (write ? controlled(request, true) : session(request)).id, enabled: () => integrationConfig.realtime.enabled && realtime.available() });
+      // recover and enforce retention independently of open browser windows
+      const davoRecovery = integrationConfig.realtime.enabled && realtime.available() ? davoRuntime.recover().catch(error => { davoRuntime.recordFailure(error); }) : Promise.resolve();
+      let davoTickRunning = false;
+      const davoTimer = setInterval(() => {
+        // coalesce slow provider cleanup without queue growth
+        if (davoTickRunning || davoStore.currentGeneration === undefined && !realtime.available()) return;
+        davoTickRunning = true;
+        void davoRecovery.then(() => davoRuntime.tick()).catch(error => { davoRuntime.recordFailure(error); }).finally(() => { davoTickRunning = false; });
+      }, 1000);
+      davoTimer.unref();
+      let davoClosed = false;
+      let davoCutoffTimer: ReturnType<typeof setTimeout> | undefined;
+      // schedule the exact los angeles cutoff independently of polling cadence
+      const scheduleDavoCutoff = () => {
+        // shutdown cannot re-arm an elapsed cutoff callback
+        if (davoClosed) return;
+        const delay = Math.max(1, Date.parse(retentionWindow(Date.now()).nextSweepAt) - Date.now());
+        davoCutoffTimer = setTimeout(() => {
+          // unopened disabled installations have no provider state to retire
+          if (davoStore.currentGeneration === undefined && !realtime.available()) { scheduleDavoCutoff(); return; }
+          void davoRecovery.then(() => davoRuntime.tick()).catch(error => { davoRuntime.recordFailure(error); }).finally(scheduleDavoCutoff);
+        }, delay);
+        davoCutoffTimer.unref();
+      };
+      scheduleDavoCutoff();
+      let davoBackgroundRunning = false;
+      let davoBackground: Promise<unknown> | undefined;
+      let davoPrunedGeneration: number | undefined;
+      const davoNotificationRetryAt = new Map<string, number>();
+      // isolate evaluator and push latency from mandatory provider cutoff enforcement
+      const davoBackgroundTimer = setInterval(() => {
+        // leave disabled and unopened installations untouched
+        if (davoBackgroundRunning || davoStore.currentGeneration === undefined) return;
+        davoBackgroundRunning = true;
+        davoBackground = davoBridge.tick().then(async () => {
+          const state = await davoStore.read();
+          // prune delivery metadata once after startup or retention advance
+          if (davoPrunedGeneration !== state.retention.generation) { await push.pruneDavoAttempts(); davoPrunedGeneration = state.retention.generation; }
+          // discard elapsed retry timers with their original outbox rows
+          for (const id of davoNotificationRetryAt.keys()) { if (!state.notificationOutbox.some(event => event.id === id)) davoNotificationRetryAt.delete(id); }
+          // persist one notification event claim before any endpoint attempt
+          for (const event of state.notificationOutbox) {
+            // recovered network ambiguity must not trigger another delivery
+            if (event.state === 'dispatching') { await davoStore.transact(draft => { const exact = draft.notificationOutbox.find(row => row.id === event.id && row.state === 'dispatching'); if (exact !== undefined) exact.state = 'ambiguous'; }); continue; }
+            // only ready retained done or genuine-choice events can notify
+            if (event.state !== 'ready' || (davoNotificationRetryAt.get(event.id) ?? 0) > Date.now()) continue;
+            const request = state.requests.find(row => row.id === event.requestId);
+            // expired original requests have no notification authority
+            if (!davoNotificationMatchesRequest(event, request) || request === undefined || Date.now() >= Date.parse(request.principal.expiresAt)) continue;
+            // claim only the still-current request notification inside the mutation frontier
+            const claimed = await davoStore.transact(draft => {
+              const exact = draft.notificationOutbox.find(row => row.id === event.id && row.state === 'ready');
+              const owner = draft.requests.find(row => row.id === exact?.requestId);
+              // a consumed or replaced choice cannot acquire a delivery claim
+              if (exact === undefined || !davoNotificationMatchesRequest(exact, owner) || owner === undefined || Date.now() >= Date.parse(owner.principal.expiresAt)) return false;
+              exact.state = 'dispatching';
+              exact.attempts += 1;
+              return true;
+            });
+            // another flush may already own this event
+            if (!claimed) continue;
+            const deliveryState = await davoStore.read();
+            const deliveryEvent = deliveryState.notificationOutbox.find(row => row.id === event.id && row.state === 'dispatching');
+            const deliveryRequest = deliveryState.requests.find(row => row.id === deliveryEvent?.requestId);
+            // recheck exact authority after persistence and immediately before external push
+            if (deliveryEvent === undefined || !davoNotificationMatchesRequest(deliveryEvent, deliveryRequest) || deliveryRequest === undefined || Date.now() >= Date.parse(deliveryRequest.principal.expiresAt)) continue;
+            davoRuntime.metrics.count('outbox_attempts');
+            let counts: { definitelyNotSent: number; acceptedAtLeastOnce: number; ambiguous: number };
+            try { counts = await push.notifyDavo(deliveryEvent.eventId, davoNotification(deliveryEvent.eventId, deliveryEvent.kind), deliveryRequest.principal.expiresAt); }
+            catch { counts = { definitelyNotSent: 0, acceptedAtLeastOnce: 0, ambiguous: 1 }; }
+            davoRuntime.metrics.count('outbox_ambiguous', counts.ambiguous);
+            await davoStore.transact(draft => { const exact = draft.notificationOutbox.find(row => row.id === event.id && row.state === 'dispatching'); if (exact !== undefined) { exact.state = counts.definitelyNotSent > 0 ? 'ready' : counts.ambiguous > 0 ? 'ambiguous' : 'attempted'; exact.certaintyCounts = counts; } });
+            // retry only definitely-unsent targets under the same durable event id
+            if (counts.definitelyNotSent > 0) davoNotificationRetryAt.set(event.id, Date.now() + Math.min(15 * 60_000, 1000 * 2 ** Math.min(event.attempts + 1, 10)));
+            else davoNotificationRetryAt.delete(event.id);
+          }
+        }).catch(() => undefined).finally(() => { davoBackgroundRunning = false; });
+      }, 2000);
+      davoBackgroundTimer.unref();
+      app.addHook('onClose', async () => { davoClosed = true; clearTimeout(davoCutoffTimer); clearInterval(davoTimer); clearInterval(davoBackgroundTimer); davoBridge.close(); await davoBackground; davoRuntime.fence(); if (davoStore.currentGeneration !== undefined) await davoRuntime.calls.closeAll(); });
     }
   }
   // share a boot-local route proof with the tunnel setup health check
@@ -2144,7 +2229,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (persistence.agent.transport === 'structured') {
       const conversationId = persistence.agent.conversationId;
       if (conversationId === undefined) return reply.code(409).send({ error: 'The current conversation is unknown.' });
-      const renamed = await structuredAgents.rename(id, name);
+      const renamed = await prompts.withExternalActivity(id, async () => await structuredAgents.rename(id, name), result => result === 'ok');
       if (renamed === 'unavailable') return reply.code(404).send({ error: 'agent unavailable' });
       if (renamed === 'busy') return reply.code(409).send({ error: 'The agent is working. Name the conversation once its turn ends.' });
       if (renamed === 'refused') return reply.code(409).send({ error: 'The agent refused the name.' });
@@ -2167,7 +2252,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (conversationId === undefined) return reply.code(409).send({ error: 'The current conversation is unknown.' });
       // the Transport delivers the CLI's own rename under the agent's input reservation, which a
       // live restart reservation refuses
-      const renamed = await transport.rename(id, name);
+      const renamed = await prompts.withExternalActivity(id, async () => await transport.rename(id, name), result => result === 'sent');
       if (renamed === 'unavailable') return reply.code(404).send({ error: 'agent unavailable' });
       if (renamed === 'busy') return reply.code(409).send({ error: 'The agent is busy with another operation.' });
       if (renamed !== 'sent') return reply.code(502).send({ error: 'Could not deliver the rename to the agent.' });
@@ -2193,7 +2278,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     controlled(request, true);
     const id = (request.params as { id: string }).id;
     if (!await structuredAgents.has(id)) return reply.code(await discovery.target(id) === undefined ? 404 : 409).send({ error: 'This agent starts a new conversation with its own command.' });
-    const started = await structuredAgents.newConversation(id);
+    const started = await prompts.withExternalActivity(id, async () => await structuredAgents.newConversation(id), result => result === 'ok');
     if (started === 'ok') return reply.code(204).send();
     if (started === 'unavailable') return reply.code(404).send({ error: 'agent unavailable' });
     return reply.code(409).send({ error: started === 'busy' ? 'The agent is working. Start a new conversation once its turn ends.' : 'The agent refused to start a new conversation.' });
@@ -2209,7 +2294,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const raw = body(request).instructions;
     if (raw !== undefined && (typeof raw !== 'string' || raw.length > maxCompactInstructions)) return reply.code(400).send({ error: `Instructions are text of at most ${maxCompactInstructions} characters.` });
     const instructions = raw?.trim() || undefined;
-    const compacted = agent.structured?.role === 'conductor' ? await conductor.compact(instructions) : await structuredAgents.compact(id, instructions === undefined ? {} : { instructions });
+    const compacted = agent.structured?.role === 'conductor' ? await conductor.compact(instructions) : await prompts.withExternalActivity(id, async () => await structuredAgents.compact(id, instructions === undefined ? {} : { instructions }), result => result === 'ok');
     if (compacted === 'ok') return reply.code(204).send();
     if (compacted === 'unavailable') return reply.code(404).send({ error: 'agent unavailable' });
     return reply.code(409).send({ error: compacted === 'busy' ? 'The agent is working. Compact once its turn ends.' : compacted.refused });
@@ -2229,7 +2314,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const model = agentModel.safeParse(raw.model).data;
     const effort = raw.effort === undefined ? undefined : agentEffort.safeParse(raw.effort).data;
     if (model === undefined || (raw.effort !== undefined && (effort === undefined || !agentEfforts(agent.kind).includes(effort)))) return reply.code(400).send({ error: 'invalid model' });
-    const switched = await structuredAgents.setModel(id, { model, ...(effort === undefined ? {} : { effort }) });
+    const switched = await prompts.withExternalActivity(id, async () => await structuredAgents.setModel(id, { model, ...(effort === undefined ? {} : { effort }) }), result => result === 'ok');
     if (switched === 'ok') return reply.code(204).send();
     if (switched === 'unavailable') return reply.code(404).send({ error: 'agent unavailable' });
     if (switched === 'not-allowed') return reply.code(409).send({ error: `${model} is not an Allowed model.` });
@@ -2610,7 +2695,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (attachments.length > 0 && await structuredAgents.has(id)) return reply.code(400).send({ error: 'This agent does not take attachments yet.' });
     if (!await prompts.submit(id, data.prompt, attachments)) return reply.code(404).send({ error: 'target unavailable' });
     // a prompt to an Exited Agent waits in its queue while the Agent resumes
-    if ((await structuredAgents.agent(id))?.structured?.lifecycle === 'exited') void structuredAgents.resume(id).catch(error => { console.error(`[structured] ${id} could not resume:`, error); });
+    if ((await structuredAgents.agent(id))?.structured?.lifecycle === 'exited') void prompts.withExternalActivity(id, async () => await structuredAgents.resume(id), result => result === true).catch(error => { console.error(`[structured] ${id} could not resume:`, error); });
     return reply.code(204).send();
   });
   // a structured Agent's Raw events: the latest lines between the console and its process
@@ -2630,7 +2715,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     controlled(request, true);
     const id = (request.params as { id: string }).id;
     if (!await structuredAgents.has(id)) return reply.code(404).send({ error: 'target unavailable' });
-    return await structuredAgents.resume(id) ? reply.code(204).send() : reply.code(409).send({ error: 'The agent could not be resumed.' });
+    return await prompts.withExternalActivity(id, async () => await structuredAgents.resume(id), result => result === true) ? reply.code(204).send() : reply.code(409).send({ error: 'The agent could not be resumed.' });
   });
   // what a structured Agent's transcript Panel shows
   // the latest `limit` lines of the transcript, or one item in full (`item`)
@@ -2981,7 +3066,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (persistence === undefined) return 'skipped';
     // a structured Agent names its Conversation in place, as the rename route does
     if (persistence.agent.transport === 'structured') {
-      if (await structuredAgents.rename(agentId, clean) !== 'ok') return 'skipped';
+      if (await prompts.withExternalActivity(agentId, async () => await structuredAgents.rename(agentId, clean), result => result === 'ok') !== 'ok') return 'skipped';
       const conversationId = (await structuredAgents.agent(agentId))?.conversationId;
       if (conversationId !== undefined) await consoleNamed.record(persistence.saveKey, { kind: persistence.agent.kind, id: conversationId }).catch(() => undefined);
       return 'named';
@@ -2994,7 +3079,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (conversationId === undefined) return 'skipped';
       const cwd = discovery.paneDirectory(agentId);
       for (let press = 0; press < conversationNamePresses; press += 1) {
-        const renamed = await transport.rename(agentId, clean, press > 0);
+        const renamed = await prompts.withExternalActivity(agentId, async () => await transport.rename(agentId, clean, press > 0), result => result === 'sent');
         if (renamed === 'unavailable' || renamed === 'busy' || renamed === 'unsent') return press === 0 ? 'skipped' : 'stuck';
         if (renamed === 'stuck') return 'stuck';
         for (let attempt = 0; attempt < conversationNamePollAttempts; attempt += 1) {
@@ -3801,7 +3886,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // and queue; one of another kind, or one that failed, is closed and replaced
     if (activeAgent !== undefined && withoutProcess(activeAgent)) {
       if (activeAgent.kind === resumeKind && activeAgent.structured?.lifecycle === 'exited') {
-        if (!await structuredAgents.resume(activeAgent.id, conversationId)) return reply.code(409).send({ error: 'Could not resume the conversation.', agentId: activeAgent.id });
+        if (!await prompts.withExternalActivity(activeAgent.id, async () => await structuredAgents.resume(activeAgent!.id, conversationId), result => result === true)) return reply.code(409).send({ error: 'Could not resume the conversation.', agentId: activeAgent.id });
         await dashboardUpdates.refresh().catch(() => undefined);
         return reply.code(201).send({ agentId: activeAgent.id });
       }
@@ -3811,7 +3896,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // a structured Agent of the row's kind switches in place, between Turns, keeping its queue
     if (activeAgent?.transport === 'structured') {
       if (activeAgent.kind !== resumeKind) return reply.code(409).send({ error: 'Close this agent before resuming another kind\'s conversation here.' });
-      const switched = await structuredAgents.switchConversation(activeAgent.id, conversationId);
+      const switched = await prompts.withExternalActivity(activeAgent.id, async () => await structuredAgents.switchConversation(activeAgent.id, conversationId), result => result === 'ok');
       if (switched === 'unavailable') return reply.code(404).send({ error: 'The worktree agent is no longer open.' });
       if (switched !== 'ok') return reply.code(409).send({ error: switched === 'busy' ? 'The agent is working. Switch once its turn ends.' : 'The agent refused the switch.' });
       await dashboardUpdates.refresh().catch(() => undefined);
@@ -3848,7 +3933,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     controlled(request, true);
     const id = (request.params as { id: string }).id;
     // the Conductor's process starts again in place, keeping its id, queue and Conversation
-    if ((await structuredAgents.agent(id))?.structured?.role === 'conductor') return await structuredAgents.restart(id) ? reply.code(204).send() : reply.code(409).send({ error: 'The Conductor could not be restarted.' });
+    if ((await structuredAgents.agent(id))?.structured?.role === 'conductor') return await prompts.withExternalActivity(id, async () => await structuredAgents.restart(id), result => result === true) ? reply.code(204).send() : reply.code(409).send({ error: 'The Conductor could not be restarted.' });
     const manual = await prepareManual({ type: 'agent', id }, body(request));
     const mutationGeneration = prompts.mutationGeneration();
     const result = await restartIdleConfiguredAgent(id, undefined, prompts.mutationVersion(id), mutationGeneration, undefined, manual.choice.kind, manual);
@@ -4769,10 +4854,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // use a known conversation identity, not a client-supplied resume path
       switchConversation: async (agent, conversation) => {
         // current structured conversations switch through their native transport
-        if (agent.transport === 'structured') return await structuredAgents.switchConversation(agent.id, conversation.id) === 'ok';
+        if (agent.transport === 'structured') return await prompts.withExternalActivity(agent.id, async () => await structuredAgents.switchConversation(agent.id, conversation.id), result => result === 'ok') === 'ok';
         // pane restarts retain the existing idle/queue/generation guard
         if (agent.worktreeId === undefined) return false;
-        return (await switchByRestart(agent.id, { kind: conversation.kind, id: conversation.id, worktreeId: agent.worktreeId, chosenAt: prompts.mutationGeneration() })).status === 'switched';
+        return (await prompts.withExternalActivity(agent.id, async () => await switchByRestart(agent.id, { kind: conversation.kind, id: conversation.id, worktreeId: agent.worktreeId!, chosenAt: prompts.mutationGeneration() }), result => result.status === 'switched')).status === 'switched';
       },
       // forgetting remains a console-record mutation and never deletes provider history
       forgetConversation: async (agent, conversation) => {
@@ -4827,7 +4912,28 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // pending Ask runs are owned by this server and abort before shutdown
     app.addHook('onClose', async () => { generalAsks.close(); });
     const agentOperationDeps: AgentOperationDependencies = {
-      structuredAgents,
+      structuredAgents: {
+        // retain ordinary read semantics
+        agent: id => structuredAgents.agent(id),
+        // retain model catalog reads
+        models: id => structuredAgents.models(id),
+        // stamp every model switch before process effects
+        setModel: (id, model) => prompts.withExternalActivity(id, () => structuredAgents.setModel(id, model), result => result === 'ok'),
+        // fence a conversation replacement before delivery
+        newConversation: id => prompts.withExternalActivity(id, () => structuredAgents.newConversation(id), result => result === 'ok'),
+        // fence native rename commands before delivery
+        rename: (id, name) => prompts.withExternalActivity(id, () => structuredAgents.rename(id, name), result => result === 'ok'),
+        // fence process resumption before delivery
+        resume: (id, conversation) => prompts.withExternalActivity(id, () => structuredAgents.resume(id, conversation), result => result === true),
+        // fence context compaction before delivery
+        compact: id => prompts.withExternalActivity(id, () => structuredAgents.compact(id), result => result === 'ok'),
+        // retain exact transcript reads
+        transcript: (id, limit) => structuredAgents.transcript(id, limit),
+        // retain exact item reads
+        transcriptItem: (id, item) => structuredAgents.transcriptItem(id, item),
+        // fence generation-bound lifecycle commands before execution
+        restartAtGeneration: (id, generation, command) => prompts.withExternalActivity(id, () => structuredAgents.restartAtGeneration(id, generation, command), result => result === 'ok')
+      },
       comparison,
       resolveAgent: developerAgent,
       processGeneration: id => structuredAgents.processGeneration(id),
@@ -4954,7 +5060,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       buttonCatalog,
       watches
     });
-    developerTools = [...createAgentTools(agentPorts), ...workspaceTools, ...createWorkerTools({ config, structured: structuredAgents, resolvePlace: developerPlace, close: id => prompts.close(id), createWorktree: (projectId, input, open, issue) => createWorktree(projectId, input, open, issue) })];
+    developerTools = [...createAgentTools(agentPorts), ...workspaceTools, ...createWorkerTools({ config, structured: structuredAgents, resolvePlace: developerPlace, close: id => prompts.close(id), createWorktree: (projectId, input, open, issue) => createWorktree(projectId, input, open, issue) }), ...davoToolDefinitions];
   }
   // close owned Files transport and existing background services on shutdown
   // close both viewer-owned streams and server-owned dashboard connections

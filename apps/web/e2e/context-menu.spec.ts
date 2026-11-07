@@ -214,9 +214,9 @@ test('right click opens split-button flyouts without running their primary actio
   expect(await page.locator('.agent-panel').count()).toBe(launchesBefore);
 });
 
-test('Davo context action disables Davo without opening a call', async ({ page }) => {
+test('Davo context action disables Davo without opening listening', async ({ page }) => {
   const fixture = await mountConsole(page);
-  const call = page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' });
+  const call = page.locator('.tab-row-lead').getByRole('button', { name: 'Open Davo' });
   await call.click({ button: 'right' });
   const menu = page.getByRole('menu', { name: 'Davo options' });
   await expect(menu).toBeVisible();
@@ -238,7 +238,7 @@ test('Davo context action preserves newer file-backed identity and context', asy
     authoritativeDavo: { enabled: true, name: 'Riley', context: 'New file-backed context.' },
     enabledPathRevision: 'voice-enabled-r7'
   });
-  const call = page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' });
+  const call = page.locator('.tab-row-lead').getByRole('button', { name: 'Open Davo' });
   await call.click({ button: 'right' });
   await page.getByRole('menu', { name: 'Davo options' }).getByRole('menuitem', { name: 'Disable Davo' }).click();
 

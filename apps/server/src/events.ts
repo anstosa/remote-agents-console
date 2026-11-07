@@ -2,7 +2,7 @@ import type { Agent, StackProcessState } from './domain/models.js';
 import type { AgentNotificationContext } from './notifications.js';
 
 /** One Agent as a dashboard snapshot saw it: whether prompts wait for it, its names, and whether its Turn is one another Agent or the console started. */
-export type ObservedAgent = { agent: Agent; queued: boolean; context: AgentNotificationContext; quiet: boolean };
+export type ObservedAgent = { agent: Agent; queued: boolean; context: AgentNotificationContext; quiet: boolean; davoOwned?: boolean };
 
 /**
  * What happens in the console (ADR 0019): each dashboard snapshot's Agents and Stack processes,

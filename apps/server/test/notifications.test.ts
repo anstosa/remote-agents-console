@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Agent } from '../src/domain/models.js';
 import { resolveAttention } from '../src/adapters/attention.js';
-import { AgentNotificationCoordinator, agentAttentionState, agentNotification, agentPresentationAttentionState, reviewNotification, scheduleNotification, type AgentNotification, type AgentNotificationContext } from '../src/notifications.js';
+import { AgentNotificationCoordinator, agentAttentionState, agentNotification, agentPresentationAttentionState, davoNotification, reviewNotification, scheduleNotification, type AgentNotification, type AgentNotificationContext } from '../src/notifications.js';
 
 // Resolve attention from the title exactly as DiscoveryService would, so the
 // coordinator reads the same resolved state the wire carries.
@@ -23,6 +23,19 @@ const context: AgentNotificationContext = { projectName: 'Remote Agents', worktr
 
 describe('agent notifications', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('suppresses only correlated davo questions while preserving quiet conductor questions', () => {
+    const delivered: AgentNotification[] = [];
+    const coordinator = new AgentNotificationCoordinator(message => { delivered.push(message); });
+    const question = { id: 'question-owned', text: 'Choose the release target', choices: ['Stage', 'Production'], source: 'structured' as const, pane: { targetPaneId: '%2' } };
+    coordinator.observe(agent({ attention: 'working' }), false, context);
+    coordinator.observe(agent({ attention: 'question', question }), false, context, true, true);
+    expect(delivered).toEqual([]);
+    coordinator.observe(agent({ attention: 'working' }), false, context);
+    coordinator.observe(agent({ attention: 'question', question: { ...question, id: 'question-conductor' } }), false, context, true, false);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].kind).toBe('question');
+  });
 
   it('distinguishes questions from completed work', () => {
     const questioning = agent({ title: '⠋ Working', question: { id: 'question-1', text: 'Deploy now?', choices: ['Yes', 'No'], source: 'structured', pane: { targetPaneId: '%2' } } });
@@ -76,6 +89,23 @@ describe('agent notifications', () => {
       tag: 'review-ready-eric',
       url: '/#worktree=eric',
       worktreeId: 'eric'
+    });
+  });
+
+  it('builds generic event-stable Davo done and choice notifications without request content', () => {
+    expect(davoNotification('event-123', 'done')).toEqual({
+      kind: 'davo',
+      title: 'Davo update',
+      body: 'Your request is complete',
+      tag: 'davo-event-123',
+      url: '/#davo'
+    });
+    expect(davoNotification('event-456', 'choice')).toEqual({
+      kind: 'davo',
+      title: 'Davo update',
+      body: 'Your input is needed',
+      tag: 'davo-event-456',
+      url: '/#davo'
     });
   });
 

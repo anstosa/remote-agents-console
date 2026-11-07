@@ -152,7 +152,7 @@ describe('scheduler tick fires Schedules unattended', () => {
     const { notes, queued, noteId } = await seed({ kind: 'claude', target: { worktreeId: 'wt-main' } });
     const tmux = recordingTmux();
     const submitted: string[] = [];
-    const prompts = { submit: async (_agentId: string, text: string) => { submitted.push(text); return true; }, beginAgentMutation: () => () => {} };
+    const prompts = { submit: async (_agentId: string, text: string) => { submitted.push(text); return true; }, beginAgentMutation: () => () => {}, /* preserve the unwatched lifecycle boundary */ withExternalActivity: async (_id: string, effect: () => unknown | Promise<unknown>) => await effect() };
     const server = await tickApp({ notes, queued, tmux, launch: launchFake(), discovery, push, prompts, conversationNamePollDelay: async () => {} });
     try {
       await server.scheduler.tick(tickNow);
