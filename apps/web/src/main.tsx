@@ -2521,6 +2521,64 @@ function MobileTerminalKeys({ id }: { id: string }) {
   const [shiftActive, setShiftActive] = useState(false);
   const [altActive, setAltActive] = useState(false);
   const [fnActive, setFnActive] = useState(false);
+  const keyboardSwipeStart = useRef<{ identifier: number; x: number; y: number } | undefined>(undefined);
+  const keyboardSwiped = useRef(false);
+  const keyboardSwipeCleanup = useRef<(() => void) | undefined>(undefined);
+  // cancel the gesture and release its document-level touch observer
+  const cancelKeyboardSwipe = () => {
+    keyboardSwipeStart.current = undefined;
+    keyboardSwipeCleanup.current?.();
+    keyboardSwipeCleanup.current = undefined;
+  };
+  // release an unfinished gesture when its pane changes or unmounts
+  useEffect(() => cancelKeyboardSwipe, [id]);
+  // preserve the terminal's input focus until a tap or deliberate dismissal completes
+  const preserveKeyFocus = (event: React.PointerEvent<HTMLDivElement>) => {
+    keyboardSwiped.current = false;
+    event.preventDefault();
+  };
+  // track only one finger starting on the helper controls
+  const startKeyboardSwipe = (event: React.TouchEvent<HTMLDivElement>) => {
+    cancelKeyboardSwipe();
+    keyboardSwiped.current = false;
+    // multiple fingers belong to browser gestures rather than keyboard dismissal
+    if (event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    keyboardSwipeStart.current = { identifier: touch.identifier, x: touch.clientX, y: touch.clientY };
+    // a second finger outside the helper strip still invalidates this gesture
+    const invalidateMultiTouch = (next: TouchEvent) => {
+      // keep the gesture invalid even if the additional finger lifts first
+      if (next.touches.length > 1) cancelKeyboardSwipe();
+    };
+    document.addEventListener('touchstart', invalidateMultiTouch, { capture: true, passive: true });
+    // remove only this gesture's capture listener
+    keyboardSwipeCleanup.current = () => document.removeEventListener('touchstart', invalidateMultiTouch, true);
+  };
+  // release input without focusing the composer and reopening the soft keyboard
+  const finishKeyboardSwipe = (event: React.TouchEvent<HTMLDivElement>) => {
+    const start = keyboardSwipeStart.current;
+    cancelKeyboardSwipe();
+    // ignore incomplete or multi-touch gestures
+    if (start === undefined || event.touches.length !== 0) return;
+    // match only the finger that started this gesture
+    const touch = Array.from(event.changedTouches).find(candidate => candidate.identifier === start.identifier);
+    // another finger ending cannot finish this gesture
+    if (touch === undefined) return;
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    // preserve taps and upward, sideways or diagonal movement
+    if (dy < 40 || dy <= Math.abs(dx) * 1.25) return;
+    keyboardSwiped.current = true;
+    exitTerminalInput.get(id)?.();
+  };
+  // a completed swipe cannot also activate the key under the finger
+  const suppressSwipeClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    // retain normal taps and keyboard button activation
+    if (!keyboardSwiped.current || event.detail === 0) return;
+    keyboardSwiped.current = false;
+    event.preventDefault();
+    event.stopPropagation();
+  };
   // publish the mounted pane's sticky toggle state
   useEffect(() => {
     mobileModifiers.set(id, { alt: altActive, ctrl: ctrlActive, shift: shiftActive, fn: fnActive });
@@ -2548,7 +2606,7 @@ function MobileTerminalKeys({ id }: { id: string }) {
   const mobileControl = (value: '\x1b'|'\x03') => { terminalInputs.get(id)?.(value); };
   // read on the click, not pointerdown: iOS only grants clipboard reads to a tap's activation
   const mobilePaste = () => { void navigator.clipboard?.readText().then(text => { if (text) terminalPasters.get(id)?.(text); }, () => { /* dismissed or denied */ }); };
-  return <div className="mobile-terminal-keys" aria-label="Terminal keys"><div className="mobile-control-keys"><button type="button" aria-label="Esc" onPointerDown={event => { event.preventDefault(); mobileControl('\x1b'); }}>Esc</button><button type="button" aria-label="Ctrl+C" onPointerDown={event => { event.preventDefault(); mobileControl('\x03'); }}>Ctrl+C</button></div><div className="mobile-key-modifiers"><button type="button" aria-label="Tab" onPointerDown={event => { event.preventDefault(); mobileKey('tab'); }}>Tab</button><button type="button" className={shiftActive ? 'active' : ''} aria-pressed={shiftActive} onPointerDown={event => { event.preventDefault(); toggleModifier('shift'); }}>Shift</button><button type="button" className={ctrlActive ? 'active' : ''} aria-pressed={ctrlActive} onPointerDown={event => { event.preventDefault(); toggleModifier('ctrl'); }}>Ctrl</button><button type="button" className={altActive ? 'active' : ''} aria-pressed={altActive} onPointerDown={event => { event.preventDefault(); toggleModifier('alt'); }}>Alt</button><button type="button" className={`mobile-key-fn${fnActive ? ' active' : ''}`} aria-pressed={fnActive} title="Function keys: 1–9 for F1–F9, 0 for F10" onPointerDown={event => { /* preserve terminal focus while toggling fn */ event.preventDefault(); toggleModifier('fn'); }}>Fn</button></div><div className="mobile-arrow-keys"><button type="button" aria-label="Slash" onPointerDown={event => { event.preventDefault(); mobileKey('slash'); }}>/</button><button type="button" aria-label="Up arrow" onPointerDown={event => { event.preventDefault(); mobileKey('up'); }}><MobileKeyIcon name="up" /></button><button type="button" aria-label="Dollar" onPointerDown={event => { event.preventDefault(); mobileKey('dollar'); }}>$</button><button type="button" aria-label="Left arrow" onPointerDown={event => { event.preventDefault(); mobileKey('left'); }}><MobileKeyIcon name="left" /></button><button type="button" aria-label="Down arrow" onPointerDown={event => { event.preventDefault(); mobileKey('down'); }}><MobileKeyIcon name="down" /></button><button type="button" aria-label="Right arrow" onPointerDown={event => { event.preventDefault(); mobileKey('right'); }}><MobileKeyIcon name="right" /></button></div><button type="button" className="mobile-key-paste" aria-label="Paste" title="Paste" onPointerDown={event => event.preventDefault()} onClick={mobilePaste}><MobileKeyIcon name="paste" /></button></div>;
+  return <div className="mobile-terminal-keys" aria-label="Terminal keys" onPointerDown={preserveKeyFocus} onTouchStart={startKeyboardSwipe} onTouchEnd={finishKeyboardSwipe} onTouchCancel={cancelKeyboardSwipe} onClickCapture={suppressSwipeClick}><div className="mobile-control-keys"><button type="button" aria-label="Esc" onClick={() => /* send escape after tap */ mobileControl('\x1b')}>Esc</button><button type="button" aria-label="Ctrl+C" onClick={() => /* interrupt only after tap */ mobileControl('\x03')}>Ctrl+C</button></div><div className="mobile-key-modifiers"><button type="button" aria-label="Tab" onClick={() => /* send tab after tap */ mobileKey('tab')}>Tab</button><button type="button" className={shiftActive ? 'active' : ''} aria-pressed={shiftActive} onClick={() => /* toggle shift after tap */ toggleModifier('shift')}>Shift</button><button type="button" className={ctrlActive ? 'active' : ''} aria-pressed={ctrlActive} onClick={() => /* toggle ctrl after tap */ toggleModifier('ctrl')}>Ctrl</button><button type="button" className={altActive ? 'active' : ''} aria-pressed={altActive} onClick={() => /* toggle alt after tap */ toggleModifier('alt')}>Alt</button><button type="button" className={`mobile-key-fn${fnActive ? ' active' : ''}`} aria-pressed={fnActive} title="Function keys: 1–9 for F1–F9, 0 for F10" onClick={() => { /* toggle only after a completed tap */ toggleModifier('fn'); }}>Fn</button></div><div className="mobile-arrow-keys"><button type="button" aria-label="Slash" onClick={() => /* send slash after tap */ mobileKey('slash')}>/</button><button type="button" aria-label="Up arrow" onClick={() => /* send up after tap */ mobileKey('up')}><MobileKeyIcon name="up" /></button><button type="button" aria-label="Dollar" onClick={() => /* send dollar after tap */ mobileKey('dollar')}>$</button><button type="button" aria-label="Left arrow" onClick={() => /* send left after tap */ mobileKey('left')}><MobileKeyIcon name="left" /></button><button type="button" aria-label="Down arrow" onClick={() => /* send down after tap */ mobileKey('down')}><MobileKeyIcon name="down" /></button><button type="button" aria-label="Right arrow" onClick={() => /* send right after tap */ mobileKey('right')}><MobileKeyIcon name="right" /></button></div><button type="button" className="mobile-key-paste" aria-label="Paste" title="Paste" onClick={mobilePaste}><MobileKeyIcon name="paste" /></button></div>;
 }
 
 // render the agent panel's composer: prompt history above attach on the left, the prompt, and
@@ -7261,7 +7319,8 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
     // this; the composer's focus blurs it so keystrokes return to prompting.
     terminalInputs.set(id, handle.sendInput);
     terminalPasters.set(id, handle.paste);
-    const exitInput = () => terminal.blur();
+    // explicitly leave output mode even when a contextual menu already moved focus
+    const exitInput = () => { terminal.blur(); /* update mode only while mounted */ if (!disposed) setInputActive(false); };
     exitTerminalInput.set(id, exitInput);
     // Focusing the pane drives `.input-active` (which collapses the composer to the
     // terminal helper keys on a phone); blurring it, or focusing the composer, reverts.

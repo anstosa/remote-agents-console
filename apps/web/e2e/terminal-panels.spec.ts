@@ -2009,6 +2009,161 @@ test('on a phone a tap on a Terminal focuses its textarea', async ({ page }) => 
   expect(focusedSynchronously).toBe(true);
 });
 
+// dismiss keyboard input through native touches on either shared helper-key surface
+test.describe('swiping down on output or terminal controls', () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+
+  // move a real finger over a key without synthesizing a button click
+  const swipeControls = async (page: Page, key: Locator, dx: number, dy: number, cancel = false, multiTouch = false) => {
+    const bounds = await key.boundingBox();
+    // require a visible control before sending native touch events
+    if (bounds === null) throw new Error('terminal key has no touch bounds');
+    const x = Math.round(bounds.x + bounds.width / 2);
+    const y = Math.round(bounds.y + bounds.height / 2);
+    const session = await page.context().newCDPSession(page);
+    // retain stable finger identities throughout the gesture
+    const points = (offsetX: number, offsetY: number) => [
+      { x: x + offsetX, y: y + offsetY, id: 1 },
+      ...(multiTouch ? [{ x: x + offsetX + 35, y: y + offsetY, id: 2 }] : [])
+    ];
+    try {
+      await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: points(0, 0) });
+      // cross the gesture threshold gradually instead of jumping to the endpoint
+      for (let step = 1; step <= 8; step++) {
+        await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: points(Math.round(dx * step / 8), Math.round(dy * step / 8)) });
+        await page.evaluate(() => new Promise<number>(resolve => requestAnimationFrame(resolve)));
+      }
+      await session.send('Input.dispatchTouchEvent', { type: cancel ? 'touchCancel' : 'touchEnd', touchPoints: [] });
+    } finally { await session.detach(); }
+  };
+
+  // cover the same gesture without closing either kind of running pane
+  for (const kind of ['agent', 'terminal'] as const) {
+    test(`swiping down on ${kind} controls dismisses input without sending keys`, async ({ page }) => {
+      await installPaneMock(page);
+      await routeApi(page);
+      await page.goto('/');
+      await seedPaneSize(page, 'agent-1', 80, 24);
+      const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true });
+      // only the agent parameter verifies draft restoration
+      if (kind === 'agent') await prompt.fill('unsent draft');
+      // a shell owns its own keyboard and must stay open after dismissal
+      if (kind === 'terminal') {
+        await openPicker(page);
+        await page.getByRole('menuitem', { name: /build/u }).click();
+        await seedPaneSize(page, '%5', 80, 24);
+      }
+      const pane = page.locator(kind === 'agent' ? '.log-output' : '.terminal-pane[data-panel-key="%5"]');
+      const textarea = pane.locator('.xterm-helper-textarea');
+      const controls = pane.getByLabel('Terminal keys');
+      await pane.locator(kind === 'agent' ? '.log-canvas' : '.terminal-canvas').tap();
+      await expect(textarea).toBeFocused();
+      await expect(controls).toBeVisible();
+      // ordinary touch taps still toggle modifiers and send exactly one key
+      await controls.getByRole('button', { name: 'Ctrl', exact: true }).tap();
+      await expect(controls.getByRole('button', { name: 'Ctrl', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await controls.getByRole('button', { name: 'Ctrl', exact: true }).tap();
+      await controls.getByRole('button', { name: 'Tab', exact: true }).tap();
+      const id = kind === 'agent' ? 'agent-1' : '%5';
+      await expect.poll(() => paneInputText(page, id)).toBe('\t');
+      await expect(textarea).toBeFocused();
+      await swipeControls(page, controls.getByRole('button', { name: 'Esc', exact: true }), 0, 50);
+      await expect(textarea).not.toBeFocused();
+      await expect(page.locator('textarea:focus')).toHaveCount(0);
+      await expect(pane).toBeInViewport({ ratio: 0.99 });
+      expect(await paneInputText(page, id)).toBe('\t');
+      // agent dismissal restores the draft without focusing it and reopening the keyboard
+      if (kind === 'agent') {
+        await expect(pane).not.toHaveClass(/input-active/u);
+        await expect(controls).toBeHidden();
+        await expect(page.getByRole('region', { name: 'Prompt composer' })).toBeVisible();
+        await expect(prompt).toHaveValue('unsent draft');
+      } else {
+        await expect(pane).not.toHaveClass(/\bfocused\b/u);
+        await expect(controls).toBeVisible();
+      }
+    });
+  }
+
+  // retain multi-touch history even when the second finger never touches the controls
+  test('swiping down controls ignores a second finger that starts and ends outside the strip', async ({ page }) => {
+    await installPaneMock(page);
+    await routeApi(page);
+    await page.goto('/');
+    await seedPaneSize(page, 'agent-1', 80, 24);
+    const output = page.locator('.log-output');
+    const textarea = output.locator('.xterm-helper-textarea');
+    const controls = output.getByLabel('Terminal keys');
+    const esc = controls.getByRole('button', { name: 'Esc', exact: true });
+    await output.locator('.log-canvas').tap();
+    await expect(textarea).toBeFocused();
+    const primaryBounds = await esc.boundingBox();
+    const outsideBounds = await output.locator('.log-canvas').boundingBox();
+    // require separate rendered helper and canvas touch targets
+    if (primaryBounds === null || outsideBounds === null) throw new Error('missing multi-touch targets');
+    const primary = { x: Math.round(primaryBounds.x + primaryBounds.width / 2), y: Math.round(primaryBounds.y + primaryBounds.height / 2), id: 1 };
+    const secondary = { x: Math.round(outsideBounds.x + outsideBounds.width / 2), y: Math.round(outsideBounds.y + Math.min(100, outsideBounds.height / 4)), id: 2 };
+    expect(secondary.y).toBeLessThan(primary.y - 100);
+    // validate the browser's actual partial-release order instead of assuming CDP semantics
+    await page.evaluate(() => {
+      const events: Array<{ type: string; helper: boolean; touches: number }> = [];
+      Object.defineProperty(window, '__keyboardGestureEvents', { value: events });
+      // record starts and releases at their original touch targets
+      for (const type of ['touchstart', 'touchend']) document.addEventListener(type, event => {
+        const target = event.target;
+        events.push({ type, helper: target instanceof Element && target.closest('.mobile-terminal-keys') !== null, touches: (event as TouchEvent).touches.length });
+      }, true);
+    });
+    const session = await page.context().newCDPSession(page);
+    try {
+      await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [primary] });
+      await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [primary, secondary] });
+      // CDP releases the supplied secondary point while the primary remains active
+      await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [secondary] });
+      // the remaining primary still completes an otherwise qualifying downward swipe
+      for (let step = 1; step <= 8; step++) {
+        await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...primary, y: primary.y + Math.round(50 * step / 8) }] });
+        await page.evaluate(() => new Promise<number>(resolve => requestAnimationFrame(resolve)));
+      }
+      await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    } finally { await session.detach(); }
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __keyboardGestureEvents: unknown[] }).__keyboardGestureEvents)).toEqual([
+      { type: 'touchstart', helper: true, touches: 1 },
+      { type: 'touchstart', helper: false, touches: 2 },
+      { type: 'touchend', helper: false, touches: 1 },
+      { type: 'touchend', helper: true, touches: 0 }
+    ]);
+    await expect(textarea).toBeFocused();
+    await expect(output).toHaveClass(/input-active/u);
+    await expect(controls).toBeVisible();
+    await expect(output).toBeInViewport({ ratio: 0.99 });
+    expect(await paneInputText(page, 'agent-1')).toBe('');
+    // invalidating one gesture must not disable the next valid single-finger dismissal
+    await swipeControls(page, esc, 0, 50);
+    await expect(textarea).not.toBeFocused();
+    await expect(output).not.toHaveClass(/input-active/u);
+    expect(await paneInputText(page, 'agent-1')).toBe('');
+  });
+
+  // keep incidental movement and interrupted touches from closing the keyboard
+  test('swiping down controls ignores short, upward, sideways, diagonal, cancelled and multi-touch gestures', async ({ page }) => {
+    await installPaneMock(page);
+    await routeApi(page);
+    await page.goto('/');
+    await seedPaneSize(page, 'agent-1', 80, 24);
+    const output = page.locator('.log-output');
+    await output.locator('.log-canvas').tap();
+    const esc = output.getByRole('button', { name: 'Esc', exact: true });
+    // each rejected gesture leaves the same input target and bytes untouched
+    for (const [dx, dy, cancel, multiTouch] of [[0, 20, false, false], [0, -50, false, false], [70, 0, false, false], [50, 50, false, false], [0, 50, true, false], [0, 50, false, true]] as const) {
+      await swipeControls(page, esc, dx, dy, cancel, multiTouch);
+      await expect(output.locator('.xterm-helper-textarea')).toBeFocused();
+      await expect(output).toHaveClass(/input-active/u);
+      expect(await paneInputText(page, 'agent-1')).toBe('');
+    }
+  });
+});
+
 test('on a phone minimizing a Terminal returns to the agent panel and drops its dot', async ({ page }) => {
   await page.setViewportSize({ width: 428, height: 880 });
   await installPaneMock(page);
