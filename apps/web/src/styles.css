@@ -1367,6 +1367,11 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 .prompt textarea.voice-listening, .prompt textarea.voice-listening:focus-visible { border-color: var(--red); outline: 0; box-shadow: inset 0 0 0 1px var(--red); animation: voice-listening 1s ease-in-out infinite alternate; }
 .prompt textarea { min-height: 4.5rem; max-height: calc(var(--app-height, 100dvh) * .5); overflow-y: auto; resize: none; padding: .45rem .55rem; line-height: 1.35; font-family: "JetBrains Mono Prompt", var(--font-mono); font-variant-ligatures: contextual; font-feature-settings: "calt" 1; text-rendering: optimizeLegibility; }
 .prompt-composer { position: relative; }
+/* give each recording toggle one compact acknowledgement without moving surrounding layout */
+.prompt-composer.voice-toggle-bounce { animation: prompt-voice-bounce 240ms ease-out 1; }
+/* keep microphone state visible above the field without stealing text or gesture input */
+.prompt-recording-indicator { position: absolute; z-index: 2; bottom: calc(100% + .3rem); left: 50%; display: grid; width: 1.6rem; height: 1.6rem; place-items: center; border: 1px solid var(--red); border-radius: 50%; background: var(--crust); color: var(--red); transform: translateX(-50%); pointer-events: none; animation: prompt-recording-blink 1s ease-in-out infinite; }
+.prompt-recording-indicator svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .prompt-composer textarea { display: block; width: 100%; }
 .command-menu { position: absolute; right: 0; bottom: calc(100% + .35rem); left: 0; z-index: var(--layer-popover); display: grid; max-height: 15rem; overflow: auto; padding: .3rem; border: 1px solid color-mix(in srgb, var(--lavender) 55%, var(--surface-1)); border-radius: var(--control-radius); background: var(--mantle); box-shadow: 0 .7rem 1.8rem color-mix(in srgb, var(--crust) 80%, transparent); }
 .command-menu button { display: grid; grid-template-columns: minmax(8rem, max-content) minmax(0, 1fr); width: 100%; gap: .7rem; align-items: center; border: 0; border-radius: calc(var(--control-radius) - .15rem); padding: .45rem .5rem; background: transparent; color: var(--subtext-0); text-align: left; box-shadow: none; }
@@ -1682,11 +1687,18 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .cleanup-actions { display: flex; align-items: center; gap: .75rem; padding-top: .15rem; }
 .cleanup-actions > span { color: var(--subtext-0); font: .7rem var(--font-mono); }
 .cleanup-actions button { min-width: 7.5rem; justify-content: center; margin-left: auto; border-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 85%, var(--peach)); color: var(--crust); }
+/* one quick up-and-down bounce per logical recording toggle */
+@keyframes prompt-voice-bounce { 0%, 100% { transform: translateY(0); } 45% { transform: translateY(-6px); } 75% { transform: translateY(2px); } }
+/* keep the live microphone recognizable throughout its slow blink */
+@keyframes prompt-recording-blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 @keyframes voice-listening { from { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 30%, transparent); } to { box-shadow: inset 0 0 0 1px var(--red), 0 0 .75rem color-mix(in srgb, var(--red) 48%, transparent); } }
 @keyframes voice-soundwave-bar { 0% { transform: scaleX(.12); } 45% { transform: scaleX(.82); } 100% { transform: scaleX(.34); } }
 /* allow notes to share the pulse without changing cleanup's yellow default */
 @keyframes cleanup-glow { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.22); box-shadow: inset 0 0 1rem color-mix(in srgb, var(--cleanup-glow-color, var(--yellow)) 20%, transparent), 0 0 1.1rem color-mix(in srgb, var(--cleanup-glow-color, var(--yellow)) 68%, transparent); } }
 @keyframes settings-update-glow { 0%, 100% { filter: brightness(.92); box-shadow: inset 0 0 .35rem color-mix(in srgb, var(--mauve) 18%, transparent), 0 0 .25rem color-mix(in srgb, var(--mauve) 28%, transparent); } 50% { filter: brightness(1.3); box-shadow: inset 0 0 .9rem color-mix(in srgb, var(--mauve) 42%, transparent), 0 0 1rem color-mix(in srgb, var(--mauve) 78%, transparent); } }
+/* recording remains visible without motion for either reduced-motion preference */
+@media (prefers-reduced-motion: reduce) { .prompt-composer.voice-toggle-bounce, .prompt textarea.voice-listening, .prompt-recording-indicator { animation: none; } }
+:root[data-motion="reduced"] :is(.prompt-composer.voice-toggle-bounce, .prompt textarea.voice-listening, .prompt-recording-indicator) { animation: none; }
 /* retain static attention colors when motion is reduced */
 @media (prefers-reduced-motion: reduce) { .notes-toggle.unread-queued-prompts, .voice-soundwave i { animation: none; } }
 /* the Reduced motion setting stills the same animations regardless of the OS */

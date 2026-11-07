@@ -1,4 +1,4 @@
-import { cloneElement, Component, createContext, type Dispatch, Fragment, lazy, type ReactElement, type ReactNode, type SetStateAction, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { cloneElement, Component, createContext, type Dispatch, lazy, type ReactElement, type ReactNode, type SetStateAction, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { PublicHomepage } from './public-homepage.js';
@@ -39,7 +39,7 @@ import type { KeysConfig } from '../../server/src/config/keys.js';
 import { applyColorTheme, useColorTheme } from './color-theme.js';
 import { useDynamicWorktrees } from './dynamic-worktrees.js';
 import { useUsagePace } from './usage-pace.js';
-import { applyReducedMotion } from './reduced-motion.js';
+import { applyReducedMotion, prefersReducedMotion } from './reduced-motion.js';
 import { useFullscreenAction } from './fullscreen-loader.js';
 import { applyFlyoutMarkers } from './flyout-markers.js';
 import { readNotificationSounds } from './notification-sounds.js';
@@ -998,10 +998,19 @@ const copyText = async (value: string) => {
   } finally { textarea.remove(); }
 };
 const selectionCopyFlashMs = 600;
-const voiceHoldDelayMs = 450;
+// keep recording feedback distinct from notification-only alert sounds
+const playDictationCue = (active: boolean) => {
+  try {
+    const sound = new Audio(active ? '/dictation-start.wav' : '/dictation-stop.wav');
+    sound.volume = 0.35;
+    void sound.play().catch(() => { /* browser playback policy may deny a cue */ });
+  } catch { /* unavailable audio must not block recording controls */ }
+};
 
 const ServerContext = createContext<ServerInfo | undefined>(undefined);
 const ServerStatusContext = createContext<Readonly<Record<string, InstanceAttention>>>({});
+// dictation belongs only to a visible prompt input mode
+const PromptInputModeContext = createContext(true);
 const VoiceTriggerContext = createContext<{ open: () => void; active: boolean; visible: boolean; name: string } | undefined>(undefined);
 // the dashboard's Projects and their Worktrees, which name a Worktree's stack "<Project> / <Worktree>"
 const ProjectsContext = createContext<readonly Project[]>([]);
@@ -2620,6 +2629,7 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const selectionActions = useSelectionActions();
   // use the shared mobile text-editing breakpoint
   const phone = usePhoneLayout();
+  const promptInputMode = useContext(PromptInputModeContext);
   const [commandToken, setCommandToken] = useState<CommandToken>();
   const [activeCommand, setActiveCommand] = useState(0);
   const [promptCommands, setPromptCommands] = useState<PromptCommand[]>([]);
@@ -2641,6 +2651,10 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   // would only queue behind it, so the operator answers, replies in their own words, or dismisses
   const answerMode = question === undefined || turnBlocked || normalPromptQuestionId !== question.id;
   const questionNotesOpen = question !== undefined && notesQuestionId === question.id;
+  const dictationAvailable = promptInputMode && (question === undefined || !answerMode);
+  // delayed service callbacks must see the current input owner before effects run
+  const dictationAvailableRef = useRef(dictationAvailable);
+  dictationAvailableRef.current = dictationAvailable;
   // keep file intake out of snapshots and modes without attachment controls
   const attachmentInputDisabled = pending || (question !== undefined && answerMode);
   // clear the drop target when the active composer changes or becomes unavailable
@@ -2765,9 +2779,39 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     promptInput.current.setSelectionRange(selection.start, selection.end);
   }, [id, value, question?.id, answerMode]);
   const recognition = useRef<SpeechRecognitionInstance | undefined>(undefined);
-  const voiceHoldTimer = useRef<number | undefined>(undefined);
-  const voiceHoldPointer = useRef<number | undefined>(undefined);
-  const voiceHoldStarted = useRef(false);
+  const voiceSessionActive = useRef(false);
+  const voiceSwipeStart = useRef<{ identifier: number; x: number; y: number; scrollTop: number } | undefined>(undefined);
+  const voiceSwipeCleanup = useRef<(() => void) | undefined>(undefined);
+  // release only the current prompt gesture's document observer
+  const cancelVoiceSwipe = () => {
+    voiceSwipeStart.current = undefined;
+    voiceSwipeCleanup.current?.();
+    voiceSwipeCleanup.current = undefined;
+  };
+  // one cue and bounce belong to each logical recording transition, not service restarts
+  const updateListening = (active: boolean) => {
+    // repeated recognition callbacks must not replay toggle feedback
+    if (voiceSessionActive.current === active) return;
+    voiceSessionActive.current = active;
+    setListening(active);
+    const composer = promptInput.current?.parentElement;
+    // restart the short one-shot animation even when toggles happen quickly
+    if (composer !== undefined && composer !== null) {
+      composer.classList.remove('voice-toggle-bounce');
+      // reduced motion keeps state feedback without a forced-layout bounce
+      if (!prefersReducedMotion()) {
+        const bounds = composer.getBoundingClientRect();
+        // visible stops still bounce while hidden and offscreen prompts retain no latent animation
+        if (bounds.width > 0 && bounds.height > 0 && bounds.right > 0 && bounds.left < window.innerWidth && bounds.bottom > 0 && bounds.top < window.innerHeight && getComputedStyle(composer).visibility !== 'hidden') composer.classList.add('voice-toggle-bounce');
+      }
+    }
+    playDictationCue(active);
+  };
+  // leave no persistent transform or animation after the one-shot feedback
+  const finishVoiceBounce = (event: React.AnimationEvent<HTMLDivElement>) => {
+    // ignore animation events from the blinking mic and red border
+    if (event.target === event.currentTarget && event.animationName === 'prompt-voice-bounce') event.currentTarget.classList.remove('voice-toggle-bounce');
+  };
   const voiceEnabled = useRef(false);
   const voiceRestartTimer = useRef<number | undefined>(undefined);
   const promptValue = useRef(value);
@@ -2776,12 +2820,24 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const speechSegments = useRef(new Map<number, string>());
   const speechWindow = window as Window & { SpeechRecognition?: SpeechRecognitionConstructor; webkitSpeechRecognition?: SpeechRecognitionConstructor };
   const supportsSpeechRecognition = speechWindow.SpeechRecognition !== undefined || speechWindow.webkitSpeechRecognition !== undefined;
-  useEffect(() => () => {
-    if (voiceHoldTimer.current !== undefined) window.clearTimeout(voiceHoldTimer.current);
-    if (voiceRestartTimer.current !== undefined) window.clearTimeout(voiceRestartTimer.current);
-    voiceEnabled.current = false;
-    recognition.current?.abort();
-  }, []);
+  // changing agents or leaving the composer must release the microphone and pending gestures
+  useEffect(() => {
+    setListening(false);
+    // detach stale callbacks before abort can synchronously emit an end event
+    return () => {
+      cancelVoiceSwipe();
+      // discard any pending silent recognition restart
+      if (voiceRestartTimer.current !== undefined) window.clearTimeout(voiceRestartTimer.current);
+      voiceRestartTimer.current = undefined;
+      voiceEnabled.current = false;
+      const current = recognition.current;
+      recognition.current = undefined;
+      current?.abort();
+      // an active logical session ends once when its owner disappears
+      if (voiceSessionActive.current) playDictationCue(false);
+      voiceSessionActive.current = false;
+    };
+  }, [id]);
   // apply one attachment policy to file-picker, clipboard, and drop inputs
   const chooseAttachments = (files: FileList | File[] | null) => {
     // preserve attachment snapshots owned by pending operations
@@ -2854,14 +2910,23 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
       input.classList.remove('selection-copied');
     }, selectionCopyFlashMs);
   };
+  // stop the logical session before abort callbacks or delayed restarts can resume it
   const stopVoice = () => {
+    cancelVoiceSwipe();
     voiceEnabled.current = false;
+    // explicit stops retire any pending silent service restart
     if (voiceRestartTimer.current !== undefined) window.clearTimeout(voiceRestartTimer.current);
     voiceRestartTimer.current = undefined;
-    recognition.current?.abort();
+    const current = recognition.current;
     recognition.current = undefined;
-    setListening(false);
+    current?.abort();
+    updateListening(false);
   };
+  // a hidden prompt or output-mode switch cannot leave an invisible microphone running
+  useEffect(() => {
+    // question-only UI and offscreen phone panels no longer own dictation
+    if (!dictationAvailable) stopVoice();
+  }, [dictationAvailable]);
   // submit only after the launch handoff has a real agent
   // text the Agent offers for the composer fills it only while it is empty, once per offer
   useEffect(() => {
@@ -3017,10 +3082,13 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
       setAttachmentError('Unable to send this answer. The question may have changed or may not support text answers.');
     } finally { setPendingOperation(pendingKey, false); }
   };
+  // begin dictation or silently reconnect an already-enabled logical session
   const startVoice = () => {
-    if (pending || !supportsSpeechRecognition || recognition.current !== undefined) return false;
+    if (pending || !dictationAvailableRef.current || !supportsSpeechRecognition || recognition.current !== undefined) return false;
     const Recognition = (speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition)!;
-    const next = new Recognition();
+    let next: SpeechRecognitionInstance;
+    try { next = new Recognition(); }
+    catch { stopVoice(); return false; }
     recognition.current = next;
     next.continuous = true;
     next.interimResults = true;
@@ -3029,7 +3097,7 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     speechPrefix.current = promptValue.current;
     speechSegments.current.clear();
     next.onresult = event => {
-      if (recognition.current !== next) return;
+      if (recognition.current !== next || !dictationAvailableRef.current) return;
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index];
         const transcript = result?.[0]?.transcript.trim() ?? '';
@@ -3045,51 +3113,62 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     next.onend = () => {
       if (recognition.current !== next) return;
       recognition.current = undefined;
-      if (!voiceEnabled.current) return setListening(false);
+      // service disconnects do not toggle an intentionally latched session
+      if (!voiceEnabled.current) return updateListening(false);
       voiceRestartTimer.current = window.setTimeout(() => {
         voiceRestartTimer.current = undefined;
-        if (voiceEnabled.current && recognition.current === undefined) startVoice();
+        if (voiceEnabled.current && dictationAvailableRef.current && recognition.current === undefined) startVoice();
       });
     };
+    // fatal errors end the logical mode promptly instead of waiting for another callback
     next.onerror = event => {
-      if (event.error !== undefined && event.error !== 'no-speech' && event.error !== 'aborted') voiceEnabled.current = false;
+      // stale recognition instances cannot stop a newer session
+      if (recognition.current !== next) return;
+      // silence and expected aborts still follow the existing end/restart policy
+      if (event.error !== undefined && event.error !== 'no-speech' && event.error !== 'aborted') stopVoice();
     };
-    setListening(true);
     try { next.start(); }
     catch {
       voiceEnabled.current = false;
       recognition.current = undefined;
-      setListening(false);
+      updateListening(false);
       return false;
     }
+    updateListening(true);
     return true;
   };
-  const beginVoiceHold = (event: React.PointerEvent<HTMLTextAreaElement>) => {
-    if (pending || !supportsSpeechRecognition || !event.isPrimary || event.button !== 0) return;
-    if (voiceEnabled.current || listening) {
-      event.preventDefault();
-      stopVoice();
-      return;
-    }
-    if (voiceHoldTimer.current !== undefined) window.clearTimeout(voiceHoldTimer.current);
-    const pointerId = event.pointerId;
-    voiceHoldPointer.current = pointerId;
-    voiceHoldStarted.current = false;
-    try { event.currentTarget.setPointerCapture(pointerId); } catch { /* Pointer capture may be unavailable in synthetic events. */ }
-    voiceHoldTimer.current = window.setTimeout(() => {
-      voiceHoldTimer.current = undefined;
-      if (voiceHoldPointer.current === pointerId) voiceHoldStarted.current = startVoice();
-    }, voiceHoldDelayMs);
+  // leave taps and native text selection alone while tracking a possible upward swipe
+  const beginVoiceSwipe = (event: React.TouchEvent<HTMLTextAreaElement>) => {
+    cancelVoiceSwipe();
+    // unavailable recognition and multi-touch must never request microphone access
+    if (!dictationAvailableRef.current || !supportsSpeechRecognition || event.touches.length !== 1 || pending && !voiceEnabled.current) return;
+    const touch = event.touches[0];
+    voiceSwipeStart.current = { identifier: touch.identifier, x: touch.clientX, y: touch.clientY, scrollTop: event.currentTarget.scrollTop };
+    // a second finger outside this textarea still invalidates microphone intent
+    const invalidateMultiTouch = (next: TouchEvent) => {
+      // lifting the extra finger cannot restore a previously invalid gesture
+      if (next.touches.length > 1) cancelVoiceSwipe();
+    };
+    document.addEventListener('touchstart', invalidateMultiTouch, { capture: true, passive: true });
+    // release exactly this prompt gesture's capture listener
+    voiceSwipeCleanup.current = () => document.removeEventListener('touchstart', invalidateMultiTouch, true);
   };
-  const endVoiceHold = (event: React.PointerEvent<HTMLTextAreaElement>) => {
-    if (voiceHoldPointer.current !== event.pointerId) return;
-    if (voiceHoldTimer.current !== undefined) window.clearTimeout(voiceHoldTimer.current);
-    voiceHoldTimer.current = undefined;
-    voiceHoldPointer.current = undefined;
-    if (voiceHoldStarted.current) {
-      event.preventDefault();
-    }
-    voiceHoldStarted.current = false;
+  // toggle once after a deliberate single-finger upward gesture completes
+  const endVoiceSwipe = (event: React.TouchEvent<HTMLTextAreaElement>) => {
+    const start = voiceSwipeStart.current;
+    cancelVoiceSwipe();
+    // native scrolling wins even when its scroll event has not yet flushed
+    if (start === undefined || event.touches.length !== 0 || event.currentTarget.scrollTop !== start.scrollTop) return;
+    const touch = Array.from(event.changedTouches).find(candidate => candidate.identifier === start.identifier);
+    // another finger cannot finish the recorded gesture
+    if (touch === undefined) return;
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    // preserve short, downward, sideways and diagonal editing gestures
+    if (dy > -40 || -dy <= Math.abs(dx) * 1.25) return;
+    // a latched session can always be stopped, even between silent restarts
+    if (voiceEnabled.current || voiceSessionActive.current) stopVoice();
+    else startVoice();
   };
   // open the native file chooser
   const attachFiles = () => attachmentInput.current?.click();
@@ -3205,7 +3284,7 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
       input.setSelectionRange(input.value.length, input.value.length);
     });
   };
-  const composer = <div className="prompt-composer" ref={commandAnchorRef}><textarea ref={promptInput} data-prompt-id={id} className={listening ? 'voice-listening' : undefined} aria-label="Prompt" aria-description={supportsSpeechRecognition ? 'Press and hold to start dictation. Tap again to stop.' : undefined} aria-autocomplete="list" data-context-flyout aria-expanded={commandToken !== undefined} aria-controls={commandToken === undefined ? undefined : `prompt-commands-${id}`} aria-activedescendant={commandOptions[activeCommand] === undefined ? undefined : `prompt-command-${id}-${activeCommand}`} value={value} onFocus={() => { exitTerminalInput.get(id)?.(); onPromptFocus(); }} onBlur={() => setCommandToken(undefined)} onCopy={flashCopiedPromptSelection} onPaste={pasteAttachments} onPointerDownCapture={phone ? undefined : preserveContextMenuPress} onMouseDownCapture={phone ? undefined : preserveContextMenuPress} onPointerDown={beginVoiceHold} onPointerUp={endVoiceHold} onPointerCancel={endVoiceHold} onLostPointerCapture={endVoiceHold} onContextMenu={event => { /* preserve active dictation */ if (voiceHoldStarted.current) { event.preventDefault(); return; } openPromptContextMenu(event); }} onKeyDown={event => { const plainArrow = !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey; if (commandOptions.length > 0 && plainArrow && event.key === 'ArrowDown') { event.preventDefault(); setActiveCommand(current => (current + 1) % commandOptions.length); } else if (commandOptions.length > 0 && plainArrow && event.key === 'ArrowUp') { event.preventDefault(); setActiveCommand(current => (current + commandOptions.length - 1) % commandOptions.length); } else if (commandOptions.length > 0 && plainArrow && event.key === 'Enter') { event.preventDefault(); selectCommand(commandOptions[activeCommand] ?? commandOptions[0]!); } else if (plainArrow && event.key === 'ArrowUp' && (historyIndex.current !== undefined || event.currentTarget.selectionStart === event.currentTarget.selectionEnd && !value.slice(0, event.currentTarget.selectionStart).includes('\n'))) { event.preventDefault(); recallPrompt(-1); } else if (plainArrow && event.key === 'ArrowDown' && historyIndex.current !== undefined) { event.preventDefault(); recallPrompt(1); } else if (event.key === 'Escape' && commandToken !== undefined) { event.preventDefault(); setCommandToken(undefined); } else if (event.key === 'Tab') { event.preventDefault(); setValue(current => current + '\t'); } else if (event.key === 'Enter') { event.preventDefault(); /* disabled or remapped modified enter must never submit a prompt */ if (event.altKey && !event.ctrlKey && !event.shiftKey && !event.metaKey && steering !== undefined) { void steerPrompt(); return; } if (event.ctrlKey || event.shiftKey || event.metaKey || event.altKey) return; /* forward plain blank Enter to output */ else if (!event.metaKey && !event.altKey && !value && attachments.length === 0) terminalInputs.get(id)?.('\r'); /* preserve mobile multiline entry */ else if (window.matchMedia('(max-width: 600px)').matches) insertPromptText(event.currentTarget, '\n'); else void submit(); } }} onChange={updatePrompt} />{commandToken !== undefined && <FlyoutPortal onDismiss={() => setCommandToken(undefined)}><div ref={commandFlyoutRef} className="command-menu" style={commandFlyoutStyle} id={`prompt-commands-${id}`} role="listbox" aria-label={`${commandToken.prefix} commands`}>{commandOptions.length > 0 ? commandOptions.map((command, index) => <button key={command.value} id={`prompt-command-${id}-${index}`} type="button" role="option" aria-selected={index === activeCommand} className={index === activeCommand ? 'active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => selectCommand(command)}><code>{command.value}</code><span>{command.description}</span></button>) : <span className="command-menu-empty">No matching commands</span>}</div></FlyoutPortal>}</div>;
+  const composer = <div className="prompt-composer" ref={commandAnchorRef} onAnimationEnd={finishVoiceBounce}><textarea ref={promptInput} data-prompt-id={id} className={listening ? 'voice-listening' : undefined} aria-label="Prompt" aria-description={supportsSpeechRecognition ? 'Swipe up to toggle dictation.' : undefined} aria-autocomplete="list" data-context-flyout aria-expanded={commandToken !== undefined} aria-controls={commandToken === undefined ? undefined : `prompt-commands-${id}`} aria-activedescendant={commandOptions[activeCommand] === undefined ? undefined : `prompt-command-${id}-${activeCommand}`} value={value} onFocus={() => { exitTerminalInput.get(id)?.(); onPromptFocus(); }} onBlur={() => setCommandToken(undefined)} onCopy={flashCopiedPromptSelection} onPaste={pasteAttachments} onPointerDownCapture={phone ? undefined : preserveContextMenuPress} onMouseDownCapture={phone ? undefined : preserveContextMenuPress} onTouchStart={beginVoiceSwipe} onTouchEnd={endVoiceSwipe} onTouchCancel={cancelVoiceSwipe} onScroll={cancelVoiceSwipe} onContextMenu={event => { /* native text editing cancels pending microphone gestures */ cancelVoiceSwipe(); openPromptContextMenu(event); }} onKeyDown={event => { const plainArrow = !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey; if (commandOptions.length > 0 && plainArrow && event.key === 'ArrowDown') { event.preventDefault(); setActiveCommand(current => (current + 1) % commandOptions.length); } else if (commandOptions.length > 0 && plainArrow && event.key === 'ArrowUp') { event.preventDefault(); setActiveCommand(current => (current + commandOptions.length - 1) % commandOptions.length); } else if (commandOptions.length > 0 && plainArrow && event.key === 'Enter') { event.preventDefault(); selectCommand(commandOptions[activeCommand] ?? commandOptions[0]!); } else if (plainArrow && event.key === 'ArrowUp' && (historyIndex.current !== undefined || event.currentTarget.selectionStart === event.currentTarget.selectionEnd && !value.slice(0, event.currentTarget.selectionStart).includes('\n'))) { event.preventDefault(); recallPrompt(-1); } else if (plainArrow && event.key === 'ArrowDown' && historyIndex.current !== undefined) { event.preventDefault(); recallPrompt(1); } else if (event.key === 'Escape' && commandToken !== undefined) { event.preventDefault(); setCommandToken(undefined); } else if (event.key === 'Tab') { event.preventDefault(); setValue(current => current + '\t'); } else if (event.key === 'Enter') { event.preventDefault(); /* disabled or remapped modified enter must never submit a prompt */ if (event.altKey && !event.ctrlKey && !event.shiftKey && !event.metaKey && steering !== undefined) { void steerPrompt(); return; } if (event.ctrlKey || event.shiftKey || event.metaKey || event.altKey) return; /* forward plain blank Enter to output */ else if (!event.metaKey && !event.altKey && !value && attachments.length === 0) terminalInputs.get(id)?.('\r'); /* preserve mobile multiline entry */ else if (window.matchMedia('(max-width: 600px)').matches) insertPromptText(event.currentTarget, '\n'); else void submit(); } }} onChange={updatePrompt} />{listening && <span className="prompt-recording-indicator" role="status" aria-label="Dictation recording"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" /></svg><span className="sr-only">Dictation recording</span></span>}{commandToken !== undefined && <FlyoutPortal onDismiss={() => setCommandToken(undefined)}><div ref={commandFlyoutRef} className="command-menu" style={commandFlyoutStyle} id={`prompt-commands-${id}`} role="listbox" aria-label={`${commandToken.prefix} commands`}>{commandOptions.length > 0 ? commandOptions.map((command, index) => <button key={command.value} id={`prompt-command-${id}-${index}`} type="button" role="option" aria-selected={index === activeCommand} className={index === activeCommand ? 'active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => selectCommand(command)}><code>{command.value}</code><span>{command.description}</span></button>) : <span className="command-menu-empty">No matching commands</span>}</div></FlyoutPortal>}</div>;
   const questionModeToggle = question === undefined || turnBlocked ? null : <button type="button" className="question-mode-toggle" aria-label={`Switch to ${answerMode ? 'normal prompt' : 'answer'} mode`} onClick={() => { /* toggle detected question mode */ setNormalPromptQuestionId(answerMode ? question.id : undefined); }}>{answerMode ? 'Normal prompt' : 'Answer mode'}</button>;
   const questionNotesId = `question-notes-${id}`;
   const questionNotes = questionNotesOpen ? <div className="question-notes" id={questionNotesId}><textarea aria-label="Reply" maxLength={32_000} placeholder="Answer in your own words…" value={value} onFocus={() => { /* leave terminal input */ exitTerminalInput.get(id)?.(); onPromptFocus(); }} onChange={event => { /* update note draft */ setValue(event.target.value); }} /><div className="question-notes-actions"><button type="button" className={pending ? 'progress-border progress-blue' : undefined} aria-busy={pending || undefined} disabled={pending || !value.trim()} aria-label="Send reply" onClick={() => { /* answer the active question directly */ void answer(value); }}><ProgressRing busy={pending} />{pending ? 'Sending' : 'Send reply'}</button></div></div> : null;
@@ -5939,7 +6018,7 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
   const laidOut = columns.flatMap((column, index) => {
     const isTerminal = splitPanelKind(column.key) === 'terminal';
     // a phone mounts keys only for the visible Terminal so inactive splits keep no live controls
-    const node = isTerminal ? cloneElement(column.node as ReactElement<TerminalColumnProps>, { key: column.key, selectionActions, mobileActive: !phone || carousel.visibleKey === column.key }) : <Fragment key={column.key}>{column.node}</Fragment>;
+    const node = isTerminal ? cloneElement(column.node as ReactElement<TerminalColumnProps>, { key: column.key, selectionActions, mobileActive: !phone || carousel.visibleKey === column.key }) : <PromptInputModeContext.Provider key={column.key} value={!phone || carousel.visibleKey === column.key}>{column.node}</PromptInputModeContext.Provider>;
     return index === 0 ? [node] : [resizer(columns[index - 1].key, column.key), node];
   });
   const mobileView = carousel.visibleKey !== undefined ? ` mobile-${splitPanelKind(carousel.visibleKey)}-view` : '';
@@ -7243,6 +7322,7 @@ type LogProps = { id: string; onTurnOff?: () => void; embedded?: boolean; codexS
 // neither. The Workspace around it owns everything Place-scoped (notes, browser, code, Terminals, git).
 function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQuestion, onMetadata, header, composer, notes, onAddToPrompt, onOpenUrl, onOpenFile, processingLabel, processingDetail }: LogProps) {
   const canvas = useRef<HTMLDivElement | null>(null);
+  const inheritedPromptMode = useContext(PromptInputModeContext);
   const terminalRef = useRef<XTerm | undefined>(undefined);
   // A Log mounts whenever its tab becomes active. Existing agents therefore
   // begin by attaching to their live output, not by starting a new process.
@@ -7433,7 +7513,7 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
   // the embedded advisor floats its status over the output; the agent panel's header shows it
   if (header === undefined) return <><div className={`log-output${inputActive ? ' input-active' : ''}${selectionActive ? ' selection-active' : ''}`}>{outputBody}{loadingOverlay}<span className={`status log-status ${visibleStatus.toLowerCase()}`}>{visibleStatus}</span></div>{selectionActions}</>;
   // shared stream skeletons stay in output while task transitions cover the split
-  return <><AgentPanelFrame onTurnOff={onTurnOff} className={`${inputActive ? ' input-active' : ''}${selectionActive ? ' selection-active' : ''}`} header={header(visibleStatus)} composer={composer} mobileKeys={<MobileTerminalKeys id={id} />} overlay={loadingOverlay}>{outputBody}</AgentPanelFrame>{selectionActions}</>;
+  return <><AgentPanelFrame onTurnOff={onTurnOff} className={`${inputActive ? ' input-active' : ''}${selectionActive ? ' selection-active' : ''}`} header={header(visibleStatus)} composer={<PromptInputModeContext.Provider value={inheritedPromptMode && !inputActive}>{composer}</PromptInputModeContext.Provider>} mobileKeys={<MobileTerminalKeys id={id} />} overlay={loadingOverlay}>{outputBody}</AgentPanelFrame>{selectionActions}</>;
 }
 
 // The composer's prompt-history button and flyout for one Agent. The open state is the caller's,

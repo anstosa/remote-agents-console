@@ -787,8 +787,8 @@ test.describe('touch text context menus', () => {
     });
   }
 
-  // retain dictation without opening a custom prompt menu on touch holds
-  test('prompt dictation never opens a custom context menu on mobile', async ({ page }) => {
+  // leave long prompt holds to the native context menu without starting dictation
+  test('prompt long holds stay idle and preserve the native context menu on mobile', async ({ page }) => {
     // retain the controlled external speech fixture shape
     type SpeechWindow = typeof window & { __contextSpeech: { starts: number } };
     // model only the external speech-recognition lifecycle
@@ -807,15 +807,22 @@ test.describe('touch text context menus', () => {
     await mountConsole(page);
     const prompt = page.getByRole('textbox', { name: 'Prompt' });
     await prompt.fill('native prompt');
-    await prompt.dispatchEvent('pointerdown', { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0 });
-    // wait for speech startup instead of a presentation class
-    await expect.poll(() => page.evaluate(() => (window as SpeechWindow).__contextSpeech.starts)).toBe(1);
-    await nativeContextEvent(prompt);
-    await expect(page.getByRole('menu')).toHaveCount(0);
-    await expect(prompt).toHaveValue('native prompt');
-    await prompt.dispatchEvent('pointerup', { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0 });
+    const bounds = await prompt.boundingBox();
+    // require the real prompt target before delivering native touch input
+    if (bounds === null) throw new Error('prompt has no touch bounds');
+    const touch = await page.context().newCDPSession(page);
+    try {
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2, id: 1 }] });
+      // exceed both the removed hold timer and the swipe duration ceiling
+      await page.waitForTimeout(750);
+      expect(await nativeContextEvent(prompt)).toEqual({ defaultPrevented: false, dispatched: true });
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    } finally { await touch.detach(); }
+    expect(await page.evaluate(() => (window as SpeechWindow).__contextSpeech.starts)).toBe(0);
     expect(await nativeContextEvent(prompt)).toEqual({ defaultPrevented: false, dispatched: true });
     await expect(page.getByRole('menu')).toHaveCount(0);
+    await expect(prompt).toHaveValue('native prompt');
+    await expect.poll(() => prompt.evaluate((element: HTMLTextAreaElement) => [element.selectionStart, element.selectionEnd])).toEqual([0, 7]);
   });
 
   // leave mobile note selection and editing to the native menu

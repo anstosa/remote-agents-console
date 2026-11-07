@@ -109,6 +109,17 @@ Toasts overlap Settings content like other splits; only the wrapped Settings
 toolbar reserves space. Showing or dismissing notices must not move the tab.
 
 ## Interaction states
+Prompt dictation toggles with a deliberate single-finger upward swipe on the prompt
+box. Taps, long presses and scrolling an overflowing draft remain native text editing. Each logical start or stop
+gets one brief bounce and a distinct local recording cue; silent service restarts
+never repeat toggle feedback. While enabled, retain the red border and a blinking,
+noninteractive microphone centered just above the field. Reduced motion keeps a
+static microphone and red border without bounce or blinking. Audio playback is
+best effort under browser/device policy and is independent of notification-only
+alert sounds; unavailable audio never prevents recording controls.
+Stop dictation when its prompt enters question-only UI, output input mode, or an
+offscreen phone split; an invisible prompt must never retain microphone ownership.
+
 Read-only content loads are skeleton-first: reserve the geometry of the rows,
 properties, code, images, usage, or labels being fetched. Skeletons are decorative,
 noninteractive, and owned by one accessible busy container. Successful empty or zero
