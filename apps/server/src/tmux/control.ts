@@ -28,6 +28,9 @@ const foregroundSubscribeArg = `${foregroundSubscription}:%*:#{pane_current_comm
 // client fails and its viewers reconnect, mirroring run()'s SIGKILL timeout for spawns.
 // Generous because tmux orders a reply behind pending %output.
 const commandTimeoutMs = 10_000;
+// how long a session's client outlives its last viewer, so switching away from a Workspace and
+// back reuses the attach instead of spawning a fresh one
+export const paneClientGraceMs = 30_000;
 const inputBlockingPaneModes: ReadonlySet<string> = new Set(['copy-mode', 'view-mode']);
 const paneModeFormat = '#{pane_in_mode}\t#{pane_mode}';
 
@@ -91,11 +94,12 @@ export class TmuxControlClient implements PaneClient {
   private readonly inputQueues = new Map<string, Promise<boolean>>();
   private readonly foregrounds = new Map<string, string>();
   private disposed = false;
+  private idleTimer: ReturnType<typeof setTimeout> | undefined;
   // resolves once the attach's own %begin/%end block has been consumed
   readonly ready: Promise<void>;
 
   // command clients suppress output and have server-owned lifetimes
-  constructor(private readonly binary: string, private readonly socketPath: string, session: string | undefined, private readonly onGone: () => void, private readonly options: { commandOnly?: boolean; timeoutMs?: number } = {}) {
+  constructor(private readonly binary: string, private readonly socketPath: string, session: string | undefined, private readonly onGone: () => void, private readonly options: { commandOnly?: boolean; timeoutMs?: number; graceMs?: number } = {}) {
     this.parser = new ControlProtocolParser(event => this.onEvent(event));
     // `-C` over pipes (never `-CC`), `-f ignore-size` so the client does not affect any
     // window's size; default stdio is 'pipe' for all three fds. Never `read-only`: a command-line
@@ -204,6 +208,7 @@ export class TmuxControlClient implements PaneClient {
     if (this.options.commandOnly) throw new Error('command client cannot stream panes');
     if (!paneId.test(pane)) throw new Error('bad pane id');
     if (this.disposed) throw new Error('control client disposed');
+    clearTimeout(this.idleTimer);
     const set = this.subscribers.get(pane) ?? new Set<PaneActivitySubscriber>();
     set.add(subscriber);
     this.subscribers.set(pane, set);
@@ -212,8 +217,11 @@ export class TmuxControlClient implements PaneClient {
     return () => {
       set.delete(subscriber);
       if (set.size === 0) this.subscribers.delete(pane);
-      // the last viewer of this session left; tear the client down
-      if (this.subscriberCount() === 0) this.dispose();
+      // the last viewer of this session left; tear the client down unless one returns in time
+      if (this.subscriberCount() === 0 && !this.disposed) {
+        clearTimeout(this.idleTimer);
+        this.idleTimer = setTimeout(() => this.dispose(), this.options.graceMs ?? paneClientGraceMs);
+      }
     };
   }
 
@@ -394,6 +402,7 @@ export class TmuxControlClient implements PaneClient {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    clearTimeout(this.idleTimer);
     // settle any in-flight command so its awaiting caller does not hang forever
     for (const waiter of this.blockWaiters.splice(0)) { clearTimeout(waiter.timer); waiter.reject(new Error('control client disposed')); }
     try { this.child.stdin.write('detach\n'); } catch { /* pipe already closed */ }
@@ -407,18 +416,20 @@ export class PaneStreamRegistry implements PaneStreamProvider {
   private readonly clients = new Map<string, TmuxControlClient>();
   private readonly binary = tmuxBinary();
 
+  constructor(private readonly graceMs = paneClientGraceMs) {}
+
   get(socket: SocketRef, session: string): TmuxControlClient {
     if (!sessionId.test(session)) throw new Error('bad session');
     const key = `${socket.fingerprint}\0${session}`;
     const existing = this.clients.get(key);
     if (existing !== undefined) return existing;
-    // get() spawns immediately, and a client is reaped only once it has had a subscriber
-    // that then leaves (or the client fails). Every caller (the log and pane sockets)
-    // subscribes synchronously after get(), so a zero-subscriber client is never left behind.
+    // get() spawns immediately, and a client is reaped a grace period after its last
+    // subscriber leaves (or at once if it fails). The pane socket subscribes synchronously
+    // after get(), so a zero-subscriber client exists only during that grace.
     const client = new TmuxControlClient(this.binary, socket.path, session, () => {
       // evict a disposed client unconditionally, so a reconnecting viewer never gets it
       if (this.clients.get(key) === client) this.clients.delete(key);
-    });
+    }, { graceMs: this.graceMs });
     this.clients.set(key, client);
     return client;
   }

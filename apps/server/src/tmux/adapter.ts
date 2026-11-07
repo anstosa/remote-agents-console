@@ -405,10 +405,11 @@ export class TmuxAdapter {
   }
 
   // resize-window pins the window at a manual size that ignores attached
-  // clients; unsetting the option hands the size back to tmux
-  async unpinWindowSize(socket: SocketRef, pane: string): Promise<boolean> {
-    if (!paneId.test(pane)) return false;
-    return (await run(this.binary, ['-S', socket.path, 'set-option', '-w', '-t', pane, '-u', 'window-size'])).code === 0;
+  // clients; unsetting the option hands the size back to tmux. `target` is a pane or a
+  // window id (`@N`), which still resolves after the released pane has died
+  async unpinWindowSize(socket: SocketRef, target: string): Promise<boolean> {
+    if (!paneId.test(target) && !/^@\d+$/u.test(target)) return false;
+    return (await run(this.binary, ['-S', socket.path, 'set-option', '-w', '-t', target, '-u', 'window-size'])).code === 0;
   }
 
   // paste one named buffer into the live process

@@ -822,11 +822,11 @@ describe('/ws/pane Worktree target', () => {
 describe('/ws/pane window-keyed Size claim', () => {
   it('shares one claim between two panes of the same window (keyed by window, not pane)', async () => {
     // Both panes resolve to window @7 (the fake client's windowId), so the two viewers share one
-    // coordinator entry keyed by the window and release unpins exactly once — for the surviving
-    // owner. Were the claim keyed by pane id (or the pane fallback used before windowKeyReady),
-    // each socket would hold its own claim and unpin twice. This proves the /ws/pane handler keys
-    // the Size claim by the resolved window id (app.ts INVARIANT), coverage carried over from the
-    // retired /ws/logs socket test.
+    // coordinator entry keyed by the window and release (with no grace here) unpins exactly once —
+    // for the window. Were the claim keyed by pane id (or the pane fallback used before
+    // windowKeyReady), each socket would hold its own claim and unpin twice. This proves the
+    // /ws/pane handler keys the Size claim by the resolved window id (app.ts INVARIANT), coverage
+    // carried over from the retired /ws/logs socket test.
     const stream = fakePaneStream();
     const resizes: string[] = [];
     const unpins: string[] = [];
@@ -853,7 +853,7 @@ describe('/ws/pane window-keyed Size claim', () => {
     const tickets = new TicketStore();
     const app = await buildApp(
       testConfig({ publicOrigin: new URL(`http://127.0.0.1:${port}`), projects: [testProject({ id: 'proj' })] as never }),
-      { auth, control, dashboardUpdates, discovery, tickets, paneStream: stream.provider, tmux } as never
+      { auth, control, dashboardUpdates, discovery, tickets, paneStream: stream.provider, tmux, paneViewportGraceMs: 0 } as never
     );
     await app.listen({ host: '127.0.0.1', port });
 
@@ -877,7 +877,7 @@ describe('/ws/pane window-keyed Size claim', () => {
     await waitFor(() => unpins.length >= 1);
     await new Promise(resolve => setTimeout(resolve, 100));
 
-    // one window, one claim: exactly one unpin, for the window's surviving (latest) owner
-    expect(unpins).toEqual(['%2']);
+    // one window, one claim: exactly one unpin, by the window id so a dead pane cannot strand it
+    expect(unpins).toEqual(['@7']);
   });
 });

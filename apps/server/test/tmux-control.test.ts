@@ -48,8 +48,8 @@ type ScriptedScenario = {
   stallCapture?: boolean;
 };
 
-// start a deterministic control-mode peer for seed boundary tests
-async function scriptedClient(scenario: ScriptedScenario): Promise<{ client: TmuxControlClient; commands: string }> {
+// write a deterministic control-mode peer; `-S <scenarioPath>` selects its scenario
+async function scriptedTmux(scenario: ScriptedScenario): Promise<{ binary: string; scenarioPath: string; commands: string }> {
   const root = await mkdtempAsync(join(tmpdir(), 'rac-control-scripted-'));
   scriptedRoots.push(root);
   const binary = join(root, 'tmux-script.mjs');
@@ -110,6 +110,12 @@ process.stdin.on('data', chunk => {
   }
 });
 `, { mode: 0o700 });
+  return { binary, scenarioPath, commands };
+}
+
+// start a deterministic control-mode peer for seed boundary tests
+async function scriptedClient(scenario: ScriptedScenario): Promise<{ client: TmuxControlClient; commands: string }> {
+  const { binary, scenarioPath, commands } = await scriptedTmux(scenario);
   const client = new TmuxControlClient(binary, scenarioPath, 'fixture', () => {});
   await client.ready;
   return { client, commands };
@@ -174,6 +180,83 @@ describe('tmux control client foreground command', () => {
       expect(later).toEqual(['nvim']);
     } finally {
       client.dispose();
+    }
+  });
+});
+
+describe('pane stream registry grace', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  // a registry whose clients attach to the scripted peer instead of tmux
+  async function scriptedRegistry(graceMs: number): Promise<{ registry: PaneStreamRegistry; ref: SocketRef; commands: string }> {
+    const { binary, scenarioPath, commands } = await scriptedTmux({});
+    vi.stubEnv('RAC_TMUX_BIN', binary);
+    return { registry: new PaneStreamRegistry(graceMs), ref: { path: scenarioPath, fingerprint: 'scripted', device: 0, inode: 0 }, commands };
+  }
+  const viewer = { onReseed: () => {}, onResize: () => {}, onExit: () => {} };
+  // each attach arms its client-size subscription once
+  const attaches = (commands: string) => { try { return readFileSync(commands, 'utf8').split('\n').filter(line => line.includes('rac-clients::')).length; } catch { return 0; } };
+
+  it('hands a viewer returning within the grace the same attached client', async () => {
+    const { registry, ref, commands } = await scriptedRegistry(60_000);
+    try {
+      const first = registry.get(ref, 'fixture');
+      first.subscribe('%1', viewer)();
+      await first.ready;
+      expect(registry.size).toBe(1);
+      expect(registry.openPaneKeys().size).toBe(0);
+
+      const returning = registry.get(ref, 'fixture');
+      expect(returning).toBe(first);
+      returning.subscribe('%1', viewer);
+      expect(registry.openPaneKeys()).toEqual(new Set(['scripted\0%1']));
+      await eventually(() => attaches(commands) > 0);
+      expect(attaches(commands)).toBe(1);
+    } finally {
+      registry.closeAll();
+    }
+    expect(registry.size).toBe(0);
+  });
+
+  it('keeps a client a viewer returned to within the grace past the grace', async () => {
+    const { registry, ref } = await scriptedRegistry(50);
+    const exits: string[] = [];
+    try {
+      const client = registry.get(ref, 'fixture');
+      client.subscribe('%1', viewer)();
+      registry.get(ref, 'fixture').subscribe('%1', { ...viewer, onExit: reason => { exits.push(reason); } });
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      expect(registry.size).toBe(1);
+      expect(registry.get(ref, 'fixture')).toBe(client);
+      await expect(client.command('list-panes')).resolves.toMatchObject({ ok: true });
+      expect(exits).toEqual([]);
+    } finally {
+      registry.closeAll();
+    }
+  });
+
+  it('tears a client in its grace down at once on closeAll', async () => {
+    const { registry, ref } = await scriptedRegistry(60_000);
+    const client = registry.get(ref, 'fixture');
+    client.subscribe('%1', viewer)();
+    registry.closeAll();
+    expect(registry.size).toBe(0);
+    expect(() => client.subscribe('%1', viewer)).toThrow('disposed');
+  });
+
+  it('detaches a client nobody returns to once the grace ends', async () => {
+    const { registry, ref } = await scriptedRegistry(50);
+    try {
+      const client = registry.get(ref, 'fixture');
+      client.subscribe('%1', viewer)();
+      expect(registry.size).toBe(1);
+      await eventually(() => registry.size === 0);
+      expect(() => client.subscribe('%1', viewer)).toThrow('disposed');
+      // a later viewer of the same session gets a fresh client
+      expect(registry.get(ref, 'fixture')).not.toBe(client);
+    } finally {
+      registry.closeAll();
     }
   });
 });
@@ -289,7 +372,7 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       const unsubscribe = viewer.subscribe(pane, { onReseed: () => {}, onResize: () => {}, onExit: () => {} });
       await viewer.ready;
       unsubscribe();
-      expect(viewers.size).toBe(0);
+      viewers.closeAll();
       expect(await adapter.listPanes(ref)).toHaveLength(1);
       // closing the bootstrap session moves the command client to a surviving session
       await run(tmux, ['-S', socket, 'new-session', '-d', '-s', 'survivor', 'cat', '-']);
@@ -436,9 +519,9 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
     }
   });
 
-  it('shares one client per session and reaps it when the last viewer leaves', async () => {
+  it('shares one client per session and reaps it a grace after the last viewer leaves', async () => {
     const { ref, pane } = await fixtureSession();
-    const registry = new PaneStreamRegistry();
+    const registry = new PaneStreamRegistry(50);
     try {
       const first = registry.get(ref, 'fixture');
       const second = registry.get(ref, 'fixture');
@@ -452,7 +535,8 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       expect(registry.size).toBe(1);
 
       unsubscribeB();
-      expect(registry.size).toBe(0);
+      expect(registry.size).toBe(1);
+      await eventually(() => registry.size === 0);
       // a later viewer of the same session gets a fresh client
       const reopened = registry.get(ref, 'fixture');
       expect(reopened).not.toBe(first);

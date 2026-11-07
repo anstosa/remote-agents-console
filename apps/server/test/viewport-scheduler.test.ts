@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { LatestViewportScheduler, PaneViewportCoordinator, type PaneGeometry, type PaneViewport } from '../src/logs/viewport-scheduler.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { LatestViewportScheduler, PaneViewportCoordinator, paneViewportGraceMs, type PaneGeometry, type PaneViewport } from '../src/logs/viewport-scheduler.js';
 
 const geometry = (cols: number, rows: number, clientLimit?: PaneViewport): PaneGeometry => ({ cols, rows, ...(clientLimit === undefined ? {} : { clientLimit }) });
 const unpinNothing = async () => true;
@@ -39,9 +39,87 @@ describe('latest viewport scheduling', () => {
 });
 
 describe('pane viewport coordination', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('keeps the window at the browser size through the release grace, then restores it', async () => {
+    vi.useFakeTimers();
+    const applied: Array<[number, number]> = [];
+    let unpins = 0;
+    const coordinator = new PaneViewportCoordinator();
+    const lease = coordinator.acquire('socket:@1', async () => geometry(220, 80), async (cols, rows) => { applied.push([cols, rows]); return true; }, async () => { unpins += 1; return true; });
+
+    await lease.resize(62, 41);
+    await lease.release();
+    await vi.advanceTimersByTimeAsync(paneViewportGraceMs - 1);
+    expect(applied).toEqual([[62, 41]]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(applied).toEqual([[62, 41], [220, 80]]);
+    expect(unpins).toBe(1);
+  });
+
+  it('never restores a release whose window a new viewer claimed within the grace', async () => {
+    vi.useFakeTimers();
+    const applied: Array<[number, number]> = [];
+    let unpins = 0;
+    const coordinator = new PaneViewportCoordinator();
+    const read = async () => geometry(220, 80);
+    const apply = async (cols: number, rows: number) => { applied.push([cols, rows]); return true; };
+    const unpin = async () => { unpins += 1; return true; };
+    const first = coordinator.acquire('socket:@1', read, apply, unpin);
+    await first.resize(62, 41);
+    await first.release();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const returning = coordinator.acquire('socket:@1', read, apply, unpin);
+    await vi.advanceTimersByTimeAsync(paneViewportGraceMs);
+    expect(applied).toEqual([[62, 41]]);
+    expect(unpins).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // the returning viewer still restores the original size, not the browser's
+    await returning.release();
+    await vi.advanceTimersByTimeAsync(paneViewportGraceMs);
+    expect(applied).toEqual([[62, 41], [220, 80]]);
+    expect(unpins).toBe(1);
+  });
+
+  it('restores at once, with no grace, when a terminal is attached to the window', async () => {
+    // a phone viewer leaving must hand the window back to the desktop `tmux attach` right away
+    vi.useFakeTimers();
+    const applied: Array<[number, number]> = [];
+    let unpins = 0;
+    const coordinator = new PaneViewportCoordinator();
+    const lease = coordinator.acquire('socket:@1', async () => geometry(62, 41, { cols: 220, rows: 80 }), async (cols, rows) => { applied.push([cols, rows]); return true; }, async () => { unpins += 1; return true; });
+    await lease.resize(220, 80);
+    await lease.resize(62, 41);
+
+    await lease.release();
+
+    expect(applied).toEqual([[220, 80], [62, 41], [220, 80]]);
+    expect(unpins).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('restores releases still in their grace at once on shutdown', async () => {
+    vi.useFakeTimers();
+    const applied: Array<[number, number]> = [];
+    let unpins = 0;
+    const coordinator = new PaneViewportCoordinator();
+    const lease = coordinator.acquire('socket:@1', async () => geometry(220, 80), async (cols, rows) => { applied.push([cols, rows]); return true; }, async () => { unpins += 1; return true; });
+    await lease.resize(62, 41);
+    await lease.release();
+
+    await coordinator.restoreAll();
+
+    expect(applied).toEqual([[62, 41], [220, 80]]);
+    expect(unpins).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('restores the original desktop pane after a mobile viewer disconnects', async () => {
     const applied: Array<[number, number]> = [];
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const lease = coordinator.acquire('socket:%1', async () => geometry(220, 80), async (cols, rows) => { applied.push([cols, rows]); return true; }, unpinNothing);
 
     await expect(lease.resize(62, 41)).resolves.toBe(true);
@@ -52,7 +130,7 @@ describe('pane viewport coordination', () => {
 
   it('heals a pane already stuck at mobile dimensions after a desktop viewer connects', async () => {
     const applied: Array<[number, number]> = [];
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const lease = coordinator.acquire('socket:%1', async () => geometry(62, 41), async (cols, rows) => { applied.push([cols, rows]); return true; }, unpinNothing);
 
     await expect(lease.resize(307, 70)).resolves.toBe(true);
@@ -63,7 +141,7 @@ describe('pane viewport coordination', () => {
 
   it('retries the largest known viewport during release after a transient resize failure', async () => {
     const applied: Array<[number, number]> = [];
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     let attempts = 0;
     const lease = coordinator.acquire('socket:%1', async () => geometry(62, 41), async (cols, rows) => {
       applied.push([cols, rows]);
@@ -79,7 +157,7 @@ describe('pane viewport coordination', () => {
 
   it('does not let a stale client restore over a newer viewport owner', async () => {
     const applied: Array<[number, number]> = [];
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const first = coordinator.acquire('socket:%1', async () => geometry(220, 80), async (cols, rows) => { applied.push([cols, rows]); return true; }, unpinNothing);
     await first.resize(62, 41);
     const latest = coordinator.acquire('socket:%1', async () => geometry(62, 41), async (cols, rows) => { applied.push([cols, rows]); return true; }, unpinNothing);
@@ -97,7 +175,7 @@ describe('pane viewport coordination', () => {
     // that viewer's release restores the window and unpins it
     const applied: Array<[number, number]> = [];
     let unpins = 0;
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const windowKey = 'socket:@3';
     const read = async () => geometry(220, 80);
     const apply = async (cols: number, rows: number) => { applied.push([cols, rows]); return true; };
@@ -117,7 +195,7 @@ describe('pane viewport coordination', () => {
   it('repairs pane geometry changed by an external tmux layout manager', async () => {
     const applied: Array<[number, number]> = [];
     let current = geometry(220, 80);
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const lease = coordinator.acquire('socket:%1', async () => current, async (cols, rows) => {
       applied.push([cols, rows]);
       current = geometry(cols, rows);
@@ -134,7 +212,7 @@ describe('pane viewport coordination', () => {
 
   it('never sizes a pane beyond what an attached terminal can show', async () => {
     const applied: Array<[number, number]> = [];
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const lease = coordinator.acquire('socket:%1', async () => geometry(220, 80, { cols: 100, rows: 29 }), async (cols, rows) => { applied.push([cols, rows]); return true; }, unpinNothing);
 
     await expect(lease.resize(200, 50)).resolves.toBe(true);
@@ -146,7 +224,7 @@ describe('pane viewport coordination', () => {
     const applied: Array<[number, number]> = [];
     let current: PaneViewport = { cols: 220, rows: 80 };
     let terminal: PaneViewport | undefined;
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const lease = coordinator.acquire('socket:%1', async () => geometry(current.cols, current.rows, terminal), async (cols, rows) => {
       applied.push([cols, rows]);
       current = { cols, rows };
@@ -168,7 +246,7 @@ describe('pane viewport coordination', () => {
   it('restores within the attached terminal and hands the window back to tmux on release', async () => {
     const applied: Array<[number, number]> = [];
     let unpinned = 0;
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const lease = coordinator.acquire('socket:%1', async () => geometry(100, 29, { cols: 100, rows: 29 }), async (cols, rows) => { applied.push([cols, rows]); return true; }, async () => { unpinned += 1; return true; });
 
     await expect(lease.resize(62, 41)).resolves.toBe(true);
@@ -181,7 +259,7 @@ describe('pane viewport coordination', () => {
   it('leaves tmux alone when releasing a lease that never resized', async () => {
     const applied: Array<[number, number]> = [];
     let unpinned = 0;
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const lease = coordinator.acquire('socket:%1', async () => geometry(220, 80), async (cols, rows) => { applied.push([cols, rows]); return true; }, async () => { unpinned += 1; return true; });
 
     await lease.release();
@@ -191,7 +269,7 @@ describe('pane viewport coordination', () => {
   });
 
   it('still finishes a release when handing the window back throws', async () => {
-    const coordinator = new PaneViewportCoordinator();
+    const coordinator = new PaneViewportCoordinator(0);
     const lease = coordinator.acquire('socket:%1', async () => geometry(220, 80), async () => true, async () => { throw new Error('tmux gone'); });
 
     await lease.resize(62, 41);

@@ -355,10 +355,12 @@ describe('TmuxAdapter capture', () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
 
     await expect(new TmuxAdapter().unpinWindowSize(socket, '%1')).resolves.toBe(true);
+    await expect(new TmuxAdapter().unpinWindowSize(socket, '@3')).resolves.toBe(true);
     await expect(new TmuxAdapter().unpinWindowSize(socket, 'main')).resolves.toBe(false);
 
-    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(2);
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'set-option', '-w', '-t', '%1', '-u', 'window-size']);
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'set-option', '-w', '-t', '@3', '-u', 'window-size']);
   });
 
   it('closes the entire replaced session so companion HUD panes do not linger', async () => {

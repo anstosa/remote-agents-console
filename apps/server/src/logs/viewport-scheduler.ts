@@ -33,6 +33,10 @@ type PaneViewportEntry = {
   apply: (cols: number, rows: number) => Promise<boolean>;
   unpin: () => Promise<boolean>;
   restore?: PaneViewport;
+  // the last geometry read showed a terminal attached, which a release must re-clamp at once
+  attached?: boolean;
+  // a release waiting out its grace
+  pending?: ReturnType<typeof setTimeout>;
 };
 
 export type PaneViewportLease = {
@@ -46,8 +50,15 @@ export type PaneViewportLease = {
 const within = (requested: PaneViewport, limit: PaneViewport | undefined): PaneViewport =>
   limit === undefined ? requested : { cols: Math.min(requested.cols, limit.cols), rows: Math.min(requested.rows, limit.rows) };
 
+// how long a released Size claim keeps the window at the browser's size, so a viewer that comes
+// back (a Workspace switched away from and back) finds it unchanged and the program in the pane
+// gets no SIGWINCH redraw
+export const paneViewportGraceMs = 30_000;
+
 export class PaneViewportCoordinator {
   private readonly entries = new Map<string, PaneViewportEntry>();
+
+  constructor(private readonly graceMs = paneViewportGraceMs) {}
 
   acquire(
     key: string,
@@ -62,6 +73,8 @@ export class PaneViewportCoordinator {
     entry.read = read;
     entry.apply = apply;
     entry.unpin = unpin;
+    // a viewer returning within a release's grace takes the claim over as it stands
+    this.cancelPending(entry);
     this.entries.set(key, entry);
     return {
       resize: (cols, rows) => this.resize(key, entry, owner, cols, rows),
@@ -71,7 +84,12 @@ export class PaneViewportCoordinator {
   }
 
   async restoreAll(): Promise<void> {
-    await Promise.all([...this.entries.entries()].map(([key, entry]) => this.release(key, entry, entry.owner)));
+    await Promise.all([...this.entries.entries()].map(([key, entry]) => this.release(key, entry, entry.owner, 0)));
+  }
+
+  private cancelPending(entry: PaneViewportEntry): void {
+    clearTimeout(entry.pending);
+    entry.pending = undefined;
   }
 
   private enqueue<T>(entry: PaneViewportEntry, operation: () => Promise<T>): Promise<T> {
@@ -85,6 +103,7 @@ export class PaneViewportCoordinator {
       if (this.entries.get(key) !== entry || entry.owner !== owner) return false;
       const geometry = await entry.read().catch(() => undefined);
       if (geometry === undefined || entry.owner !== owner) return false;
+      entry.attached = geometry.clientLimit !== undefined;
       const baseline = entry.restore ?? geometry;
       entry.restore = { cols: Math.max(baseline.cols, cols), rows: Math.max(baseline.rows, rows) };
       const target = within({ cols, rows }, geometry.clientLimit);
@@ -97,6 +116,7 @@ export class PaneViewportCoordinator {
       if (this.entries.get(key) !== entry || entry.owner !== owner) return { ok: false, resized: false };
       const geometry = await entry.read().catch(() => undefined);
       if (geometry === undefined || entry.owner !== owner) return { ok: false, resized: false };
+      entry.attached = geometry.clientLimit !== undefined;
       // the limit is re-read every tick: a terminal attaching, detaching or
       // resizing moves the target just as an external layout change does
       const target = within({ cols, rows }, geometry.clientLimit);
@@ -106,10 +126,19 @@ export class PaneViewportCoordinator {
     });
   }
 
-  private release(key: string, entry: PaneViewportEntry, owner: symbol): Promise<void> {
+  private release(key: string, entry: PaneViewportEntry, owner: symbol, graceMs = this.graceMs): Promise<void> {
     if (this.entries.get(key) !== entry || entry.owner !== owner) return Promise.resolve();
     const releasing = Symbol(key);
     entry.owner = releasing;
+    // restoreAll supersedes a release still in its grace
+    this.cancelPending(entry);
+    if (graceMs <= 0 || entry.attached === true) return this.restore(key, entry, releasing);
+    entry.pending = setTimeout(() => { entry.pending = undefined; void this.restore(key, entry, releasing); }, graceMs);
+    entry.pending.unref();
+    return Promise.resolve();
+  }
+
+  private restore(key: string, entry: PaneViewportEntry, releasing: symbol): Promise<void> {
     return this.enqueue(entry, async () => {
       if (this.entries.get(key) !== entry || entry.owner !== releasing) return;
       if (entry.restore !== undefined) {
