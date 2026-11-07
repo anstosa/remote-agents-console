@@ -352,7 +352,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const app = Fastify({ logger: false, trustProxy: false, bodyLimit: 65_536, routerOptions: { maxParamLength: 16_384 } }); const webRoot = fileURLToPath(new URL('../../web/dist', import.meta.url));
   // The UI version is the hashed app bundle: match the module script specifically so
   // other head scripts (e.g. the pre-paint /theme-init.js) can precede it in the HTML.
-  const uiVersion = async () => await readFile(join(webRoot, 'index.html'), 'utf8').then(html => /<script[^>]+type="module"[^>]+src="([^"]+)"/u.exec(html)?.[1]).catch(() => undefined); await app.register(cookie); await app.register(staticPlugin, { root: webRoot, index: false }); await app.register(rateLimit, { global: false });
+  const uiVersion = async () => await readFile(join(webRoot, 'index.html'), 'utf8').then(html => /<script[^>]+type="module"[^>]+src="([^"]+)"/u.exec(html)?.[1]).catch(() => undefined); await app.register(cookie); await app.register(staticPlugin, { root: webRoot, index: false, preCompressed: true, setHeaders: response => response.setHeader('Vary', 'Accept-Encoding') }); await app.register(rateLimit, { global: false });
   // A pane-socket `input` frame carries up to 64 KiB of decoded bytes (spec "The pane
   // socket"), which is ~87 KiB once base64url-encoded in the JSON envelope; the WS max
   // payload must clear that so a full 64 KiB paste is delivered rather than dropped by
@@ -617,7 +617,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.addHook('onSend', async (request, reply, payload) => {
     // authorize WebAssembly only in the isolated formatter worker, never in the page
     const formatterPolicy = /^\/assets\/shell-format-worker-[\w-]+\.js(?:\?.*)?$/u.test(request.url) ? "script-src 'self' 'wasm-unsafe-eval'; " : '';
-    reply.header('Cache-Control', 'no-store').header('X-Frame-Options', 'DENY').header('X-Content-Type-Options', 'nosniff').header('Referrer-Policy', 'no-referrer').header('Permissions-Policy', 'camera=(), microphone=(self), geolocation=(self), clipboard-read=(self), clipboard-write=(self)').header('Cross-Origin-Opener-Policy', 'same-origin-allow-popups').header('Cross-Origin-Resource-Policy', 'same-origin').header('Content-Security-Policy', `default-src 'self'; ${formatterPolicy}connect-src 'self' ${websocketScheme}://${expectedHost}${integrationConfig.realtime.enabled ? ' https://api.openai.com' : ''}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; ${frameSourcePolicy}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+    // Vite content-hashes everything under /assets/; other static files revalidate by ETag
+    const staticFile = request.routeOptions.url === '/*' && reply.statusCode < 400;
+    const cacheControl = !staticFile ? 'no-store' : request.url.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache';
+    reply.header('Cache-Control', cacheControl).header('X-Frame-Options', 'DENY').header('X-Content-Type-Options', 'nosniff').header('Referrer-Policy', 'no-referrer').header('Permissions-Policy', 'camera=(), microphone=(self), geolocation=(self), clipboard-read=(self), clipboard-write=(self)').header('Cross-Origin-Opener-Policy', 'same-origin-allow-popups').header('Cross-Origin-Resource-Policy', 'same-origin').header('Content-Security-Policy', `default-src 'self'; ${formatterPolicy}connect-src 'self' ${websocketScheme}://${expectedHost}${integrationConfig.realtime.enabled ? ' https://api.openai.com' : ''}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; ${frameSourcePolicy}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
     // isolate editable static artwork from the application policy
     if (request.url === '/favicon.svg' || request.url.startsWith('/instance-icons/')) reply.header('Content-Security-Policy', "default-src 'none'; style-src 'none'; sandbox; base-uri 'none'; frame-ancestors 'none'");
     // publish HSTS only for HTTPS deployments

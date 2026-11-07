@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/compress-dist.mjs",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test:e2e": "LD_LIBRARY_PATH=${XDG_CACHE_HOME:-$HOME/.cache}/playwright-system-libs/rootfs/usr/lib/x86_64-linux-gnu playwright test --output=/tmp/remoteagents-playwright-results-$USER",
