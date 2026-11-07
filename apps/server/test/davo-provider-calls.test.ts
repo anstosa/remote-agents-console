@@ -49,6 +49,34 @@ function call(overrides: Partial<DavoProviderCallPersistenceState['providerCalls
 }
 
 describe('DavoProviderCalls', () => {
+  // preserve private failure details behind fixed diagnostics
+  it.each(['transport', 'rejection'] as const)('logs content-free %s diagnostics without clearing uncertainty', async failure => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const store = persistence();
+      const response = new Response('private provider body with standard-key and SDP', { status: 429 });
+      const readBody = vi.spyOn(response, 'text');
+      // simulate failure at the real transport boundary
+      const provider = vi.fn(async () => {
+        // keep exception details out of diagnostics
+        if (failure === 'transport') throw new Error('private socket error with standard-key and SDP');
+        return response;
+      });
+      const calls = new DavoProviderCalls({ apiKey: 'standard-key', persistence: store.port, fetch: provider as typeof fetch, now: () => new Date('2026-11-05T22:00:00.000Z') });
+
+      await expect(calls.negotiate(negotiation)).resolves.toEqual({ ok: false, code: 'davo_provider_unavailable' });
+      expect(warning.mock.calls).toEqual(failure === 'transport'
+        ? [['[davo] provider create transport failed']]
+        : [['[davo] provider create rejected', { status: 429 }]]);
+      expect(readBody).not.toHaveBeenCalled();
+      expect(store.state()).toEqual({ providerCalls: [], providerQuarantineUntil: creationFenceUntil });
+      await expect(calls.negotiate(negotiation)).resolves.toEqual({ ok: false, code: 'davo_provider_hangup_ambiguous' });
+      expect(provider).toHaveBeenCalledTimes(1);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it('registers the trusted provider call before returning the SDP answer', async () => {
     const store = persistence();
     const provider = vi.fn(async () => new Response('v=0\r\nanswer', { status: 201, headers: { location: '/v1/realtime/calls/rtc_trusted123' } }));

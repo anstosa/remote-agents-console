@@ -139,22 +139,31 @@ export class DavoProviderCalls {
           const cleared = await this.clearPostCreateQuarantine(creationFence);
           return { ok: false, code: cleared ? 'davo_provider_unavailable' : 'davo_store_unavailable' };
         }
+        console.warn('[davo] provider create transport failed');
         return { ok: false, code: 'davo_provider_unavailable' };
       }
       // require successful SDP creation
-      if (!response.ok) return { ok: false, code: 'davo_provider_unavailable' };
+      if (!response.ok) {
+        console.warn('[davo] provider create rejected', { status: response.status });
+        return { ok: false, code: 'davo_provider_unavailable' };
+      }
       const createdAt = this.now();
       const providerMaximumEndsAt = new Date(createdAt.getTime() + this.providerMaximumMs).toISOString();
       const callId = trustedCallId(response.headers.get('location'));
       // quarantine creations without trusted cleanup authority
-      if (callId === undefined) return { ok: false, code: 'davo_provider_control_unsupported' };
+      if (callId === undefined) {
+        console.warn('[davo] provider create missing trusted location');
+        return { ok: false, code: 'davo_provider_control_unsupported' };
+      }
       let answer: string;
       try { answer = await response.text(); }
       catch {
+        console.warn('[davo] provider answer unreadable');
         return this.cleanupPostCreate(callId, creationFence, 'davo_provider_unavailable');
       }
       // reject unbounded provider answers
       if (utf8Bytes(answer) === 0 || utf8Bytes(answer) > maxOfferBytes) {
+        console.warn('[davo] provider answer invalid');
         return this.cleanupPostCreate(callId, creationFence, 'davo_provider_control_unsupported');
       }
       const record: DavoProviderCallPrivateRecord = {
@@ -175,6 +184,7 @@ export class DavoProviderCalls {
           return { state: { ...available, providerCalls: [...available.providerCalls, record] }, result: undefined };
         });
       } catch {
+        console.warn('[davo] provider registration failed');
         // the creation fence already precedes this cleanup effect
         await this.cleanupPostCreate(callId, creationFence, 'davo_store_unavailable');
         return { ok: false, code: 'davo_store_unavailable' };
