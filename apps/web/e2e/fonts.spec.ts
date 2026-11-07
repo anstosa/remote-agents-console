@@ -20,5 +20,6 @@ test('bundles and uses every JetBrains Mono Nerd Font face', async ({ page }) =>
     return await Promise.all(faces.map(async face => (await document.fonts.load(face, 'Agent 󰊤')).length));
   });
 
-  expect(loadedFaces).toEqual([1, 1, 1, 1]);
+  // each style loads its text face plus the shared Nerd icons face
+  expect(loadedFaces).toEqual([2, 2, 2, 2]);
 });

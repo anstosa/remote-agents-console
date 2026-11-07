@@ -1,14 +1,17 @@
+/* Each Nerd Font face is split by unicode-range: text glyphs per face, and the private-use
+   icons (identical in every face) in one shared file, fetched only once an icon is drawn. */
 @font-face {
   font-family: "JetBrainsMono Nerd Font";
-  src: url("/fonts/JetBrainsMonoNerdFont-Medium.ttf") format("truetype");
+  src: url("./fonts/JetBrainsMonoNerdFont-Medium.woff2") format("woff2");
   font-style: normal;
   font-weight: 400 600;
   font-display: swap;
+  unicode-range: U+0-DFFF, U+F900-EFFFF;
 }
 
 @font-face {
   font-family: "JetBrains Mono Prompt";
-  src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  src: url("./fonts/JetBrainsMono-Regular.woff2") format("woff2");
   font-style: normal;
   font-weight: 400;
   font-display: swap;
@@ -16,26 +19,65 @@
 
 @font-face {
   font-family: "JetBrainsMono Nerd Font";
-  src: url("/fonts/JetBrainsMonoNerdFont-Italic.ttf") format("truetype");
+  src: url("./fonts/JetBrainsMonoNerdFont-Italic.woff2") format("woff2");
   font-style: italic;
   font-weight: 400 600;
   font-display: swap;
+  unicode-range: U+0-DFFF, U+F900-EFFFF;
 }
 
 @font-face {
   font-family: "JetBrainsMono Nerd Font";
-  src: url("/fonts/JetBrainsMonoNerdFont-Bold.ttf") format("truetype");
+  src: url("./fonts/JetBrainsMonoNerdFont-Bold.woff2") format("woff2");
   font-style: normal;
   font-weight: 700 900;
   font-display: swap;
+  unicode-range: U+0-DFFF, U+F900-EFFFF;
 }
 
 @font-face {
   font-family: "JetBrainsMono Nerd Font";
-  src: url("/fonts/JetBrainsMonoNerdFont-BoldItalic.ttf") format("truetype");
+  src: url("./fonts/JetBrainsMonoNerdFont-BoldItalic.woff2") format("woff2");
   font-style: italic;
   font-weight: 700 900;
   font-display: swap;
+  unicode-range: U+0-DFFF, U+F900-EFFFF;
+}
+
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("./fonts/JetBrainsMonoNerdFont-Icons.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  unicode-range: U+E000-F8FF, U+F0000-10FFFF;
+}
+
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("./fonts/JetBrainsMonoNerdFont-Icons.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 400 600;
+  font-display: swap;
+  unicode-range: U+E000-F8FF, U+F0000-10FFFF;
+}
+
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("./fonts/JetBrainsMonoNerdFont-Icons.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700 900;
+  font-display: swap;
+  unicode-range: U+E000-F8FF, U+F0000-10FFFF;
+}
+
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("./fonts/JetBrainsMonoNerdFont-Icons.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 700 900;
+  font-display: swap;
+  unicode-range: U+E000-F8FF, U+F0000-10FFFF;
 }
 
 :root {

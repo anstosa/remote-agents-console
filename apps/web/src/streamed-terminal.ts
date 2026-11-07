@@ -730,6 +730,23 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     scheduleOverlayRender();
   }) : undefined;
 
+  // When a web font loads, xterm keeps both its cell (measured only at open() and on font
+  // option changes) and the DOM renderer's per-glyph widths (e.g. icons drawn before the split
+  // icons face arrived) from the fallback font. Its DPR-change path re-measures the cell,
+  // clears the width cache and redraws; propose a new grid only if the cell changed.
+  const remeasureCell = () => {
+    if (disposed) return;
+    const renderService = (terminal as unknown as { _core?: { _renderService?: { dimensions: { css: { cell: { width: number; height: number } } }; handleDevicePixelRatioChange?: () => void } } })._core?._renderService;
+    if (!renderService?.handleDevicePixelRatioChange) return;
+    const { width, height } = renderService.dimensions.css.cell;
+    renderService.handleDevicePixelRatioChange();
+    const cell = renderService.dimensions.css.cell;
+    if (cell.width === width && cell.height === height) return;
+    scheduleViewport();
+    scheduleOverlayRender();
+  };
+  document.fonts.addEventListener('loadingdone', remeasureCell);
+
   // share one resize observer for terminal layout and full-height placeholders
   const resizeObserver = new ResizeObserver(() => {
     if (disposed) return;
@@ -777,6 +794,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       unsubscribeFont();
       unsubscribeTheme();
       releaseWebgl?.();
+      document.fonts.removeEventListener('loadingdone', remeasureCell);
       overlays.clear();
       selectionSurface?.dispose();
       terminal.dispose();
