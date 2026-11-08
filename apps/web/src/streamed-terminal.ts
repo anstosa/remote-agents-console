@@ -139,12 +139,9 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   // Layout: the terminal renders at its natural grid top-left; when the pane is
   // smaller than the panel the surrounding area shows the terminal background, so a
   // smaller pane is letterboxed rather than stretched.
-  container.classList.add('streamed-terminal');
-  if (getComputedStyle(container).position === 'static') container.style.position = 'relative';
   const host = document.createElement('div');
   host.className = 'streamed-terminal-host';
   Object.assign(host.style, { position: 'absolute', inset: '0', overflow: 'hidden' });
-  container.append(host);
 
   const status = document.createElement('div');
   status.className = 'streamed-terminal-status';
@@ -162,7 +159,6 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   const skeletonGroup = createOutputSkeletonGroup(loadingKind);
   outputSkeleton.append(skeletonGroup);
   status.append(statusMessage, outputSkeleton);
-  container.append(status);
 
   // repeat measured content groups through the entire available output height
   const syncOutputSkeleton = () => {
@@ -185,7 +181,31 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   jump.className = 'streamed-terminal-jump';
   jump.textContent = 'Jump to latest';
   jump.hidden = true;
-  container.append(jump);
+
+  // Cover the terminal with the themed background until the first seed has rendered, so the
+  // operator never sees xterm's brief pre-paint frame or its hardcoded-black viewport before
+  // content arrives — the pane appears already populated instead of flashing empty. Only the
+  // initial mount is covered; a reconnect keeps the existing screen, and the cover is long
+  // gone by then, so it never masks a live pane.
+  const cover = document.createElement('div');
+  cover.className = 'streamed-terminal-cover';
+  Object.assign(cover.style, { position: 'absolute', inset: '0', zIndex: '2', pointerEvents: 'none' });
+  const applyCoverBackground = (background: string | undefined) => { cover.style.background = background ?? ''; };
+  applyCoverBackground(computeTerminalTheme().background);
+  let revealed = false;
+
+  const applyContainerBackground = (background: string | undefined) => { container.style.background = background ?? ''; };
+  // Take `target` as the container: its classes and background, and this pane's own elements.
+  const attachTo = (target: HTMLElement) => {
+    container = target;
+    container.classList.add('streamed-terminal');
+    // expose native text only where agent programs would otherwise capture dragging
+    container.classList.toggle('native-mouse-selection', options.preferNativeMouseSelection === true);
+    if (getComputedStyle(container).position === 'static') container.style.position = 'relative';
+    container.append(host, status, jump, ...(revealed ? [] : [cover]));
+    applyContainerBackground(computeTerminalTheme().background);
+  };
+  attachTo(container);
 
   const terminal = new XTerm({
     fontFamily: terminalFontFamily,
@@ -223,15 +243,10 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     }
   };
   terminal.open(host);
-  // expose native text only where agent programs would otherwise capture dragging
-  container.classList.toggle('native-mouse-selection', options.preferNativeMouseSelection === true);
   const selectionSurface = options.preferNativeMouseSelection ? createTerminalSelectionSurface(terminal) : undefined;
   // Mirror the font size onto the element as the font-size subscription does on change, so
   // the configured size is legible in the DOM from mount (not only after the first change).
   Object.assign(terminal.element!.style, { fontFamily: terminalFontFamily, fontSize: `${readTerminalFontSize()}px`, fontKerning: 'none', fontWeight: 'normal' });
-
-  const applyContainerBackground = (background: string | undefined) => { container.style.background = background ?? ''; };
-  applyContainerBackground(computeTerminalTheme().background);
 
   let suppressFocusUntil = 0;
   const overlays = createOutputLinkOverlays(
@@ -242,18 +257,6 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   );
 
   let disposed = false;
-  // Cover the terminal with the themed background until the first seed has rendered, so the
-  // operator never sees xterm's brief pre-paint frame or its hardcoded-black viewport before
-  // content arrives — the pane appears already populated instead of flashing empty. Only the
-  // initial mount is covered; a reconnect keeps the existing screen, and the cover is long
-  // gone by then, so it never masks a live pane.
-  const cover = document.createElement('div');
-  cover.className = 'streamed-terminal-cover';
-  Object.assign(cover.style, { position: 'absolute', inset: '0', zIndex: '2', pointerEvents: 'none' });
-  const applyCoverBackground = (background: string | undefined) => { cover.style.background = background ?? ''; };
-  applyCoverBackground(computeTerminalTheme().background);
-  container.append(cover);
-  let revealed = false;
   const revealTerminal = () => { if (revealed) return; revealed = true; cover.remove(); mark('cover'); };
   let connection: PaneConnection | undefined;
   let sizeApplied = false;
@@ -505,12 +508,15 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     options.onStatus?.(undefined);
   };
 
-  const handleDisconnect = (reason: string) => {
-    if (disposed) return;
+  const closeConnection = () => {
     const current = connection;
     connection = undefined;
-    invalidateCodexFollowState();
     if (current !== undefined) { try { current.close(); } catch { /* already closing */ } }
+  };
+  const handleDisconnect = (reason: string) => {
+    if (disposed) return;
+    closeConnection();
+    invalidateCodexFollowState();
     // Keep the terminal mounted as its own placeholder with a status, then re-subscribe.
     showStatus(reason);
     // a refusing server (a lost control lease) never seeds, and one that seeds then fails is
@@ -829,9 +835,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       if (overlayFrame !== undefined) window.cancelAnimationFrame(overlayFrame);
       if (viewportFrame !== undefined) window.cancelAnimationFrame(viewportFrame);
       firstViewportSub?.dispose();
-      const current = connection;
-      connection = undefined;
-      if (current !== undefined) { try { current.close(); } catch { /* already closing */ } }
+      closeConnection();
       resizeObserver.disconnect();
       releaseTouchScroll();
       releaseLongPress();
