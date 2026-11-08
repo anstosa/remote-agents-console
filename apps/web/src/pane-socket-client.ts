@@ -15,6 +15,10 @@ type Request = (url: string, init?: RequestInit) => Promise<Response>;
 const paneSocketUrl = (id: string, pane?: string): string =>
   `${location.origin.replace(/^http/u, 'ws')}/ws/pane/${encodeURIComponent(id)}${pane === undefined ? '' : `?pane=${encodeURIComponent(pane)}`}`;
 
+// pane sockets constructed but not yet open or closed, across the page: Firefox lets only one
+// WebSocket handshake per server IP proceed at a time, so this explains slow opens
+let connectingSockets = 0;
+
 // Shared connector body: mint a single-use `pane` ticket from `ticketPath`, then open the
 // pane socket for `target` (optionally a specific `pane`) with the ticket as the second
 // subprotocol. Each call mints its own ticket, so a reconnect never replays a spent one.
@@ -39,10 +43,14 @@ const createPaneConnector = (target: string, pane: string | undefined, ticketPat
       if (!response.ok) throw new Error('pane ticket unavailable');
       const { ticket } = await response.json();
       if (closed) return;
+      handlers.onSocket?.(connectingSockets);
       const ws = new WebSocket(paneSocketUrl(target, pane), ['rac', ticket]);
+      let connecting = true;
+      connectingSockets += 1;
+      const settle = () => { if (connecting) { connecting = false; connectingSockets -= 1; } };
       ws.binaryType = 'arraybuffer';
       socket = ws;
-      ws.onopen = () => { if (!closed && socket === ws) { handlers.onOpen(); flush(); } };
+      ws.onopen = () => { settle(); if (!closed && socket === ws) { handlers.onOpen(); flush(); } };
       ws.onmessage = event => {
         if (closed || socket !== ws) return;
         if (event.data instanceof ArrayBuffer) { handlers.onBytes(new Uint8Array(event.data)); return; }
@@ -50,6 +58,7 @@ const createPaneConnector = (target: string, pane: string | undefined, ticketPat
         try { handlers.onFrame(JSON.parse(String(event.data)) as PaneServerFrame); } catch { /* ignore malformed */ }
       };
       ws.onclose = event => {
+        settle();
         if (closed || socket !== ws) return;
         socket = undefined;
         handlers.onClose({ code: event.code, reason: event.reason });

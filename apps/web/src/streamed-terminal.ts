@@ -13,7 +13,7 @@ import { subscribeColorTheme } from './color-theme.js';
 import { createOutputLinkOverlays } from './output-links.js';
 import { safeHttpTarget } from './terminal-link-metadata.js';
 import { preserveOutputLongPressSelection } from './output-touch.js';
-import { encodeInputBytes, maxInputFrameBytes, type PaneConnection, type PaneConnector, type PaneMetadata, type PaneServerFrame } from './pane-stream.js';
+import { encodeInputBytes, maxInputFrameBytes, type PaneConnection, type PaneConnector, type PaneMetadata, type PaneServerFrame, type PaneTiming } from './pane-stream.js';
 
 export interface StreamedTerminalOptions {
   // Opens a pane connection; called once per subscribe, including every reconnect.
@@ -64,6 +64,26 @@ export interface StreamedTerminalHandle {
 }
 
 const coarsePointer = () => window.matchMedia('(pointer: coarse)').matches;
+
+const roundMs = (ms: number) => Math.round(ms * 10) / 10;
+const browserTag = (): PaneTiming['browser'] => {
+  const agent = navigator.userAgent;
+  return /firefox/iu.test(agent) ? 'firefox' : /chrom/iu.test(agent) ? 'chrome' : /safari/iu.test(agent) ? 'safari' : 'other';
+};
+// the page's own load timeline rides the page's first timing frame only
+let pageTimingSent = false;
+// read from navigation and resource timing, so the fetches in main.tsx need no hooks
+const pageTiming = (): NonNullable<PaneTiming['page']> => {
+  const page: NonNullable<PaneTiming['page']> = {};
+  const [navigation] = performance.getEntriesByType('navigation') as PerformanceNavigationTiming[];
+  if (navigation !== undefined) Object.assign(page, { responseEnd: roundMs(navigation.responseEnd), domContentLoaded: roundMs(navigation.domContentLoadedEventEnd) });
+  for (const entry of performance.getEntriesByType('resource') as PerformanceResourceTiming[]) {
+    const path = new URL(entry.name, location.href).pathname;
+    if (path === '/api/auth/session') page.session ??= roundMs(entry.responseEnd);
+    if (path === '/api/dashboard') page.dashboard ??= roundMs(entry.responseEnd);
+  }
+  return page;
+};
 
 // build decorative transcript or shell groups without inventing output text
 const createOutputSkeletonGroup = (kind: 'agent' | 'terminal'): HTMLElement => {
@@ -234,7 +254,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   applyCoverBackground(computeTerminalTheme().background);
   container.append(cover);
   let revealed = false;
-  const revealTerminal = () => { if (revealed) return; revealed = true; cover.remove(); };
+  const revealTerminal = () => { if (revealed) return; revealed = true; cover.remove(); mark('cover'); };
   let connection: PaneConnection | undefined;
   let sizeApplied = false;
   // The next bytes are a fresh seed: clear the scrollback right before writing them, so
@@ -258,6 +278,10 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   const maxQueuedBytes = 256 * 1024;
   const maxQueuedFrames = 1024;
   let reconnectTimer: number | undefined;
+  // the current stream attempt's connection timeline, sent once its first seed is parsed
+  let timeline: { start: number; timing: { type: 'timing' } & PaneTiming } | undefined;
+  let attempts = 0;
+  const mark = (name: keyof PaneTiming['marks']) => { if (timeline !== undefined) timeline.timing.marks[name] ??= roundMs(performance.now() - timeline.start); };
   // when the current stream's seed was parsed; undefined until then
   let seededAt: number | undefined;
   let overlayFrame: number | undefined;
@@ -313,6 +337,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     const dimensions = fit.proposeDimensions();
     if (!dimensions || !Number.isFinite(dimensions.cols) || !Number.isFinite(dimensions.rows) || dimensions.cols < 1 || dimensions.rows < 1) return;
     connection.send({ type: 'viewport', cols: dimensions.cols, rows: dimensions.rows, scrollback });
+    // one queued before the open goes out with the open's own viewport
+    if (timeline?.timing.marks.open !== undefined) mark('viewport');
     // A grid was proposable, so the cell is now measured; stop re-proposing on every render.
     firstViewportSub?.dispose();
     firstViewportSub = undefined;
@@ -415,11 +441,25 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
           parsedSeedGeneration = generation;
           seededAt = performance.now();
           hideStatus();
+          mark('parsed');
         }
         scheduleOverlayRender();
         syncFollowState();
         // uncover the first populated frame
         if (wasSeed) revealTerminal();
+        if (timeline?.timing.marks.parsed !== undefined) {
+          const sent = timeline;
+          timeline = undefined;
+          // xterm queued its render of the seed before this frame callback, so it has run by then
+          window.requestAnimationFrame(() => {
+            if (disposed || connection !== source) return;
+            sent.timing.marks.painted = roundMs(performance.now() - sent.start);
+            // the DOM renderer draws `.xterm-rows`; WebGL replaces them with canvases
+            sent.timing.renderer = host.querySelector('.xterm-rows') === null ? 'webgl' : 'dom';
+            if (!pageTimingSent) { pageTimingSent = true; sent.timing.page = pageTiming(); }
+            source?.send(sent.timing);
+          });
+        }
         // let xterm finish its parser turn before scheduling the next visual event
         queueMicrotask(drainOutput);
       });
@@ -520,10 +560,17 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     awaitingSeed = true;
     seededAt = undefined;
     invalidateCodexFollowState();
+    const start = performance.now();
+    timeline = { start, timing: { type: 'timing', attempt: attempts++ === 0 ? 'initial' : 'reconnect', sincePageLoad: roundMs(start), renderer: 'dom', browser: browserTag(), mobile: coarse, marks: {} } };
     connection = options.connect({
-      onOpen: () => sendViewport(),
-      onBytes: queueOutput,
-      onFrame: handleFrame,
+      onSocket: connecting => { mark('socket'); if (timeline !== undefined) timeline.timing.connectingSockets = connecting; },
+      onOpen: () => { mark('open'); sendViewport(); },
+      onBytes: bytes => {
+        mark('firstFrame');
+        if (timeline !== undefined && timeline.timing.marks.seed === undefined) { mark('seed'); timeline.timing.seedBytes = bytes.length; }
+        queueOutput(bytes);
+      },
+      onFrame: frame => { mark('firstFrame'); handleFrame(frame); },
       // keep transport codes out of the reconnect notice
       onClose: () => handleDisconnect('Reconnecting…')
     });

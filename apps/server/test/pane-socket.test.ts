@@ -1,4 +1,7 @@
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
@@ -148,7 +151,7 @@ async function freePort(): Promise<number> {
   });
 }
 
-type Deps = { kind?: string; controlActive?: () => boolean; controlConnect?: () => boolean; tmux?: unknown; prompts?: unknown; query?: string; discovery?: unknown; sendOnOpen?: unknown };
+type Deps = { kind?: string; controlActive?: () => boolean; controlConnect?: () => boolean; tmux?: unknown; prompts?: unknown; query?: string; discovery?: unknown; sendOnOpen?: unknown; paneTimingFile?: string };
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -159,7 +162,7 @@ async function connect(paneStream: PaneStreamProvider, deps: Deps = {}) {
   const tickets = new TicketStore();
   const app = await buildApp(
     testConfig({ publicOrigin: new URL(`http://127.0.0.1:${port}`), projects: [testProject({ id: 'proj' })] as never }),
-    { auth, control, dashboardUpdates, discovery: deps.discovery ?? discoveryOf(kind), tickets, paneStream, ...(deps.tmux === undefined ? {} : { tmux: deps.tmux }), ...(deps.prompts === undefined ? {} : { prompts: deps.prompts }) } as never
+    { auth, control, dashboardUpdates, discovery: deps.discovery ?? discoveryOf(kind), tickets, paneStream, ...(deps.tmux === undefined ? {} : { tmux: deps.tmux }), ...(deps.prompts === undefined ? {} : { prompts: deps.prompts }), ...(deps.paneTimingFile === undefined ? {} : { paneTimingFile: deps.paneTimingFile }) } as never
   );
   await app.listen({ host: '127.0.0.1', port });
   const ticket = tickets.mint('session', 'pane', 'agent-1').id;
@@ -879,5 +882,62 @@ describe('/ws/pane window-keyed Size claim', () => {
 
     // one window, one claim: exactly one unpin, by the window id so a dead pane cannot strand it
     expect(unpins).toEqual(['@7']);
+  });
+});
+
+describe('/ws/pane timing', () => {
+  const timingFrame = { type: 'timing', attempt: 'initial', sincePageLoad: 950.5, connectingSockets: 1, renderer: 'dom', browser: 'firefox', mobile: false, seedBytes: 4, marks: { socket: 12, open: 30, viewport: 30.1, firstFrame: 44, seed: 50, parsed: 55, cover: 55.2, painted: 60 } };
+  const readLines = async (file: string) => (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(line => line !== '');
+
+  it('logs one record merging the browser timeline with the server steps', async () => {
+    const file = join(await mkdtemp(join(tmpdir(), 'pane-timing-')), 'pane-timing.jsonl');
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux, paneTimingFile: file });
+    conn.viewport();
+    await waitFor(() => conn.binary.length > 0);
+    conn.send(timingFrame);
+    // a second frame on the same connection is ignored
+    conn.send({ ...timingFrame, attempt: 'reconnect' });
+    let lines: string[] = [];
+    await waitFor(() => { void readLines(file).then(read => { lines = read; }); return lines.length > 0; });
+    await delay(50);
+    lines = await readLines(file);
+
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0]!) as { at: string; session: string; pane: string; kind: string; server: Record<string, unknown>; client: Record<string, unknown> };
+    const { type: _type, ...client } = timingFrame;
+    expect(record).toMatchObject({ session: '$1', pane: '%1', kind: 'claude', client });
+    expect(Number.isNaN(Date.parse(record.at))).toBe(false);
+    expect(record.server).toMatchObject({ claim: 'new', sizeBefore: '80x24', size: '80x24', seedBytes: 4 });
+    for (const step of ['ticket', 'target', 'windowKey', 'firstMessage', 'viewport', 'resizeStart', 'resizeEnd', 'sizeSent', 'captureStart', 'captured', 'seedSent', 'timing']) {
+      expect(record.server[step], step).toEqual(expect.any(Number));
+    }
+    expect(conn.closeCode()).toBeUndefined();
+  });
+
+  it('ignores a malformed or oversized timing frame without closing the stream', async () => {
+    const file = join(await mkdtemp(join(tmpdir(), 'pane-timing-')), 'pane-timing.jsonl');
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux, paneTimingFile: file });
+    conn.viewport();
+    await waitFor(() => conn.binary.length > 0);
+    conn.send({ ...timingFrame, marks: 'nope' });
+    conn.send(timingFrame);
+    await delay(50);
+    // the first timing frame spent the connection's one chance, and the stream stays up
+    conn.send({ type: 'input', data: encode('ok') });
+    await waitFor(() => stream.inputs.length > 0);
+    expect(conn.closeCode()).toBeUndefined();
+    expect(await readLines(file)).toEqual([]);
+
+    const oversized = await connect(stream.provider, { tmux, paneTimingFile: file });
+    oversized.viewport();
+    await waitFor(() => oversized.binary.length > 0);
+    oversized.send({ ...timingFrame, padding: 'x'.repeat(5_000) });
+    await delay(50);
+    expect(oversized.closeCode()).toBeUndefined();
+    expect(await readLines(file)).toEqual([]);
   });
 });

@@ -67,11 +67,13 @@ describe('pane viewport coordination', () => {
     const apply = async (cols: number, rows: number) => { applied.push([cols, rows]); return true; };
     const unpin = async () => { unpins += 1; return true; };
     const first = coordinator.acquire('socket:@1', read, apply, unpin);
+    expect(first.held).toBe(false);
     await first.resize(62, 41);
     await first.release();
     await vi.advanceTimersByTimeAsync(1_000);
 
     const returning = coordinator.acquire('socket:@1', read, apply, unpin);
+    expect(returning.held).toBe(true);
     await vi.advanceTimersByTimeAsync(paneViewportGraceMs);
     expect(applied).toEqual([[62, 41]]);
     expect(unpins).toBe(0);

@@ -75,6 +75,9 @@ export type PaneClient = {
   // absolute positioning and the cursor restored. normal screen: history joined with CRLF,
   // cleared first and the cursor restored. false means capture or delivery failed.
   seed(pane: string, depth: number, deliver: (bytes: Buffer) => boolean): Promise<boolean>;
+  // when the client was spawned (performance.now()) and its attach completing; pane timing only
+  readonly startedAt?: number;
+  readonly ready?: Promise<void>;
 };
 export type PaneStreamProvider = {
   get(socket: SocketRef, session: string): PaneClient;
@@ -95,6 +98,7 @@ export class TmuxControlClient implements PaneClient {
   private readonly foregrounds = new Map<string, string>();
   private disposed = false;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly startedAt = performance.now();
   // resolves once the attach's own %begin/%end block has been consumed
   readonly ready: Promise<void>;
 

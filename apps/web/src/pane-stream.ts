@@ -24,7 +24,25 @@ export type PaneClientFrame =
   // Bytes consumed since the last ack, for the server's drop-while-behind flow control.
   | { type: 'ack'; bytes: number }
   // Ask the Agent pane's derive to resend the current question and metadata.
-  | { type: 'metadata' };
+  | { type: 'metadata' }
+  // This stream's connection timeline, sent once after its first seed is parsed; the server
+  // logs it with its own steps to pane-timing.jsonl.
+  | ({ type: 'timing' } & PaneTiming);
+
+// Milliseconds from the attempt's start (performance.now() offsets), except `page`, whose
+// values are offsets from page load and which only the page's first timing frame carries.
+export interface PaneTiming {
+  attempt: 'initial' | 'reconnect';
+  sincePageLoad: number;
+  // other pane sockets mid-handshake when this one was constructed
+  connectingSockets?: number;
+  renderer: 'webgl' | 'dom';
+  browser: 'firefox' | 'chrome' | 'safari' | 'other';
+  mobile: boolean;
+  seedBytes?: number;
+  marks: Partial<Record<'socket' | 'open' | 'viewport' | 'firstFrame' | 'seed' | 'parsed' | 'cover' | 'painted', number>>;
+  page?: Partial<Record<'responseEnd' | 'domContentLoaded' | 'session' | 'dashboard', number>>;
+}
 
 // Server → browser (the JSON frames; raw pane bytes arrive as binary frames).
 export type PaneServerFrame =
@@ -44,6 +62,9 @@ export type PaneServerFrame =
   | { type: 'foreground'; command: string };
 
 export interface PaneConnectionHandlers {
+  // the ticket arrived and the socket was constructed, with how many other pane sockets
+  // were still mid-handshake at that moment
+  onSocket?: (connectingSockets: number) => void;
   onOpen: () => void;
   onBytes: (bytes: Uint8Array) => void;
   onFrame: (frame: PaneServerFrame) => void;

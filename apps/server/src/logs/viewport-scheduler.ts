@@ -43,6 +43,8 @@ export type PaneViewportLease = {
   resize: (cols: number, rows: number) => Promise<boolean>;
   ensure: (cols: number, rows: number) => Promise<{ ok: boolean; resized: boolean }>;
   release: () => Promise<void>;
+  // this viewer took over a released claim still in its grace, so the window kept its size
+  held: boolean;
 };
 
 // Never ask for more than an attached terminal can show, so a browser and a
@@ -73,13 +75,15 @@ export class PaneViewportCoordinator {
     entry.read = read;
     entry.apply = apply;
     entry.unpin = unpin;
+    const held = entry.pending !== undefined;
     // a viewer returning within a release's grace takes the claim over as it stands
     this.cancelPending(entry);
     this.entries.set(key, entry);
     return {
       resize: (cols, rows) => this.resize(key, entry, owner, cols, rows),
       ensure: (cols, rows) => this.ensure(key, entry, owner, cols, rows),
-      release: () => this.release(key, entry, owner)
+      release: () => this.release(key, entry, owner),
+      held
     };
   }
 

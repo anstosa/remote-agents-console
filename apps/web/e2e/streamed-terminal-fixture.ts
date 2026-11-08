@@ -102,6 +102,7 @@ export const pushClose = (code: number, reason: string) => handlers?.onClose({ c
 const terminal = () => handle!.terminal;
 export const sentFrames = () => sent.map(frame => frame.type);
 export const inputFrameCount = () => sent.filter(frame => frame.type === 'input').length;
+export const timingFrames = () => sent.filter(frame => frame.type === 'timing');
 export const ackedBytes = () => sent.filter((frame): frame is Extract<PaneClientFrame, { type: 'ack' }> => frame.type === 'ack').map(frame => frame.bytes);
 export const focusTerminal = () => handle!.focus();
 export const blurTerminal = () => (document.activeElement as HTMLElement | null)?.blur();

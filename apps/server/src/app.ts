@@ -54,6 +54,7 @@ import { isReviewRun, paneTmuxSession, stackActions, worktreeAgents, type Agent,
 import { CommandCatalogService } from './commands/service.js';
 import { LatestViewportScheduler, PaneViewportCoordinator } from './logs/viewport-scheduler.js';
 import { boundedViewport } from './logs/viewport.js';
+import { maxTimingFrameChars, parsePaneTiming, paneTimingLog } from './logs/pane-timing.js';
 import { PaneStreamRegistry, type PaneStreamProvider } from './tmux/control.js';
 import { isPaneTheme } from './tmux/terminal-colors.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from './dashboard/updates.js';
@@ -147,7 +148,7 @@ import { registerGoogleCalendarRoutes } from './google-calendar/routes.js';
 import { calendarLabelsForAgent } from './google-calendar/labels.js';
 import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
 
-export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number };
+export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; paneTimingFile?: string };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use, and with the
 // structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
@@ -308,6 +309,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const launchHome = config.launchHome === null ? undefined : nativeHome();
   const agentUpdates = deps.agentUpdates ?? new AgentUpdateService(config, launchHome);
   const paneViewports = new PaneViewportCoordinator(deps.paneViewportGraceMs);
+  const logPaneTiming = paneTimingLog(deps.paneTimingFile ?? join(serverCheckout(), '.data/pane-timing.jsonl'));
   // one tmux control-mode client per session, shared by every viewer, drives the
   // event-driven log frames (ADR 0008)
   const paneStream: PaneStreamProvider = deps.paneStream ?? new PaneStreamRegistry();
@@ -4582,11 +4584,17 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // its tmux session (the Agent's own by default). This is the only pane viewer: the browser's
   // streamed terminal (xterm 6.0) consumes it for the Agent Panel and every Console shell.
   app.get('/ws/pane/:id', { websocket: true }, async (socket, request) => {
+    // this connection's setup steps in ms since the upgrade (first occurrence only), merged
+    // with the browser's `timing` frame into one pane-timing.jsonl record
+    const startedAt = performance.now();
+    const timing: Record<string, unknown> = {};
+    const mark = (name: string) => { timing[name] ??= Math.round((performance.now() - startedAt) * 10) / 10; };
     try {
       const s = controlled(request, false);
       const ticket = String(request.headers['sec-websocket-protocol'] ?? '').split(',').map(x => x.trim())[1];
       const id = (request.params as { id: string }).id;
       if (!tickets.consume(ticket, s.id, 'pane', id)) throw new Error();
+      mark('ticket');
       // Buffer client frames from the instant the socket is up: ws drops any 'message' that
       // arrives before a listener is attached, and the browser sends its first (and, until a
       // resize, only) `viewport` right on open — while the target/membership resolution below
@@ -4595,7 +4603,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // swaps in the real processor and replays what queued.
       const earlyFrames: unknown[] = [];
       let handleRaw: (raw: unknown) => void = raw => { earlyFrames.push(raw); };
-      socket.on('message', (raw: unknown) => handleRaw(raw));
+      socket.on('message', (raw: unknown) => { mark('firstMessage'); handleRaw(raw); });
       // Resolve the pane target: an Agent (default pane = the Agent's own, membership = every
       // pane of its tmux session, derive + mutation lock on its own pane) or a Place (an
       // explicit pane required, membership = the Place's pane set — every pane of every
@@ -4641,7 +4649,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // the browser may have disconnected during the awaits above (target/membership lookups);
       // bail before spawning/subscribing so a control client and lease are never left dangling
       if (socket.readyState !== socket.OPEN) return;
+      mark('target');
+      const clientWanted = performance.now();
       const paneClient = paneStream.get(socketRef, session);
+      if (paneClient.startedAt !== undefined) timing.control = paneClient.startedAt >= clientWanted ? 'attached' : 'reused';
+      void paneClient.ready?.then(() => mark('controlReady'), () => {});
       const captureVia = (depth: number) => paneClient.capture(pane, depth);
       const adapter = agent === undefined ? undefined : adapterFor(agent.kind);
       // the Agent's derive (question/metadata) rides the Agent's own pane only, and only for
@@ -4650,13 +4662,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // One Size claim per window, keyed by window id resolved over the connection: every
       // caller awaits windowKeyReady first (see the INVARIANT below).
       let windowKey = pane;
-      const windowKeyReady = paneClient.windowId(pane).then(w => { if (w !== undefined) windowKey = w; }).catch(() => { /* keep the pane-id fallback */ });
+      const windowKeyReady = paneClient.windowId(pane).then(w => { mark('windowKey'); if (w !== undefined) windowKey = w; }).catch(() => { /* keep the pane-id fallback */ });
       let paneViewport: ReturnType<typeof paneViewports.acquire> | undefined;
       // INVARIANT: every caller must `await windowKeyReady` before the first call, so the
       // memoised claim is keyed by the window id, not the pane-id fallback.
       const viewportLease = () => paneViewport ??= paneViewports.acquire(
         `${socketRef.fingerprint}:${windowKey}`,
-        () => tmux.size(socketRef, pane),
+        async () => { const size = await tmux.size(socketRef, pane); timing.sizeBefore ??= size && `${size.cols}x${size.rows}`; return size; },
         (nextCols, nextRows) => tmux.resize(socketRef, pane, nextCols, nextRows),
         () => tmux.unpinWindowSize(socketRef, windowKey)
       );
@@ -4672,6 +4684,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         // an unknown grid cannot authorize the initial snapshot
         if (size === undefined) return false;
         sendFrame({ type: 'size', cols: size.cols, rows: size.rows });
+        timing.size ??= `${size.cols}x${size.rows}`;
+        mark('sizeSent');
         return socket.readyState === socket.OPEN;
       };
       let cols = 120;
@@ -4700,6 +4714,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         // a fresh seed re-establishes the whole screen, so the pre-reseed in-flight count is
         // void: reset it (and clear a lingering drop) so backpressure restarts from the seed
         seeding = true;
+        mark('captureStart');
         const generation = ++seedGeneration;
         unacked = 0;
         dropped = false;
@@ -4708,7 +4723,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
           if (generation !== seedGeneration || socket.readyState !== socket.OPEN) return false;
           // preserve take-control policy before sending the snapshot
           if (!control.active(s.id)) { socket.close(1008); return false; }
+          mark('captured');
+          timing.seedBytes ??= seed.length;
           sendBinary(seed);
+          mark('seedSent');
           seeding = false;
           return true;
         }).catch(() => false);
@@ -4791,7 +4809,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const viewport = new LatestViewportScheduler(
         async (nextCols, nextRows) => {
           await windowKeyReady;
+          mark('resizeStart');
           const resized = await viewportLease().resize(nextCols, nextRows);
+          mark('resizeEnd');
+          timing.claim ??= viewportLease().held ? 'held' : 'new';
           const reported = await reportSize();
           // release the first snapshot only after its grid reached the viewer
           if (resized && reported) seedOnce();
@@ -4835,6 +4856,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         }
       };
       const lease = leaseHeartbeat(socket, s.id, config.pollIntervalMs);
+      let timingLogged = false;
       const processFrame = (raw: unknown) => {
         try {
           const frame = JSON.parse(String(raw));
@@ -4844,6 +4866,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
             if (bounded === undefined) throw new Error();
             if (Number.isInteger(frame.scrollback) && frame.scrollback >= 1 && frame.scrollback <= 5_000) seedDepth = frame.scrollback;
             ({ cols, rows } = bounded);
+            mark('viewport');
             viewportEstablished = true;
             void viewport.schedule({ cols, rows, history: 0, onFailure: () => socket.close(1011) });
             return;
@@ -4865,6 +4888,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
           }
           if (frame.type === 'metadata') {
             if (derives) void runDerive(true);
+            return;
+          }
+          // the browser's timeline for this stream: one per connection, and a malformed one is
+          // dropped rather than closing the stream
+          if (frame.type === 'timing') {
+            const client = timingLogged || String(raw).length > maxTimingFrameChars ? undefined : parsePaneTiming(frame);
+            timingLogged = true;
+            if (client === undefined) return;
+            mark('timing');
+            void logPaneTiming({ at: new Date().toISOString(), session, pane, kind: isAgentPane ? agent!.kind : 'terminal', server: { ...timing }, client });
             return;
           }
           throw new Error();
