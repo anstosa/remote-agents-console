@@ -822,6 +822,30 @@ describe('/ws/pane Worktree target', () => {
   });
 });
 
+describe('/ws/pane closed during setup', () => {
+  // the browser flicks past a Workspace: its stream closes while the viewport it sent is still
+  // waiting on the window id, which must then not size the window for a viewer that is gone
+  it('takes no Size claim for a viewport left waiting on the window id', async () => {
+    const stream = fakePaneStream();
+    const client = stream.provider.get(socket as never, '$1');
+    const windowId = client.windowId.bind(client);
+    let resolveWindow!: () => void;
+    const windowHeld = new Promise<void>(resolve => { resolveWindow = resolve; });
+    client.windowId = async pane => { await windowHeld; return await windowId(pane); };
+    const { tmux, resizes } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport();
+    await waitFor(stream.subscribed);
+    open.at(-1)!.ws.close();
+    await delay(50);
+    resolveWindow();
+    await delay(50);
+
+    expect(resizes).toEqual([]);
+    expect(conn.binary).toEqual([]);
+  });
+});
+
 describe('/ws/pane window-keyed Size claim', () => {
   it('shares one claim between two panes of the same window (keyed by window, not pane)', async () => {
     // Both panes resolve to window @7 (the fake client's windowId), so the two viewers share one

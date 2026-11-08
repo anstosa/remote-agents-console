@@ -129,9 +129,12 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     let windowKey = pane;
     const windowKeyReady = paneClient.windowId(pane).then(w => { mark('windowKey'); if (w !== undefined) windowKey = w; }).catch(() => { /* keep the pane-id fallback */ });
     let paneViewport: ReturnType<typeof paneViewports.acquire> | undefined;
+    // set once the stream ends; a viewport or re-clamp still awaiting `windowKeyReady` then
+    // must not take a claim no one will release
+    let ended = false;
     // INVARIANT: every caller must `await windowKeyReady` before the first call, so the
     // memoised claim is keyed by the window id, not the pane-id fallback.
-    const viewportLease = () => paneViewport ??= paneViewports.acquire(
+    const viewportLease = () => ended ? undefined : paneViewport ??= paneViewports.acquire(
       `${socketRef.fingerprint}:${windowKey}`,
       async () => { const size = await tmux.size(socketRef, pane); timing.sizeBefore ??= size && `${size.cols}x${size.rows}`; return size; },
       (nextCols, nextRows) => tmux.resize(socketRef, pane, nextCols, nextRows),
@@ -257,7 +260,8 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
         if (!control.active(sessionId)) return transport.close(1008);
         if (await paneClient.windowId(pane) === undefined) { sendFrame({ type: 'exit', reason: 'pane closed' }); return transport.close(1000); }
         if (!viewportEstablished) return;
-        const ensured = await viewportLease().ensure(cols, rows);
+        const ensured = await viewportLease()?.ensure(cols, rows);
+        if (ensured === undefined) return;
         if (!ensured.ok) return transport.close(1011);
         // report the pane's actual size only when it moved (a layout change may leave it put)
         if (ensured.resized) { const after = await tmux.size(socketRef, pane); if (after !== undefined) sendFrame({ type: 'size', cols: after.cols, rows: after.rows }); }
@@ -274,10 +278,12 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     const viewport = new LatestViewportScheduler(
       async (nextCols, nextRows) => {
         await windowKeyReady;
+        const lease = viewportLease();
+        if (lease === undefined) return false;
         mark('resizeStart');
-        const resized = await viewportLease().resize(nextCols, nextRows);
+        const resized = await lease.resize(nextCols, nextRows);
         mark('resizeEnd');
-        timing.claim ??= viewportLease().held ? 'held' : 'new';
+        timing.claim ??= lease.held ? 'held' : 'new';
         const reported = await reportSize();
         // release the first snapshot only after its grid reached the viewer
         if (resized && reported) seedOnce();
@@ -372,7 +378,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     // frame can slip past unbuffered.
     for (const raw of earlyFrames.splice(0)) processFrame(raw);
     handleRaw = processFrame;
-    cleanup = () => { if (quietTimer !== undefined) clearTimeout(quietTimer); unsubscribePane(); if (paneViewport !== undefined) void paneViewport.release(); };
+    cleanup = () => { ended = true; if (quietTimer !== undefined) clearTimeout(quietTimer); unsubscribePane(); if (paneViewport !== undefined) void paneViewport.release(); };
     // carry the derive once at subscribe, before any %output
     if (derives) void runDerive(true);
   };
