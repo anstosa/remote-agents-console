@@ -72,7 +72,8 @@ export type PaneCaptureRunner = (depth: number) => Promise<string | undefined>;
 export type PaneSize = { cols: number; rows: number };
 // clientLimit: the largest pane size every tmux client attached to the pane's
 // session can display; absent when nothing is attached
-export type PaneGeometry = PaneSize & { clientLimit?: PaneSize };
+// window: the whole window the pane sits in
+export type PaneGeometry = PaneSize & { clientLimit?: PaneSize; window?: PaneSize };
 // The console imposes no size ceiling of its own; the only bound is tmux's own maximum
 // window dimension (WINDOW_MAXIMUM, 10000). A pane tmux has already made larger (a wide
 // attached terminal) is still reported as it is. (Sizing, ADR 0008: the old 500x300 clamp
@@ -401,7 +402,8 @@ export class TmuxAdapter {
     const { paneCols: cols, paneRows: rows } = layout;
     if (cols < 1 || rows < 1) return undefined;
     const limit = clientLimit(layout, clients);
-    return limit === undefined ? { cols, rows } : { cols, rows, clientLimit: limit };
+    const window = { cols: layout.windowCols, rows: layout.windowRows };
+    return limit === undefined ? { cols, rows, window } : { cols, rows, window, clientLimit: limit };
   }
 
   // resize-window pins the window at a manual size that ignores attached

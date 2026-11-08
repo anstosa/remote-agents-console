@@ -1,8 +1,9 @@
 export type ViewportRequest = { cols: number; rows: number; history: number; onFailure?: () => void };
 export type PaneViewport = { cols: number; rows: number };
 // clientLimit: the largest pane size every tmux client attached to the pane's
-// session can display; absent when nothing is attached
-export type PaneGeometry = PaneViewport & { clientLimit?: PaneViewport };
+// session can display; absent when nothing is attached. window: the whole window the pane
+// sits in, taken to be the pane alone when absent
+export type PaneGeometry = PaneViewport & { clientLimit?: PaneViewport; window?: PaneViewport };
 
 export class LatestViewportScheduler {
   private version = 0;
@@ -26,12 +27,30 @@ export class LatestViewportScheduler {
   }
 }
 
-type PaneViewportEntry = {
+type PaneViewportViewer = {
   owner: symbol;
+  read: () => Promise<PaneGeometry | undefined>;
+  apply: (cols: number, rows: number) => Promise<boolean>;
+  unpin: () => Promise<boolean>;
+  // the grid this viewer last asked for
+  size?: PaneViewport;
+  // its pane was resized for it without a resize of its own, so the next re-clamp reports it
+  moved?: boolean;
+};
+
+// One Size claim per key (a window): the latest live viewer drives it, through its own read
+// and apply; the others conform to the size it leaves, and when it leaves the one before it
+// drives again. Only the last viewer's release restores the window.
+type PaneViewportEntry = {
+  // the driving viewer, or a release's marker once no viewer is left
+  owner: symbol;
+  // live viewers in acquire order, the driver last
+  viewers: PaneViewportViewer[];
   queue: Promise<void>;
   read: () => Promise<PaneGeometry | undefined>;
   apply: (cols: number, rows: number) => Promise<boolean>;
   unpin: () => Promise<boolean>;
+  // the window size to restore: as the claim found it, grown to the largest a viewer asked for
   restore?: PaneViewport;
   // the last geometry read showed a terminal attached, which a release must re-clamp at once
   attached?: boolean;
@@ -52,6 +71,10 @@ export type PaneViewportLease = {
 const within = (requested: PaneViewport, limit: PaneViewport | undefined): PaneViewport =>
   limit === undefined ? requested : { cols: Math.min(requested.cols, limit.cols), rows: Math.min(requested.rows, limit.rows) };
 
+// what the window holds beside the pane (other panes and their borders)
+const besidePane = (geometry: PaneGeometry): PaneViewport =>
+  geometry.window === undefined ? { cols: 0, rows: 0 } : { cols: Math.max(0, geometry.window.cols - geometry.cols), rows: Math.max(0, geometry.window.rows - geometry.rows) };
+
 // how long a released Size claim keeps the window at the browser's size, so a viewer that comes
 // back (a Workspace switched away from and back) finds it unchanged and the program in the pane
 // gets no SIGWINCH redraw
@@ -70,11 +93,9 @@ export class PaneViewportCoordinator {
   ): PaneViewportLease {
     const owner = Symbol(key);
     const existing = this.entries.get(key);
-    const entry = existing ?? { owner, queue: Promise.resolve(), read, apply, unpin };
-    entry.owner = owner;
-    entry.read = read;
-    entry.apply = apply;
-    entry.unpin = unpin;
+    const entry = existing ?? { owner, viewers: [], queue: Promise.resolve(), read, apply, unpin };
+    entry.viewers.push({ owner, read, apply, unpin });
+    this.drive(entry, entry.viewers.at(-1)!);
     const held = entry.pending !== undefined;
     // a viewer returning within a release's grace takes the claim over as it stands
     this.cancelPending(entry);
@@ -88,7 +109,32 @@ export class PaneViewportCoordinator {
   }
 
   async restoreAll(): Promise<void> {
-    await Promise.all([...this.entries.entries()].map(([key, entry]) => this.release(key, entry, entry.owner, 0)));
+    await Promise.all([...this.entries.entries()].map(([key, entry]) => { entry.viewers.length = 0; return this.releaseClaim(key, entry, 0); }));
+  }
+
+  private drive(entry: PaneViewportEntry, viewer: PaneViewportViewer): void {
+    entry.owner = viewer.owner;
+    entry.read = viewer.read;
+    entry.apply = viewer.apply;
+    entry.unpin = viewer.unpin;
+  }
+
+  private viewer(entry: PaneViewportEntry, owner: symbol): PaneViewportViewer | undefined {
+    return entry.viewers.find(viewer => viewer.owner === owner);
+  }
+
+  private live(entry: PaneViewportEntry, owner: symbol): boolean {
+    return this.viewer(entry, owner) !== undefined;
+  }
+
+  // size the window for its driver's grid, remembering the window to restore
+  private async apply(entry: PaneViewportEntry, geometry: PaneGeometry, cols: number, rows: number): Promise<boolean> {
+    entry.attached = geometry.clientLimit !== undefined;
+    const beside = besidePane(geometry);
+    const baseline = entry.restore ?? geometry.window ?? geometry;
+    entry.restore = { cols: Math.max(baseline.cols, cols + beside.cols), rows: Math.max(baseline.rows, rows + beside.rows) };
+    const target = within({ cols, rows }, geometry.clientLimit);
+    return await entry.apply(target.cols, target.rows).catch(() => false);
   }
 
   private cancelPending(entry: PaneViewportEntry): void {
@@ -104,34 +150,68 @@ export class PaneViewportCoordinator {
 
   private resize(key: string, entry: PaneViewportEntry, owner: symbol, cols: number, rows: number): Promise<boolean> {
     return this.enqueue(entry, async () => {
-      if (this.entries.get(key) !== entry || entry.owner !== owner) return false;
+      const viewer = this.viewer(entry, owner);
+      if (this.entries.get(key) !== entry || viewer === undefined) return false;
+      viewer.size = { cols, rows };
+      // the size it is about to get reaches the viewer anyway
+      viewer.moved = false;
+      // a viewer that does not drive the claim conforms to the size the driver leaves
+      if (entry.owner !== owner) return true;
       const geometry = await entry.read().catch(() => undefined);
-      if (geometry === undefined || entry.owner !== owner) return false;
-      entry.attached = geometry.clientLimit !== undefined;
-      const baseline = entry.restore ?? geometry;
-      entry.restore = { cols: Math.max(baseline.cols, cols), rows: Math.max(baseline.rows, rows) };
-      const target = within({ cols, rows }, geometry.clientLimit);
-      return await entry.apply(target.cols, target.rows).catch(() => false);
+      if (geometry === undefined) return false;
+      if (entry.owner !== owner) return this.live(entry, owner);
+      return await this.apply(entry, geometry, cols, rows);
     });
   }
 
   private ensure(key: string, entry: PaneViewportEntry, owner: symbol, cols: number, rows: number): Promise<{ ok: boolean; resized: boolean }> {
     return this.enqueue(entry, async () => {
-      if (this.entries.get(key) !== entry || entry.owner !== owner) return { ok: false, resized: false };
+      const viewer = this.viewer(entry, owner);
+      if (this.entries.get(key) !== entry || viewer === undefined) return { ok: false, resized: false };
+      viewer.size = { cols, rows };
+      const moved = viewer.moved === true;
+      viewer.moved = false;
+      // the driver moved the window under a viewer that does not drive it: report its new size
+      if (entry.owner !== owner) return { ok: true, resized: true };
       const geometry = await entry.read().catch(() => undefined);
-      if (geometry === undefined || entry.owner !== owner) return { ok: false, resized: false };
+      if (geometry === undefined) return { ok: false, resized: false };
+      if (entry.owner !== owner) return { ok: this.live(entry, owner), resized: true };
       entry.attached = geometry.clientLimit !== undefined;
       // the limit is re-read every tick: a terminal attaching, detaching or
       // resizing moves the target just as an external layout change does
       const target = within({ cols, rows }, geometry.clientLimit);
-      if (geometry.cols === target.cols && geometry.rows === target.rows) return { ok: true, resized: false };
+      if (geometry.cols === target.cols && geometry.rows === target.rows) return { ok: true, resized: moved };
       const resized = await entry.apply(target.cols, target.rows).catch(() => false);
       return { ok: resized, resized };
     });
   }
 
-  private release(key: string, entry: PaneViewportEntry, owner: symbol, graceMs = this.graceMs): Promise<void> {
-    if (this.entries.get(key) !== entry || entry.owner !== owner) return Promise.resolve();
+  private release(key: string, entry: PaneViewportEntry, owner: symbol): Promise<void> {
+    const index = entry.viewers.findIndex(viewer => viewer.owner === owner);
+    if (this.entries.get(key) !== entry || index < 0) return Promise.resolve();
+    entry.viewers.splice(index, 1);
+    const next = entry.viewers.at(-1);
+    if (next === undefined) return this.releaseClaim(key, entry, this.graceMs);
+    if (entry.owner === owner) this.handBack(entry, next);
+    return Promise.resolve();
+  }
+
+  // the viewer before the one that left drives again, and its pane gets back the grid it asked for
+  private handBack(entry: PaneViewportEntry, next: PaneViewportViewer): void {
+    this.drive(entry, next);
+    void this.enqueue(entry, async () => {
+      const size = next.size;
+      if (entry.owner !== next.owner || size === undefined) return;
+      const geometry = await entry.read().catch(() => undefined);
+      if (geometry === undefined || entry.owner !== next.owner) return;
+      const target = within(size, geometry.clientLimit);
+      if (geometry.cols === target.cols && geometry.rows === target.rows) return;
+      if (await this.apply(entry, geometry, size.cols, size.rows)) next.moved = true;
+    });
+  }
+
+  // the last viewer left: hold the window through the grace, then restore it
+  private releaseClaim(key: string, entry: PaneViewportEntry, graceMs: number): Promise<void> {
     const releasing = Symbol(key);
     entry.owner = releasing;
     // restoreAll supersedes a release still in its grace
@@ -146,8 +226,11 @@ export class PaneViewportCoordinator {
     return this.enqueue(entry, async () => {
       if (this.entries.get(key) !== entry || entry.owner !== releasing) return;
       if (entry.restore !== undefined) {
+        // the window's size goes back through whichever pane drove last, so size that pane
+        // for the window, keeping what sits beside it
         const geometry = await entry.read().catch(() => undefined);
-        const target = within(entry.restore, geometry?.clientLimit);
+        const beside = geometry === undefined ? { cols: 0, rows: 0 } : besidePane(geometry);
+        const target = within({ cols: entry.restore.cols - beside.cols, rows: entry.restore.rows - beside.rows }, geometry?.clientLimit);
         await entry.apply(target.cols, target.rows).catch(() => false);
         // leave the window to tmux so a terminal attached later is sized normally
         try { await entry.unpin(); } catch { /* best effort, like the restore */ }

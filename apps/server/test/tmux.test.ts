@@ -290,7 +290,7 @@ describe('TmuxAdapter capture', () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
     run.mockResolvedValueOnce({ code: 0, stdout: '220\t86\t220\t80\n', stderr: '' });
 
-    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 220, rows: 80 });
+    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 220, rows: 80, window: { cols: 220, rows: 86 } });
 
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', [
       '-S', '/tmp/tmux',
@@ -306,7 +306,7 @@ describe('TmuxAdapter capture', () => {
     // status line and a 140x40 terminal with two
     run.mockResolvedValueOnce({ code: 0, stdout: '200\t50\t200\t44\n100\t30\tattached,focused,UTF-8\ton\n140\t40\tattached,UTF-8\t2\n', stderr: '' });
 
-    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 44, clientLimit: { cols: 100, rows: 23 } });
+    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 44, window: { cols: 200, rows: 50 }, clientLimit: { cols: 100, rows: 23 } });
   });
 
   it('skips the clients tmux skips when sizing a window', async () => {
@@ -315,7 +315,7 @@ describe('TmuxAdapter capture', () => {
     // client next to an ordinary 120x40 terminal
     run.mockResolvedValueOnce({ code: 0, stdout: '200\t50\t200\t50\n0\t0\tattached,control-mode,UTF-8\ton\n90\t20\tattached,suspended,UTF-8\ton\n80\t24\tattached,ignore-size,UTF-8\ton\n120\t40\tattached,UTF-8\ton\n', stderr: '' });
 
-    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 50, clientLimit: { cols: 120, rows: 39 } });
+    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 50, window: { cols: 200, rows: 50 }, clientLimit: { cols: 120, rows: 39 } });
   });
 
   it('drops a control-mode client even when it has published a size', async () => {
@@ -324,7 +324,7 @@ describe('TmuxAdapter capture', () => {
     // report a phantom 80x24; only the real 120x40 terminal should bound the pane
     run.mockResolvedValueOnce({ code: 0, stdout: '200\t50\t200\t50\n80\t24\tattached,control-mode,ignore-size,UTF-8\toff\n120\t40\tattached,UTF-8\ton\n', stderr: '' });
 
-    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 50, clientLimit: { cols: 120, rows: 39 } });
+    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 50, window: { cols: 200, rows: 50 }, clientLimit: { cols: 120, rows: 39 } });
   });
 
   it('does not let a lone control-mode client clamp the pane', async () => {
@@ -333,7 +333,7 @@ describe('TmuxAdapter capture', () => {
     // pane must not be clamped to it, so no client limit is reported
     run.mockResolvedValueOnce({ code: 0, stdout: '200\t50\t200\t50\n80\t24\tattached,control-mode,ignore-size,UTF-8\toff\n', stderr: '' });
 
-    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 50 });
+    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 50, window: { cols: 200, rows: 50 } });
   });
 
   it('reports a pane that an attached terminal has grown past the request bound', async () => {
@@ -341,14 +341,14 @@ describe('TmuxAdapter capture', () => {
     // after the console hands the window back to tmux, a 600-column terminal sizes it
     run.mockResolvedValueOnce({ code: 0, stdout: '600\t100\t600\t100\n600\t101\tattached,focused,UTF-8\ton\n', stderr: '' });
 
-    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 600, rows: 100, clientLimit: { cols: 600, rows: 100 } });
+    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 600, rows: 100, window: { cols: 600, rows: 100 }, clientLimit: { cols: 600, rows: 100 } });
   });
 
   it('honours an ignore-size client when it is the only one attached', async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
     run.mockResolvedValueOnce({ code: 0, stdout: '200\t50\t200\t50\n80\t24\tattached,ignore-size,UTF-8\toff\n', stderr: '' });
 
-    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 50, clientLimit: { cols: 80, rows: 24 } });
+    await expect(new TmuxAdapter().size(socket, '%1')).resolves.toEqual({ cols: 200, rows: 50, window: { cols: 200, rows: 50 }, clientLimit: { cols: 80, rows: 24 } });
   });
 
   it('hands the window size back to tmux when the console stops viewing a pane', async () => {

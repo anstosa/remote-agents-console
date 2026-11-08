@@ -35,6 +35,8 @@ const discoveryOf = (kind: string) => {
 // type and how deep it seeded
 function fakePaneStream() {
   let subscriber: PaneActivitySubscriber | undefined;
+  // each subscribed pane's subscriber, for streams of several panes at once
+  const subscribers = new Map<string, PaneActivitySubscriber>();
   const inputs: Buffer[] = [];
   const seedDepths: number[] = [];
   let seedBytes: Buffer = Buffer.from('SEED');
@@ -47,7 +49,7 @@ function fakePaneStream() {
   let windowId: string | undefined = '@7';
   let inputAccepted = true;
   const client: PaneClient = {
-    subscribe(_pane, sub) { subscriber = sub; return () => {}; },
+    subscribe(pane, sub) { subscriber = sub; subscribers.set(pane, sub); return () => { if (subscribers.get(pane) === sub) subscribers.delete(pane); }; },
     capture: async () => captureText,
     windowId: async () => windowId,
     sendInput: async (_pane, bytes) => { inputs.push(Buffer.from(bytes)); return inputAccepted; },
@@ -81,6 +83,8 @@ function fakePaneStream() {
     assistantMessage: () => assistantMessage,
     output: (bytes: Buffer) => subscriber?.onOutput?.(bytes),
     fire: (event: 'onReseed' | 'onResize') => subscriber?.[event]?.(),
+    // a layout change reaches every pane of the session
+    fireAll: (event: 'onReseed' | 'onResize') => { for (const each of subscribers.values()) each[event]?.(); },
     exit: (reason: string) => subscriber?.onExit?.(reason),
     activity: () => subscriber?.onActivity?.(),
     clipboard: (text: string) => subscriber?.onClipboard?.(text),
@@ -906,6 +910,43 @@ describe('/ws/pane window-keyed Size claim', () => {
 
     // one window, one claim: exactly one unpin, by the window id so a dead pane cannot strand it
     expect(unpins).toEqual(['@7']);
+  });
+});
+
+describe('/ws/pane two panes of one window', () => {
+  // split Terminal panes share one tmux window, so one Size claim, and a Workspace switch mounts
+  // them together: the viewer that does not drive the claim must keep streaming
+  it('keeps both streams up through their viewports and a layout change', async () => {
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const control = { connect: () => true, active: () => true } as never;
+    const port = await freePort();
+    const tickets = new TicketStore();
+    const app = await buildApp(
+      testConfig({ publicOrigin: new URL(`http://127.0.0.1:${port}`), projects: [testProject({ id: 'proj' })] as never }),
+      { auth, control, dashboardUpdates, discovery: discoveryOf('claude'), tickets, paneStream: stream.provider, tmux, prompts: fakePrompts().prompts } as never
+    );
+    await app.listen({ host: '127.0.0.1', port });
+    const openPane = async (query: string, cols: number, rows: number) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/pane/agent-1${query}`, ['rac', tickets.mint('session', 'pane', 'agent-1').id]);
+      ws.binaryType = 'arraybuffer';
+      open.push({ app, ws });
+      const state: { sizes: number; seeded: boolean; code?: number } = { sizes: 0, seeded: false };
+      ws.addEventListener('message', event => { if (typeof (event as MessageEvent).data === 'string') { if ((JSON.parse((event as MessageEvent).data as string) as { type: string }).type === 'size') state.sizes += 1; } else state.seeded = true; });
+      ws.addEventListener('close', event => { state.code = (event as CloseEvent).code; });
+      await new Promise<void>(resolve => ws.addEventListener('open', () => resolve()));
+      ws.send(JSON.stringify({ type: 'viewport', cols, rows, scrollback: 500 }));
+      return state;
+    };
+    const [one, two] = await Promise.all([openPane('', 100, 30), openPane('?pane=%2', 90, 20)]);
+    await waitFor(() => one.seeded && two.seeded);
+
+    // the driver's resize re-lays out the window under the other pane
+    stream.fireAll('onResize');
+    await waitFor(() => one.sizes > 1 || two.sizes > 1);
+    await delay(50);
+    expect(one.code).toBeUndefined();
+    expect(two.code).toBeUndefined();
   });
 });
 

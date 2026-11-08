@@ -194,6 +194,98 @@ describe('pane viewport coordination', () => {
     expect(unpins).toBe(1);
   });
 
+  it('lets a viewer of the window that does not drive the claim conform instead of failing', async () => {
+    // two split panes of one window, mounted together: the first viewer is not the claim's driver,
+    // but its resize and its re-clamp after the driver moves the window still succeed
+    const applied: string[] = [];
+    const coordinator = new PaneViewportCoordinator(0);
+    const lease = (pane: string) => coordinator.acquire('socket:@3', async () => geometry(220, 80), async (cols, rows) => { applied.push(`${pane} ${cols}x${rows}`); return true; }, unpinNothing);
+    const first = lease('%1');
+    const second = lease('%2');
+
+    await expect(Promise.all([first.resize(100, 30), second.resize(90, 20)])).resolves.toEqual([true, true]);
+    await expect(first.ensure(100, 30)).resolves.toEqual({ ok: true, resized: true });
+    await expect(second.ensure(90, 20)).resolves.toEqual({ ok: true, resized: true });
+
+    expect(applied).toEqual(['%2 90x20', '%2 90x20']);
+  });
+
+  // two panes side by side in one window: each pane's own width, one shared height
+  const splitWindow = (one: number, two: number, rows: number) => {
+    const panes: Record<string, PaneViewport> = { '%1': { cols: one, rows }, '%2': { cols: two, rows } };
+    const window = () => ({ cols: panes['%1']!.cols + panes['%2']!.cols + 1, rows: panes['%1']!.rows });
+    const applied: string[] = [];
+    return {
+      applied,
+      window,
+      read: (pane: string) => async () => ({ ...panes[pane]!, window: window() }),
+      apply: (pane: string) => async (cols: number, rows: number) => {
+        applied.push(`${pane} ${cols}x${rows}`);
+        panes[pane]!.cols = cols;
+        for (const each of Object.values(panes)) each.rows = rows;
+        return true;
+      }
+    };
+  };
+
+  it('hands the claim back to the earlier viewer when the driver leaves, with the grid it asked for', async () => {
+    const split = splitWindow(150, 49, 50);
+    let unpins = 0;
+    const coordinator = new PaneViewportCoordinator(0);
+    const lease = (pane: string) => coordinator.acquire('socket:@3', split.read(pane), split.apply(pane), async () => { unpins += 1; return true; });
+    const first = lease('%1');
+    await first.resize(120, 40);
+    const second = lease('%2');
+    await second.resize(60, 30);
+    // the driver's grid left the earlier pane shorter
+    expect(await split.read('%1')()).toMatchObject({ cols: 120, rows: 30 });
+
+    await second.release();
+    // nothing else asks: the hand-back itself sizes the pane again, and its next re-clamp reports it
+    await expect(first.ensure(120, 40)).resolves.toEqual({ ok: true, resized: true });
+    expect(await split.read('%1')()).toMatchObject({ cols: 120, rows: 40 });
+    expect(unpins).toBe(0);
+    // a released viewer neither drives nor restores again
+    await expect(second.resize(50, 10)).resolves.toBe(false);
+    await second.release();
+    await first.release();
+
+    expect(split.applied).toEqual(['%1 120x40', '%2 60x30', '%1 120x40', '%1 139x50']);
+    expect(split.window()).toEqual({ cols: 200, rows: 50 });
+    expect(unpins).toBe(1);
+  });
+
+  it('restores the window the claim found, whichever pane leaves last', async () => {
+    // opened in one tick, so the second pane drives and the first conforms until it leaves
+    const split = splitWindow(150, 49, 50);
+    const coordinator = new PaneViewportCoordinator(0);
+    const lease = (pane: string) => coordinator.acquire('socket:@3', split.read(pane), split.apply(pane), unpinNothing);
+    const first = lease('%1');
+    const second = lease('%2');
+    await Promise.all([first.resize(140, 40), second.resize(40, 30)]);
+
+    await second.release();
+    await first.ensure(140, 40);
+    await first.release();
+
+    expect(split.applied).toEqual(['%2 40x30', '%1 140x40', '%1 159x50']);
+    expect(split.window()).toEqual({ cols: 200, rows: 50 });
+  });
+
+  it('does not fail a driver that a newer viewer supersedes mid-resize', async () => {
+    let readStarted!: () => void;
+    let finishRead!: () => void;
+    const started = new Promise<void>(resolve => { readStarted = resolve; });
+    const coordinator = new PaneViewportCoordinator(0);
+    const first = coordinator.acquire('socket:@3', async () => { readStarted(); await new Promise<void>(resolve => { finishRead = resolve; }); return geometry(220, 80); }, async () => true, unpinNothing);
+    const resizing = first.resize(100, 30);
+    await started;
+    coordinator.acquire('socket:@3', async () => geometry(220, 80), async () => true, unpinNothing);
+    finishRead();
+
+    await expect(resizing).resolves.toBe(true);
+  });
+
   it('repairs pane geometry changed by an external tmux layout manager', async () => {
     const applied: Array<[number, number]> = [];
     let current = geometry(220, 80);
