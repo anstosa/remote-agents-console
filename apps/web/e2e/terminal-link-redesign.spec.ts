@@ -42,8 +42,8 @@ const mountAgentScenario = async (page: Page) => {
       agents: [{ id: agentId, sessionId: 'socket:$9', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'repo', worktreeLabel: 'Cora', title: 'Ready', queuedPromptCount: 0 }],
       projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [{ id: 'cora', projectId: 'repo', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'main', available: true, pinned: true, order: 0 }] }]
     } });
-    // issue one pane ticket
-    if (path === `/api/agents/${agentId}/tickets`) return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    // issue the pane socket ticket
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     // keep empty Agent collections deterministic
     if (new RegExp(`^/api/agents/${agentId}/(?:saved-prompts|queued-prompts|prompt-history)$`, 'u').test(path)) return route.fulfill({ json: { prompts: [] } });
     // keep optional panels empty

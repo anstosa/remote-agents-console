@@ -49,7 +49,7 @@ test('refetches the fly-out badge on a generation change, and catches up on reop
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents, projects: [] } });
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/worktrees/cora/notes' && request.method() === 'GET') { notesGets += 1; return route.fulfill({ json: { notes: [note()] } }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -96,7 +96,7 @@ test('refreshes the open note pane\'s Last run footnote on a generation change',
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents, projects } });
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/schedule/preview') return route.fulfill({ json: { next: ['2026-09-07T09:00:00-07:00'] } });
     if (url.pathname === '/api/worktrees/wt-main/notes' && request.method() === 'GET') return route.fulfill({ json: { notes: [note()] } });
@@ -145,7 +145,7 @@ test('keeps queued-note controls red until notes are opened and shares acknowled
     // disable push registration
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // allow both log panels to mount
-    if (/^\/api\/agents\/agent-(?:cora|owen)\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty prompt lists without triggering unrelated requests
     if (/^\/api\/agents\/agent-(?:cora|owen)\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     // allow ordinary tab selection acknowledgements
@@ -274,7 +274,7 @@ test('merges queued-note acknowledgements across browser tabs', async ({ page, c
     if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: coraNotes } });
     if (path === '/api/worktrees/owen/notes') return route.fulfill({ json: { notes: owenNotes } });
     // allow log panels and prompt history
-    if (path.endsWith('/tickets')) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (path.endsWith('/prompt-history')) return route.fulfill({ json: { prompts: [] } });
     // allow tab selection
     if (path.endsWith('/notifications/dismiss')) return route.fulfill({ status: 204 });
@@ -336,7 +336,7 @@ test('keeps a queued note when the initial notes response arrives last', async (
     // disable push registration
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     // allow the terminal panel to mount
-    if (path.endsWith('/tickets')) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // provide an empty prompt history
     if (path.endsWith('/prompt-history')) return route.fulfill({ json: { prompts: [] } });
     // expose the queued prompt independently of the blocked notes request

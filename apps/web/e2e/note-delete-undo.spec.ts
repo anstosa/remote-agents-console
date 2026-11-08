@@ -52,7 +52,7 @@ const mockNotes = async (page: Page, api: NoteApi) => {
     ], projects: [] } });
     // disable optional integrations
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (/^\/api\/agents\/agent-(?:cora|owen)\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-(?:cora|owen)\/(?:saved-prompts|prompt-history|queued-prompts)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     // return each workspace's current note list
     const listMatch = /^\/api\/worktrees\/(cora|owen)\/notes$/u.exec(url.pathname);

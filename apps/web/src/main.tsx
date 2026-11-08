@@ -7352,7 +7352,7 @@ function Log({ id, workspaceKey, onTurnOff, embedded = false, codexScrollControl
   const openOutputUrlRef = useRef(onOpenUrl);
   openOutputUrlRef.current = onOpenUrl;
   useEffect(() => {
-    // The Agent's pane — and the embedded update advisor's pane — stream over `/ws/pane/:id`:
+    // The Agent's pane — and the embedded update advisor's pane — stream over the page's pane socket:
     // the streamed terminal component (xterm 6.0) is the only pane viewer. `embedded` drops the
     // panel chrome (server switcher, footer controls, the global font shortcut) but shares this mount.
     let disposed = false;

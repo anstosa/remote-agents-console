@@ -187,7 +187,7 @@ test('keeps the embedded update advisor out of the main agent tabs', async ({ pa
     // keep the host repository current
     if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
     // authorize the visible agent output
-    if (url.pathname === '/api/agents/agent-cora/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty visible-agent stores
     if (/^\/api\/agents\/agent-cora\/(?:saved-prompts|queued-prompts|prompt-history|skills)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [], skills: [] } });
     // disable push enrollment
@@ -305,7 +305,7 @@ test('opens the commit review before starting and retains update failures in the
     // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // connect the visible agent output
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty prompt stores
     if (/^\/api\/agents\/agent-1\/(?:saved-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -418,7 +418,7 @@ test('opens an advisor for flagged update paths before enabling Update', async (
       return route.fulfill({ status: 204 });
     }
     // authorize advisor output
-    if (url.pathname === '/api/agents/update-advisor/tickets') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
     // accept one advisor follow-up
     if (url.pathname === '/api/agents/update-advisor/prompt' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'queued' } });
     // capture one approval that arrives before the follow-up response
@@ -589,7 +589,7 @@ test('shows and answers advisor questions while completed guidance is pending', 
       return route.fulfill({ status: 201, json: { agentId: 'update-advisor', targetSha } });
     }
     // authorize advisor output
-    if (url.pathname === '/api/agents/update-advisor/tickets') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
     // capture question answers independently from queued prompts
     if (url.pathname === '/api/agents/update-advisor/question' && request.method() === 'POST') {
       questionAnswers.push(await request.postDataJSON() as { questionId?: string; index?: number; text?: string });
@@ -726,7 +726,7 @@ for (const requestKind of ['question', 'prompt'] as const) {
         return route.fulfill({ status: 201, json: { agentId: 'update-advisor', targetSha } });
       }
       // authorize advisor output
-      if (url.pathname === '/api/agents/update-advisor/tickets') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
+      if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
       // hold the submitted turn until fresh metadata has already arrived
       if (url.pathname === `/api/agents/update-advisor/${requestKind}` && request.method() === 'POST') {
         requestStarted = true;

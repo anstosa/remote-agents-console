@@ -99,7 +99,7 @@ async function openBrowser(page: Page) {
       projects: []
     } });
     // serve the pane stream ticket
-    if (path === '/api/agents/agent-browser-address/tickets') return route.fulfill({ json: { ticket: 'browser-address-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'browser-address-ticket' } });
     // serve empty agent prompt collections
     if (/^\/api\/agents\/agent-browser-address\/(?:saved-prompts|prompt-history|queued-prompts)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
     // serve empty workspace notes

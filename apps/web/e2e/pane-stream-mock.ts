@@ -2,21 +2,26 @@ import type { Page } from '@playwright/test';
 
 // The shared binary-capable mock WebSocket for the streamed Agent panel. Every app-level
 // spec that drives the panel installs this in place of its own private mock: it overrides
-// `window.WebSocket` so the panel's `/ws/pane/:id` connection is scripted, delivers raw
-// pane bytes as `arraybuffer` binary frames and JSON server frames as text, and captures
-// the JSON frames the panel sends back. The spec drives it through `window.__pane`, which
-// the helpers below wrap with a typed, `page`-bound API.
+// `window.WebSocket` so the page's `/ws/panes` socket is scripted — it plays the server's side
+// of the multiplexed protocol, keeping each stream the page opens by its pane id (the `open`
+// frame's `pane`, else its target), delivering raw pane bytes as `arraybuffer` binary frames
+// behind the stream id and JSON server frames as text — and captures the JSON frames each
+// stream sends back. The spec drives it through `window.__pane`, which the helpers below wrap
+// with a typed, `page`-bound API.
 //
 // It is a self-contained function so Playwright can serialise it into an init script (it
-// closes over no module scope); the app opens the pane socket only after minting a `pane`
-// ticket, so each spec must also fulfil `POST /api/agents/:id/tickets` with `{ ticket }`.
+// closes over no module scope); the app opens the pane socket only after minting a `panes`
+// ticket, so each spec must also fulfil `POST /api/panes/ticket` with `{ ticket }`.
 
 export function installPaneStreamMock(): void {
-  const paneSockets = new Map<string, MockPaneSocket[]>();
+  type MockStream = { socket: MockPaneSocket; id: number; paneId: string };
+  // live streams per pane id, newest last
+  const paneStreams = new Map<string, MockStream[]>();
   const connectCounts = new Map<string, number>();
-  // Frames the panel has sent for an id, across every socket it opened (so a remount
+  // Frames the panel has sent for an id, across every stream it opened (so a remount
   // reopening the pane keeps accumulating rather than resetting).
   const sentByPane = new Map<string, string[]>();
+  const paneSockets: MockPaneSocket[] = [];
 
   class MockPaneSocket {
     static readonly CONNECTING = 0;
@@ -30,23 +35,12 @@ export function installPaneStreamMock(): void {
     onclose: ((event: CloseEvent) => void) | null = null;
     onerror: ((event: Event) => void) | null = null;
     onmessage: ((event: MessageEvent) => void) | null = null;
-    readonly sent: string[] = [];
-    readonly paneId: string | undefined;
+    readonly streams = new Map<number, MockStream>();
 
     constructor(url: string | URL) {
       this.url = String(url);
-      // A Terminal socket names its pane with `?pane=%N` (the Worktree-keyed form), so key by
-      // that pane id when present — distinct terminals of one Worktree get distinct mocks. The
-      // Agent panel sends no `pane`, so it keys by the target id in the path as before.
-      const paneQuery = /[?&]pane=([^&]+)/u.exec(this.url);
-      const match = /\/ws\/pane\/([^/?]+)/u.exec(this.url);
-      this.paneId = paneQuery ? decodeURIComponent(paneQuery[1]!) : match ? decodeURIComponent(match[1]!) : undefined;
-      if (this.paneId !== undefined) {
-        const list = paneSockets.get(this.paneId) ?? [];
-        list.push(this);
-        paneSockets.set(this.paneId, list);
-        connectCounts.set(this.paneId, (connectCounts.get(this.paneId) ?? 0) + 1);
-      }
+      // other sockets (the dashboard's) are inert
+      if (/\/ws\/panes$/u.test(this.url)) paneSockets.push(this);
       // Open on the next browser task, as a real socket would.
       window.setTimeout(() => {
         if (this.readyState !== MockPaneSocket.CONNECTING) return;
@@ -55,63 +49,75 @@ export function installPaneStreamMock(): void {
       });
     }
 
-    private forget() {
-      if (this.paneId === undefined) return;
-      const list = paneSockets.get(this.paneId);
-      const index = list?.indexOf(this) ?? -1;
+    private forget(stream: MockStream) {
+      this.streams.delete(stream.id);
+      const list = paneStreams.get(stream.paneId);
+      const index = list?.indexOf(stream) ?? -1;
       if (list && index >= 0) list.splice(index, 1);
     }
 
     send(data: string) {
-      this.sent.push(data);
-      if (this.paneId !== undefined) {
-        const log = sentByPane.get(this.paneId) ?? [];
-        log.push(data);
-        sentByPane.set(this.paneId, log);
+      if (!paneSockets.includes(this)) return;
+      const { stream: id, ...frame } = JSON.parse(data) as { stream: number; type?: string; target?: string; pane?: string; cols?: number; rows?: number };
+      if (frame.type === 'open') {
+        const stream = { socket: this, id, paneId: frame.pane ?? frame.target! };
+        this.streams.set(id, stream);
+        paneStreams.set(stream.paneId, [...paneStreams.get(stream.paneId) ?? [], stream]);
+        connectCounts.set(stream.paneId, (connectCounts.get(stream.paneId) ?? 0) + 1);
+        return;
       }
+      const stream = this.streams.get(id);
+      if (stream === undefined) return;
+      if (frame.type === 'close') { this.forget(stream); return; }
+      const log = sentByPane.get(stream.paneId) ?? [];
+      log.push(JSON.stringify(frame));
+      sentByPane.set(stream.paneId, log);
       // A single-client server arbitrates the pane to the browser's requested grid, so
       // echo every `viewport` back as a `size`. This keeps the terminal conforming to the
       // panel as it resizes (a split view opening, the font changing), like the console.
-      try {
-        const frame = JSON.parse(data) as { type?: string; cols?: number; rows?: number };
-        if (frame.type === 'viewport' && typeof frame.cols === 'number' && typeof frame.rows === 'number') {
-          const { cols, rows } = frame;
-          window.setTimeout(() => {
-            if (this.readyState === MockPaneSocket.OPEN) this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'size', cols, rows }) }));
-          });
-        }
-      } catch { /* not a JSON frame */ }
+      if (frame.type === 'viewport' && typeof frame.cols === 'number' && typeof frame.rows === 'number') {
+        const { cols, rows } = frame;
+        window.setTimeout(() => this.deliver(stream, JSON.stringify({ type: 'size', cols, rows, stream: id })));
+      }
     }
 
-    close() {
-      if (this.readyState === MockPaneSocket.CLOSED) return;
-      this.readyState = MockPaneSocket.CLOSED;
-      this.forget();
-      this.onclose?.(new CloseEvent('close'));
+    deliver(stream: MockStream, data: string | ArrayBuffer) {
+      if (this.readyState !== MockPaneSocket.OPEN || this.streams.get(stream.id) !== stream) return;
+      this.onmessage?.(new MessageEvent('message', { data }));
     }
+
+    close() { this.drop(1005, ''); }
 
     // Test-only: drop the connection as a lost socket would, with a code and reason.
     drop(code: number, reason: string) {
       if (this.readyState === MockPaneSocket.CLOSED) return;
       this.readyState = MockPaneSocket.CLOSED;
-      this.forget();
+      for (const stream of [...this.streams.values()]) this.forget(stream);
       this.onclose?.(new CloseEvent('close', { code, reason }));
+    }
+
+    // Test-only: the server ends one stream, as a pane socket of its own closed once did.
+    end(stream: MockStream, code: number) {
+      this.deliver(stream, JSON.stringify({ type: 'closed', stream: stream.id, code }));
+      this.forget(stream);
     }
   }
 
   Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockPaneSocket });
 
-  const live = (id: string): MockPaneSocket | undefined => {
-    const list = paneSockets.get(id);
-    return list !== undefined && list.length > 0 ? list[list.length - 1] : undefined;
+  const live = (id: string): MockStream | undefined => paneStreams.get(id)?.at(-1);
+  const deliverFrame = (id: string, frame: Record<string, unknown>) => {
+    const stream = live(id);
+    stream?.socket.deliver(stream, JSON.stringify({ ...frame, stream: stream.id }));
   };
-  const deliver = (id: string, data: string | ArrayBuffer) => {
-    const socket = live(id);
-    if (socket === undefined || socket.readyState !== MockPaneSocket.OPEN) return;
-    socket.onmessage?.(new MessageEvent('message', { data }));
+  const deliverBytes = (id: string, bytes: Uint8Array) => {
+    const stream = live(id);
+    if (stream === undefined) return;
+    const framed = new Uint8Array(4 + bytes.length);
+    new DataView(framed.buffer).setUint32(0, stream.id);
+    framed.set(bytes, 4);
+    stream.socket.deliver(stream, framed.buffer);
   };
-  const deliverBytes = (id: string, bytes: Uint8Array) => deliver(id, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
-  const deliverFrame = (id: string, frame: unknown) => deliver(id, JSON.stringify(frame));
   const decodeInput = (data: string) => new TextDecoder().decode(Uint8Array.from(atob(data.replace(/-/gu, '+').replace(/_/gu, '/')), character => character.charCodeAt(0)));
   const parsedSent = (id: string) => (sentByPane.get(id) ?? []).map(raw => JSON.parse(raw) as Record<string, unknown>);
   const inputFrames = (id: string) => parsedSent(id).filter(frame => frame.type === 'input');
@@ -119,20 +125,26 @@ export function installPaneStreamMock(): void {
   Object.defineProperty(window, '__pane', {
     configurable: true,
     value: {
-      // Agent ids with an open pane socket right now.
-      openIds: () => [...paneSockets.entries()].filter(([, list]) => list.some(socket => socket.readyState === MockPaneSocket.OPEN)).map(([id]) => id),
-      ready: (id: string) => live(id)?.readyState === MockPaneSocket.OPEN,
-      // Sockets ever opened for this id (grows on reconnect).
+      // Pane ids with an open stream right now.
+      openIds: () => [...paneStreams.entries()].filter(([, list]) => list.some(stream => stream.socket.readyState === MockPaneSocket.OPEN)).map(([id]) => id),
+      ready: (id: string) => live(id)?.socket.readyState === MockPaneSocket.OPEN,
+      // Streams ever opened for this id (grows on reconnect).
       connectCount: (id: string) => connectCounts.get(id) ?? 0,
+      // Pane sockets ever constructed, and how many are open now.
+      socketCount: () => paneSockets.length,
+      openSocketCount: () => paneSockets.filter(socket => socket.readyState === MockPaneSocket.OPEN).length,
       // Server → browser.
       size: (id: string, cols: number, rows: number) => deliverFrame(id, { type: 'size', cols, rows }),
       bytes: (id: string, text: string) => deliverBytes(id, new TextEncoder().encode(text)),
-      frame: (id: string, frame: unknown) => deliverFrame(id, frame),
+      frame: (id: string, frame: Record<string, unknown>) => deliverFrame(id, frame),
       question: (id: string, question: unknown) => deliverFrame(id, { type: 'question', question }),
       metadata: (id: string, message: string, overflow: boolean) => deliverFrame(id, { type: 'metadata', metadata: { message, overflow } }),
       reseed: (id: string) => deliverFrame(id, { type: 'reseed' }),
       exit: (id: string, reason: string) => deliverFrame(id, { type: 'exit', reason }),
-      drop: (id: string, code: number, reason: string) => live(id)?.drop(code, reason),
+      // end this pane's stream with a close code; the shared socket stays up
+      drop: (id: string, code: number) => { const stream = live(id); stream?.socket.end(stream, code); },
+      // drop the whole shared socket under every stream
+      dropSocket: (code: number, reason: string) => paneSockets.at(-1)?.drop(code, reason),
       // Browser → server (what the panel sent).
       frameTypes: (id: string) => parsedSent(id).map(frame => frame.type as string),
       lastViewport: (id: string) => parsedSent(id).filter(frame => frame.type === 'viewport').at(-1),
@@ -150,6 +162,8 @@ interface PaneApi {
   openIds: () => string[];
   ready: (id: string) => boolean;
   connectCount: (id: string) => number;
+  socketCount: () => number;
+  openSocketCount: () => number;
   size: (id: string, cols: number, rows: number) => void;
   bytes: (id: string, text: string) => void;
   frame: (id: string, frame: unknown) => void;
@@ -157,7 +171,8 @@ interface PaneApi {
   metadata: (id: string, message: string, overflow: boolean) => void;
   reseed: (id: string) => void;
   exit: (id: string, reason: string) => void;
-  drop: (id: string, code: number, reason: string) => void;
+  drop: (id: string, code: number) => void;
+  dropSocket: (code: number, reason: string) => void;
   frameTypes: (id: string) => string[];
   lastViewport: (id: string) => { cols: number; rows: number; scrollback: number } | undefined;
   inputText: (id: string) => string;
@@ -173,7 +188,7 @@ type PaneWindow = { __pane: PaneApi };
 // Install the mock before the app loads. Call once per test, before `page.goto`.
 export const installPaneMock = (page: Page) => page.addInitScript(installPaneStreamMock);
 
-// Wait until the panel has opened a pane socket for `id`, then push the first size so the
+// Wait until the panel has opened a pane stream for `id`, then push the first size so the
 // seed can be applied at the browser's grid.
 export const seedPaneSize = async (page: Page, id: string, cols = 80, rows = 24) => {
   await page.waitForFunction(paneId => (window as unknown as PaneWindow).__pane.ready(paneId), id);
@@ -184,7 +199,10 @@ export const pushBytes = (page: Page, id: string, text: string) => page.evaluate
 export const pushQuestion = (page: Page, id: string, question: unknown) => page.evaluate(({ id, question }) => (window as unknown as PaneWindow).__pane.question(id, question), { id, question });
 export const pushMetadata = (page: Page, id: string, message: string, overflow = false) => page.evaluate(({ id, message, overflow }) => (window as unknown as PaneWindow).__pane.metadata(id, message, overflow), { id, message, overflow });
 export const pushExit = (page: Page, id: string, reason: string) => page.evaluate(({ id, reason }) => (window as unknown as PaneWindow).__pane.exit(id, reason), { id, reason });
-export const dropPane = (page: Page, id: string, code = 1006, reason = 'lost') => page.evaluate(({ id, code, reason }) => (window as unknown as PaneWindow).__pane.drop(id, code, reason), { id, code, reason });
+export const dropPane = (page: Page, id: string, code = 1006) => page.evaluate(({ id, code }) => (window as unknown as PaneWindow).__pane.drop(id, code), { id, code });
+export const dropPaneSocket = (page: Page, code = 1006, reason = 'lost') => page.evaluate(({ code, reason }) => (window as unknown as PaneWindow).__pane.dropSocket(code, reason), { code, reason });
+export const paneSocketCount = (page: Page) => page.evaluate(() => (window as unknown as PaneWindow).__pane.socketCount());
+export const openPaneSocketCount = (page: Page) => page.evaluate(() => (window as unknown as PaneWindow).__pane.openSocketCount());
 export const paneConnectCount = (page: Page, id: string) => page.evaluate(id => (window as unknown as PaneWindow).__pane.connectCount(id), id);
 export const paneInputText = (page: Page, id: string) => page.evaluate(id => (window as unknown as PaneWindow).__pane.inputText(id), id);
 export const paneInputList = (page: Page, id: string) => page.evaluate(id => (window as unknown as PaneWindow).__pane.inputList(id), id);

@@ -51,7 +51,7 @@ test('focusing and submitting the prompt keeps keyboard input in the composer', 
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready' }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'terminal-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'terminal-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') {
       await promptRequestFinished;

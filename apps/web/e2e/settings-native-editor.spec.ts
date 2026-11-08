@@ -108,7 +108,7 @@ async function setupNativeEditor(page: Page, options: NativeEditorOptions = {}) 
     // authorize dashboard streaming
     if (path === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'native-editor-dashboard-ticket' } });
     // authorize agent and terminal streaming
-    if (path === '/api/agents/agent-cora/tickets' || path === '/api/worktrees/cora/tickets') return route.fulfill({ json: { ticket: 'native-editor-pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'native-editor-pane-ticket' } });
     // keep prompt collections empty
     if (path === '/api/agents/agent-cora/saved-prompts' || path === '/api/agents/agent-cora/queued-prompts' || path === '/api/agents/agent-cora/prompt-history') return route.fulfill({ json: { prompts: [] } });
     // keep slash commands empty

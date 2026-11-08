@@ -52,7 +52,7 @@ const mockNoteLocking = async (page: Page, fixture: NoteLockFixture, context: 'w
     // disable optional integrations
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // authorize the visible pane
-    if (url.pathname === `/api/agents/${context === 'worktree' ? 'agent-1' : 'scratch-1'}/tickets`) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty prompt resources
     if (/^\/api\/agents\/(?:agent-1|scratch-1)\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     // list current note summaries

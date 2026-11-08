@@ -63,7 +63,7 @@ test('persists an unchanged dismissal across tabs and reloads, then offers a cha
     // suppress the separate host update flow
     if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
     // authorize both output panes
-    if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty agent stores
     if (/^\/api\/agents\/agent-[12]\/(?:saved-prompts|queued-prompts|prompt-history|skills)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [], skills: [] } });
     // accept foreground notification cleanup
@@ -193,7 +193,7 @@ test('hides the branch rebase notification for the Remote Agents host repository
     // keep the reviewed host updater current for this banner check
     if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
     // authorize the visible agent output
-    if (url.pathname === '/api/agents/agent-remoteagents/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty prompt stores
     if (/^\/api\/agents\/agent-remoteagents\/(?:saved-prompts|queued-prompts|prompt-history|skills)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [], skills: [] } });
     // disable push enrollment

@@ -1,8 +1,8 @@
 import { expect, test } from '@playwright/test';
 import { installPaneMock, seedPaneSize, pushBytes, pushQuestion, pushMetadata, pushExit, dropPane, paneConnectCount, paneInputText, paneFrameTypes, paneLastViewport, paneAckTotal } from './pane-stream-mock.js';
 
-// The Agent panel over the Pane stream, at the app level: it mints a `pane` ticket, opens
-// the pane socket, seeds and appends bytes, and sends the viewport/input/ack frames — plus
+// The Agent panel over the Pane stream, at the app level: it mints a `panes` ticket, opens
+// the pane socket and its stream, seeds and appends bytes, and sends the viewport/input/ack frames — plus
 // the app wiring the component does not own (the question picker, metadata → notes). The
 // component's own behaviour (scrolling, safety, font/theme, reconnect) is covered by
 // streamed-terminal.spec.ts; this asserts the panel is wired to it.
@@ -23,7 +23,7 @@ const routeApi = async (page: import('@playwright/test').Page, capture: { answer
     // expose the requested adapter kind without changing the remaining panel contract
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', kind, sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Working', attention: 'working', queuedPromptCount: 0 }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [] } });
@@ -76,7 +76,7 @@ for (const kind of [undefined, 'codex', 'omx', 'claude'] as const) {
   });
 }
 
-test('mints a pane ticket, seeds, appends bytes and sends viewport, input and ack frames', async ({ page }) => {
+test('mints a pane socket ticket, seeds, appends bytes and sends viewport, input and ack frames', async ({ page }) => {
   await installPaneMock(page);
   await routeApi(page);
   await page.goto('/');
@@ -151,7 +151,7 @@ test('a dropped socket keeps the terminal mounted then reconnects', async ({ pag
   await expect(page.getByLabel('Live log')).toContainText('BEFORE-DROP');
 
   const before = await paneConnectCount(page, 'agent-1');
-  await dropPane(page, 'agent-1', 1006, 'lost');
+  await dropPane(page, 'agent-1', 1006);
   // The component re-subscribes after its reconnect delay, minting a fresh ticket.
   await expect.poll(() => paneConnectCount(page, 'agent-1'), { timeout: 5000 }).toBeGreaterThan(before);
   await expect(page.getByLabel('Live log')).toBeVisible();

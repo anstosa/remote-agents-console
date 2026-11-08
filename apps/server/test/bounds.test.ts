@@ -15,10 +15,10 @@ describe('bounded ephemeral authorization state', () => {
   }, 15_000);
   it('prunes expired and caps one-time WebSocket tickets', () => {
     let now = 0; const tickets = new TicketStore(() => now);
-    for (let index = 0; index < 2_049; index++) tickets.mint('session', 'pane', 'target');
+    for (let index = 0; index < 2_049; index++) tickets.mint('session', 'panes', 'target');
     const values = (tickets as unknown as { tickets: Map<string, unknown> }).tickets;
     expect(values.size).toBe(2_048);
-    now = 30_001; tickets.mint('session', 'pane', 'target');
+    now = 30_001; tickets.mint('session', 'panes', 'target');
     expect(values.size).toBe(1);
   });
 });

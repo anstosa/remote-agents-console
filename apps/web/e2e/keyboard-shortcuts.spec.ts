@@ -21,7 +21,7 @@ const routeApi = (page: Page, options: { keys?: unknown; shells?: unknown[]; del
   if (path === '/api/settings/status') return route.fulfill({ json: { pending: false, targets: [], effective: 'known', restartAvailable: true } });
   if (path === '/api/settings' && request.method() === 'GET') return route.fulfill({ json: { version: 1, revisionId: 'keyboard-snapshot', sources: [{ id: 'app', label: 'Application config', path: '/fixture/config/config.json', format: 'json', exists: true, writable: true, protected: false, tracked: false, revisionId: 'keyboard-app', apply: 'rac-restart', value: { keys: options.keys ?? {} }, schema: { type: 'object', properties: { keys: { type: 'json', label: 'Key tables', optional: true, apply: 'rac-restart' } } } }], status: { pending: false, targets: [], effective: 'known', restartAvailable: true } } });
   if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-  if (path === '/api/agents/agent-1/tickets' || path === '/api/worktrees/cora/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+  if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
   if (path === '/api/agents/agent-1/saved-prompts' || path === '/api/agents/agent-1/prompt-history' || path === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
   if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: options.notes ?? [] } });
   if (path === '/api/worktrees/cora/panes' && request.method() === 'GET') return route.fulfill({ json: { panes: panes() } });
@@ -615,7 +615,7 @@ test('the Workspace picker preserves input focus for an inactive Agent and Termi
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
-    if (path === '/api/agents/agent-2/tickets' || path === '/api/worktrees/owen/tickets') return route.fulfill({ json: { ticket: 'pane-ticket-owen' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket-owen' } });
     if (/^\/api\/agents\/agent-2\/(?:saved-prompts|prompt-history|queued-prompts)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
     if (path === '/api/worktrees/owen/notes') return route.fulfill({ json: { notes: [] } });
     if (path === '/api/worktrees/owen/panes' && request.method() === 'GET') return route.fulfill({ json: { panes: [

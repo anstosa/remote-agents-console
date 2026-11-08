@@ -514,7 +514,7 @@ const setupDashboard = async (page: Page, options: { bridge: string; direct?: bo
     // publish one preview target
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-permissions', sessionId: 'socket:$1', home: '/worktrees/permissions', worktreeId: 'permissions', worktreeLabel: 'Permissions', worktreeOrder: 0, title: 'Ready', projectUrl: previewOrigin, ...(options.direct ? { projectProxied: false } : {}), stack: { actions: ['start'], running: true, tunnel: true } }], projects: [] } });
     // serve the required log ticket
-    if (path === '/api/agents/agent-permissions/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // serve empty agent collections
     if (path === '/api/agents/agent-permissions/saved-prompts' || path === '/api/agents/agent-permissions/prompt-history' || path === '/api/agents/agent-permissions/queued-prompts') return route.fulfill({ json: { prompts: [] } });
     // serve empty worktree notes

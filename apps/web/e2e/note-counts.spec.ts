@@ -46,7 +46,7 @@ const mockNoteCounts = async (page: Page, fixture: NoteCountsFixture) => {
     // disable cloudflare health preload
     if (url.pathname === '/api/settings/cloudflare/health') return route.fulfill({ json: { state: 'disabled', failures: 0, reconnecting: false, canReconnect: false } });
     // authorize the visible agent pane
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // disable optional agent update notices
     if (url.pathname === '/api/agents/updates') return route.fulfill({ json: { agents: [] } });
     // disable optional server update notices

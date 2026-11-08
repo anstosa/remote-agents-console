@@ -158,9 +158,8 @@ test('creates loading tabs immediately and keeps the worktree launcher available
       return route.fulfill({ json: { agentId: 'agent-bravo' } });
     }
     // provide active agent bootstrap data
-    if (/^\/api\/agents\/agent-(?:alpha|bravo)\/(?:tickets|saved-prompts|prompt-history)$/u.test(url.pathname)) {
-      return route.fulfill({ json: url.pathname.endsWith('/tickets') ? { ticket: 'log-ticket' } : { prompts: [] } });
-    }
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (/^\/api\/agents\/agent-(?:alpha|bravo)\/(?:saved-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -269,7 +268,8 @@ test('keeps a pending Turn off on its worktree tab without blocking another agen
       return route.fulfill({ status: 204 });
     }
     // provide active agent bootstrap data
-    if (/^\/api\/agents\/agent-(?:alpha|bravo)\/(?:tickets|saved-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: url.pathname.endsWith('/tickets') ? { ticket: 'log-ticket' } : { prompts: [] } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (/^\/api\/agents\/agent-(?:alpha|bravo)\/(?:saved-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 

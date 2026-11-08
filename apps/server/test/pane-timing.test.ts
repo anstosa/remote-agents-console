@@ -6,15 +6,15 @@ import { paneTimingLog, parsePaneTiming } from '../src/logs/pane-timing.js';
 
 describe('pane timing frames', () => {
   it('keeps the known fields of a well-formed frame', () => {
-    const frame = { type: 'timing', attempt: 'reconnect', sincePageLoad: 812.4, connectingSockets: 2, renderer: 'webgl', browser: 'firefox', mobile: true, seedBytes: 5120, marks: { socket: 9.1, open: 40, viewport: 40.2, firstFrame: 61, seed: 70, parsed: 80, cover: 80.1, painted: 92 }, page: { responseEnd: 120, domContentLoaded: 300, session: 410, dashboard: 650 } };
+    const frame = { type: 'timing', attempt: 'reconnect', sincePageLoad: 812.4, sharedSocket: 'new', renderer: 'webgl', browser: 'firefox', mobile: true, seedBytes: 5120, marks: { socket: 9.1, open: 40, viewport: 40.2, firstFrame: 61, seed: 70, parsed: 80, cover: 80.1, painted: 92 }, page: { responseEnd: 120, domContentLoaded: 300, session: 410, dashboard: 650 } };
     const { type: _type, ...expected } = frame;
     expect(parsePaneTiming(frame)).toEqual(expected);
   });
 
   it('drops unknown keys, invalid values and non-enum strings', () => {
     expect(parsePaneTiming({
-      type: 'timing', attempt: 'injected\n{"x":1}', renderer: 'canvas', browser: '<script>', mobile: 'yes',
-      sincePageLoad: -1, connectingSockets: Number.POSITIVE_INFINITY, seedBytes: '10', extra: 'nope',
+      type: 'timing', attempt: 'injected\n{"x":1}', sharedSocket: 'reused', renderer: 'canvas', browser: '<script>', mobile: 'yes',
+      sincePageLoad: -1, connectingSockets: 2, seedBytes: '10', extra: 'nope',
       marks: { open: 5, seed: Number.NaN, parsed: -3, painted: '9', evil: 2 },
       page: 'not-an-object'
     })).toEqual({ marks: { open: 5 } });

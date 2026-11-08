@@ -42,7 +42,7 @@ async function installEditorFixture(page: Page, options: { editor?: boolean; fai
   // record uncaught browser failures throughout the rendered flow
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.route('**/api/dashboard', route => route.fulfill({ json: dashboard(options.editor !== false) }));
-  await page.route('**/api/worktrees/cora/tickets', route => route.fulfill({ json: { ticket: 'editor-pane-ticket' } }));
+  await page.route('**/api/panes/ticket', route => route.fulfill({ json: { ticket: 'editor-pane-ticket' } }));
   await page.route('**/api/worktrees/cora/panes', route => {
     // count only confirmation reads after editor creation
     if (shellBodies.length > 0) paneReadsAfterShell += 1;

@@ -53,7 +53,7 @@ import { isReviewRun, paneTmuxSession, stackActions, worktreeAgents, type Agent,
 import { CommandCatalogService } from './commands/service.js';
 import { PaneViewportCoordinator } from './logs/viewport-scheduler.js';
 import { paneTimingLog } from './logs/pane-timing.js';
-import { openPaneSession, type PaneSessionDependencies, type PaneTransport } from './pane-session.js';
+import { openPaneSession, type PaneSession, type PaneSessionDependencies, type PaneTransport } from './pane-session.js';
 import { PaneStreamRegistry, type PaneStreamProvider } from './tmux/control.js';
 import { isPaneTheme } from './tmux/terminal-colors.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from './dashboard/updates.js';
@@ -4541,10 +4541,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await openedFolders.forget(path);
     return reply.code(204).send();
   });
-  app.post('/api/agents/:id/tickets', async (request, reply) => { const s = controlled(request, true); const kind = body(request).kind; if (kind !== 'pane') return reply.code(400).send({ error: 'invalid ticket type' }); const target = await discovery.target((request.params as { id: string }).id); if (!target) return reply.code(404).send({ error: 'target unavailable' }); return { ticket: tickets.mint(s.id, 'pane', target.agent.id).id }; });
-  // a `pane` ticket for a Place target (a Console shell or another pane at the Place); the
-  // Place counterpart of the Agent ticket route, so `/ws/pane/:id` streams either (spec)
-  app.post('/api/worktrees/:id/tickets', async (request, reply) => { const s = controlled(request, true); const kind = body(request).kind; if (kind !== 'pane') return reply.code(400).send({ error: 'invalid ticket type' }); const id = (request.params as { id: string }).id; if (await resolvePlace(id) === undefined) return reply.code(404).send({ error: 'place unavailable' }); return { ticket: tickets.mint(s.id, 'pane', id).id }; });
+  // the single-use ticket that opens a page's `/ws/panes` socket; every stream on it is then
+  // authorized on its own `open` frame
+  app.post('/api/panes/ticket', async request => { const s = controlled(request, true); return { ticket: tickets.mint(s.id, 'panes', 'panes').id }; });
   // renew and check the single-browser control lease on an interval; close the socket the
   // moment the lease is lost. The one periodic tick a pane socket keeps (its live frame and
   // Size claim are event-driven), and the dashboard socket's heartbeat, are the same thing.
@@ -4574,29 +4573,85 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       void dashboardUpdates.refresh().catch(() => {});
     } catch { socket.close(1008); }
   });
-  // The Pane stream (ADR 0008, spec "The pane socket"): one WebSocket per shown pane, keyed by
-  // an Agent or a Place; `?pane=%N` streams any pane of its set (an Agent's own by default).
-  // This is the only pane viewer: the browser's streamed terminal (xterm 6.0) consumes it for
-  // the Agent Panel and every Console shell. The stream itself is `openPaneSession`.
+  // The pane socket (ADR 0008, spec "The pane socket"): one WebSocket per page carries every
+  // Pane stream it shows, the only pane viewer (the browser's streamed terminal, xterm 6.0, for
+  // the Agent Panel and every Console shell). The browser opens a stream with
+  // `{type:'open', stream, target, pane?}` — target an Agent or a Place id, `pane` any pane of
+  // its set (an Agent's own by default) — and closes it with `{type:'close', stream}`; every
+  // other frame both ways is the stream's JSON frame with its `stream` id added. Pane bytes go
+  // out as binary frames behind a 4-byte big-endian stream id. A stream the server ends is
+  // reported as `{type:'closed', stream, code}` with the WebSocket close code it would have
+  // closed a socket of its own with. The stream itself is `openPaneSession`.
   const paneSessionDependencies: PaneSessionDependencies = { control, discovery, resolvePlace, tmux, launch, paneStream, paneViewports, prompts, logPaneTiming };
-  app.get('/ws/pane/:id', { websocket: true }, async (socket, request) => {
-    const startedAt = performance.now();
+  const maxPaneStreams = 64;
+  const maxPaneTargetChars = 4_096;
+  const isPaneStreamId = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 0xffff_ffff;
+  app.get('/ws/panes', { websocket: true }, (socket, request) => {
     try {
       const s = controlled(request, false);
       const ticket = String(request.headers['sec-websocket-protocol'] ?? '').split(',').map(x => x.trim())[1];
-      const id = (request.params as { id: string }).id;
-      if (!tickets.consume(ticket, s.id, 'pane', id)) throw new Error();
+      if (!tickets.consume(ticket, s.id, 'panes', 'panes')) throw new Error();
       const lease = leaseHeartbeat(socket, s.id, config.pollIntervalMs);
-      const transport: PaneTransport = {
-        send: frame => socket.send(JSON.stringify(frame)),
-        sendBytes: bytes => socket.send(bytes),
-        close: code => socket.close(code),
-        open: () => socket.readyState === socket.OPEN
+      // each stream's entry; a transport acts only while its own entry is the live one
+      type PaneStreamEntry = { session?: PaneSession; free?: () => void };
+      const streams = new Map<number, PaneStreamEntry>();
+      // streams holding one of the socket's slots: live, or ended with their setup (target
+      // lookups, a forced discovery scan) still running, so open-then-close cannot pile them up
+      let slots = 0;
+      const report = (stream: number, code: number) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ type: 'closed', stream, code })); };
+      const end = (stream: number, code?: number) => {
+        const entry = streams.get(stream);
+        if (entry === undefined) return;
+        streams.delete(stream);
+        if (code !== undefined) report(stream, code);
+        // released after the caller's own turn, as a socket's 'close' event would be
+        queueMicrotask(() => entry.session?.closed());
+        entry.free?.();
       };
-      const session = openPaneSession(paneSessionDependencies, transport, s.id, id, (request.query as { pane?: unknown }).pane, startedAt);
-      // attached before any await: ws drops a 'message' that arrives with no listener
-      socket.on('message', (raw: unknown) => session.receive(raw));
-      socket.on('close', () => { clearInterval(lease); session.closed(); });
+      const open = (stream: number, target: unknown, pane: unknown) => {
+        // an id already in use ends that stream too: the browser never reuses one
+        if (streams.has(stream)) return end(stream, 1008);
+        if (typeof target !== 'string' || target === '' || target.length > maxPaneTargetChars || (pane !== undefined && typeof pane !== 'string') || slots >= maxPaneStreams) return report(stream, 1008);
+        // the checks a socket of its own got at its upgrade, again for every stream: same
+        // browser session, still signed in and still holding control
+        try { if (controlled(request, false).id !== s.id) throw new Error(); } catch { return report(stream, 1008); }
+        const startedAt = performance.now();
+        const entry: PaneStreamEntry = {};
+        streams.set(stream, entry);
+        slots += 1;
+        let ended = false;
+        let settled = false;
+        const free = () => { if (ended && settled) slots -= 1; };
+        entry.free = () => { ended = true; free(); };
+        const header = Buffer.alloc(4);
+        header.writeUInt32BE(stream);
+        const live = () => streams.get(stream) === entry && socket.readyState === socket.OPEN;
+        const transport: PaneTransport = {
+          send: frame => socket.send(JSON.stringify({ ...frame, stream })),
+          sendBytes: bytes => socket.send(Buffer.concat([header, bytes])),
+          close: code => { if (streams.get(stream) === entry) end(stream, code); },
+          open: live
+        };
+        entry.session = openPaneSession(paneSessionDependencies, transport, s.id, target, pane, startedAt);
+        void entry.session.settled.then(() => { settled = true; free(); });
+      };
+      socket.on('message', (raw: Buffer, isBinary: boolean) => {
+        let frame: Record<string, unknown>;
+        try {
+          if (isBinary) throw new Error();
+          frame = JSON.parse(String(raw)) as Record<string, unknown>;
+          if (typeof frame !== 'object' || frame === null || typeof frame.type !== 'string' || !isPaneStreamId(frame.stream)) throw new Error();
+        } catch { return socket.close(1008); }
+        const stream = frame.stream as number;
+        if (frame.type === 'open') return open(stream, frame.target, frame.pane);
+        if (frame.type === 'close') return end(stream);
+        // a frame for a stream that already ended crossed its `closed` in flight
+        streams.get(stream)?.session?.receive(raw);
+      });
+      socket.on('close', () => {
+        clearInterval(lease);
+        for (const stream of [...streams.keys()]) end(stream);
+      });
     } catch { socket.close(1008); }
   });
   // bind developer ports after all existing browser/domain guards have initialized

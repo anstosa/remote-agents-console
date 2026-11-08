@@ -140,8 +140,9 @@ try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
     const page = await context.newPage();
     await page.addInitScript(({ output, latestAssistantMessage }) => {
-      // The Agent panel streams its pane over `/ws/pane/:id`: deliver the seed as binary bytes
-      // and the latest response as a metadata frame, echoing the browser's viewport as the size.
+      // The Agent panel streams its pane over the page's `/ws/panes` socket: deliver each stream's
+      // seed as binary bytes behind its stream id and the latest response as a metadata frame,
+      // echoing the browser's viewport as the size.
       const seed = output.replace(/\n/gu, '\r\n');
       class MockPaneSocket {
         static CONNECTING = 0;
@@ -156,8 +157,8 @@ try {
         onmessage = null;
         constructor(url) {
           this.url = String(url);
-          this.isPane = this.url.includes('/ws/pane/');
-          this.painted = false;
+          this.isPane = this.url.endsWith('/ws/panes');
+          this.painted = new Set();
           window.setTimeout(() => {
             if (this.readyState !== MockPaneSocket.CONNECTING) return;
             this.readyState = MockPaneSocket.OPEN;
@@ -169,15 +170,18 @@ try {
           let frame;
           try { frame = JSON.parse(data); } catch { return; }
           if (frame.type !== 'viewport' || typeof frame.cols !== 'number' || typeof frame.rows !== 'number') return;
-          const { cols, rows } = frame;
+          const { cols, rows, stream } = frame;
           window.setTimeout(() => {
             if (this.readyState !== MockPaneSocket.OPEN) return;
-            this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'size', cols, rows }) }));
-            if (this.painted) return;
-            this.painted = true;
+            this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'size', cols, rows, stream }) }));
+            if (this.painted.has(stream)) return;
+            this.painted.add(stream);
             const bytes = new TextEncoder().encode(seed);
-            this.onmessage?.(new MessageEvent('message', { data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }));
-            this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'metadata', metadata: { message: latestAssistantMessage, overflow: false } }) }));
+            const framed = new Uint8Array(4 + bytes.length);
+            new DataView(framed.buffer).setUint32(0, stream);
+            framed.set(bytes, 4);
+            this.onmessage?.(new MessageEvent('message', { data: framed.buffer }));
+            this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'metadata', metadata: { message: latestAssistantMessage, overflow: false }, stream }) }));
           }, 60);
         }
         close() {
@@ -198,7 +202,7 @@ try {
       if (url.pathname === '/api/dashboard') return route.fulfill({ json: dashboard });
       if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
       if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
-      if (/^\/api\/agents\/agent-(?:atlas|docs|api)\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+      if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
       if (url.pathname === '/api/agents/agent-atlas/saved-prompts') return route.fulfill({ json: { prompts: [
         { id: 'saved-prompt-001', text: 'Review the diff without changing behavior.' },
         { id: 'saved-prompt-002', text: 'Run targeted validation.', attachments: [{ name: 'test-plan.md', size: 920 }] }

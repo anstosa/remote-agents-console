@@ -164,8 +164,8 @@ async function setupWorktreeSettings(page: Page) {
           reviewTour: { available: false, reason: "generator_unavailable" },
         },
       });
-    // authorize both synthetic panes
-    if (/^\/api\/agents\/agent-(?:cora|owen)\/tickets$/u.test(path))
+    // authorize both synthetic panes' socket
+    if (path === '/api/panes/ticket')
       return route.fulfill({ json: { ticket: "log-ticket" } });
     // keep optional agent collections empty
     if (

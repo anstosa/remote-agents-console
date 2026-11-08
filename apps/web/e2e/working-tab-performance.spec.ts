@@ -19,7 +19,7 @@ test('uses one border animation per working tab without animated content', async
       }
     });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (/^\/api\/agents\/agent-[123]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[123]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });

@@ -14,7 +14,7 @@ test('restores each workspace open note and fullscreen state after switching tab
       { id: 'agent-owen', sessionId: 'socket:$2', home: '/worktrees/owen', worktreeId: 'owen', worktreeLabel: 'Owen', worktreeOrder: 1, title: 'Ready' }
     ], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (/^\/api\/agents\/agent-(?:cora|owen)\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-(?:cora|owen)\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     if (/^\/api\/agents\/agent-(?:cora|owen)\/notifications\/dismiss$/u.test(url.pathname)) return route.fulfill({ status: 204 });
     const noteList = /^\/api\/worktrees\/(cora|owen)\/notes$/u.exec(url.pathname);

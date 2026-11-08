@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 // are enums, so nothing the browser invents reaches the file verbatim.
 const markKeys = ['socket', 'open', 'viewport', 'firstFrame', 'seed', 'parsed', 'cover', 'painted'] as const;
 const pageKeys = ['responseEnd', 'domContentLoaded', 'session', 'dashboard'] as const;
-const enums = { attempt: ['initial', 'reconnect', 'revisit'], renderer: ['webgl', 'dom'], browser: ['firefox', 'chrome', 'safari', 'other'] } as const;
+const enums = { attempt: ['initial', 'reconnect', 'revisit'], sharedSocket: ['open', 'connecting', 'new'], renderer: ['webgl', 'dom'], browser: ['firefox', 'chrome', 'safari', 'other'] } as const;
 export const maxTimingFrameChars = 4_096;
 
 export type ClientTiming = Record<string, unknown>;
@@ -23,7 +23,7 @@ export function parsePaneTiming(frame: Record<string, unknown>): ClientTiming | 
   if (marks === undefined) return undefined;
   const timing: ClientTiming = { marks };
   for (const [key, allowed] of Object.entries(enums)) if ((allowed as readonly unknown[]).includes(frame[key])) timing[key] = frame[key];
-  for (const key of ['sincePageLoad', 'connectingSockets', 'seedBytes']) if (isTime(frame[key])) timing[key] = frame[key];
+  for (const key of ['sincePageLoad', 'seedBytes']) if (isTime(frame[key])) timing[key] = frame[key];
   if (typeof frame.mobile === 'boolean') timing.mobile = frame.mobile;
   const page = times(frame.page, pageKeys);
   if (page !== undefined) timing.page = page;

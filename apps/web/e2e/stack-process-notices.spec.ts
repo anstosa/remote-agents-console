@@ -21,10 +21,10 @@ async function mockConsole(page: Page, starts: string[]) {
       starts.push(decodeURIComponent(path));
       return starts.length === 1 ? route.fulfill({ status: 409, json: { error: 'stack operation already running' } }) : route.fulfill({ status: 202 });
     }
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     const agentRoute = /^\/api\/agents\/([^/]+)\/(.+)$/u.exec(path);
     if (agentRoute !== null) {
-      const [, id, rest] = agentRoute;
-      if (rest === 'tickets') return route.fulfill({ json: { ticket: `log-${id}` } });
+      const [, , rest] = agentRoute;
       if (rest === 'prompt-history' || rest === 'queued-prompts') return route.fulfill({ json: { prompts: [] } });
       if (rest === 'conversation') return route.fulfill({ json: {} });
     }

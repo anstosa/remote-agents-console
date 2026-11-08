@@ -578,7 +578,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     const start = performance.now();
     timeline = { start, timing: { type: 'timing', attempt, sincePageLoad: roundMs(start), renderer: 'dom', browser: browserTag(), mobile: coarse, marks: {} } };
     connection = options.connect({
-      onSocket: connecting => { mark('socket'); if (timeline !== undefined) timeline.timing.connectingSockets = connecting; },
+      onSocket: shared => { mark('socket'); if (timeline !== undefined) timeline.timing.sharedSocket = shared; },
       onOpen: () => { mark('open'); sendViewport(); },
       onBytes: bytes => {
         mark('firstFrame');

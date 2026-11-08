@@ -136,8 +136,8 @@ async function mountVoicePage(page: Page, options: VoiceOptions = {}) {
     } });
     }
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    // serve agent output tickets
-    if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(path)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    // serve the pane socket ticket
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // count ordinary submissions
     if (path === '/api/agents/agent-1/prompt' && request.method() === 'POST') {
       queued += 1;

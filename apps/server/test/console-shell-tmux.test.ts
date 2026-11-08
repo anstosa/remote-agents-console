@@ -15,6 +15,7 @@ import { run } from '../src/tmux/command.js';
 import { interactiveShellName, interactiveShellPath } from '../src/tmux/interactive-shell.js';
 import type { SocketRef, Worktree } from '../src/domain/models.js';
 import { testConfig, testProject, testWorktree } from './helpers/config.js';
+import { openPaneSocket } from './helpers/pane-socket.js';
 import { adhocScratchPlace, worktreePlace } from '../src/places/places.js';
 
 // The Console-shell lifecycle against a throwaway tmux server on a private socket: the adapter
@@ -99,7 +100,7 @@ async function eventually(check: () => boolean): Promise<void> {
 
 const encode = (data: string) => Buffer.from(data, 'utf8').toString('base64url');
 
-// open a Worktree pane socket against the given member pane, acking every binary frame
+// open a Worktree pane stream against the given member pane, acking every binary frame
 async function openWorktreePane(socket: SocketRef, worktree: Worktree, member: { paneId: string; sessionId: string }) {
   const discovery = { target: async () => undefined, snapshotTarget: async () => undefined, worktreesNow: () => [worktree] } as never;
   const launch = { placePanes: async () => [{ paneId: member.paneId, sessionId: member.sessionId, pid: 1, path: worktree.identity, command: 'cat', title: '', socket }] } as never;
@@ -111,21 +112,10 @@ async function openWorktreePane(socket: SocketRef, worktree: Worktree, member: {
   );
   openApps.push(app);
   await app.listen({ host: '127.0.0.1', port });
-  const ticket = tickets.mint('session', 'pane', worktree.id).id;
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/pane/${encodeURIComponent(worktree.id)}?pane=${encodeURIComponent(member.paneId)}`, ['rac', ticket]);
-  ws.binaryType = 'arraybuffer';
-  openSockets.push(ws);
-  const frames: Record<string, unknown>[] = [];
-  const binary: Buffer[] = [];
-  let closeCode: number | undefined;
-  ws.addEventListener('message', event => {
-    const data = (event as MessageEvent).data;
-    if (typeof data === 'string') frames.push(JSON.parse(data) as Record<string, unknown>);
-    else { const chunk = Buffer.from(data as ArrayBuffer); binary.push(chunk); ws.send(JSON.stringify({ type: 'ack', bytes: chunk.length })); }
-  });
-  ws.addEventListener('close', event => { closeCode = (event as CloseEvent).code; });
-  await new Promise<void>((resolve) => { ws.addEventListener('open', () => resolve()); ws.addEventListener('close', () => resolve()); });
-  return { frames, binary, closeCode: () => closeCode, send: (frame: unknown) => ws.send(JSON.stringify(frame)), text: () => Buffer.concat(binary).toString('utf8') };
+  const paneSocket = await openPaneSocket(port, tickets, { ack: true });
+  openSockets.push(paneSocket.ws);
+  const conn = paneSocket.stream(1, worktree.id, member.paneId);
+  return { ...conn, text: () => Buffer.concat(conn.binary).toString('utf8') };
 }
 
 // Make the fixture server the console's own tmux socket for a LaunchService built afterwards. A

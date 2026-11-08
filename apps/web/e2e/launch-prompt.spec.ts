@@ -59,7 +59,7 @@ const mountLifecycle = async (page: Page, options: { failFirst?: boolean; holdFa
     // provide empty worktree notes
     if (/^\/api\/worktrees\/(?:cora|delta)\/notes$/u.test(url.pathname)) return route.fulfill({ json: { notes: [] } });
     // provide the live output ticket
-    if (url.pathname === '/api/agents/agent-ready/tickets') return route.fulfill({ json: { ticket: 'agent-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'agent-ticket' } });
     // record agent-only prompt writes
     if (request.method() === 'POST' && /^\/api\/agents\/[^/]+\/(?:prompt|saved-prompts)$/u.test(url.pathname)) {
       agentWrites.push({ path: url.pathname, body: request.postDataJSON() });
@@ -149,7 +149,7 @@ const mountPendingSession = async (page: Page, scope: 'scratch' | 'directory', o
     // allow dashboard socket setup
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     // provide the live output ticket
-    if (/^\/api\/agents\/(?:anchor|scratch-ready|directory-ready)\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'agent-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'agent-ticket' } });
     // record agent-only prompt writes
     if (request.method() === 'POST' && /^\/api\/agents\/[^/]+\/(?:prompt|saved-prompts)$/u.test(url.pathname)) {
       agentWrites.push({ path: url.pathname, body: request.postDataJSON() });
@@ -524,7 +524,7 @@ test('confirms and discards a failed directory launch without server cleanup', a
   expect(harness.launchRequests()).toBe(1);
   const unexpectedDiscardMutations = harness.mutations().slice(mutationsBeforeDiscard.length).filter(mutation => {
     /* allow selected-agent bookkeeping */
-    return !/^\/api\/agents\/anchor\/(?:tickets|notifications\/dismiss)$/u.test(mutation.path);
+    return mutation.path !== '/api/panes/ticket' && mutation.path !== '/api/agents/anchor/notifications/dismiss';
   });
   expect(unexpectedDiscardMutations).toEqual([]);
 });
@@ -610,7 +610,7 @@ test('keeps initial and same-document tab links aligned with stable selection ke
     // provide inactive worktree resources
     if (/^\/api\/worktrees\/delta\/(?:bookmarks|notes)$/u.test(url.pathname)) return route.fulfill({ json: url.pathname.endsWith('/bookmarks') ? { bookmarks: [], canResume: false } : { notes: [] } });
     // provide live-agent resources
-    if (url.pathname === '/api/agents/agent-cora/tickets') return route.fulfill({ json: { ticket: 'agent-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'agent-ticket' } });
     // provide empty prompt lists
     if (/^\/api\/agents\/agent-cora\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });

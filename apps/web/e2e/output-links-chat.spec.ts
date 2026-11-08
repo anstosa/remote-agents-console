@@ -54,7 +54,7 @@ const mountChat = async (page: Page, fixture: ChatFixture) => {
       case path === '/api/auth/session': return route.fulfill({ json: { csrfToken: 'link-csrf', active: true, deviceName: 'Test device' } });
       case path === '/api/dashboard': return route.fulfill({ json: fixture.dashboard });
       case path === '/api/push/public-key': return route.fulfill({ json: {} });
-      case path === `/api/agents/${fixture.agentId}/tickets`: return route.fulfill({ json: { ticket: 'pane-ticket' } });
+      case path === '/api/panes/ticket': return route.fulfill({ json: { ticket: 'pane-ticket' } });
       case new RegExp(`^/api/agents/${fixture.agentId}/(?:saved-prompts|queued-prompts|prompt-history)$`, 'u').test(path): return route.fulfill({ json: { prompts: [] } });
       case path.endsWith('/notes') && request.method() === 'GET': return route.fulfill({ json: { notes: [] } });
       case path.endsWith('/panes') && request.method() === 'GET': return route.fulfill({ json: { panes: [] } });

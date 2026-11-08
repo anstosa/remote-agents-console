@@ -30,7 +30,7 @@ for (const width of [1280, 390]) {
       if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
       if (path === '/api/push/public-key') return route.fulfill({ json: {} });
       if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, cleanupPending: targets.length, cleanupTargets: targets, agents: [{ id: 'current-agent', sessionId: 'socket:$1', home: '/worktrees/current', title: 'Ready' }], projects: [] } });
-      if (path === '/api/agents/current-agent/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+      if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
       if (path === '/api/agents/current-agent/saved-prompts') return route.fulfill({ json: { prompts: [] } });
       if (path === '/api/cleanup' && request.method() === 'GET') return route.fulfill({ json: { targets } });
       // keep unchecked resources and one failed selection available for retry

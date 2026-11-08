@@ -31,7 +31,7 @@ test('dismisses a newly selected agent tab but waits for prompt focus on the alr
     // authorize the controllable dashboard stream
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     // persist each dismissal instead of replaying an unchanged unread fixture
     if (/^\/api\/agents\/agent-[12]\/notifications\/dismiss$/u.test(url.pathname) && request.method() === 'POST') {

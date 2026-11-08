@@ -42,7 +42,7 @@ async function mount(page: Page, worktrees: Worktree[], selected = 'Source') {
     // keep notes empty
     if (path.endsWith('/notes')) return route.fulfill({ json: { notes: [] } });
     // connect mock terminal streams
-    if (path.endsWith('/tickets')) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // keep prompt collections empty
     if (path.endsWith('/prompt-history') || path.endsWith('/queued-prompts')) return route.fulfill({ json: { prompts: [] } });
     // acknowledge viewed output

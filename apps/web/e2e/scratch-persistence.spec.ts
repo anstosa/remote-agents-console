@@ -16,7 +16,7 @@ test('creates notes from a scratch agent', async ({ page }) => {
     // disable optional browser services
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // authorize the scratch log stream
-    if (url.pathname === '/api/agents/scratch-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty supporting prompt resources
     if (/^\/api\/agents\/scratch-1\/(?:saved-prompts|queued-prompts|prompt-history|skills|message-files)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [], skills: [], files: [] } });
     // return an empty scratch conversations list

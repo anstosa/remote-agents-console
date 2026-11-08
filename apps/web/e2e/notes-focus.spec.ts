@@ -13,7 +13,7 @@ async function mountNotesWorkspace(page: Page, notes: Array<{ id: string; text: 
     // disable push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // connect the visible agent
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'terminal-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'terminal-ticket' } });
     // keep saved prompts empty
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // keep prompt history empty

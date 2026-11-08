@@ -17,7 +17,7 @@ async function stubDynamicWorktrees(page: import('@playwright/test').Page, soloS
     // offer cleanup for both expanded and compacted projects
     if (url.pathname === '/api/worktrees/closed-pull-requests') return route.fulfill({ json: { worktrees: [{ worktreeId: solo.id, reason: 'merged' }, { worktreeId: multiSecond.id, reason: 'closed' }] } });
     // return agent bootstrap data
-    if (url.pathname === '/api/agents/agent-solo/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty agent collections
     if (url.pathname === '/api/agents/agent-solo/saved-prompts' || url.pathname === '/api/agents/agent-solo/queued-prompts' || url.pathname === '/api/agents/agent-solo/prompt-history') return route.fulfill({ json: { prompts: [] } });
     // return no agent commands

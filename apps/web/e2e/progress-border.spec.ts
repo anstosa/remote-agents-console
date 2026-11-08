@@ -148,7 +148,7 @@ test('keeps branch and agent connection skeletons free of loading borders', asyn
     // expose one connected worktree
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     // authorize the mocked pane stream
-    if (path === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // provide empty saved prompts
     if (path === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // hold repository choices after the connection loader starts
@@ -340,7 +340,7 @@ test('uses a toolbar skeleton for note reads and working motion for note creatio
     // expose one worktree with persistent notes
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready' }], projects: [] } });
     // authorize the mocked agent stream
-    if (path === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // provide empty saved prompts
     if (path === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // hold the foreground note read

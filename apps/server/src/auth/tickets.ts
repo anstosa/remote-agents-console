@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-export type TicketKind = 'dashboard'|'pane'|'files-download';
+export type TicketKind = 'dashboard'|'panes'|'files-download';
 export type Ticket = { id: string; sessionId: string; kind: TicketKind; target: string; expires: number };
 
 // hold bounded single-use capabilities for authenticated browser streams

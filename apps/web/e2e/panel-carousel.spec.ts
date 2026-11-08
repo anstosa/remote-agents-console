@@ -21,7 +21,7 @@ const routeApi = (page: Page, agents = [coraAgent]) => page.route('**/api/**', a
   if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
   if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents, projects: [] } });
   if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-  if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(path) || /^\/api\/worktrees\/(?:cora|owen)\/tickets$/u.test(path)) return route.fulfill({ json: { ticket: 'pane-ticket' } });
+  if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
   if (/^\/api\/agents\/agent-[12]\/(?:saved-prompts|prompt-history|queued-prompts)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
   if (/^\/api\/agents\/agent-[12]\/message-files$/u.test(path)) return route.fulfill({ json: { files: [] } });
   // create one blank note for focus-preservation coverage

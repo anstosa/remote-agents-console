@@ -45,7 +45,7 @@ async function mountDashboard(page: Page, options: DashboardMount) {
     // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // connect active agent logs
-    if (/^\/api\/agents\/[^/]+\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // serve empty prompt collections
     if (/^\/api\/agents\/[^/]+\/(?:saved-prompts|queued-prompts)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     // track prompt history refreshes

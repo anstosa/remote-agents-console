@@ -40,7 +40,7 @@ const mountWorkspace = async (page: Page, onCodeChunk: (route: Route) => Promise
     // provide a canonical terminal agent in one active changed workspace
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', worktreeId: 'cora', panel: 'terminal', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, queuedPromptCount: 0, home: '/worktrees/cora', branch: 'feature/recovery', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0, changes: patch.files.map(file => file.change) }, title: 'Ready' }], projects: [] } });
     // open the mocked agent stream
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // disable optional push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // keep prompt collections empty

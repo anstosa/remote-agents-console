@@ -22,7 +22,7 @@ test('dispatches a configured $fixup beside a pull request with detected issues'
     // disable optional push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // authorize the agent stream
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // keep prompt collections empty
     if (/^\/api\/agents\/agent-1\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     // keep repository choices empty

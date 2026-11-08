@@ -137,7 +137,7 @@ async function mountConsole(page: Page, { coraPinned = cora.pinned, sessionDavo 
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     if (path === '/api/server/revision') return route.fulfill({ status: 404, json: { error: 'not mocked' } });
     if (path === '/api/server-statuses') return route.fulfill({ json: { servers: [] } });
-    if (path === '/api/agents/agent-1/tickets' || path === `/api/worktrees/${coraId}/tickets`) return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (/^\/api\/agents\/agent-1\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
     if (path === `/api/worktrees/${coraId}/notes` && request.method() === 'GET') return route.fulfill({ json: { notes: [{ id: 'note-1', title: 'Plan', text: 'Context menu plan' }] } });
     if (path.endsWith('/notes') && request.method() === 'GET') return route.fulfill({ json: { notes: [] } });

@@ -152,7 +152,6 @@ const routeApi = async (page: Page, scenario: Scenario): Promise<ConsoleHarness>
     if (agentResource !== null) {
       const id = routeCapture(agentResource, 1);
       const rest = agentResource[2];
-      if (rest === 'tickets') return route.fulfill({ json: { ticket: `ticket-${id}` } });
       if (rest === 'saved-prompts' || rest === 'queued-prompts' || rest === 'prompt-history') return route.fulfill({ json: { prompts: [] } });
       if (rest === 'conversation') return route.fulfill({ json: { name: `Conversation ${id}` } });
       // list structured conversations
@@ -229,8 +228,7 @@ const routeApi = async (page: Page, scenario: Scenario): Promise<ConsoleHarness>
       const placeId = routeCapture(paneList, 1);
       return route.fulfill({ json: { panes: scenario.panes[placeId] ?? [] } });
     }
-    const ticket = /^\/api\/worktrees\/(.+)\/tickets$/u.exec(path);
-    if (ticket !== null) return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     const shellCreate = /^\/api\/worktrees\/(.+)\/shells$/u.exec(path);
     // create a regular or editor shell through the shared endpoint
     if (shellCreate !== null && request.method() === 'POST') {

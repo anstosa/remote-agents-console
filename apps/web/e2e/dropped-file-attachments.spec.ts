@@ -22,8 +22,8 @@ const mockComposerApi = async (page: Page, promptRequest?: PromptRequestHandler)
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready', kind: 'codex', attention: 'finished' }], projects: [] } });
     // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    // provide websocket tickets
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'test-ticket' } });
+    // provide the pane socket ticket
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'test-ticket' } });
     // return no saved prompts
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // return no queued prompts

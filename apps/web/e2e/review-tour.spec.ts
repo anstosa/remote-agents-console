@@ -11,8 +11,8 @@ async function installAgentWebSocket(page: Page): Promise<void> {
 async function fulfillAgentSupport(route: Route, pathname: string): Promise<boolean> {
   // disable push registration
   if (pathname === '/api/push/public-key') { await route.fulfill({ json: {} }); return true; }
-  // seed the agent log ticket
-  if (pathname === '/api/agents/agent-1/tickets') { await route.fulfill({ json: { ticket: 'log-ticket' } }); return true; }
+  // seed the pane socket ticket
+  if (pathname === '/api/panes/ticket') { await route.fulfill({ json: { ticket: 'log-ticket' } }); return true; }
   // return no saved prompts
   if (pathname === '/api/agents/agent-1/saved-prompts') { await route.fulfill({ json: { prompts: [] } }); return true; }
   // return no prompt history

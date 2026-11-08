@@ -59,7 +59,7 @@ test('loads direct external previews without managed proxy endpoints', async ({ 
     // publish the direct project target
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-direct', sessionId: 'socket:$1', home: '/worktrees/external-preview', worktreeId: 'external-preview', worktreeLabel: 'External preview', worktreeOrder: 0, title: 'Ready', projectUrl: directUrl, projectProxied: false, stack: { actions: ['start', 'stop', 'restart'], running: true, tunnel: true } }], projects: [] } });
     // serve the required log ticket
-    if (path === '/api/agents/agent-direct/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // serve empty agent collections
     if (path === '/api/agents/agent-direct/saved-prompts' || path === '/api/agents/agent-direct/prompt-history' || path === '/api/agents/agent-direct/queued-prompts') return route.fulfill({ json: { prompts: [] } });
     // serve empty worktree notes
@@ -180,7 +180,7 @@ test('themes browser chrome and retains safe external addresses', async ({ page 
     // publish one managed project target
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-themed', sessionId: 'socket:$1', home: '/worktrees/themed', worktreeId: 'themed', worktreeLabel: 'Themed', worktreeOrder: 0, title: 'Ready', projectUrl: 'https://project.example.com', stack: { actions: ['start'], running: true, tunnel: true } }], projects: [] } });
     // serve the required log ticket
-    if (path === '/api/agents/agent-themed/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // serve empty agent collections
     if (path === '/api/agents/agent-themed/saved-prompts' || path === '/api/agents/agent-themed/prompt-history' || path === '/api/agents/agent-themed/queued-prompts') return route.fulfill({ json: { prompts: [] } });
     // serve empty worktree notes
@@ -385,7 +385,7 @@ test('opens the configured project in desktop and mobile split views', async ({ 
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', projectUrl: 'https://project.example.com', stack: { actions: ['start', 'build'], running: true, tunnel: true } }], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [{ id: 'delta', label: 'Delta', path: '/worktrees/delta', available: true, pinned: true, order: 1, projectUrl: 'https://project.example.com', stack: { actions: [], running: true, tunnel: true } }] }] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
@@ -765,7 +765,7 @@ test.describe('phone browser split', () => {
       // serve one project-enabled agent
       if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', projectUrl: 'https://project.example.com', stack: { running: true, tunnel: true } }], projects: [] } });
       // serve the required log ticket
-      if (path === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+      if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
       // serve empty agent collections
       if (path === '/api/agents/agent-1/saved-prompts' || path === '/api/agents/agent-1/prompt-history' || path === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
       // serve one mobile note

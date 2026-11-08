@@ -86,7 +86,7 @@ async function mount(page: import('@playwright/test').Page, options: MountOption
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (path === '/api/dashboard') { dashboardReads += 1; return route.fulfill({ json: state.dashboard }); }
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (/^\/api\/(?:agents\/[^/]+|worktrees\/[^/]+)\/tickets$/u.test(path)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/[^/]+\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
     if (/^\/api\/agents\/[^/]+\/prompt$/u.test(path) && request.method() === 'POST') { prompts.push(request.postDataJSON() as Record<string, unknown>); return route.fulfill({ status: 204 }); }
     if (/^\/api\/agents\/[^/]+\/question$/u.test(path) && request.method() === 'POST') { answers.push(request.postDataJSON() as Record<string, unknown>); return route.fulfill({ status: 204 }); }

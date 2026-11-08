@@ -172,7 +172,7 @@ describe('pane viewport coordination', () => {
   });
 
   it('shares one Size claim between two viewers of panes in the same window', async () => {
-    // both /ws/pane sockets key the claim by the window id, so two panes of one window
+    // both pane streams key the claim by the window id, so two panes of one window
     // resolve to a single coordinator entry: the latest viewer drives the one pin, and only
     // that viewer's release restores the window and unpins it
     const applied: Array<[number, number]> = [];

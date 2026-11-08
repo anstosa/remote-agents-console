@@ -95,7 +95,7 @@ async function mount(page: Page, scenario: Scenario = {}): Promise<Mounted> {
     // publish one active worktree with one changed file
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', placeId: 'cora', worktreeId: 'cora', sessionId: 'socket:$1', home: workspace, branch: 'feature/delete-file', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0, changes: [comparison(initial).files[0]!.change] }, gitPrStatus: { base: 'origin/main', files: 1, changes: [comparison(initial).files[0]!.change] }, title: 'Ready', queuedPromptCount: 0 }], projects: [] } });
     // authorize the agent pane
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     // satisfy shared startup reads
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // return empty agent collections

@@ -63,7 +63,7 @@ const mockWorktreeVisibility = async (page: Page, fixture: NoteVisibilityFixture
     // disable optional push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // authorize both agent panes
-    if (/^\/api\/agents\/agent-(?:cora|owen)\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty prompt resources
     if (/^\/api\/agents\/agent-(?:cora|owen)\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     // accept notification dismissal
@@ -137,7 +137,7 @@ const mockScratchVisibility = async (page: Page, fixture: NoteVisibilityFixture)
     // disable optional push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // authorize the scratch pane
-    if (url.pathname === '/api/agents/scratch-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return empty prompt resources
     if (/^\/api\/agents\/scratch-1\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     // list the scratch note

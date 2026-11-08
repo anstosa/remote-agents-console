@@ -31,8 +31,8 @@ test('releases prompt submission as soon as the server accepts it', async ({ pag
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', title: 'Ready' }], projects: [] } });
     // disable push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    // issue live-output tickets
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    // issue the pane socket ticket
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // return static composer resources
     if (url.pathname === '/api/agents/agent-1/commands') return route.fulfill({ json: { commands: [] } });
     // return static saved prompts

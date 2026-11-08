@@ -22,7 +22,7 @@ async function mockConsoleRoutes(page: Page, available: () => boolean, overrides
     // disable push enrollment
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     // authorize the mocked pane stream
-    if (path === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // leave saved prompts empty
     if (path === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });

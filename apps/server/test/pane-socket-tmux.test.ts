@@ -12,10 +12,11 @@ import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { PaneStreamRegistry } from '../src/tmux/control.js';
 import { run } from '../src/tmux/command.js';
 import { testConfig, testProject } from './helpers/config.js';
+import { openPaneSocket } from './helpers/pane-socket.js';
 
 // The ticket's PRIMARY seam: the app built with its real tmux dependencies (TmuxAdapter and
 // the control-mode PaneStreamRegistry) against a throwaway tmux server on a private socket,
-// driven through a real /ws/pane WebSocket. It proves end to end what the fake-stream seam
+// driven through a real /ws/panes WebSocket. It proves end to end what the fake-stream seam
 // cannot: a byte-exact seed from a live pane, typed input echoing back as real bytes, a real
 // resize, and a killed pane ending the stream. Unix sockets are blocked in the build sandbox,
 // so this is skipped there and run on the host and in CI (the effort records the host run).
@@ -100,33 +101,15 @@ async function openPane(fixture: Awaited<ReturnType<typeof fixtureSession>>, pan
   );
   openApps.push(app);
   await app.listen({ host: '127.0.0.1', port });
-  const ticket = tickets.mint('session', 'pane', 'agent-1').id;
-  const query = pane === undefined ? '' : `?pane=${encodeURIComponent(pane)}`;
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/pane/agent-1${query}`, ['rac', ticket]);
-  ws.binaryType = 'arraybuffer';
-  openSockets.push(ws);
-  const frames: Record<string, unknown>[] = [];
-  const binary: Buffer[] = [];
-  let closeCode: number | undefined;
-  ws.addEventListener('message', event => {
-    const data = (event as MessageEvent).data;
-    if (typeof data === 'string') frames.push(JSON.parse(data) as Record<string, unknown>);
-    else { const chunk = Buffer.from(data as ArrayBuffer); binary.push(chunk); ws.send(JSON.stringify({ type: 'ack', bytes: chunk.length })); }
-  });
-  ws.addEventListener('close', event => { closeCode = (event as CloseEvent).code; });
-  await new Promise<void>((resolve) => { ws.addEventListener('open', () => resolve()); ws.addEventListener('close', () => resolve()); });
-  return {
-    frames,
-    binary,
-    closeCode: () => closeCode,
-    send: (frame: unknown) => ws.send(JSON.stringify(frame)),
-    seedText: () => Buffer.concat(binary).toString('utf8')
-  };
+  const paneSocket = await openPaneSocket(port, tickets, { ack: true });
+  openSockets.push(paneSocket.ws);
+  const conn = paneSocket.stream(1, 'agent-1', pane);
+  return { ...conn, seedText: () => Buffer.concat(conn.binary).toString('utf8') };
 }
 
 const encode = (data: string) => Buffer.from(data, 'utf8').toString('base64url');
 
-describe.skipIf(!tmuxSocketsWork)('/ws/pane (real tmux)', () => {
+describe.skipIf(!tmuxSocketsWork)('/ws/panes (real tmux)', () => {
   beforeAll(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); });
   afterAll(() => { vi.unstubAllEnvs(); });
 

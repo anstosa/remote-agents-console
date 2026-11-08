@@ -20,7 +20,7 @@ describe('files download tickets', () => {
     expect(tickets.consume(wrongSession.id, 'session', 'files-download', 'manifest')).toBe(false);
     const wrongTarget = tickets.mint('session', 'files-download', 'manifest');
     expect(tickets.consume(wrongTarget.id, 'session', 'files-download', 'other')).toBe(false);
-    const wrongKind = tickets.mint('session', 'pane', 'manifest');
+    const wrongKind = tickets.mint('session', 'panes', 'manifest');
     expect(tickets.consume(wrongKind.id, 'session', 'files-download', 'manifest')).toBe(false);
   });
 

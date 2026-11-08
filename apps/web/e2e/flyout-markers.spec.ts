@@ -12,7 +12,7 @@ async function stubConsole(page: Page) {
     // expose one workspace with flyout controls
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', branch: 'feature/markers', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 } }], projects: [] } });
     // connect the agent output
-    if (path === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     // leave notes and prompt collections empty
     if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [] } });
     if (/^\/api\/agents\/agent-1\/(saved-prompts|prompt-history|queued-prompts)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });

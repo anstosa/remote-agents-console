@@ -141,8 +141,8 @@ async function mountWorkspace(page: Page, selected: string, storage: Record<stri
     if (path === '/api/server/revision') return route.fulfill({ status: 404, json: { error: 'not mocked' } });
     // keep remote server status empty
     if (path === '/api/server-statuses') return route.fulfill({ json: { servers: [] } });
-    // mint pane stream tickets for both agent and terminal panels
-    if (path.endsWith('/tickets')) return route.fulfill({ json: { ticket: 'workspace-visibility-ticket' } });
+    // mint the pane socket ticket both agent and terminal panels stream over
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'workspace-visibility-ticket' } });
     // keep prompt collections empty
     if (path.endsWith('/saved-prompts') || path.endsWith('/queued-prompts') || path.endsWith('/prompt-history')) return route.fulfill({ json: { prompts: [] } });
     // hold one durable review restore across dirty-close confirmation

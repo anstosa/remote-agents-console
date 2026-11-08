@@ -32,7 +32,7 @@ async function mockBranches(page: Page, onCheckout?: (body: unknown) => void) {
     // satisfy shared startup data
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // satisfy terminal ticket loading
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // satisfy saved prompt loading
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // return branch summaries exactly as the server boundary supplies them

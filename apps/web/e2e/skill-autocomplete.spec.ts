@@ -8,7 +8,7 @@ test('includes repo-local skills in prompt autocomplete', async ({ page }) => {
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/ferry.fyi', title: 'Ready' }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // return runtime and built-in commands
     if (url.pathname === '/api/agents/agent-1/commands') return route.fulfill({ json: { commands: [{ value: '$oh-my-codex:plan', description: 'Plan through the installed plugin.' }, { value: '$push', description: 'Review, commit, and push the current branch.' }, { value: '/permissions', description: 'Choose what Codex is allowed to do' }, { value: '/fast', description: '1.5x speed, increased usage' }] } });

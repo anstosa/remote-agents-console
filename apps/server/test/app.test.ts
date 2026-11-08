@@ -1394,14 +1394,16 @@ describe('Console shells server lifecycle', () => {
     } finally { await app.close(); }
   }, 15_000);
 
-  it('mints a pane ticket for a Worktree target', async () => {
+  // one ticket opens the page's pane socket; each stream on it names its own target
+  it('mints a pane socket ticket, and no per-target ones', async () => {
     const { app, headers } = await start({});
     try {
-      const response = await app.inject({ method: 'POST', url: '/api/worktrees/cora/tickets', headers, payload: { kind: 'pane' } });
+      const response = await app.inject({ method: 'POST', url: '/api/panes/ticket', headers, payload: {} });
       expect(response.statusCode).toBe(200);
       expect(typeof response.json().ticket).toBe('string');
-      const bad = await app.inject({ method: 'POST', url: '/api/worktrees/cora/tickets', headers, payload: { kind: 'bogus' } });
-      expect(bad.statusCode).toBe(400);
+      const { 'x-csrf-token': _csrf, ...forged } = headers as Record<string, string>;
+      expect((await app.inject({ method: 'POST', url: '/api/panes/ticket', headers: forged, payload: {} })).statusCode).toBe(403);
+      expect((await app.inject({ method: 'POST', url: '/api/worktrees/cora/tickets', headers, payload: { kind: 'pane' } })).statusCode).toBe(404);
     } finally { await app.close(); }
   }, 15_000);
 

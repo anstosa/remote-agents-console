@@ -22,7 +22,7 @@ async function openConsole(page: Page, stored?: string): Promise<string[]> {
       paneThemes.push((request.postDataJSON() as { theme: string }).theme);
       return route.fulfill({ status: 204 });
     }
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });

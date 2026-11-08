@@ -88,7 +88,7 @@ async function mount(page: Page, created: Created, posts: { path: string; body: 
       posts.push({ path, body: request.postDataJSON() });
       return route.fulfill({ status: 503, json: { error: 'not in this test' } });
     }
-    if (path === `/api/agents/${created.agentId}/tickets`) return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (/^\/api\/agents\/[^/]+\/(saved-prompts|prompt-history|queued-prompts)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
     if (/^\/api\/agents\/[^/]+\/commands$/u.test(path)) return route.fulfill({ json: { commands: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });

@@ -40,7 +40,7 @@ const mountTurnOffTransport = async (page: Page, scope: TurnOffScope) => {
     // disable push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // provide the live agent ticket
-    if (url.pathname === `/api/agents/${agentId}/tickets`) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // provide empty agent collections
     if (new RegExp(`^/api/agents/${agentId}/(?:saved-prompts|queued-prompts|prompt-history)$`, 'u').test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     // model the chunked tunnel parser's explicit-json requirement

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { expectProgressBorder, expectStationaryStatus } from './progress-border-assertions';
+import { installPaneMock, paneConnectCount } from './pane-stream-mock';
 
 type MockAgent = { id: string; kind: 'claude' | 'codex'; attention?: 'working' | 'finished' | 'question'; hasMessageQuestion?: true; unread?: boolean; conversation?: string | null; history?: string[] };
 type Console = { agents: MockAgent[]; dismissed: string[] };
@@ -21,10 +22,10 @@ async function mockConsole(page: Page, state: Console) {
       return route.fulfill({ json: { generation: 1, agents, projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree, delta, echo] }] } });
     }
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     const agentRoute = /^\/api\/agents\/([^/]+)\/(.+)$/u.exec(path);
     if (agentRoute !== null) {
       const [, id, rest] = agentRoute;
-      if (rest === 'tickets') return route.fulfill({ json: { ticket: `log-${id}` } });
       if (rest === 'prompt-history') return route.fulfill({ json: { prompts: (state.agents.find(agent => agent.id === id)?.history ?? []).map((text, index) => ({ id: `${id}-${index}`, text, createdAt: '2026-09-24T00:00:00.000Z' })) } });
       if (rest === 'queued-prompts') return route.fulfill({ json: { prompts: [] } });
       // viewing an Agent dismisses its notifications, which clears its unread output on the server
@@ -67,8 +68,7 @@ test('two Agents at one Place share one tab with stacked kind marks', async ({ p
 
 test('the switcher swaps the output, draft and history between the Agents at a Place', async ({ page }) => {
   await mockConsole(page, { agents: [{ id: 'agent-1', kind: 'claude', attention: 'finished' }, { id: 'agent-2', kind: 'codex', attention: 'finished', history: ['first', 'second'] }], dismissed: [] });
-  const outputTickets: string[] = [];
-  page.on('request', request => { const match = /\/api\/agents\/([^/]+)\/tickets$/u.exec(new URL(request.url()).pathname); if (match !== null) outputTickets.push(match[1]!); });
+  await installPaneMock(page);
   await page.goto('/');
   const prompt = agentPanel(page).getByRole('textbox', { name: 'Prompt' });
   await expect(agentPanel(page).getByRole('button', { name: 'Prompt history (0)' })).toBeVisible();
@@ -83,7 +83,7 @@ test('the switcher swaps the output, draft and history between the Agents at a P
   await expect(prompt).toHaveValue('');
   await expect(page).toHaveURL(/#agent=agent-2$/u);
   // the output streams the chosen Agent's pane, and the composer carries its history
-  await expect.poll(() => outputTickets.includes('agent-2')).toBe(true);
+  await expect.poll(() => paneConnectCount(page, 'agent-2')).toBeGreaterThan(0);
   await expect(agentPanel(page).getByRole('button', { name: 'Prompt history (2)' })).toBeVisible();
 
   await switcher(page).click();

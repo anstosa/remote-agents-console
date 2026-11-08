@@ -12,7 +12,7 @@ import { stated } from './helpers/agent.js';
 import { launchFake, zeroPollDelay } from './helpers/run.js';
 
 // The Place-scoped routes that exist for Worktrees, driven with a directory-Project Place and
-// Scratch Places that have no Agent: panes, Console shells, pane tickets, pins, notes and file
+// Scratch Places that have no Agent: panes, Console shells, pins, notes and file
 // preview accept them; the git-only routes refuse them with a clear 409.
 
 const dirs: string[] = [];
@@ -119,18 +119,6 @@ describe('Terminals at a directory-Project or Scratch Place with no Agent', () =
       expect(ended.statusCode).toBe(204);
       expect(close).toHaveBeenCalledWith(testSocket, '%9');
       expect(placeConsoleShells).toHaveBeenCalledWith(adhocPlace);
-    } finally { await app.close(); }
-  });
-
-  it('mints a pane ticket for a listed Place and refuses an unknown one', async () => {
-    const app = await start();
-    try {
-      const minted = await app.inject({ method: 'POST', url: url(scratchPlace.id, '/tickets'), headers: mutate, payload: { kind: 'pane' } });
-      expect(minted.statusCode).toBe(200);
-      expect(typeof minted.json().ticket).toBe('string');
-      // a Scratch folder the dashboard does not list (no Agent, shell or pin) is no Place
-      const unknown = await app.inject({ method: 'POST', url: url('scratch:/etc', '/tickets'), headers: mutate, payload: { kind: 'pane' } });
-      expect(unknown.statusCode).toBe(404);
     } finally { await app.close(); }
   });
 });

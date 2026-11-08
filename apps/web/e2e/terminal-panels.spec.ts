@@ -33,7 +33,7 @@ const routeApi = (page: Page, options: { panes: () => Pane[]; onShell?: () => st
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Working', attention: 'working', queuedPromptCount: 0 }], projects: [] } });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (path === '/api/agents/agent-1/tickets' || path === '/api/worktrees/cora/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (path === '/api/agents/agent-1/saved-prompts' || path === '/api/agents/agent-1/prompt-history' || path === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
     // list this scenario's persisted notes
     if (path === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes: options.notes ?? [] } });
@@ -1252,7 +1252,7 @@ test('an agentless Worktree tab restores its existing Terminal', async ({ page }
       { id: 'cora', projectId: 'repo', label: 'Cora', path: '/worktrees/cora', main: true, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'main' }
     ] }] } });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (path === '/api/worktrees/cora/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [] } });
     if (path === '/api/worktrees/cora/launch-resolution') return route.fulfill({ json: { adapters: [] } });
     if (path === '/api/worktrees/cora/panes' && request.method() === 'GET') return route.fulfill({ json: { panes } });
@@ -1279,7 +1279,7 @@ const routeTwoWorkspaces = async (page: Page) => {
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [agent('agent-1', 'cora', 'Cora', '$1'), agent('agent-2', 'dax', 'Dax', '$2')], projects: [] } });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (/^\/api\/(agents\/agent-[12]|worktrees\/(cora|dax))\/tickets$/u.test(path)) return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (/\/(saved-prompts|prompt-history|queued-prompts)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
     if (/^\/api\/worktrees\/(cora|dax)\/notes$/u.test(path)) return route.fulfill({ json: { notes: [] } });
     if (path === '/api/worktrees/cora/panes') return route.fulfill({ json: { panes: agentPanes } });
@@ -1358,7 +1358,7 @@ test('on a phone an agentless Workspace keeps its toolbar below the Terminal hel
       { id: 'cora', projectId: 'repo', label: 'Cora', path: '/worktrees/cora', main: true, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'main' }
     ] }] } });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (path === '/api/worktrees/cora/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [] } });
     if (path === '/api/worktrees/cora/launch-resolution') return route.fulfill({ json: { adapters: [] } });
     if (path === '/api/worktrees/cora/panes' && request.method() === 'GET') return route.fulfill({ json: { panes } });
@@ -1397,7 +1397,7 @@ test('an agentless Worktree Terminal can create a note and prepare its prompt', 
       { id: 'cora', projectId: 'repo', label: 'Cora', path: '/worktrees/cora', main: true, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'main' }
     ] }] } });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (path === '/api/worktrees/cora/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (path === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes } });
     if (path === '/api/worktrees/cora/notes' && request.method() === 'POST') {
       const payload = request.postDataJSON() as { title?: string } | null;
@@ -2362,7 +2362,7 @@ const routePlace = (page: Page, panes: Pane[], requests: string[], options: { ag
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [...options.agentRunning ? [notesAgent] : [], scratchAgent], projects: [notesProject], places: [notesPlace(panes.filter(pane => pane.role === 'shell').length)] } });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (path === '/api/agents/agent-9/tickets' || path === `${notesPlacePath}/tickets`) return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (path === '/api/agents/agent-9/saved-prompts' || path === '/api/agents/agent-9/prompt-history' || path === '/api/agents/agent-9/queued-prompts') return route.fulfill({ json: { prompts: [] } });
     if (path === '/api/agents/agent-9' && request.method() === 'DELETE') { options.agentRunning = false; return route.fulfill({ status: 204 }); }
     if (path === `${notesPlacePath}/notes` && request.method() === 'GET') return route.fulfill({ json: { notes: [] } });

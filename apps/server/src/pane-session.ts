@@ -15,9 +15,8 @@ import type { PaneStreamProvider } from './tmux/control.js';
 
 // One Pane stream (ADR 0008, spec "The pane socket"): a pane's raw bytes — the seed first,
 // then live `%output` over the shared control-mode client — out as binary frames, and input,
-// sizing, flow-control acks and the Agent-pane derive as JSON frames. The socket route
-// authenticates the browser and adapts its socket to a `PaneTransport`; everything per stream
-// lives here.
+// sizing, flow-control acks and the Agent-pane derive as JSON frames. `/ws/panes` carries
+// many of these over one socket, each behind its own `PaneTransport`.
 
 // what a stream needs from the socket carrying it
 export type PaneTransport = {
@@ -25,7 +24,8 @@ export type PaneTransport = {
   send: (frame: Record<string, unknown>) => void;
   // one binary frame of pane bytes
   sendBytes: (bytes: Buffer) => void;
-  // end the stream with a WebSocket close code (1000 pane gone, 1008 policy, 1011 failure)
+  // end the stream with a WebSocket close code's meaning (1000 pane gone, 1008 policy, 1011
+  // failure)
   close: (code: number) => void;
   open: () => boolean;
 };
@@ -47,20 +47,21 @@ export type PaneSession = {
   receive: (raw: unknown) => void;
   // the transport closed; release the stream's subscriptions and Size claim
   closed: () => void;
+  // the target resolution and setup finished, whether or not the stream came up
+  settled: Promise<void>;
 };
 
 // how long a pane must be quiet after output before its live frame is captured
 const logQuietWindowMs = 250;
 
 // Opens the stream for `id` (an Agent or a Place) and `requestedPane` for an authenticated
-// browser session. A failed resolution or setup closes the transport 1008.
+// browser session holding control. A failed resolution or setup closes the transport 1008.
 export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTransport, sessionId: string, id: string, requestedPane: unknown, startedAt: number): PaneSession {
   const { control, discovery, resolvePlace, tmux, launch, paneStream, paneViewports, prompts, logPaneTiming } = deps;
-  // this stream's setup steps in ms since `startedAt` (first occurrence only), merged with the
-  // browser's `timing` frame into one pane-timing.jsonl record
+  // this stream's setup steps in ms since `startedAt` (its `open` frame; first occurrence
+  // only), merged with the browser's `timing` frame into one pane-timing.jsonl record
   const timing: Record<string, unknown> = {};
   const mark = (name: string) => { timing[name] ??= Math.round((performance.now() - startedAt) * 10) / 10; };
-  mark('ticket');
   // Buffer client frames from the instant the stream is up: the browser sends its first (and,
   // until a resize, only) `viewport` right on open — while the target/membership resolution
   // below still awaits (a Worktree pane spawns `list-panes`). Losing that one frame means no
@@ -74,7 +75,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     // pane of its tmux session, derive + mutation lock on its own pane) or a Place (an
     // explicit pane required, membership = the Place's pane set — every pane of every
     // session holding a pane at the Place, plus its Console shells — raw bytes, no derive, no
-    // lock). Both mint a `pane` ticket bound to their id (spec, The pane socket).
+    // lock).
     // A snapshot miss is a Place, or an Agent launched since the last scan: only an id that
     // names no Place pays for the forced scan, so a Terminal never waits on one.
     let agentTarget = await discovery.snapshotTarget(id);
@@ -382,9 +383,10 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     // carry the derive once at subscribe, before any %output
     if (derives) void runDerive(true);
   };
-  void setup().catch(() => transport.close(1008));
+  const settled = setup().catch(() => transport.close(1008));
   return {
     receive: raw => { mark('firstMessage'); handleRaw(raw); },
-    closed: () => { cleanup?.(); }
+    closed: () => { cleanup?.(); },
+    settled
   };
 }

@@ -1,7 +1,7 @@
-// The wire contract for a Pane stream (spec "The pane socket"). One WebSocket per
-// shown pane delivers the pane's raw bytes as binary frames — the seed first, then
-// live output — and JSON frames for everything else; the browser sends JSON frames
-// back. The component is built against this contract; the server side is built in
+// The wire contract for a Pane stream (spec "The pane socket"). A stream delivers the
+// pane's raw bytes as binary frames — the seed first, then live output — and JSON frames
+// for everything else; the browser sends JSON frames back. Every stream of the page
+// shares one WebSocket (pane-socket-client.ts adds the stream ids). The component is built against this contract; the server side is built in
 // parallel ("Pane socket streams the Agent pane") and the two meet in "Agent Panel
 // switches to the Pane stream". The transport is abstracted behind `PaneConnector`
 // so the component can be driven by a real WebSocket in the app and by a scripted
@@ -29,13 +29,18 @@ export type PaneClientFrame =
   // logs it with its own steps to pane-timing.jsonl.
   | ({ type: 'timing' } & PaneTiming);
 
+// The page's shared pane socket when a stream was requested: already open, still connecting
+// (minting its ticket or mid-handshake), or opened for this stream.
+export type PaneSharedSocket = 'open' | 'connecting' | 'new';
+
 // Milliseconds from the attempt's start (performance.now() offsets), except `page`, whose
 // values are offsets from page load and which only the page's first timing frame carries.
+// `socket` is the stream requested and `open` its `open` frame sent on the shared socket, so
+// `open - socket` is the wait for that socket (none when it was already open).
 export interface PaneTiming {
   attempt: 'initial' | 'reconnect' | 'revisit';
   sincePageLoad: number;
-  // other pane sockets mid-handshake when this one was constructed
-  connectingSockets?: number;
+  sharedSocket?: PaneSharedSocket;
   renderer: 'webgl' | 'dom';
   browser: 'firefox' | 'chrome' | 'safari' | 'other';
   mobile: boolean;
@@ -62,9 +67,9 @@ export type PaneServerFrame =
   | { type: 'foreground'; command: string };
 
 export interface PaneConnectionHandlers {
-  // the ticket arrived and the socket was constructed, with how many other pane sockets
-  // were still mid-handshake at that moment
-  onSocket?: (connectingSockets: number) => void;
+  // the stream was requested, with the shared socket's state at that moment
+  onSocket?: (shared: PaneSharedSocket) => void;
+  // the stream is on the wire; frames sent from here go straight out
   onOpen: () => void;
   onBytes: (bytes: Uint8Array) => void;
   onFrame: (frame: PaneServerFrame) => void;

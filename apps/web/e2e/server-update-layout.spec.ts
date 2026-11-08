@@ -52,7 +52,7 @@ const installUpdateFixture = async (page: Page) => {
       return route.fulfill({ status: 201, json: { agentId: 'update-advisor', targetSha } });
     }
     // authorize advisor output
-    if (url.pathname === '/api/agents/update-advisor/tickets') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
+    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
     // return empty advisor stores
     if (/^\/api\/agents\/update-advisor\/(?:saved-prompts|prompt-history|queued-prompts|skills|message-files)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [], skills: [], files: [] } });
     // reject accidental host mutations

@@ -52,10 +52,10 @@ async function mockConsole(page: Page, requests: string[], options: MockOptions 
       recordMutation(request, path, options.mutations);
       return acceptsEmptyJson(request) ? route.fulfill({ status: 202 }) : route.fulfill({ status: 415, json: { error: 'Unsupported Media Type' } });
     }
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     const agentRoute = /^\/api\/agents\/([^/]+)\/(.+)$/u.exec(path);
     if (agentRoute !== null) {
-      const [, id, rest] = agentRoute;
-      if (rest === 'tickets') return route.fulfill({ json: { ticket: `log-${id}` } });
+      const [, , rest] = agentRoute;
       if (rest === 'prompt-history' || rest === 'queued-prompts') return route.fulfill({ json: { prompts: [] } });
       if (rest === 'conversation') return route.fulfill({ json: {} });
     }
