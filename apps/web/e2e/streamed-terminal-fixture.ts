@@ -1,6 +1,7 @@
 import '@xterm/xterm/css/xterm.css';
 import '../src/styles.css';
-import { mountStreamedTerminal, type StreamedTerminalHandle } from '../src/streamed-terminal.js';
+import type { StreamedTerminalHandle, StreamedTerminalOptions } from '../src/streamed-terminal.js';
+import { mountKeptTerminal, releaseKeptTerminal, showKeptWorkspace, type TerminalKeep } from '../src/kept-terminals.js';
 import { setTerminalFontSize } from '../src/terminal-font-size.js';
 import { setColorTheme } from '../src/color-theme.js';
 import { registerKeyAction } from '../src/keyboard.js';
@@ -15,6 +16,7 @@ let handle: StreamedTerminalHandle | undefined;
 let host: HTMLElement | undefined;
 let root: HTMLElement | undefined;
 let connectCount = 0;
+let closeCount = 0;
 const sent: PaneClientFrame[] = [];
 const questions: unknown[] = [];
 const openedUrls: string[] = [];
@@ -27,45 +29,32 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
   }
 };
 
+type FixtureOptions = { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; captureExit?: boolean; loadingKind?: 'agent' | 'terminal'; preferNativeMouseSelection?: boolean; keep?: TerminalKeep };
+let lastOptions: FixtureOptions = {};
+// each mount's disposals, by its keep's workspace and panel, so a spec can see exactly-once
+const disposals = new Map<string, number>();
+const counted = new WeakSet<StreamedTerminalHandle>();
+
 // mount the scripted pane with optional codex transcript controls
-export const renderStreamedTerminal = async (
-  container: HTMLElement,
-  options: { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; captureExit?: boolean; loadingKind?: 'agent' | 'terminal'; preferNativeMouseSelection?: boolean } = {}
-): Promise<void> => {
-  container.style.width = options.width ?? '640px';
-  container.style.height = options.height ?? '320px';
-  root = container;
+export const renderStreamedTerminal = async (container: HTMLElement, options: FixtureOptions = {}): Promise<void> => {
   sent.length = 0;
   questions.length = 0;
   openedUrls.length = 0;
   connectCount = 0;
-  handle = mountStreamedTerminal(container, {
-    scrollback: options.scrollback,
-    codexScrollControls: options.codexScrollControls,
-    preferNativeMouseSelection: options.preferNativeMouseSelection,
-    // Long by default so a status can be asserted before a reconnect fires: only a stream
-    // that stayed up this long after its seed reconnects at once, and an `exit` never does.
-    reconnectDelayMs: options.reconnectDelayMs ?? 60_000,
-    // Stands in for the panel's sticky mobile modifiers so the transform seam is testable.
-    transformInput: options.upperCaseInput ? data => data.toUpperCase() : undefined,
-    // capture plain-link routing while leaving modified activations on their native path
-    onOpenUrl: options.captureOpenUrls ? url => { openedUrls.push(url); return true; } : undefined,
-    // stands in for a Terminal panel, which closes on exit
-    onExit: options.captureExit ? reason => { container.dataset.exited = reason; } : undefined,
-    onQuestion: question => questions.push(question),
-    // expose both placeholder variants before output arrives
-    ...(options.loadingKind === undefined ? {} : { loadingKind: options.loadingKind }),
-    connect: next => {
-      handlers = next;
-      connectCount += 1;
-      // Open on the next task, as a real socket would.
-      setTimeout(() => next.onOpen(), 0);
-      return { send: frame => { sent.push(frame); }, close: () => { /* scripted */ } };
-    }
-  });
+  closeCount = 0;
+  lastOptions = options;
+  mountInto(container, options);
+  const mounted = handle!;
+  // a reclaimed kept terminal is already counted
+  if (!counted.has(mounted)) {
+    counted.add(mounted);
+    const dispose = mounted.dispose;
+    const name = `${options.keep?.workspace}/${options.keep?.panel}`;
+    mounted.dispose = () => { disposals.set(name, (disposals.get(name) ?? 0) + 1); dispose(); };
+  }
   // emulate an incompatible public-cell metadata interface without changing xterm internals
   if (options.missingCellMetadata) {
-    const buffer = handle.terminal.buffer.active;
+    const buffer = mounted.terminal.buffer.active;
     const originalGetLine = buffer.getLine.bind(buffer);
     Object.defineProperty(buffer, 'getLine', { configurable: true, value: (line: number) => {
       const row = originalGetLine(line);
@@ -83,10 +72,65 @@ export const renderStreamedTerminal = async (
       });
     } });
   }
-  host = container.querySelector<HTMLElement>('.streamed-terminal-host') ?? undefined;
   await waitFor(() => sent.some(frame => frame.type === 'viewport'));
   container.dataset.ready = 'true';
 };
+
+const terminalOptions = (container: HTMLElement, options: FixtureOptions): StreamedTerminalOptions => ({
+  scrollback: options.scrollback,
+  codexScrollControls: options.codexScrollControls,
+  preferNativeMouseSelection: options.preferNativeMouseSelection,
+  // Long by default so a status can be asserted before a reconnect fires: only a stream
+  // that stayed up this long after its seed reconnects at once, and an `exit` never does.
+  reconnectDelayMs: options.reconnectDelayMs ?? 60_000,
+  // Stands in for the panel's sticky mobile modifiers so the transform seam is testable.
+  transformInput: options.upperCaseInput ? data => data.toUpperCase() : undefined,
+  // capture plain-link routing while leaving modified activations on their native path
+  onOpenUrl: options.captureOpenUrls ? url => { openedUrls.push(url); return true; } : undefined,
+  // stands in for a Terminal panel, which closes on exit
+  onExit: options.captureExit ? reason => { container.dataset.exited = reason; } : undefined,
+  onQuestion: question => questions.push(question),
+  // expose both placeholder variants before output arrives
+  ...(options.loadingKind === undefined ? {} : { loadingKind: options.loadingKind }),
+  connect: next => {
+    handlers = next;
+    connectCount += 1;
+    // Open on the next task, as a real socket would.
+    setTimeout(() => next.onOpen(), 0);
+    return { send: frame => { sent.push(frame); }, close: () => { closeCount += 1; } };
+  }
+});
+
+const mountInto = (container: HTMLElement, options: FixtureOptions) => {
+  container.style.width = options.width ?? '640px';
+  container.style.height = options.height ?? '320px';
+  root = container;
+  handle = mountKeptTerminal(options.keep, container, terminalOptions(container, options));
+  host = container.querySelector<HTMLElement>('.streamed-terminal-host') ?? undefined;
+};
+
+// --- Keep-alive: a panel unmounting as its Workspace is left, and mounting again -------
+
+// the panel unmounts: its container leaves the page and the terminal is released
+let left: HTMLElement | undefined;
+export const leavePanel = () => { left = root; root!.remove(); releaseKeptTerminal(lastOptions.keep, handle!); };
+// what the panel the terminal left still holds: children, classes and pane data attributes
+export const leftContainer = () => ({ children: left?.childElementCount, className: left?.className, data: Object.keys(left?.dataset ?? {}).filter(name => name !== 'ready') });
+// a panel with the last mount's options mounts in a new container `id`; whether it reclaimed
+// the same xterm instance
+export const showPanel = (id: string): boolean => {
+  const previous = handle!.terminal;
+  const container = document.createElement('div');
+  container.id = id;
+  document.body.append(container);
+  mountInto(container, lastOptions);
+  return handle!.terminal === previous;
+};
+const workspaceHides = new Map<string, () => void>();
+export const showWorkspace = (workspace: string) => workspaceHides.set(workspace, showKeptWorkspace(workspace));
+export const hideWorkspace = (workspace: string) => workspaceHides.get(workspace)?.();
+export const disposalsOf = (workspace: string, panel: string) => disposals.get(`${workspace}/${panel}`) ?? 0;
+export const closeCalls = () => closeCount;
 
 // --- Drive (server → browser) -------------------------------------------------------
 

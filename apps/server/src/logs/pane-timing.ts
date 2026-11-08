@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 // are enums, so nothing the browser invents reaches the file verbatim.
 const markKeys = ['socket', 'open', 'viewport', 'firstFrame', 'seed', 'parsed', 'cover', 'painted'] as const;
 const pageKeys = ['responseEnd', 'domContentLoaded', 'session', 'dashboard'] as const;
-const enums = { attempt: ['initial', 'reconnect'], renderer: ['webgl', 'dom'], browser: ['firefox', 'chrome', 'safari', 'other'] } as const;
+const enums = { attempt: ['initial', 'reconnect', 'revisit'], renderer: ['webgl', 'dom'], browser: ['firefox', 'chrome', 'safari', 'other'] } as const;
 export const maxTimingFrameChars = 4_096;
 
 export type ClientTiming = Record<string, unknown>;

@@ -1268,6 +1268,83 @@ test('an agentless Worktree tab restores its existing Terminal', async ({ page }
   await expect(page.locator('.terminal-pane[data-panel-key="%5"]')).toBeVisible();
 });
 
+// two agent Workspaces, Cora with its build shell open as a Terminal
+const routeTwoWorkspaces = async (page: Page) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await installPaneMock(page);
+  await page.addInitScript(() => localStorage.setItem('rac.terminals:cora', JSON.stringify([{ paneId: '%5', name: 'build' }])));
+  const agent = (id: string, worktreeId: string, worktreeLabel: string, session: string) => ({ id, sessionId: `socket:${session}`, home: `/worktrees/${worktreeId}`, worktreeId, worktreeLabel, title: 'Ready', attention: 'finished', queuedPromptCount: 0 });
+  await page.route('**/api/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [agent('agent-1', 'cora', 'Cora', '$1'), agent('agent-2', 'dax', 'Dax', '$2')], projects: [] } });
+    if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (/^\/api\/(agents\/agent-[12]|worktrees\/(cora|dax))\/tickets$/u.test(path)) return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    if (/\/(saved-prompts|prompt-history|queued-prompts)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
+    if (/^\/api\/worktrees\/(cora|dax)\/notes$/u.test(path)) return route.fulfill({ json: { notes: [] } });
+    if (path === '/api/worktrees/cora/panes') return route.fulfill({ json: { panes: agentPanes } });
+    if (path === '/api/worktrees/dax/panes') return route.fulfill({ json: { panes: [] } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+};
+const openPaneIds = (page: Page) => page.evaluate(() => (window as unknown as { __pane: { openIds: () => string[] } }).__pane.openIds());
+
+// leaving a Workspace parks its streamed panes; going back shows their last screens at once
+test('a Workspace shown again shows its panes\u2019 last screens before their fresh seeds', async ({ page }) => {
+  await routeTwoWorkspaces(page);
+  const agentOutput = page.locator('.log-split > .log-output');
+  const shell = page.locator('.terminal-pane[data-panel-key="%5"]');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await pushBytes(page, 'agent-1', 'AGENT-ONE-SCREEN\r\n');
+  await seedPaneSize(page, '%5', 80, 24);
+  await pushBytes(page, '%5', 'SHELL-SCREEN\r\n');
+  await expect(agentOutput.locator('.xterm-rows')).toContainText('AGENT-ONE-SCREEN');
+  await expect(shell.locator('.xterm-rows')).toContainText('SHELL-SCREEN');
+
+  // leaving closes both streams at once
+  await page.getByRole('tab', { name: /^Dax/u }).click();
+  await seedPaneSize(page, 'agent-2', 80, 24);
+  await expect.poll(() => openPaneIds(page)).toEqual(['agent-2']);
+
+  // back again: the kept screens show uncovered while the fresh streams are still unseeded
+  await page.getByRole('tab', { name: /^Cora/u }).click();
+  await expect(agentOutput.locator('.xterm-rows')).toContainText('AGENT-ONE-SCREEN');
+  await expect(shell.locator('.xterm-rows')).toContainText('SHELL-SCREEN');
+  await expect(page.locator('.streamed-terminal-cover')).toHaveCount(0);
+  await expect(page.locator('.streamed-terminal-status:visible')).toHaveCount(0);
+  await expect.poll(() => paneConnectCount(page, 'agent-1')).toBe(2);
+  await expect.poll(() => paneConnectCount(page, '%5')).toBe(2);
+  await expect.poll(() => openPaneIds(page)).toEqual(expect.arrayContaining(['agent-1', '%5']));
+
+  // the fresh seeds replace them
+  await pushBytes(page, 'agent-1', 'AGENT-ONE-FRESH\r\n');
+  await pushBytes(page, '%5', 'SHELL-FRESH\r\n');
+  await expect(agentOutput.locator('.xterm-rows')).toContainText('AGENT-ONE-FRESH');
+  await expect(agentOutput.locator('.xterm-rows')).not.toContainText('AGENT-ONE-SCREEN');
+  await expect(shell.locator('.xterm-rows')).toContainText('SHELL-FRESH');
+  await expect(shell.locator('.xterm-rows')).not.toContainText('SHELL-SCREEN');
+});
+
+// a selection left behind must not freeze the returned pane on its kept screen
+test('a Terminal selected when its Workspace is left takes its fresh seed on return', async ({ page }) => {
+  await routeTwoWorkspaces(page);
+  const shell = page.locator('.terminal-pane[data-panel-key="%5"]');
+  await seedPaneSize(page, '%5', 80, 24);
+  await pushBytes(page, '%5', 'SELECTED-WORD\r\n');
+  await selectTerminalText(page, shell, 'SELECTED-WORD');
+  await expect(shell).toHaveClass(/selection-active/u);
+
+  await page.getByRole('tab', { name: /^Dax/u }).click();
+  await page.getByRole('tab', { name: /^Cora/u }).click();
+  await expect(shell.locator('.xterm-rows')).toContainText('SELECTED-WORD');
+  await expect.poll(() => paneConnectCount(page, '%5')).toBe(2);
+  await seedPaneSize(page, '%5', 80, 24);
+  await pushBytes(page, '%5', 'FRESH-AFTER-SELECTION\r\n');
+  await expect(shell.locator('.xterm-rows')).toContainText('FRESH-AFTER-SELECTION');
+  await expect(shell).not.toHaveClass(/selection-active/u);
+});
+
 // with no agent panel, a phone's Terminal keeps its helper keys in the split
 test('on a phone an agentless Workspace keeps its toolbar below the Terminal helper keys', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });

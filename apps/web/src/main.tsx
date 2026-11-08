@@ -8,7 +8,7 @@ import '@xterm/xterm/css/xterm.css';
 import { pollWhileVisible } from './client-scheduling.js';
 import { closeOnMiddleClick, preserveMiddleClickPress } from './middle-click.js';
 import { currentOutputLinkUrl, outputUrlMatchesHost } from './output-links.js';
-import { mountStreamedTerminal } from './streamed-terminal.js';
+import { mountKeptTerminal, releaseKeptTerminal, showKeptWorkspace } from './kept-terminals.js';
 import { attachTerminalSelection, type TerminalSelection, type TerminalSelectionController } from './terminal-selection.js';
 import { createAgentPaneConnector, createWorktreePaneConnector } from './pane-socket-client.js';
 import { FlyoutPortal } from './flyout-portal.js';
@@ -6354,7 +6354,8 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
     setSelection(undefined);
     setSelectionModeActive(false);
     setConnection('Connecting');
-    const handle = mountStreamedTerminal(container, {
+    const keep = { workspace: placeItemKey(worktreeId), panel: `terminal:${paneId}` };
+    const handle = mountKeptTerminal(keep, container, {
       connect: createWorktreePaneConnector(worktreeId, paneId, request),
       loadingKind: 'terminal',
       transformInput: data => applyStickyModifiers(paneId, data),
@@ -6400,7 +6401,7 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
       if (terminalPasters.get(paneId) === handle.paste) terminalPasters.delete(paneId);
       if (exitTerminalInput.get(paneId) === blur) exitTerminalInput.delete(paneId);
       if (terminalFocusers.get(paneId) === handle.focus) terminalFocusers.delete(paneId);
-      handle.dispose();
+      releaseKeptTerminal(keep, handle);
     };
   }, [worktreeId, paneId]);
   // open terminal modes and clipboard actions without sending a secondary mouse report
@@ -6996,6 +6997,8 @@ const minimizeWorkspacePanel = (workspaceKey: string, panelKey: string, minimize
 // `onCloseReview`, given while the guided review's panel is open here, minimizes it.
 function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, noteOptions: notes, onNavigateWorktree, onOperationFeedback, onCloseReview, onAddToPrompt }: { agentId?: string; newConversationInPlace?: boolean; noteOptions: WorkspaceNotesOptions; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onCloseReview?: () => void; onAddToPrompt?: (text: string) => void }) {
   const key = place.id === undefined ? `agent-${agentId ?? 'pending'}` : placeItemKey(place.id);
+  // runs after the panels' own effects have reclaimed their kept terminals
+  useEffect(() => showKeptWorkspace(key), [key]);
   // explicit content opens share one desktop focus and mobile selection path
   const focusSplit = useCallback((panelKey: string, input = false) => requestWorkspaceJump(key, panelKey, input), [key]);
   const browser = useProjectBrowser(place.projectUrl, place.id, place.projectProxied, () => focusSplit('browser'));
@@ -7314,13 +7317,13 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
   return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} preview={previewPane} previewController={preview} review={reviewPanel} stack={stackPane} github={githubPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} onFocusSplit={workspace.focusSplit} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
 }
 
-type LogProps = { id: string; onTurnOff?: () => void; embedded?: boolean; codexScrollControls?: boolean; onQuestion: (question: ChoiceQuestion | undefined) => void; onMetadata?: (response: string | undefined, overflow: boolean) => void; header?: (connection: string) => ReactNode; composer?: ReactNode; notes?: WorktreeNotes; onAddToPrompt?: (text: string) => void; onOpenUrl?: (url: string) => boolean; onOpenFile?: (path: string) => void; processingLabel?: string; processingDetail?: string };
+type LogProps = { id: string; workspaceKey?: string; onTurnOff?: () => void; embedded?: boolean; codexScrollControls?: boolean; onQuestion: (question: ChoiceQuestion | undefined) => void; onMetadata?: (response: string | undefined, overflow: boolean) => void; header?: (connection: string) => ReactNode; composer?: ReactNode; notes?: WorktreeNotes; onAddToPrompt?: (text: string) => void; onOpenUrl?: (url: string) => boolean; onOpenFile?: (path: string) => void; processingLabel?: string; processingDetail?: string };
 
 // Render one Agent's live output: the streamed pane, its loading and status overlays and the
 // selection toolbar. As the agent panel it also carries the header and composer the owning card
 // hands it (the header receives the connection status to show); the embedded update advisor has
 // neither. The Workspace around it owns everything Place-scoped (notes, browser, code, Terminals, git).
-function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQuestion, onMetadata, header, composer, notes, onAddToPrompt, onOpenUrl, onOpenFile, processingLabel, processingDetail }: LogProps) {
+function Log({ id, workspaceKey, onTurnOff, embedded = false, codexScrollControls = false, onQuestion, onMetadata, header, composer, notes, onAddToPrompt, onOpenUrl, onOpenFile, processingLabel, processingDetail }: LogProps) {
   const canvas = useRef<HTMLDivElement | null>(null);
   const inheritedPromptMode = useContext(PromptInputModeContext);
   const terminalRef = useRef<XTerm | undefined>(undefined);
@@ -7375,7 +7378,9 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
       onQuestion(undefined);
     };
     answeredQuestionActions.set(id, answeredQuestion);
-    const handle = mountStreamedTerminal(canvas.current!, {
+    // the embedded update advisor has no Workspace to keep it
+    const keep = workspaceKey === undefined ? undefined : { workspace: workspaceKey, panel: `agent:${id}` };
+    const handle = mountKeptTerminal(keep, canvas.current!, {
       connect: createAgentPaneConnector(id, request),
       loadingKind: 'agent',
       // mirror shared stream status without owning a second connection loader
@@ -7438,9 +7443,9 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
       if (exitTerminalInput.get(id) === exitInput) exitTerminalInput.delete(id);
       if (answeredQuestionActions.get(id) === answeredQuestion) answeredQuestionActions.delete(id);
       if (terminalRef.current === terminal) terminalRef.current = undefined;
-      handle.dispose();
+      releaseKeptTerminal(keep, handle);
     };
-  }, [codexScrollControls, embedded, id, onQuestion]);
+  }, [codexScrollControls, embedded, id, onQuestion, workspaceKey]);
   // open agent modes and clipboard actions from any non-prompt part of the split
   const openOutputContextMenu = (event: MouseEvent) => {
     const controller = selectionControllerRef.current;
@@ -8235,7 +8240,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     return <AgentPanelFrame header={header('Live', menu)} composer={exited ?? composer} onTurnOff={turnOff}><Transcript agent={agent} showThinking={showThinking} onOpenDiff={openDiff} />{debugView !== undefined && <AgentDebugDialog agentId={agent.id} view={debugView} onClose={() => setDebugView(undefined)} />}</AgentPanelFrame>;
   }
   // keep codex transcript shortcuts limited to codex and omx agent panels
-  return <Log id={agent.id} onTurnOff={turnOff} codexScrollControls={agent.kind === undefined || agent.kind === 'codex' || agent.kind === 'omx'} onQuestion={setQuestion} onMetadata={reportMetadata} onAddToPrompt={onAddToPrompt} header={header} composer={composer} notes={workspace.notes} onOpenUrl={onOpenUrl} onOpenFile={onOpenFile} processingLabel={startingNewTask ? 'Starting new task…' : undefined} processingDetail={startingNewTask ? 'Closing this session and preparing a fresh agent. This can take a few seconds.' : undefined} />;
+  return <Log id={agent.id} workspaceKey={workspace.viewKey} onTurnOff={turnOff} codexScrollControls={agent.kind === undefined || agent.kind === 'codex' || agent.kind === 'omx'} onQuestion={setQuestion} onMetadata={reportMetadata} onAddToPrompt={onAddToPrompt} header={header} composer={composer} notes={workspace.notes} onOpenUrl={onOpenUrl} onOpenFile={onOpenFile} processingLabel={startingNewTask ? 'Starting new task…' : undefined} processingDetail={startingNewTask ? 'Closing this session and preparing a fresh agent. This can take a few seconds.' : undefined} />;
 }
 
 // whether an Agent has something for the operator: a question, or a finished turn not yet seen

@@ -1292,3 +1292,135 @@ test('returns to DOM without reconnecting when the WebGL context is lost', async
   await expect(page.locator('#term .xterm-rows')).toContainText('AFTER-LOSS');
   expect(await drive(page, 'connectCalls')).toBe(1);
 });
+
+// --- Keep-alive: a Workspace left and shown again -------------------------------------
+
+const keepIn = (workspace: string) => ({ keep: { workspace, panel: 'p' } });
+// render a kept panel in `workspace`, seed it with `text`, then leave its Workspace
+const seedAndLeave = async (page: Page, workspace: string, text: string) => {
+  await page.evaluate(async ({ workspace, keep }) => {
+    document.body.replaceChildren();
+    const mount = document.createElement('div');
+    mount.id = `term-${workspace}`;
+    document.body.append(mount);
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    await module.renderStreamedTerminal(mount, keep);
+  }, { workspace, keep: keepIn(workspace) });
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', `${text}\r\n`);
+  await expect.poll(() => drive(page, 'screenText')).toContain(text);
+  await drive(page, 'leavePanel');
+};
+
+test('a kept terminal shows its last screen at once when shown again, then reseeds', async ({ page }) => {
+  await setup(page, keepIn('A'));
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'OLD-SCREEN\r\n');
+  await expect.poll(async () => (await drive<unknown[]>(page, 'timingFrames')).length).toBe(1);
+  await drive(page, 'leavePanel');
+  // leaving closes the stream at once, so the server releases the pane's Size claim
+  expect(await drive(page, 'closeCalls')).toBe(1);
+  // and hands the unmounted panel's container back empty, so the kept terminal retains none of it
+  expect(await drive(page, 'leftContainer')).toEqual({ children: 0, className: '', data: [] });
+
+  // the same xterm moves into the new panel, uncovered, and a keystroke made before the new
+  // stream opens still reaches it (the connector holds it until the open)
+  const typed = await page.evaluate(async () => {
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    const same = module.showPanel('back');
+    return { same, sent: module.sendInputRaw('x') };
+  });
+  expect(typed).toEqual({ same: true, sent: true });
+  const back = page.locator('#back');
+  await expect(back.locator('.xterm-rows')).toContainText('OLD-SCREEN');
+  await expect(back.locator('.streamed-terminal-cover')).toHaveCount(0);
+  await expect(back.locator('.streamed-terminal-status')).toBeHidden();
+  expect(await drive(page, 'connectCalls')).toBe(2);
+  await expect.poll(() => drive<string[]>(page, 'sentFrames')).toContain('viewport');
+  expect(await drive(page, 'inputData')).toBe('x');
+
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'FRESH-SEED\r\n');
+  await expect.poll(() => drive(page, 'screenText')).toContain('FRESH-SEED');
+  expect(await drive<string>(page, 'screenText')).not.toContain('OLD-SCREEN');
+  await expect.poll(async () => (await drive<unknown[]>(page, 'timingFrames')).length).toBe(2);
+  const [initial, revisit] = await drive<Array<{ attempt: string; marks: Record<string, number> }>>(page, 'timingFrames');
+  expect(initial!.attempt).toBe('initial');
+  // the kept screen was on show from the start of the attempt, long before its seed parsed
+  expect(revisit!.attempt).toBe('revisit');
+  expect(revisit!.marks.cover).toBeLessThanOrEqual(revisit!.marks.open!);
+  expect(revisit!.marks.cover).toBeLessThanOrEqual(revisit!.marks.parsed!);
+  expect(await drive(page, 'disposalsOf', 'A', 'p')).toBe(0);
+});
+
+test('a parked terminal stays closed through visibilitychange, online and a late close', async ({ page }) => {
+  await setup(page, keepIn('A'));
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'LIVE\r\n');
+  // a lost stream has its retry pending when the Workspace is left
+  await drive(page, 'pushClose', 1006, 'lost');
+  await expect(page.locator('#term .streamed-terminal-status')).toContainText('Reconnecting…');
+  await drive(page, 'leavePanel');
+  // nor does a close reported after it left arm a retry that the page events would fire
+  expect(await page.evaluate(async () => {
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    module.pushClose(1006, 'lost');
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('online'));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    return module.connectCalls();
+  })).toBe(1);
+  // shown again, it subscribes once, showing its kept screen rather than the reconnect notice
+  await drive(page, 'showPanel', 'back');
+  expect(await drive(page, 'connectCalls')).toBe(2);
+  await expect(page.locator('#back .streamed-terminal-status')).toBeHidden();
+  await expect(page.locator('#back .xterm-rows')).toContainText('LIVE');
+});
+
+test('keeps the three most recently left workspaces and disposes the rest once', async ({ page }) => {
+  await setup(page);
+  for (const workspace of ['A', 'B', 'C', 'D']) await seedAndLeave(page, workspace, `${workspace}-SCREEN`);
+  const disposed = async () => Object.fromEntries(await Promise.all(['A', 'B', 'C', 'D', 'E'].map(async workspace => [workspace, await drive<number>(page, 'disposalsOf', workspace, 'p')])));
+  expect(await disposed()).toEqual({ A: 1, B: 0, C: 0, D: 0, E: 0 });
+  // B shown again takes its terminal back, and leaving it again makes it the most recent
+  await page.evaluate(async () => {
+    document.body.replaceChildren();
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    await module.renderStreamedTerminal(mount, { keep: { workspace: 'B', panel: 'p' } });
+  });
+  await expect(page.locator('.xterm-rows')).toContainText('B-SCREEN');
+  await drive(page, 'leavePanel');
+  await seedAndLeave(page, 'E', 'E-SCREEN');
+  expect(await disposed()).toEqual({ A: 1, B: 0, C: 1, D: 0, E: 0 });
+});
+
+test('disposes a panel closed in a shown workspace, and one gone when its workspace returns', async ({ page }) => {
+  await setup(page, keepIn('S'));
+  await drive(page, 'showWorkspace', 'S');
+  await drive(page, 'leavePanel');
+  await expect.poll(() => drive(page, 'disposalsOf', 'S', 'p')).toBe(1);
+  expect(await drive(page, 'closeCalls')).toBe(1);
+
+  await seedAndLeave(page, 'G', 'G-SCREEN');
+  expect(await drive(page, 'disposalsOf', 'G', 'p')).toBe(0);
+  // G is shown with no panel left to claim its terminal
+  await drive(page, 'showWorkspace', 'G');
+  expect(await drive(page, 'disposalsOf', 'G', 'p')).toBe(1);
+  await drive(page, 'hideWorkspace', 'G');
+  await drive(page, 'hideWorkspace', 'S');
+  expect(await drive(page, 'disposalsOf', 'S', 'p')).toBe(1);
+});
+
+test('a kept terminal that never seeded comes back covered and connecting, not with its old notice', async ({ page }) => {
+  await setup(page, keepIn('A'));
+  await drive(page, 'pushExit', 'pane closed');
+  await expect(page.locator('#term')).toHaveAttribute('data-status', 'pane closed');
+  await drive(page, 'leavePanel');
+  await drive(page, 'showPanel', 'back');
+  const back = page.locator('#back');
+  await expect(back).toHaveAttribute('data-status', 'Connecting');
+  await expect(back.locator('.streamed-terminal-status')).toHaveAttribute('aria-busy', 'true');
+  await expect(back.locator('.streamed-terminal-cover')).toHaveCount(1);
+});

@@ -60,6 +60,12 @@ export interface StreamedTerminalHandle {
   requestMetadata: () => void;
   // freeze visual updates while output text is selected
   setOutputPaused: (paused: boolean) => void;
+  // Close the stream but keep the terminal and its screen, detached from any panel, so the
+  // server releases the pane's Size claim at once. Nothing reconnects it until `reattach`.
+  park: () => void;
+  // Move a parked terminal into `container` with the new panel's options: it shows its last
+  // screen at once and subscribes afresh, and the new seed replaces that screen.
+  reattach: (container: HTMLElement, options: StreamedTerminalOptions) => void;
   dispose: () => void;
 }
 
@@ -249,14 +255,18 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   Object.assign(terminal.element!.style, { fontFamily: terminalFontFamily, fontSize: `${readTerminalFontSize()}px`, fontKerning: 'none', fontWeight: 'normal' });
 
   let suppressFocusUntil = 0;
-  const overlays = createOutputLinkOverlays(
+  const createOverlays = () => createOutputLinkOverlays(
     container,
     () => { suppressFocusUntil = performance.now() + 250; },
     options.onOpenFile,
     options.onOpenUrl
   );
+  let overlays = createOverlays();
 
   let disposed = false;
+  let parked = false;
+  // the container's pane attributes, carried from the panel a parked terminal left to the next
+  let parkedData: Partial<Record<'cols' | 'rows' | 'foreground', string>> = {};
   const revealTerminal = () => { if (revealed) return; revealed = true; cover.remove(); mark('cover'); };
   let connection: PaneConnection | undefined;
   let sizeApplied = false;
@@ -283,7 +293,6 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   let reconnectTimer: number | undefined;
   // the current stream attempt's connection timeline, sent once its first seed is parsed
   let timeline: { start: number; timing: { type: 'timing' } & PaneTiming } | undefined;
-  let attempts = 0;
   const mark = (name: keyof PaneTiming['marks']) => { if (timeline !== undefined) timeline.timing.marks[name] ??= roundMs(performance.now() - timeline.start); };
   // when the current stream's seed was parsed; undefined until then
   let seededAt: number | undefined;
@@ -514,7 +523,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     if (current !== undefined) { try { current.close(); } catch { /* already closing */ } }
   };
   const handleDisconnect = (reason: string) => {
-    if (disposed) return;
+    if (disposed || parked) return;
     closeConnection();
     invalidateCodexFollowState();
     // Keep the terminal mounted as its own placeholder with a status, then re-subscribe.
@@ -555,8 +564,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     }
   };
 
-  function subscribe(): void {
-    if (disposed) return;
+  function subscribe(attempt: PaneTiming['attempt'] = 'reconnect'): void {
+    if (disposed || parked) return;
     // a replacement stream supplies its own size and seed
     clearQueuedOutput();
     sizeApplied = false;
@@ -567,7 +576,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     seededAt = undefined;
     invalidateCodexFollowState();
     const start = performance.now();
-    timeline = { start, timing: { type: 'timing', attempt: attempts++ === 0 ? 'initial' : 'reconnect', sincePageLoad: roundMs(start), renderer: 'dom', browser: browserTag(), mobile: coarse, marks: {} } };
+    timeline = { start, timing: { type: 'timing', attempt, sincePageLoad: roundMs(start), renderer: 'dom', browser: browserTag(), mobile: coarse, marks: {} } };
     connection = options.connect({
       onSocket: connecting => { mark('socket'); if (timeline !== undefined) timeline.timing.connectingSockets = connecting; },
       onOpen: () => { mark('open'); sendViewport(); },
@@ -772,7 +781,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     if (disposed) return;
     const theme = computeTerminalTheme();
     terminal.options.theme = theme;
-    applyContainerBackground(theme.background);
+    // a parked terminal has handed its container back
+    if (!parked) applyContainerBackground(theme.background);
     applyCoverBackground(theme.background);
     scheduleOverlayRender();
   });
@@ -811,7 +821,22 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
 
   // cover initial connection with the same skeleton used by automatic retries
   showStatus('Connecting');
-  subscribe();
+  subscribe('initial');
+
+  // Leave the container as we found it, so a later mount there starts clean.
+  const detach = () => {
+    overlays.clear();
+    host.remove();
+    cover.remove();
+    status.remove();
+    jump.remove();
+    container.classList.remove('streamed-terminal', 'native-mouse-selection');
+    container.style.background = '';
+    delete container.dataset.cols;
+    delete container.dataset.rows;
+    delete container.dataset.status;
+    delete container.dataset.foreground;
+  };
 
   return {
     terminal,
@@ -825,6 +850,36 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     },
     requestMetadata: () => connection?.send({ type: 'metadata' }),
     setOutputPaused,
+    park: () => {
+      if (disposed || parked) return;
+      parked = true;
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+      closeConnection();
+      clearQueuedOutput();
+      timeline = undefined;
+      resizeObserver.disconnect();
+      // a selection kept across the move would freeze output on the next panel's first selection sync
+      terminal.select(0, 0, 0);
+      parkedData = { cols: container.dataset.cols, rows: container.dataset.rows, foreground: container.dataset.foreground };
+      // the unmounted panel's DOM is not retained, and disposing a parked terminal touches no container
+      detach();
+    },
+    reattach: (next, nextOptions) => {
+      if (disposed || !parked) return;
+      parked = false;
+      options = nextOptions;
+      attachTo(next);
+      for (const [name, value] of Object.entries(parkedData)) if (value !== undefined) container.dataset[name] = value;
+      overlays = createOverlays();
+      resizeObserver.observe(container);
+      // the kept screen stands in until the fresh seed; one that never seeded shows what a fresh mount does
+      if (revealed) hideStatus();
+      else showStatus('Connecting');
+      subscribe('revisit');
+      if (revealed) mark('cover');
+      terminal.refresh(0, terminal.rows - 1);
+    },
     dispose: () => {
       if (disposed) return;
       disposed = true;
@@ -846,19 +901,9 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       unsubscribeTheme();
       releaseWebgl?.();
       document.fonts.removeEventListener('loadingdone', remeasureCell);
-      overlays.clear();
+      if (!parked) detach();
       selectionSurface?.dispose();
       terminal.dispose();
-      host.remove();
-      cover.remove();
-      status.remove();
-      jump.remove();
-      // Leave the caller's container as we found it, so a later re-mount starts clean.
-      container.classList.remove('streamed-terminal', 'native-mouse-selection');
-      container.style.background = '';
-      delete container.dataset.cols;
-      delete container.dataset.rows;
-      delete container.dataset.status;
     }
   };
 };

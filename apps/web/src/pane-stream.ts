@@ -32,7 +32,7 @@ export type PaneClientFrame =
 // Milliseconds from the attempt's start (performance.now() offsets), except `page`, whose
 // values are offsets from page load and which only the page's first timing frame carries.
 export interface PaneTiming {
-  attempt: 'initial' | 'reconnect';
+  attempt: 'initial' | 'reconnect' | 'revisit';
   sincePageLoad: number;
   // other pane sockets mid-handshake when this one was constructed
   connectingSockets?: number;
