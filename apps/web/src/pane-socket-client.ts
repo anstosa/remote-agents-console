@@ -17,9 +17,9 @@ type Attempt = { ws?: WebSocket; open: boolean };
 
 // The shared socket opens with the first stream, holds stream opens while it connects, and
 // closes `idleCloseMs` after its last stream ends, so a workspace switch (old streams close,
-// new ones open) keeps it. When it drops, every stream gets `onClose` with the socket's code,
-// and their reconnects open it again once.
-export const createPaneMux = (request: Request, idleCloseMs = 5_000) => {
+// new ones open), or a minute on a Workspace with no panes, keeps it. When it drops, every
+// stream gets `onClose` with the socket's code, and their reconnects open it again once.
+export const createPaneMux = (request: Request, idleCloseMs = 60_000) => {
   const streams = new Map<number, Stream>();
   let nextStream = 1;
   let current: Attempt | undefined;
