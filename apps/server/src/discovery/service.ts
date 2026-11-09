@@ -185,7 +185,9 @@ export class DiscoveryService {
   // bumped by invalidateWorktrees(); a scan that began under an older epoch read stale pins
   private worktreesEpoch = 0;
   private worktreesInFlightEpoch = -1;
-  private readonly gitMetadata = new Map<string, { refreshedAt: number; value: GitMeta; busy: boolean }>();
+  // `spread` scales the entry's lifetime by 0.8–1.2, so checkouts read in the same poll do not
+  // all expire in the same later one and re-read as one burst
+  private readonly gitMetadata = new Map<string, { refreshedAt: number; value: GitMeta; busy: boolean; spread: number }>();
   private readonly gitMetadataInFlight = new Map<string, Promise<GitMeta>>();
   // cache canonical roots by raw pane cwd so symlink changes expire too
   private readonly workspaceRoots = new Map<string, RootLookup>();
@@ -811,16 +813,16 @@ export class DiscoveryService {
       const cached = this.gitMetadata.get(workspace);
       const busy = busyHomes.has(workspace);
       // An open Workspace's checkout can change at any moment, from its Agents or its terminals,
-      // so its Git state is re-read every 30 s; a closed one's is kept for 10 minutes. A snapshot
-      // read while an Agent was working expires once it stops, so the Agent's last edits show.
+      // so its Git state is re-read about every 30 s; a closed one's is kept about 10 minutes.
+      // A snapshot read while an Agent was working expires once it stops, so its last edits show.
       const ttl = cached?.busy === true && !busy ? 0 : openHomes.has(workspace) ? DiscoveryService.gitMetadataCacheMs : DiscoveryService.closedGitMetadataCacheMs;
-      if (cached !== undefined && Date.now() - cached.refreshedAt < ttl) return Promise.resolve(cached.value);
+      if (cached !== undefined && Date.now() - cached.refreshedAt < ttl * cached.spread) return Promise.resolve(cached.value);
       const active = this.gitMetadataInFlight.get(workspace);
       // coalesce matching repository scans
       if (active !== undefined) return active;
       const value = gitMeta(workspace, true, defaultBranch).then(meta => {
         // a scan begun before invalidateWorktrees() read the old checkout; do not cache it
-        if (this.gitMetadataInFlight.get(workspace) === value) this.gitMetadata.set(workspace, { refreshedAt: Date.now(), value: meta, busy });
+        if (this.gitMetadataInFlight.get(workspace) === value) this.gitMetadata.set(workspace, { refreshedAt: Date.now(), value: meta, busy, spread: 0.8 + Math.random() * 0.4 });
         return meta;
       }).finally(() => {
         // release only the matching scan

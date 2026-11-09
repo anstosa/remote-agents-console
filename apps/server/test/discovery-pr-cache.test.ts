@@ -304,7 +304,7 @@ describe('DiscoveryService pull request comparison cache', () => {
     await settle(pullRequests, '/workspaces/app');
 
     await service.dashboard(false, true);
-    now += 30_001;
+    now += 36_001;
     // the expiry tick starts a background metadata refresh
     await service.dashboard(false, true);
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -316,7 +316,7 @@ describe('DiscoveryService pull request comparison cache', () => {
     expect(comparisonCallsWith('origin/release')).toHaveLength(3);
   });
 
-  it('re-reads an open Workspace\'s Git state every 30 s and a closed one\'s every 10 minutes', async () => {
+  it('re-reads an open Workspace\'s Git state about every 30 s and a closed one\'s about every 10 minutes', async () => {
     let now = 100_000;
     vi.spyOn(Date, 'now').mockImplementation(() => now);
     const workspace = '/workspaces/app';
@@ -326,10 +326,11 @@ describe('DiscoveryService pull request comparison cache', () => {
     const poll = async () => { await service.dashboard(false, true); await new Promise<void>(resolve => setImmediate(resolve)); };
 
     await poll();
-    now += 29_000;
+    // each snapshot lives 0.8–1.2 times its lifetime
+    now += 23_000;
     await poll();
     expect(reads()).toBe(1);
-    now += 1_001;
+    now += 13_001;
     await poll();
     expect(reads()).toBe(2);
     // the Agent stops: the snapshot read while it worked is replaced at once
@@ -338,15 +339,15 @@ describe('DiscoveryService pull request comparison cache', () => {
     await poll();
     expect(reads()).toBe(3);
     // the Workspace is still open, so 30 s still applies
-    now += 30_001;
+    now += 36_001;
     await poll();
     expect(reads()).toBe(4);
     // the Workspace closes
     panes.length = 0;
-    now += 30_001;
+    now += 7 * 60_000;
     await poll();
     expect(reads()).toBe(4);
-    now += 10 * 60_000;
+    now += 5 * 60_000 + 1;
     await poll();
     expect(reads()).toBe(5);
   });
