@@ -215,11 +215,12 @@ export function usePanelCarousel(containerRef: RefObject<HTMLElement | null>, ke
     };
   }, [phone, containerRef, choose, scrollTo]);
   // Bring a panel into view. Focus left in the panel scrolled away (the Agent's pane taking keys)
-  // goes with it, so the keyboard and the helper keys never split between two panels.
+  // goes with it, so the keyboard and the helper keys never split between two panels. Focus is kept
+  // when nothing scrolls away: on desktop, or when the panel is already in view (a new note's editor).
   const show = useCallback((key: string) => {
     if (!keysRef.current.includes(key)) return;
     const focused = document.activeElement;
-    if (focused instanceof HTMLElement && containerRef.current?.contains(focused) === true) focused.blur();
+    if (phoneRef.current && key !== visibleRef.current && focused instanceof HTMLElement && containerRef.current?.contains(focused) === true) focused.blur();
     pendingRestore.current = undefined;
     // an explicit menu selection takes precedence over pending Note hydration
     if (!initialPanelsReadyRef.current) ignoreHydratedNote.current = true;
