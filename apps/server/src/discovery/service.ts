@@ -185,7 +185,7 @@ export class DiscoveryService {
   // bumped by invalidateWorktrees(); a scan that began under an older epoch read stale pins
   private worktreesEpoch = 0;
   private worktreesInFlightEpoch = -1;
-  private readonly gitMetadata = new Map<string, { refreshedAt: number; value: GitMeta }>();
+  private readonly gitMetadata = new Map<string, { refreshedAt: number; value: GitMeta; busy: boolean }>();
   private readonly gitMetadataInFlight = new Map<string, Promise<GitMeta>>();
   // cache canonical roots by raw pane cwd so symlink changes expire too
   private readonly workspaceRoots = new Map<string, RootLookup>();
@@ -200,6 +200,7 @@ export class DiscoveryService {
   private structuredAnswer: (agentId: string) => Promise<string | undefined> = async () => undefined;
   private static readonly refreshCacheMs = 2_000;
   private static readonly gitMetadataCacheMs = 30_000;
+  private static readonly closedGitMetadataCacheMs = 10 * 60_000;
   // take only the GitHub reads discovery needs
   constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly github: BranchLookup = new GithubService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels' | 'issues'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string, private readonly launchHome?: string | null) {}
   // list the structured Agents on the dashboard beside the panes' Agents, fresh on every change
@@ -794,17 +795,32 @@ export class DiscoveryService {
     // a `git worktree add` from a terminal appears within one tick: if a live agent sits
     // in a checkout we do not know yet whose repository is a configured Project, re-scan once
     if (!force && await timed(steps, 'discovery.unknownWorktreeCheck', () => this.hasUnknownProjectWorktree(discovered, worktrees))) worktrees = await timed(steps, 'discovery.worktreeRescan', () => this.worktrees(true));
+    // re-place every agent against this (possibly fresher) Worktree set, publishing the
+    // console-side Place home; a Worktree's Agents take its git identity as before
+    let places = await timed(steps, 'discovery.places', () => this.places(worktrees));
+    if (await timed(steps, 'discovery.claimSessions', () => this.claimSessions(discovered, places))) { worktrees = await timed(steps, 'discovery.worktreeRescan', () => this.worktrees(true)); places = await timed(steps, 'discovery.places', () => this.places(worktrees)); }
+    const worktreeById = new Map(worktrees.map(worktree => [worktree.id, worktree] as const));
+    // the checkout each Agent's git metadata reads: its Worktree, else the one its pane is in
+    const homeOf = (agent: Agent) => { const place = this.placeOf(agent, places); return (place === undefined ? undefined : worktreeById.get(place.id))?.identity ?? agent.home; };
+    const busyHomes = new Set(discovered.filter(agent => agent.attention === 'working').map(homeOf));
+    // a checkout whose Workspace is open (its session has a pane, or an Agent runs there)
+    const openPlaces = this.workspacePlaces();
+    const openHomes = new Set([...discovered.map(homeOf), ...worktrees.filter(worktree => openPlaces.has(worktree.id)).map(worktree => worktree.identity)]);
     // share git snapshots with the owning project's comparison default
     const metadataFor = (workspace: string, defaultBranch?: string) => {
       const cached = this.gitMetadata.get(workspace);
-      // reuse recent Git state across frequent dashboard polls
-      if (cached !== undefined && Date.now() - cached.refreshedAt < DiscoveryService.gitMetadataCacheMs) return Promise.resolve(cached.value);
+      const busy = busyHomes.has(workspace);
+      // An open Workspace's checkout can change at any moment, from its Agents or its terminals,
+      // so its Git state is re-read every 30 s; a closed one's is kept for 10 minutes. A snapshot
+      // read while an Agent was working expires once it stops, so the Agent's last edits show.
+      const ttl = cached?.busy === true && !busy ? 0 : openHomes.has(workspace) ? DiscoveryService.gitMetadataCacheMs : DiscoveryService.closedGitMetadataCacheMs;
+      if (cached !== undefined && Date.now() - cached.refreshedAt < ttl) return Promise.resolve(cached.value);
       const active = this.gitMetadataInFlight.get(workspace);
       // coalesce matching repository scans
       if (active !== undefined) return active;
       const value = gitMeta(workspace, true, defaultBranch).then(meta => {
         // a scan begun before invalidateWorktrees() read the old checkout; do not cache it
-        if (this.gitMetadataInFlight.get(workspace) === value) this.gitMetadata.set(workspace, { refreshedAt: Date.now(), value: meta });
+        if (this.gitMetadataInFlight.get(workspace) === value) this.gitMetadata.set(workspace, { refreshedAt: Date.now(), value: meta, busy });
         return meta;
       }).finally(() => {
         // release only the matching scan
@@ -815,11 +831,6 @@ export class DiscoveryService {
       if (cached !== undefined) return Promise.resolve(cached.value);
       return value;
     };
-    // re-place every agent against this (possibly fresher) Worktree set, publishing the
-    // console-side Place home; a Worktree's Agents take its git identity as before
-    let places = await timed(steps, 'discovery.places', () => this.places(worktrees));
-    if (await timed(steps, 'discovery.claimSessions', () => this.claimSessions(discovered, places))) { worktrees = await timed(steps, 'discovery.worktreeRescan', () => this.worktrees(true)); places = await timed(steps, 'discovery.places', () => this.places(worktrees)); }
-    const worktreeById = new Map(worktrees.map(worktree => [worktree.id, worktree] as const));
     // the stable tab order follows configured checkout order and discovery defaults
     const orderOf = new Map(worktrees.map((worktree, index) => [worktree.id, index] as const));
     // retain mutable observations until all panes and places finish enrichment
@@ -828,9 +839,9 @@ export class DiscoveryService {
       const place = this.placeOf(discoveredAgent, places);
       const agent = place === undefined ? discoveredAgent : { ...discoveredAgent, placeId: place.id, home: place.home };
       const worktree = place === undefined ? undefined : worktreeById.get(place.id);
-      // git metadata reads the Worktree, else the checkout the pane is in; a question file lives
-      // where the pane runs, read through the console-side path when that is the Worktree itself
-      const home = worktree?.identity ?? discoveredAgent.home;
+      const home = homeOf(discoveredAgent);
+      // a question file lives where the pane runs, read through the console-side path when that
+      // is the Worktree itself
       const questionFolder = worktree !== undefined && worktreeMatchesWorkspace(worktree, discoveredAgent.home) ? worktree.identity : discoveredAgent.home;
       const defaultBranch = worktree?.defaultBranch ?? this.projectsNow().find(project => project.id === place?.projectId)?.defaultBranch;
       const [meta, question] = await Promise.all([

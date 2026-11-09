@@ -213,18 +213,19 @@ describe('DiscoveryService pull request comparison cache', () => {
   it('coalesces agents sharing one workspace and reuses their PR-base comparison on fresh pane scans', async () => {
     const pullRequests = githubListing(() => ({ number: 1, title: 'Cache', baseBranch: 'release' }));
     const panes = [
-      { paneId: '%1', sessionId: '$1', pid: 101, path: '/workspaces/app', title: '⠋ Working' },
+      { paneId: '%1', sessionId: '$1', pid: 101, path: '/workspaces/app', title: 'Ready' },
       { paneId: '%2', sessionId: '$2', pid: 102, path: '/workspaces/app', title: 'Ready' }
     ];
     const service = new DiscoveryService(socketFinder(), paneLister(panes) as never, processInspector(), pullRequests);
     await settle(pullRequests, '/workspaces/app');
 
     const first = await service.dashboard(false, true);
-    panes[0]!.title = 'Ready';
+    // an agent starting work is a fresh pane scan; the snapshot read while idle stays current
+    panes[0]!.title = '⠋ Working';
     const second = await service.dashboard(false, true);
 
-    expect(first.agents[0]?.attention).toBe('working');
-    expect(second.agents[0]?.attention).toBe('finished');
+    expect(first.agents[0]?.attention).toBe('finished');
+    expect(second.agents[0]?.attention).toBe('working');
     expect(first.agents.map(agent => agent.gitPrStatus)).toEqual([
       { base: 'origin/release', files: 1, changes: [] },
       { base: 'origin/release', files: 1, changes: [] }
@@ -313,6 +314,41 @@ describe('DiscoveryService pull request comparison cache', () => {
     await service.dashboard(false, true);
 
     expect(comparisonCallsWith('origin/release')).toHaveLength(3);
+  });
+
+  it('re-reads an open Workspace\'s Git state every 30 s and a closed one\'s every 10 minutes', async () => {
+    let now = 100_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const workspace = '/workspaces/app';
+    const panes = [{ paneId: '%1', sessionId: '$1', pid: 101, path: workspace, title: '⠋ Working' }];
+    const service = new DiscoveryService(socketFinder(), paneLister(panes) as never, processInspector(), undefined, undefined, [testProject({ id: 'app', path: workspace })], undefined, async path => path === workspace ? [worktree(workspace)] : undefined);
+    const reads = () => git.workingStatus.mock.calls.length;
+    const poll = async () => { await service.dashboard(false, true); await new Promise<void>(resolve => setImmediate(resolve)); };
+
+    await poll();
+    now += 29_000;
+    await poll();
+    expect(reads()).toBe(1);
+    now += 1_001;
+    await poll();
+    expect(reads()).toBe(2);
+    // the Agent stops: the snapshot read while it worked is replaced at once
+    panes[0]!.title = 'Ready';
+    now += 2_001;
+    await poll();
+    expect(reads()).toBe(3);
+    // the Workspace is still open, so 30 s still applies
+    now += 30_001;
+    await poll();
+    expect(reads()).toBe(4);
+    // the Workspace closes
+    panes.length = 0;
+    now += 30_001;
+    await poll();
+    expect(reads()).toBe(4);
+    now += 10 * 60_000;
+    await poll();
+    expect(reads()).toBe(5);
   });
 
   it('caches the fallback after an unavailable PR base for the metadata generation', async () => {
