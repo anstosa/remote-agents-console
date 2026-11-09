@@ -15,8 +15,9 @@ const overrides: ReadonlyArray<[key: string, value: string]> = [
   ['core.hooksPath', '/dev/null']
 ];
 
-/** The environment that sets the overrides for a git process. */
-export const gitOverrideEnv = (): Record<string, string> => Object.fromEntries([
+const overrideEnv: Readonly<Record<string, string>> = Object.freeze(Object.fromEntries([
   ['GIT_CONFIG_COUNT', String(overrides.length)],
   ...overrides.flatMap(([key, value], index) => [[`GIT_CONFIG_KEY_${index}`, key], [`GIT_CONFIG_VALUE_${index}`, value]])
-]);
+]));
+/** The environment that sets the overrides for a git process. */
+export const gitOverrideEnv = (): Readonly<Record<string, string>> => overrideEnv;

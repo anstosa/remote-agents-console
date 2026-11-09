@@ -1,7 +1,7 @@
 import { lstat, realpath } from 'node:fs/promises';
 import type { SocketRef } from '../domain/models.js';
 import { spawn } from 'node:child_process';
-import { userInfo } from 'node:os';
+import { userInfo, type UserInfo } from 'node:os';
 import { basename } from 'node:path';
 import { gitOverrideEnv } from '../git/overrides.js';
 import { interactiveShellPath } from './interactive-shell.js';
@@ -32,7 +32,9 @@ export const tmuxFormatLiteral = (value: string): string => tmuxLiteralArg(value
 export const tmuxTimeFormatLiteral = (value: string): string => tmuxFormatLiteral(value.replaceAll('%', '%%'));
 // build one restricted subprocess environment; SHELL names the console's interactive shell,
 // resolved by the one reader of RAC_INTERACTIVE_SHELL
-export const safeEnv = (): NodeJS.ProcessEnv => { const user = userInfo(); return { HOME: user.homedir, USER: user.username, LOGNAME: user.username, SHELL: interactiveShellPath(), TERM: 'xterm-256color', COLORTERM: 'truecolor', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', PATH: '/usr/local/bin:/usr/bin:/bin' }; };
+// read once: the account never changes, and each lookup is a passwd read on every spawn
+let account: UserInfo<string> | undefined;
+export const safeEnv = (): NodeJS.ProcessEnv => { const user = account ??= userInfo(); return { HOME: user.homedir, USER: user.username, LOGNAME: user.username, SHELL: interactiveShellPath(), TERM: 'xterm-256color', COLORTERM: 'truecolor', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', PATH: '/usr/local/bin:/usr/bin:/bin' }; };
 /** The environment of the console's own git: `safeEnv` with what a Worktree's repository cannot override. */
 export const gitEnv = (): NodeJS.ProcessEnv => ({ ...safeEnv(), ...gitOverrideEnv() });
 // the variables tmux sets on the process it starts in a pane, naming that pane
