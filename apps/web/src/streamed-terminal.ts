@@ -18,8 +18,8 @@ import { encodeInputBytes, maxInputFrameBytes, type PaneConnection, type PaneCon
 export interface StreamedTerminalOptions {
   // Opens a pane connection; called once per subscribe, including every reconnect.
   connect: PaneConnector;
-  // The scrollback depth the browser keeps and asks the seed to fill; defaults to a
-  // few thousand lines, fewer on a phone.
+  // The scrollback depth the browser keeps and asks the seed to fill; defaults to
+  // 2000 lines.
   scrollback?: number;
   // prefer ordinary text selection over application mouse gestures in agent output
   preferNativeMouseSelection?: boolean;
@@ -140,7 +140,7 @@ const createOutputSkeletonGroup = (kind: 'agent' | 'terminal'): HTMLElement => {
 export const mountStreamedTerminal = (container: HTMLElement, options: StreamedTerminalOptions): StreamedTerminalHandle => {
   const reconnectDelayMs = options.reconnectDelayMs ?? 1000;
   const coarse = coarsePointer();
-  const scrollback = options.scrollback ?? (coarse ? 2000 : 5000);
+  const scrollback = options.scrollback ?? 2000;
 
   // Layout: the terminal renders at its natural grid top-left; when the pane is
   // smaller than the panel the surrounding area shows the terminal background, so a
