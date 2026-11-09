@@ -223,6 +223,11 @@ export class OrchestrationService {
     }
   }
 
+  // whether a Place id (a Worktree's or any other Place's) is within these operations' scope
+  private admitted(id: string): boolean {
+    return this.dependencies.admits?.({ id, projectId: projectIdOf(id) }) ?? true;
+  }
+
   // resolve one discovered worktree by its wire id
   private worktree(id: string): Worktree | undefined {
     return worktreeById(this.dependencies.discovery.worktreesNow(), id);
@@ -771,10 +776,10 @@ export class OrchestrationService {
   // spawn a worker for the Conductor at one Place within its scope: a Worktree, or a directory
   // Project's or Scratch Place, its own included
   async spawnAgent(input: { worktreeId: string; kind?: ConductorSpawnKind; model?: string }): Promise<OrchestrationResult<{ agent_id: string }>> {
-    const { conductor, spawnWorker, admits } = this.dependencies;
+    const { conductor, spawnWorker } = this.dependencies;
     if (!validIdentifier(input.worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
     if (conductor === undefined || spawnWorker === undefined) return failure('unavailable', 'Only the Conductor spawns workers.');
-    if (admits?.({ id: input.worktreeId, projectId: projectIdOf(input.worktreeId) }) !== true) return failure('not_found', 'Place not found.');
+    if (!this.admitted(input.worktreeId)) return failure('not_found', 'Place not found.');
     return await this.operation(async () => {
       const spawned = await spawnWorker(input.worktreeId, conductor, input.kind, input.model);
       if (spawned === 'no-place') return failure('not_found', 'Place not found.');
@@ -901,10 +906,10 @@ export class OrchestrationService {
     });
   }
 
-  // a Note store and its key for a Worktree in scope
+  // a Note store and its key for a Place in scope: a Worktree, or a directory Project's or Scratch Place
   private async notesAt(worktreeId: string): Promise<{ notes: NoteFacade; key: string } | undefined> {
     const notes = this.dependencies.notes;
-    const key = notes === undefined || this.worktree(worktreeId) === undefined ? undefined : await notes.key(worktreeId);
+    const key = notes === undefined || !this.admitted(worktreeId) ? undefined : await notes.key(worktreeId);
     return notes === undefined || key === undefined ? undefined : { notes, key };
   }
 
@@ -914,7 +919,7 @@ export class OrchestrationService {
     return await this.operation(async () => {
       const at = await this.notesAt(worktreeId);
       const notes = at === undefined ? undefined : await at.notes.store.list(at.key);
-      if (notes === undefined) return failure('not_found', 'Worktree not found.');
+      if (notes === undefined) return failure('not_found', 'Place not found.');
       return success({ notes: notes.map(note => ({ id: note.id, ...(note.title === undefined ? {} : { title: note.title }), text: redactIntegrationText(note.text), mine: note.source === 'conductor', ...(note.schedule === undefined ? {} : { schedule: { cron: note.schedule.cron, enabled: note.schedule.enabled, conductor: 'conductor' in note.schedule.target } }) })) });
     });
   }
@@ -925,7 +930,7 @@ export class OrchestrationService {
     if (!validIdentifier(input.worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
     return await this.operation(async () => {
       const at = await this.notesAt(input.worktreeId);
-      if (at === undefined) return failure('not_found', 'Worktree not found.');
+      if (at === undefined) return failure('not_found', 'Place not found.');
       const note = await at.notes.store.createWithText(at.key, input.title, input.text, 'conductor');
       if (note === undefined) return failure('conflict', 'The Note could not be created: the notes limit is reached.');
       at.notes.changed();

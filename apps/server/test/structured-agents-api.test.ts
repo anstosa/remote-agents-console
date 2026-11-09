@@ -2242,6 +2242,19 @@ describe('the Conductor\'s dispatches', () => {
     expect(reports()[1]).toContain(`The review you started for Agent ${target} failed (generation_failed).`);
     await app.close();
   });
+  it('writes, schedules and deletes Notes in its own directory Project, named by its placeId', async () => {
+    const fake = fakeAgent();
+    const { app, conductor, call, dashboardAgent } = await conducting(fake);
+    const place = (await dashboardAgent(conductor)).placeId as string;
+    const created = await call('create_note', { worktree_id: place, title: 'Plan', text: 'Check CI' });
+    expect(created).toMatchObject({ ok: true, data: { note_id: expect.any(String) } });
+    const id = created.data.note_id as string;
+    expect((await call('list_notes', { worktree_id: place }, false)).data.notes).toEqual(expect.arrayContaining([expect.objectContaining({ id, title: 'Plan', text: 'Check CI', mine: true })]));
+    expect(await call('update_note', { worktree_id: place, note_id: id, text: 'Check CI twice' })).toMatchObject({ ok: true });
+    expect(await call('schedule_note', { worktree_id: place, note_id: id, cron: '0 9 * * *', enabled: false })).toMatchObject({ ok: true });
+    expect(await call('delete_note', { worktree_id: place, note_id: id })).toMatchObject({ ok: true });
+    await app.close();
+  });
   it('writes Notes in its scope, edits and deletes only its own, and one the operator saves becomes the operator\'s', async () => {
     const fake = fakeAgent();
     const { app, headers, call } = await conducting(fake);
