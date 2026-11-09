@@ -356,7 +356,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // socket"), which is ~87 KiB once base64url-encoded in the JSON envelope; the WS max
   // payload must clear that so a full 64 KiB paste is delivered rather than dropped by
   // the transport before the handler's own 64 KiB-decoded check.
-  await app.register(websocket, { options: { maxPayload: 98_304 } });
+  // permessage-deflate: pane seeds are escape-coded terminal text that compresses several
+  // times over; ws skips frames under 1 KiB, so keystroke echoes stay uncompressed
+  await app.register(websocket, { options: { maxPayload: 98_304, perMessageDeflate: true } });
   app.setErrorHandler((error, request, reply) => {
     const failure = error as { code?: unknown; statusCode?: number; message?: string };
     // expose only fixed launch validation codes

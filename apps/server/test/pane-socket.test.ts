@@ -683,6 +683,13 @@ describe('pane stream lifecycle', () => {
     expect(conn.closeCode()).toBe(1011);
   });
 
+  it('negotiates permessage-deflate, so pane seeds cross the network compressed', async () => {
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const socket = await serve(stream.provider, { tmux });
+    expect(socket.ws.extensions).toContain('permessage-deflate');
+  });
+
   it('closes 1008 for a browser without the control session', async () => {
     const stream = fakePaneStream();
     const { tmux } = fakeTmux(stream);
