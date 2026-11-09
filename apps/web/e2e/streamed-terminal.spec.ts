@@ -346,32 +346,6 @@ test('selection remains frozen across a reconnect until the replacement seed is 
   expect(await drive(page, 'cols')).toBe(30);
 });
 
-// each stream attempt reports its connection timeline once, after its seed is parsed
-test('sends one timing frame per stream attempt once its seed is parsed', async ({ page }) => {
-  await setup(page, { reconnectDelayMs: 10 });
-  const timings = () => drive<Array<{ attempt: string; seedBytes?: number; renderer: string; marks: Record<string, number>; page?: Record<string, number> }>>(page, 'timingFrames');
-  await drive(page, 'pushSize', 40, 10);
-  await drive(page, 'pushBytes', 'SEED');
-  await expect.poll(async () => (await timings()).length).toBe(1);
-  await drive(page, 'pushBytes', 'LIVE');
-  await drive(page, 'pushClose', 1006, 'lost');
-  await expect.poll(() => drive(page, 'connectCalls')).toBe(2);
-  await drive(page, 'pushSize', 40, 10);
-  await drive(page, 'pushBytes', 'RESEED');
-  await expect.poll(async () => (await timings()).length).toBe(2);
-
-  const [initial, reconnect] = await timings();
-  expect(initial).toMatchObject({ attempt: 'initial', seedBytes: 4, renderer: 'dom' });
-  const { open, firstFrame, seed, parsed, cover, painted } = initial!.marks;
-  expect([open, firstFrame, seed, parsed, cover, painted].every(value => typeof value === 'number')).toBe(true);
-  expect(open! <= firstFrame! && firstFrame! <= seed! && seed! <= parsed! && parsed! <= painted!).toBe(true);
-  expect(initial!.page).toHaveProperty('responseEnd');
-  // the reconnect keeps the old screen (no cover) and the page timeline went out once
-  expect(reconnect).toMatchObject({ attempt: 'reconnect', seedBytes: 6 });
-  expect(reconnect!.marks).not.toHaveProperty('cover');
-  expect(reconnect).not.toHaveProperty('page');
-});
-
 test('typed keys are sent as input frames through the panel modifier transform', async ({ page }) => {
   await setup(page, { upperCaseInput: true });
   await drive(page, 'pushSize', 40, 10);
@@ -1316,7 +1290,7 @@ test('a kept terminal shows its last screen at once when shown again, then resee
   await setup(page, keepIn('A'));
   await drive(page, 'pushSize', 40, 10);
   await drive(page, 'pushBytes', 'OLD-SCREEN\r\n');
-  await expect.poll(async () => (await drive<unknown[]>(page, 'timingFrames')).length).toBe(1);
+  await expect.poll(() => drive(page, 'screenText')).toContain('OLD-SCREEN');
   await drive(page, 'leavePanel');
   // leaving closes the stream at once, so the server releases the pane's Size claim
   expect(await drive(page, 'closeCalls')).toBe(1);
@@ -1343,13 +1317,6 @@ test('a kept terminal shows its last screen at once when shown again, then resee
   await drive(page, 'pushBytes', 'FRESH-SEED\r\n');
   await expect.poll(() => drive(page, 'screenText')).toContain('FRESH-SEED');
   expect(await drive<string>(page, 'screenText')).not.toContain('OLD-SCREEN');
-  await expect.poll(async () => (await drive<unknown[]>(page, 'timingFrames')).length).toBe(2);
-  const [initial, revisit] = await drive<Array<{ attempt: string; marks: Record<string, number> }>>(page, 'timingFrames');
-  expect(initial!.attempt).toBe('initial');
-  // the kept screen was on show from the start of the attempt, long before its seed parsed
-  expect(revisit!.attempt).toBe('revisit');
-  expect(revisit!.marks.cover).toBeLessThanOrEqual(revisit!.marks.open!);
-  expect(revisit!.marks.cover).toBeLessThanOrEqual(revisit!.marks.parsed!);
   expect(await drive(page, 'disposalsOf', 'A', 'p')).toBe(0);
 });
 

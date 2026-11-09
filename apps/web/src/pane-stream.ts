@@ -24,30 +24,7 @@ export type PaneClientFrame =
   // Bytes consumed since the last ack, for the server's drop-while-behind flow control.
   | { type: 'ack'; bytes: number }
   // Ask the Agent pane's derive to resend the current question and metadata.
-  | { type: 'metadata' }
-  // This stream's connection timeline, sent once after its first seed is parsed; the server
-  // logs it with its own steps to pane-timing.jsonl.
-  | ({ type: 'timing' } & PaneTiming);
-
-// The page's shared pane socket when a stream was requested: already open, still connecting
-// (minting its ticket or mid-handshake), or opened for this stream.
-export type PaneSharedSocket = 'open' | 'connecting' | 'new';
-
-// Milliseconds from the attempt's start (performance.now() offsets), except `page`, whose
-// values are offsets from page load and which only the page's first timing frame carries.
-// `socket` is the stream requested and `open` its `open` frame sent on the shared socket, so
-// `open - socket` is the wait for that socket (none when it was already open).
-export interface PaneTiming {
-  attempt: 'initial' | 'reconnect' | 'revisit';
-  sincePageLoad: number;
-  sharedSocket?: PaneSharedSocket;
-  renderer: 'webgl' | 'dom';
-  browser: 'firefox' | 'chrome' | 'safari' | 'other';
-  mobile: boolean;
-  seedBytes?: number;
-  marks: Partial<Record<'socket' | 'open' | 'viewport' | 'firstFrame' | 'seed' | 'parsed' | 'cover' | 'painted', number>>;
-  page?: Partial<Record<'responseEnd' | 'domContentLoaded' | 'session' | 'dashboard', number>>;
-}
+  | { type: 'metadata' };
 
 // Server → browser (the JSON frames; raw pane bytes arrive as binary frames).
 export type PaneServerFrame =
@@ -67,8 +44,6 @@ export type PaneServerFrame =
   | { type: 'foreground'; command: string };
 
 export interface PaneConnectionHandlers {
-  // the stream was requested, with the shared socket's state at that moment
-  onSocket?: (shared: PaneSharedSocket) => void;
   // the stream is on the wire; frames sent from here go straight out
   onOpen: () => void;
   onBytes: (bytes: Uint8Array) => void;

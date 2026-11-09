@@ -1,4 +1,4 @@
-import type { PaneClientFrame, PaneConnectionHandlers, PaneConnector, PaneServerFrame, PaneSharedSocket } from './pane-stream.js';
+import type { PaneClientFrame, PaneConnectionHandlers, PaneConnector, PaneServerFrame } from './pane-stream.js';
 
 // The real transport behind the streamed terminal's `PaneConnector` seam: every pane stream
 // of the page rides one `/ws/panes` WebSocket (spec "The pane socket"), opened with a freshly
@@ -106,9 +106,7 @@ export const createPaneMux = (request: Request, idleCloseMs = 60_000) => {
     const stream: Stream = { handlers, open: { type: 'open', stream: id, target, ...(pane === undefined ? {} : { pane }) }, outbox: [], sent: false };
     window.clearTimeout(idleTimer);
     idleTimer = undefined;
-    const shared: PaneSharedSocket = current === undefined ? 'new' : current.open ? 'open' : 'connecting';
     streams.set(id, stream);
-    handlers.onSocket?.(shared);
     if (current === undefined) connectSocket();
     // never call back into the component before `connect` has returned its connection
     else queueMicrotask(() => begin(id, stream));

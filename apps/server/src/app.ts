@@ -52,7 +52,6 @@ import { commandWindows } from './watches/commands.js';
 import { isReviewRun, paneTmuxSession, stackActions, worktreeAgents, type Agent, type Pane, type Project, type SocketRef, type StackAction, type TmuxAgent, type Worktree } from './domain/models.js';
 import { CommandCatalogService } from './commands/service.js';
 import { PaneViewportCoordinator } from './logs/viewport-scheduler.js';
-import { paneTimingLog } from './logs/pane-timing.js';
 import { openPaneSession, type PaneSession, type PaneSessionDependencies, type PaneTransport } from './pane-session.js';
 import { PaneStreamRegistry, type PaneStreamProvider } from './tmux/control.js';
 import { isPaneTheme } from './tmux/terminal-colors.js';
@@ -147,7 +146,7 @@ import { registerGoogleCalendarRoutes } from './google-calendar/routes.js';
 import { calendarLabelsForAgent } from './google-calendar/labels.js';
 import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
 
-export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; paneTimingFile?: string };
+export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use, and with the
 // structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
@@ -306,7 +305,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const launchHome = config.launchHome === null ? undefined : nativeHome();
   const agentUpdates = deps.agentUpdates ?? new AgentUpdateService(config, launchHome);
   const paneViewports = new PaneViewportCoordinator(deps.paneViewportGraceMs);
-  const logPaneTiming = paneTimingLog(deps.paneTimingFile ?? join(serverCheckout(), '.data/pane-timing.jsonl'));
   // one tmux control-mode client per session, shared by every viewer, drives the
   // event-driven log frames (ADR 0008)
   const paneStream: PaneStreamProvider = deps.paneStream ?? new PaneStreamRegistry();
@@ -4584,7 +4582,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // out as binary frames behind a 4-byte big-endian stream id. A stream the server ends is
   // reported as `{type:'closed', stream, code}` with the WebSocket close code it would have
   // closed a socket of its own with. The stream itself is `openPaneSession`.
-  const paneSessionDependencies: PaneSessionDependencies = { control, discovery, resolvePlace, tmux, launch, paneStream, paneViewports, prompts, logPaneTiming };
+  const paneSessionDependencies: PaneSessionDependencies = { control, discovery, resolvePlace, tmux, launch, paneStream, paneViewports, prompts };
   const maxPaneStreams = 64;
   const maxPaneTargetChars = 4_096;
   const isPaneStreamId = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 0xffff_ffff;
@@ -4617,7 +4615,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         // the checks a socket of its own got at its upgrade, again for every stream: same
         // browser session, still signed in and still holding control
         try { if (controlled(request, false).id !== s.id) throw new Error(); } catch { return report(stream, 1008); }
-        const startedAt = performance.now();
         const entry: PaneStreamEntry = {};
         streams.set(stream, entry);
         slots += 1;
@@ -4634,7 +4631,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
           close: code => { if (streams.get(stream) === entry) end(stream, code); },
           open: live
         };
-        entry.session = openPaneSession(paneSessionDependencies, transport, s.id, target, pane, startedAt);
+        entry.session = openPaneSession(paneSessionDependencies, transport, s.id, target, pane);
         void entry.session.settled.then(() => { settled = true; free(); });
       };
       socket.on('message', (raw: Buffer, isBinary: boolean) => {

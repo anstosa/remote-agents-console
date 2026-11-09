@@ -5,7 +5,6 @@ import type { ShapedQuestion } from './adapters/types.js';
 import type { DiscoveryService } from './discovery/service.js';
 import { paneTmuxSession, type Agent, type SocketRef } from './domain/models.js';
 import type { LaunchService } from './launch/service.js';
-import { maxTimingFrameChars, parsePaneTiming } from './logs/pane-timing.js';
 import { LatestViewportScheduler, type PaneViewportCoordinator } from './logs/viewport-scheduler.js';
 import { boundedViewport } from './logs/viewport.js';
 import type { Place } from './places/places.js';
@@ -39,7 +38,6 @@ export type PaneSessionDependencies = {
   paneStream: PaneStreamProvider;
   paneViewports: PaneViewportCoordinator;
   prompts: PromptService;
-  logPaneTiming: (record: unknown) => Promise<void>;
 };
 
 export type PaneSession = {
@@ -56,12 +54,8 @@ const logQuietWindowMs = 250;
 
 // Opens the stream for `id` (an Agent or a Place) and `requestedPane` for an authenticated
 // browser session holding control. A failed resolution or setup closes the transport 1008.
-export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTransport, sessionId: string, id: string, requestedPane: unknown, startedAt: number): PaneSession {
-  const { control, discovery, resolvePlace, tmux, launch, paneStream, paneViewports, prompts, logPaneTiming } = deps;
-  // this stream's setup steps in ms since `startedAt` (its `open` frame; first occurrence
-  // only), merged with the browser's `timing` frame into one pane-timing.jsonl record
-  const timing: Record<string, unknown> = {};
-  const mark = (name: string) => { timing[name] ??= Math.round((performance.now() - startedAt) * 10) / 10; };
+export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTransport, sessionId: string, id: string, requestedPane: unknown): PaneSession {
+  const { control, discovery, resolvePlace, tmux, launch, paneStream, paneViewports, prompts } = deps;
   // Buffer client frames from the instant the stream is up: the browser sends its first (and,
   // until a resize, only) `viewport` right on open — while the target/membership resolution
   // below still awaits (a Worktree pane spawns `list-panes`). Losing that one frame means no
@@ -115,11 +109,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     // the browser may have disconnected during the awaits above (target/membership lookups);
     // bail before spawning/subscribing so a control client and lease are never left dangling
     if (!transport.open()) return;
-    mark('target');
-    const clientWanted = performance.now();
     const paneClient = paneStream.get(socketRef, session);
-    if (paneClient.startedAt !== undefined) timing.control = paneClient.startedAt >= clientWanted ? 'attached' : 'reused';
-    void paneClient.ready?.then(() => mark('controlReady'), () => {});
     const captureVia = (depth: number) => paneClient.capture(pane, depth);
     const adapter = agent === undefined ? undefined : adapterFor(agent.kind);
     // the Agent's derive (question/metadata) rides the Agent's own pane only, and only for
@@ -128,7 +118,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     // One Size claim per window, keyed by window id resolved over the connection: every
     // caller awaits windowKeyReady first (see the INVARIANT below).
     let windowKey = pane;
-    const windowKeyReady = paneClient.windowId(pane).then(w => { mark('windowKey'); if (w !== undefined) windowKey = w; }).catch(() => { /* keep the pane-id fallback */ });
+    const windowKeyReady = paneClient.windowId(pane).then(w => { if (w !== undefined) windowKey = w; }).catch(() => { /* keep the pane-id fallback */ });
     let paneViewport: ReturnType<typeof paneViewports.acquire> | undefined;
     // set once the stream ends; a viewport or re-clamp still awaiting `windowKeyReady` then
     // must not take a claim no one will release
@@ -137,7 +127,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     // memoised claim is keyed by the window id, not the pane-id fallback.
     const viewportLease = () => ended ? undefined : paneViewport ??= paneViewports.acquire(
       `${socketRef.fingerprint}:${windowKey}`,
-      async () => { const size = await tmux.size(socketRef, pane); timing.sizeBefore ??= size && `${size.cols}x${size.rows}`; return size; },
+      () => tmux.size(socketRef, pane),
       (nextCols, nextRows) => tmux.resize(socketRef, pane, nextCols, nextRows),
       () => tmux.unpinWindowSize(socketRef, windowKey)
     );
@@ -153,8 +143,6 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
       // an unknown grid cannot authorize the initial snapshot
       if (size === undefined) return false;
       sendFrame({ type: 'size', cols: size.cols, rows: size.rows });
-      timing.size ??= `${size.cols}x${size.rows}`;
-      mark('sizeSent');
       return transport.open();
     };
     let cols = 120;
@@ -183,7 +171,6 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
       // a fresh seed re-establishes the whole screen, so the pre-reseed in-flight count is
       // void: reset it (and clear a lingering drop) so backpressure restarts from the seed
       seeding = true;
-      mark('captureStart');
       const generation = ++seedGeneration;
       unacked = 0;
       dropped = false;
@@ -192,10 +179,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
         if (generation !== seedGeneration || !transport.open()) return false;
         // preserve take-control policy before sending the snapshot
         if (!control.active(sessionId)) { transport.close(1008); return false; }
-        mark('captured');
-        timing.seedBytes ??= seed.length;
         sendBinary(seed);
-        mark('seedSent');
         seeding = false;
         return true;
       }).catch(() => false);
@@ -281,10 +265,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
         await windowKeyReady;
         const lease = viewportLease();
         if (lease === undefined) return false;
-        mark('resizeStart');
         const resized = await lease.resize(nextCols, nextRows);
-        mark('resizeEnd');
-        timing.claim ??= lease.held ? 'held' : 'new';
         const reported = await reportSize();
         // release the first snapshot only after its grid reached the viewer
         if (resized && reported) seedOnce();
@@ -327,7 +308,6 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
         release();
       }
     };
-    let timingLogged = false;
     const processFrame = (raw: unknown) => {
       try {
         const frame = JSON.parse(String(raw));
@@ -337,7 +317,6 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
           if (bounded === undefined) throw new Error();
           if (Number.isInteger(frame.scrollback) && frame.scrollback >= 1 && frame.scrollback <= 5_000) seedDepth = frame.scrollback;
           ({ cols, rows } = bounded);
-          mark('viewport');
           viewportEstablished = true;
           void viewport.schedule({ cols, rows, history: 0, onFailure: () => transport.close(1011) });
           return;
@@ -361,16 +340,9 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
           if (derives) void runDerive(true);
           return;
         }
-        // the browser's timeline for this stream: one per connection, and a malformed one is
-        // dropped rather than closing the stream
-        if (frame.type === 'timing') {
-          const client = timingLogged || String(raw).length > maxTimingFrameChars ? undefined : parsePaneTiming(frame);
-          timingLogged = true;
-          if (client === undefined) return;
-          mark('timing');
-          void logPaneTiming({ at: new Date().toISOString(), session, pane, kind: isAgentPane ? agent!.kind : 'terminal', server: { ...timing }, client });
-          return;
-        }
+        // a tab still running a build from before pane timing was removed sends this once
+        // per seed; closing on it would reconnect, reseed and send it again, forever
+        if (frame.type === 'timing') return;
         throw new Error();
       } catch { transport.close(1008); }
     };
@@ -385,7 +357,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
   };
   const settled = setup().catch(() => transport.close(1008));
   return {
-    receive: raw => { mark('firstMessage'); handleRaw(raw); },
+    receive: raw => handleRaw(raw),
     closed: () => { cleanup?.(); },
     settled
   };

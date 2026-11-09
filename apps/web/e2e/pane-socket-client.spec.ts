@@ -26,7 +26,6 @@ const setup = async (page: Page) => {
     (window as unknown as MuxWindow).__mux = {
       open: (name, target, pane) => {
         connections.set(name, connector(target, pane)({
-          onSocket: shared => log(name, `socket:${shared}`),
           onOpen: () => log(name, 'open'),
           onBytes: bytes => log(name, `bytes:${new TextDecoder().decode(bytes)}`),
           onFrame: frame => log(name, `frame:${frame.type}`),
@@ -48,9 +47,9 @@ test('opens the shared socket with the first stream and carries every later stre
   expect(await paneSocketCount(page)).toBe(0);
 
   await open(page, 'agent', 'agent-1');
-  await expect.poll(() => events(page, 'agent')).toEqual(['socket:new', 'open']);
+  await expect.poll(() => events(page, 'agent')).toEqual(['open']);
   await open(page, 'terminal', 'cora', '%5');
-  await expect.poll(() => events(page, 'terminal')).toEqual(['socket:open', 'open']);
+  await expect.poll(() => events(page, 'terminal')).toEqual(['open']);
   expect(await paneSocketCount(page)).toBe(1);
   expect(await paneConnectCount(page, 'agent-1')).toBe(1);
   expect(await paneConnectCount(page, '%5')).toBe(1);
@@ -65,8 +64,8 @@ test('holds streams opened while the socket connects, frames they sent included'
     mux.send('agent', { type: 'viewport', cols: 80, rows: 24, scrollback: 100 });
     mux.open('terminal', 'cora', '%5');
   });
-  await expect.poll(() => events(page, 'terminal')).toEqual(['socket:connecting', 'open']);
-  expect((await events(page, 'agent')).slice(0, 2)).toEqual(['socket:new', 'open']);
+  await expect.poll(() => events(page, 'terminal')).toEqual(['open']);
+  expect((await events(page, 'agent')).slice(0, 1)).toEqual(['open']);
   expect(await paneSocketCount(page)).toBe(1);
   // the queued viewport followed the stream's open, and the server's size answer came back
   expect(await paneFrameTypes(page, 'agent-1')).toEqual(['viewport']);
@@ -105,7 +104,7 @@ test('a dropped socket ends every stream, and the next stream opens a new one', 
   await expect.poll(() => events(page, 'terminal')).toContain('close:1008');
 
   await open(page, 'again', 'agent-1');
-  await expect.poll(() => events(page, 'again')).toEqual(['socket:new', 'open']);
+  await expect.poll(() => events(page, 'again')).toEqual(['open']);
   expect(await paneSocketCount(page)).toBe(2);
 });
 
@@ -117,7 +116,7 @@ test('closes the socket once it has carried no stream for a while, and keeps it 
   // a workspace switch: the old stream closes and a new one opens inside the idle window
   await close(page, 'agent');
   await open(page, 'next', 'cora', '%5');
-  await expect.poll(() => events(page, 'next')).toEqual(['socket:open', 'open']);
+  await expect.poll(() => events(page, 'next')).toEqual(['open']);
   await page.waitForTimeout(idleCloseMs + 200);
   expect(await openPaneSocketCount(page)).toBe(1);
 
@@ -126,5 +125,5 @@ test('closes the socket once it has carried no stream for a while, and keeps it 
   await expect.poll(() => openPaneSocketCount(page), { timeout: idleCloseMs * 5 }).toBe(0);
   expect(await paneSocketCount(page)).toBe(1);
   // a closed stream got no onClose: the page closed it, nothing was lost
-  expect(await events(page, 'next')).toEqual(['socket:open', 'open']);
+  expect(await events(page, 'next')).toEqual(['open']);
 });
