@@ -21,6 +21,7 @@ import { isUpdateAdvisorLabel } from '../update-advisor.js';
 import { holderPaneRole } from '../tmux/stack-sessions.js';
 import { adhocScratchPlace, configuredPlaces, markedPlace, placeForRoot, scratchHome, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
 import { implicitProject } from '../config/schema.js';
+import { timed } from '../dashboard/timing.js';
 
 export interface SocketFinder { find(): Promise<SocketRef[]>; }
 export class ProcSocketFinder implements SocketFinder {
@@ -679,15 +680,16 @@ export class DiscoveryService {
     return { worktrees, stale, pins, projects };
   }
 
-  // build or reuse one dashboard view; freshAgents bypasses pane snapshots only
-  async dashboard(force = false, freshAgents = false): Promise<Dashboard> {
+  // build or reuse one dashboard view; freshAgents bypasses pane snapshots only. `steps` takes
+  // the build's step timings (`discovery.*`) when this call builds
+  async dashboard(force = false, freshAgents = false, steps?: Record<string, number>): Promise<Dashboard> {
     const cached = this.dashboardSnapshot;
     // bypass cached state for lifecycle checks
     if (!force && !freshAgents && cached !== undefined && Date.now() - cached.refreshedAt < DiscoveryService.refreshCacheMs) return cached.value;
     // reuse only ordinary dashboard refreshes
     if (!force && !freshAgents && this.dashboardRefreshInFlight !== undefined) return this.dashboardRefreshInFlight;
     const startedAt = Date.now();
-    const value = this.buildDashboard(force, freshAgents)
+    const value = this.buildDashboard(force, freshAgents, steps)
       .then(dashboard => {
         // publish only the newest build without re-aging an older agent snapshot
         if (this.dashboardRefreshInFlight === value) this.dashboardSnapshot = { refreshedAt: startedAt, value: dashboard };
@@ -786,12 +788,12 @@ export class DiscoveryService {
   }
 
   // enrich live agent state with independently cached worktree metadata
-  private async buildDashboard(force = false, freshAgents = false): Promise<Dashboard> {
-    const discovered = [...await this.refresh(force, freshAgents), ...await this.structuredAgents()];
-    let worktrees = await this.worktrees(force);
+  private async buildDashboard(force = false, freshAgents = false, steps?: Record<string, number>): Promise<Dashboard> {
+    const discovered = [...await timed(steps, 'discovery.paneScan', () => this.refresh(force, freshAgents)), ...await timed(steps, 'discovery.structuredAgents', () => this.structuredAgents())];
+    let worktrees = await timed(steps, 'discovery.worktrees', () => this.worktrees(force));
     // a `git worktree add` from a terminal appears within one tick: if a live agent sits
     // in a checkout we do not know yet whose repository is a configured Project, re-scan once
-    if (!force && await this.hasUnknownProjectWorktree(discovered, worktrees)) worktrees = await this.worktrees(true);
+    if (!force && await timed(steps, 'discovery.unknownWorktreeCheck', () => this.hasUnknownProjectWorktree(discovered, worktrees))) worktrees = await timed(steps, 'discovery.worktreeRescan', () => this.worktrees(true));
     // share git snapshots with the owning project's comparison default
     const metadataFor = (workspace: string, defaultBranch?: string) => {
       const cached = this.gitMetadata.get(workspace);
@@ -815,14 +817,14 @@ export class DiscoveryService {
     };
     // re-place every agent against this (possibly fresher) Worktree set, publishing the
     // console-side Place home; a Worktree's Agents take its git identity as before
-    let places = await this.places(worktrees);
-    if (await this.claimSessions(discovered, places)) { worktrees = await this.worktrees(true); places = await this.places(worktrees); }
+    let places = await timed(steps, 'discovery.places', () => this.places(worktrees));
+    if (await timed(steps, 'discovery.claimSessions', () => this.claimSessions(discovered, places))) { worktrees = await timed(steps, 'discovery.worktreeRescan', () => this.worktrees(true)); places = await timed(steps, 'discovery.places', () => this.places(worktrees)); }
     const worktreeById = new Map(worktrees.map(worktree => [worktree.id, worktree] as const));
     // the stable tab order follows configured checkout order and discovery defaults
     const orderOf = new Map(worktrees.map((worktree, index) => [worktree.id, index] as const));
     // retain mutable observations until all panes and places finish enrichment
     const messageQuestionStates = new Map<string, { hasQuestion: boolean }>();
-    const agents = await Promise.all(discovered.map(async (discoveredAgent) => {
+    const agents = await timed(steps, 'discovery.agentDetails', () => Promise.all(discovered.map(async (discoveredAgent) => {
       const place = this.placeOf(discoveredAgent, places);
       const agent = place === undefined ? discoveredAgent : { ...discoveredAgent, placeId: place.id, home: place.home };
       const worktree = place === undefined ? undefined : worktreeById.get(place.id);
@@ -832,16 +834,16 @@ export class DiscoveryService {
       const questionFolder = worktree !== undefined && worktreeMatchesWorkspace(worktree, discoveredAgent.home) ? worktree.identity : discoveredAgent.home;
       const defaultBranch = worktree?.defaultBranch ?? this.projectsNow().find(project => project.id === place?.projectId)?.defaultBranch;
       const [meta, question] = await Promise.all([
-        metadataFor(home, defaultBranch),
-        this.agentQuestion(agent, questionFolder)
+        timed(steps, 'discovery.agent.gitMeta', () => metadataFor(home, defaultBranch)),
+        timed(steps, 'discovery.agent.question', () => this.agentQuestion(agent, questionFolder))
       ]);
       // native questions replace prose state without starting another transcript read
       if (question !== undefined) this.invalidateMessageQuestion(agent.id);
       // a structured Agent's final message is read directly, from the Transport that holds it
-      messageQuestionStates.set(agent.id, question !== undefined ? { hasQuestion: false } : agent.transport === 'structured' ? { hasQuestion: agent.attention === 'finished' && messageAsksQuestion(await this.structuredAnswer(agent.id)) } : this.agentMessageQuestion(agent));
+      messageQuestionStates.set(agent.id, question !== undefined ? { hasQuestion: false } : agent.transport === 'structured' ? { hasQuestion: agent.attention === 'finished' && messageAsksQuestion(await timed(steps, 'discovery.agent.structuredAnswer', () => this.structuredAnswer(agent.id))) } : this.agentMessageQuestion(agent));
       const branch = meta.branch ?? agent.branch;
-      const pullRequest = await this.pullRequestOf(meta, branch);
-      const gitPrStatus = await this.gitPrComparisonForBase(meta, branch, pullRequest?.baseBranch, defaultBranch);
+      const pullRequest = await timed(steps, 'discovery.agent.pullRequest', () => this.pullRequestOf(meta, branch));
+      const gitPrStatus = await timed(steps, 'discovery.agent.prComparison', () => this.gitPrComparisonForBase(meta, branch, pullRequest?.baseBranch, defaultBranch));
       const details = worktree === undefined
         ? { ...agent, branch, ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }) }
         : { ...agent, branch, ...(meta.gitStatus === undefined ? {} : { gitStatus: meta.gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }), home: worktree.identity, projectId: worktree.projectId, worktreeId: worktree.id, ...(worktree.newTask === undefined ? {} : { newTaskConfigured: true }), ...(worktree.projectUrl === undefined ? {} : { projectUrl: worktree.projectUrl, projectProxied: worktree.projectPort !== undefined }) };
@@ -849,7 +851,7 @@ export class DiscoveryService {
       // a structured Agent's Transport reports its Attention exactly
       const attention = agent.transport === 'structured' ? agent.attention : resolveAttention({ kind: agent.kind, title: agent.title, reported: this.paneReported.get(agent.id), hasQuestion: question !== undefined });
       return { ...details, attention, ...(pullRequest === undefined ? {} : { pullRequest }), ...(question === undefined ? {} : { question: withQuestionShape(question) }) };
-    }));
+    })));
     // a Worktree with a live agent carries its git metadata on the Agent; an idle one carries
     // it on the Worktree record, as the flat list used to. A modal advisor never claims one.
     const activeAgents = agents.filter(agent => !isUpdateAdvisorLabel(agent.displayLabel));
@@ -858,27 +860,27 @@ export class DiscoveryService {
     const shellPlaces = this.consoleShellSessions.flatMap(key => { const mark = this.sessionMarks.get(key); return mark === undefined ? [] : markedPlace(places, mark) ?? []; });
     const shellCounts = new Map<string, number>();
     for (const place of shellPlaces) shellCounts.set(place.id, (shellCounts.get(place.id) ?? 0) + 1);
-    const worktreeViews = await Promise.all(worktrees.map(async (worktree): Promise<DashboardWorktree> => {
+    const worktreeViews = await timed(steps, 'discovery.idleWorktrees', () => Promise.all(worktrees.map(async (worktree): Promise<DashboardWorktree> => {
       // a Worktree carries its Console-shell count whether or not it has a live Agent, so the
       // row shows it and the idle-tab retain rule can keep the tab open (spec, Console shells)
       const consoleShells = shellCounts.get(worktree.id) ?? 0;
       const base: DashboardWorktree = { id: worktree.id, projectId: worktree.projectId, label: worktree.label, ...(worktree.customLabel === true ? { customLabel: true } : {}), path: worktree.path, available: worktree.available, pinned: worktree.pinned, main: worktree.main, detached: worktree.detached, locked: worktree.locked, order: orderOf.get(worktree.id) ?? 0, ...(worktree.branch === undefined ? {} : { branch: worktree.branch }), ...(worktree.sha === undefined ? {} : { sha: worktree.sha }), ...(consoleShells > 0 ? { consoleShells } : {}), ...(worktree.projectUrl === undefined ? {} : { projectUrl: worktree.projectUrl, projectProxied: worktree.projectPort !== undefined }) };
       if (activeWorktreeIds.has(worktree.id)) return base;
-      const meta = await metadataFor(worktree.identity, worktree.defaultBranch);
-      const pullRequest = await this.pullRequestOf(meta, meta.branch);
-      const gitPrStatus = await this.gitPrComparisonForBase(meta, meta.branch, pullRequest?.baseBranch, worktree.defaultBranch);
+      const meta = await timed(steps, 'discovery.worktree.gitMeta', () => metadataFor(worktree.identity, worktree.defaultBranch));
+      const pullRequest = await timed(steps, 'discovery.worktree.pullRequest', () => this.pullRequestOf(meta, meta.branch));
+      const gitPrStatus = await timed(steps, 'discovery.worktree.prComparison', () => this.gitPrComparisonForBase(meta, meta.branch, pullRequest?.baseBranch, worktree.defaultBranch));
       return { ...base, ...(meta.gitStatus === undefined ? {} : { gitStatus: meta.gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }), ...(pullRequest === undefined ? {} : { pullRequest }) };
-    }));
+    })));
     const byProject = new Map<string, DashboardWorktree[]>();
     for (const view of worktreeViews) { const list = byProject.get(view.projectId) ?? []; list.push(view); byProject.set(view.projectId, list); }
-    const projects: DashboardProject[] = await Promise.all(this.projectsNow().map(async project => {
+    const projects: DashboardProject[] = await timed(steps, 'discovery.projects', () => Promise.all(this.projectsNow().map(async project => {
       const management = worktreeManagementAvailability(project);
       // the GitHub panel shows only where the origin is on github.com
-      const github = project.mode === 'repository' ? await this.github.repositoryAt(project.path).catch(() => undefined) : undefined;
-      const parent = github === undefined || this.github.repositoryParent === undefined ? undefined : await this.github.repositoryParent(github).catch(() => undefined);
+      const github = project.mode === 'repository' ? await timed(steps, 'discovery.project.githubOrigin', () => this.github.repositoryAt(project.path).catch(() => undefined)) : undefined;
+      const parent = github === undefined || this.github.repositoryParent === undefined ? undefined : await timed(steps, 'discovery.project.githubParent', () => this.github.repositoryParent!(github).catch(() => undefined));
       return { id: project.id, ...(project.implicit === true ? { implicit: true as const } : {}), label: project.label, mode: project.mode, ...(github === undefined ? {} : { github: `${github.owner}/${github.name}` }), ...(parent === undefined ? {} : { githubForkOf: `${parent.owner}/${parent.name}` }), available: project.available, ...(project.unavailableReason === undefined ? {} : { unavailableReason: project.unavailableReason }), manageWorktrees: management.available, ...(management.reason === undefined ? {} : { manageWorktreesReason: management.reason }), stalePaths: this.staleSnapshot.get(project.id) ?? [], ...(project.commands?.setup === undefined ? {} : { setup: true }), worktrees: byProject.get(project.id) ?? [] };
-    }));
-    const listed = this.listPlaces(places, [...discovered.flatMap(agent => this.placeOf(agent, places) ?? []), ...shellPlaces, ...await this.pinnedScratchPlaces(places)]);
+    })));
+    const listed = this.listPlaces(places, [...discovered.flatMap(agent => this.placeOf(agent, places) ?? []), ...shellPlaces, ...await timed(steps, 'discovery.scratchPlaces', () => this.pinnedScratchPlaces(places))]);
     this.listedPlaces = new Map(listed.map(place => [place.id, place]));
     // materialize flags only at publication so concurrent replies can invalidate earlier panes
     const presentedAgents = agents.map(agent => agent.attention === 'finished' && agent.question === undefined && messageQuestionStates.get(agent.id)?.hasQuestion === true

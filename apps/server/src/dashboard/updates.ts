@@ -1,3 +1,5 @@
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
+import { msSince } from './timing.js';
 import type { Agent, CleanupTarget, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree } from '../domain/models.js';
 import type { CleanupVersion } from '../cleanup/service.js';
 import type { LaunchResolution } from '../launch/resolution.js';
@@ -47,34 +49,75 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
 // fingerprint every dashboard field that drives browser refreshes
 export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.cleanupTargets, dashboard.cleanupVersion, dashboard.notesRevision, dashboard.githubRevision, dashboard.githubBadge, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.buttons]);
 
+// who asked for a dashboard: GET /api/dashboard, a /ws/dashboard connect, the server's poll,
+// its first build at boot, the cleanup scan, or anything else (mutation routes, job and
+// settings callbacks, Conductor reads)
+export type DashboardTrigger = 'http' | 'ws' | 'poll' | 'boot' | 'cleanup' | 'other';
+
+// One build's timeline. There is no queue: the first caller starts a build and every caller
+// until it settles joins it, `atMs` into it, and gets its value. The loader adds its `steps`
+// (ms) and `counts`; `publish` is the fingerprint and the listeners (each /ws/dashboard send).
+export type DashboardBuild = {
+  callers: Array<{ trigger: DashboardTrigger; atMs: number }>;
+  startedAt: number;
+  steps: Record<string, number>;
+  counts: Record<string, number>;
+  ms?: number;
+  // the whole process's event loop over the build: the share of it spent running code, and
+  // the longest a timer was held up (blocking work)
+  eventLoop?: { utilization: number; maxDelayMs: number };
+};
+
 export class DashboardUpdates<T = DashboardPayload> {
-  private loader?: () => Promise<T>;
+  private loader?: (build: DashboardBuild) => Promise<T>;
+  private report?: (build: DashboardBuild, value: T | undefined) => void;
   private current?: T;
   private fingerprint = '';
   private refreshInFlight?: Promise<T>;
+  private building?: DashboardBuild;
   private readonly listeners = new Set<(value: T) => void>();
 
   constructor(private readonly identify: (value: T) => string = value => JSON.stringify(value)) {}
 
-  setLoader(loader: () => Promise<T>): void { this.loader = loader; }
+  // `report` gets every settled build (its value undefined when the loader failed)
+  setLoader(loader: (build: DashboardBuild) => Promise<T>, report?: (build: DashboardBuild, value: T | undefined) => void): void { this.loader = loader; this.report = report; }
 
-  refresh(): Promise<T> {
-    if (this.refreshInFlight !== undefined) return this.refreshInFlight;
+  refresh(trigger: DashboardTrigger = 'other'): Promise<T> {
+    if (this.refreshInFlight !== undefined) {
+      if (this.building !== undefined) this.building.callers.push({ trigger, atMs: msSince(this.building.startedAt) });
+      return this.refreshInFlight;
+    }
     if (this.loader === undefined) return Promise.reject(new Error('dashboard loader unavailable'));
-    const refresh = this.loader().then(value => {
+    const build: DashboardBuild = { callers: [{ trigger, atMs: 0 }], startedAt: performance.now(), steps: {}, counts: {} };
+    const delay = monitorEventLoopDelay({ resolution: 10 });
+    delay.enable();
+    const busy = performance.eventLoopUtilization();
+    let built: T | undefined;
+    const refresh = this.loader(build).then(value => {
+      built = value;
+      const publishing = performance.now();
       const fingerprint = this.identify(value);
       this.current = value;
-      if (fingerprint === this.fingerprint) return value;
-      this.fingerprint = fingerprint;
-      for (const listener of this.listeners) {
-        try { listener(value); }
-        catch { this.listeners.delete(listener); }
+      if (fingerprint !== this.fingerprint) {
+        this.fingerprint = fingerprint;
+        for (const listener of this.listeners) {
+          try { listener(value); }
+          catch { this.listeners.delete(listener); }
+        }
       }
+      build.steps.publish = msSince(publishing);
       return value;
     }).finally(() => {
       if (this.refreshInFlight === refresh) this.refreshInFlight = undefined;
+      build.ms = msSince(build.startedAt);
+      delay.disable();
+      build.eventLoop = { utilization: Math.round(performance.eventLoopUtilization(busy).utilization * 1000) / 1000, maxDelayMs: Math.round(delay.max / 1e5) / 10 };
+      const report = this.report;
+      // once every caller, an HTTP response included, has had the value
+      if (report !== undefined) setImmediate(() => { try { report(build, built); } catch { /* timing never breaks the dashboard */ } });
     });
     this.refreshInFlight = refresh;
+    this.building = build;
     return refresh;
   }
 

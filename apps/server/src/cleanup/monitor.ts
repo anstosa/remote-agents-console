@@ -30,7 +30,7 @@ export class CleanupMonitor {
   private run(): Promise<void> {
     if (this.running !== undefined) return this.running;
     const running = this.cleanup.scan().then(async () => {
-      await this.dashboard.refresh().catch(() => undefined);
+      await this.dashboard.refresh('cleanup').catch(() => undefined);
     }).catch(() => undefined).finally(() => {
       if (this.running === running) this.running = undefined;
     });

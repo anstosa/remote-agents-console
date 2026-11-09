@@ -27,7 +27,7 @@ describe('dashboard pane snapshot wiring', () => {
     });
     try {
       await dashboardUpdates.refresh();
-      expect(discovery.dashboard).toHaveBeenCalledWith(false, true);
+      expect(discovery.dashboard).toHaveBeenCalledWith(false, true, expect.any(Object));
       expect(worktreeCommands.state).toHaveBeenCalledWith(worktree, snapshots);
       expect(tmux.closeCommands).not.toHaveBeenCalled();
     } finally { await app.close(); }

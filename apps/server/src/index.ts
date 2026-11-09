@@ -57,14 +57,14 @@ const savedPromptsLines = formatSavedPromptsToNotes(await migrateSavedPromptsToN
 if (savedPromptsLines.length > 0) { process.stderr.write('Saved prompts migration:\n'); for (const line of savedPromptsLines) process.stderr.write(`  ${line}\n`); }
 // preserve the last controller while every new process starts disconnected
 const control = await ControlService.persisted();
-const app = await buildApp(config, { control, tmux, discovery, push, notifications, cleanup, dashboardUpdates, worktreeStore, worktreeManagement, prSwitch, notes, github });
+const app = await buildApp(config, { control, tmux, discovery, push, notifications, cleanup, dashboardUpdates, worktreeStore, worktreeManagement, prSwitch, notes, github, dashboardTimingFile: join(serverCheckout(), '.data/dashboard-timing.jsonl') });
 // publish evidence before serving health without a host queue dependency
 await attestBoot(settingsInstallation, config, applicationContent, undefined, applicationMigration);
 // honor the configured cadence while overlapping refreshes coalesce
-const dashboardTimer = setInterval(() => void dashboardUpdates.refresh().catch(() => {}), dashboardPollMs);
+const dashboardTimer = setInterval(() => void dashboardUpdates.refresh('poll').catch(() => {}), dashboardPollMs);
 const cleanupMonitor = new CleanupMonitor(cleanup, dashboardUpdates);
 app.addHook('onClose', async () => { clearInterval(dashboardTimer); cleanupMonitor.stop(); notifications.stop(); });
-void dashboardUpdates.refresh().catch(() => {});
+void dashboardUpdates.refresh('boot').catch(() => {});
 cleanupMonitor.start();
 // reconnect to the structured Agents' holders, which replay what this console has not read, before
 // the scheduler judges a Run by its Agent (for at most 10 s: a holder that never answers holds up nothing)

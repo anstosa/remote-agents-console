@@ -55,7 +55,9 @@ import { PaneViewportCoordinator } from './logs/viewport-scheduler.js';
 import { openPaneSession, type PaneSession, type PaneSessionDependencies, type PaneTransport } from './pane-session.js';
 import { PaneStreamRegistry, type PaneStreamProvider } from './tmux/control.js';
 import { isPaneTheme } from './tmux/terminal-colors.js';
-import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from './dashboard/updates.js';
+import { dashboardFingerprint, DashboardUpdates, type DashboardBuild, type DashboardPayload } from './dashboard/updates.js';
+import { dashboardTimingReport, timed } from './dashboard/timing.js';
+import { jsonlLog } from './logs/jsonl-log.js';
 import { WorktreeNoteService, type NoteAuthor, type WorktreeNote } from './notes/service.js';
 import { promptNoteContent } from './notes/from-prompt.js';
 import { cronError, previewRuns, scheduleNextRun } from './schedule/cron.js';
@@ -146,7 +148,7 @@ import { registerGoogleCalendarRoutes } from './google-calendar/routes.js';
 import { calendarLabelsForAgent } from './google-calendar/labels.js';
 import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
 
-export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number };
+export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; dashboardTimingFile?: string };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use, and with the
 // structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
@@ -565,32 +567,34 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return summary.codeReview === undefined && live === 'failed' ? { ...summary, codeReview: 'failed' } : summary;
   };
   // publish current pane observations on each dashboard update
-  const dashboard = async (): Promise<DashboardPayload> => {
-    const discovered = await discovery.dashboard(false, true);
+  const dashboard = async ({ steps, counts }: DashboardBuild): Promise<DashboardPayload> => {
+    const discovered = await timed(steps, 'discovery', () => discovery.dashboard(false, true, steps));
     // share this scan with stack display without weakening fresh lifecycle checks
     const paneSnapshots = tmux.paneSnapshotsNow?.();
+    Object.assign(counts, { agents: discovered.agents.length, projects: discovered.projects.length, worktrees: discovered.projects.reduce((sum, project) => sum + project.worktrees.length, 0), places: discovered.places.length });
+    if (paneSnapshots !== undefined) counts.panes = [...paneSnapshots.values()].reduce((sum, snapshot) => sum + (snapshot.status === 'available' ? snapshot.panes.length : 0), 0);
     // a Review run pane whose run is not in flight (a restart forgot it) goes back to the operator
     void interactiveRunner.releaseOrphans(discovered.agents);
-    const queuedCounts = await queuedPromptCounts(discovered.agents);
+    const queuedCounts = await timed(steps, 'queuedCounts', () => queuedPromptCounts(discovered.agents));
     // recover durable intervals even when the original agent is no longer listed
-    if (calendarLifecycle !== undefined) await prompts.reconcileCalendar?.(discovered.agents.map(agent => agent.id)).catch(() => undefined);
-    await Promise.all(discovered.agents.map(agent => prompts.observe(agent).catch(() => undefined)));
-    await prompts.retireDeparted(discovered.agents.map(agent => agent.id)).catch(() => undefined);
-    await dispatches.sweep(discovered.agents).catch(() => undefined);
+    if (calendarLifecycle !== undefined) await timed(steps, 'reconcileCalendar', async () => await prompts.reconcileCalendar?.(discovered.agents.map(agent => agent.id)).catch(() => undefined));
+    await timed(steps, 'observeAgents', () => Promise.all(discovered.agents.map(agent => prompts.observe(agent).catch(() => undefined))));
+    await timed(steps, 'retireDeparted', () => prompts.retireDeparted(discovered.agents.map(agent => agent.id)).catch(() => undefined));
+    await timed(steps, 'dispatchSweep', () => dispatches.sweep(discovered.agents).catch(() => undefined));
     // suppress completions while more work waits
-    events.emit(observedAgents(discovered, queuedCounts));
+    timed(steps, 'emitAgents', () => events.emit(observedAgents(discovered, queuedCounts)));
     const worktrees = discovery.worktreesNow();
-    const controls = new Map(await Promise.all(worktrees.map(async worktree => [worktree.id, { actions: stackCommands.actions(worktree), ...await stackCommands.state(worktree, paneSnapshots) }] as const)));
+    const controls = new Map(await timed(steps, 'stackState', () => Promise.all(worktrees.map(async worktree => [worktree.id, { actions: stackCommands.actions(worktree), ...await stackCommands.state(worktree, paneSnapshots) }] as const))));
     const controlFor = (worktreeId: string | undefined) => worktreeId === undefined ? undefined : controls.get(worktreeId);
-    events.emit({ type: 'stack', worktrees: [...controls].flatMap(([worktreeId, state]) => state.processes === undefined ? [] : [{ worktreeId, processes: state.processes }]) });
-    const watched = await watches.summaries();
+    timed(steps, 'emitStack', () => events.emit({ type: 'stack', worktrees: [...controls].flatMap(([worktreeId, state]) => state.processes === undefined ? [] : [{ worktreeId, processes: state.processes }]) }));
+    const watched = await timed(steps, 'watches', () => watches.summaries());
     const worktreeViews = discovered.projects.flatMap(project => project.worktrees);
     const reviewBranches = worktreeViews.map(view => ({ worktreeId: view.id, branch: discovered.agents.find(agent => agent.worktreeId === view.id)?.branch ?? view.branch }));
-    const reviews = (await reviewStore.summaries(reviewBranches)).map(codeReviewSummary);
+    const reviews = (await timed(steps, 'reviews', () => reviewStore.summaries(reviewBranches))).map(codeReviewSummary);
     // resolve the Launch profile for every scope the web can launch into: each idle
     // worktree, each running agent's worktree (for Restart as…), each non-git directory
     // Project (launched in place), each Scratch Place, and the Scratch group
-    const launchResolutions = await launch.launchResolutions([scratchLaunchKey, ...worktreeViews.map(view => view.id), ...discovered.agents.flatMap(agent => agent.worktreeId === undefined ? [] : [agent.worktreeId]), ...discovered.projects.flatMap(project => project.mode === 'directory' ? [project.id] : []), ...discovered.places.map(placeLaunchScope)]);
+    const launchResolutions = await timed(steps, 'launchResolutions', () => launch.launchResolutions([scratchLaunchKey, ...worktreeViews.map(view => view.id), ...discovered.agents.flatMap(agent => agent.worktreeId === undefined ? [] : [agent.worktreeId]), ...discovered.projects.flatMap(project => project.mode === 'directory' ? [project.id] : []), ...discovered.places.map(placeLaunchScope)]));
     const launchFor = (worktreeId: string | undefined) => launchResolutions.get(worktreeId ?? scratchLaunchKey);
     // an Agent resolves in its Worktree's scope, else its directory Project's or Scratch Place's
     const placeById = new Map(discovered.places.map(place => [place.id, place] as const));
@@ -611,7 +615,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     events.emit(observedAgents(discovered, queuedCounts));
     return instanceAttention({ agents: discovered.agents.map(agent => ({ ...agent, unread: notifications.isUnread(agent) })) });
   };
-  dashboardUpdates.setLoader(dashboard);
+  dashboardUpdates.setLoader(dashboard, deps.dashboardTimingFile === undefined ? undefined : dashboardTimingReport(jsonlLog(deps.dashboardTimingFile)));
   // keep sensitive browser capabilities scoped to the console origin
   app.addHook('onSend', async (request, reply, payload) => {
     // authorize WebAssembly only in the isolated formatter worker, never in the page
@@ -1126,7 +1130,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await control.release(s.id);
     return reply.code(204).send();
   });
-  app.get('/api/dashboard', async (request) => { controlled(request); return await dashboardUpdates.refresh(); });
+  app.get('/api/dashboard', async (request) => { controlled(request); return await dashboardUpdates.refresh('http'); });
   app.post('/api/dashboard/ticket', async (request) => { const s = controlled(request, true); return { ticket: tickets.mint(s.id, 'dashboard', 'dashboard').id }; });
   app.get('/api/cleanup', async (request) => {
     controlled(request);
@@ -4570,7 +4574,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const unsubscribe = dashboardUpdates.subscribe(send);
       const lease = leaseHeartbeat(socket, s.id, 5_000);
       socket.on('close', () => { clearInterval(lease); unsubscribe(); releaseGithub?.(); });
-      void dashboardUpdates.refresh().catch(() => {});
+      void dashboardUpdates.refresh('ws').catch(() => {});
     } catch { socket.close(1008); }
   });
   // The pane socket (ADR 0008, spec "The pane socket"): one WebSocket per page carries every
