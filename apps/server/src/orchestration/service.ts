@@ -223,9 +223,10 @@ export class OrchestrationService {
     }
   }
 
-  // whether a Place id (a Worktree's or any other Place's) is within these operations' scope
+  // whether a Place id (a Worktree's or any other Place's) is within these operations' scope;
+  // unscoped operations admit none, since only the Conductor, always scoped, names Places here
   private admitted(id: string): boolean {
-    return this.dependencies.admits?.({ id, projectId: projectIdOf(id) }) ?? true;
+    return this.dependencies.admits?.({ id, projectId: projectIdOf(id) }) === true;
   }
 
   // resolve one discovered worktree by its wire id
