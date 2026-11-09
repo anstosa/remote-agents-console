@@ -467,7 +467,11 @@ test('native Windows copy removes only selected margin cells', async ({ context,
   await toolbar.getByRole('button', { name: 'Copy' }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(partialLine.slice(2));
   await toolbar.getByRole('button', { name: 'Add to prompt' }).click();
-  await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveValue(partialLine.slice(1));
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect(prompt).toHaveValue(partialLine.slice(1));
+  // Add to prompt focuses the composer, where y would be typed; a mouse selection would move focus off it
+  await expect(prompt).toBeFocused();
+  await prompt.blur();
 
   // keep selections beginning after the two margin columns unchanged
   await selectNativeRange(partialRow, 2, partialLine.length);

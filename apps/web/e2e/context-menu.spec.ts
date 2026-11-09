@@ -998,6 +998,9 @@ test('terminal menu preserves neutral mode until paste explicitly enters output 
   await page.getByRole('menu', { name: 'Open a terminal' }).getByRole('menuitem', { name: /build/u }).click();
   await seedPaneSize(page, '%5', 80, 24);
   const terminal = page.locator('.terminal-pane[data-panel-key="%5"]');
+  // a picked terminal takes input focus; leave it so the menu opens from neutral
+  await expect(terminal.locator('textarea')).toBeFocused();
+  await terminal.locator('textarea').blur();
   await terminal.locator('.terminal-canvas').click({ button: 'right' });
   const menu = page.getByRole('menu', { name: 'Terminal build actions' });
   await expect(menu.locator('[role="menuitemradio"][aria-checked="true"]')).toHaveCount(1);

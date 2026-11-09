@@ -158,10 +158,10 @@ test('swiping moves between panels one screen at a time, and the dots follow', a
   expect(new Set(tops).size).toBe(1);
   await expect(toolbar(page).locator('.git-branch')).toBeHidden();
   await expect(toolbar(page).locator('.git-status-dot')).toBeVisible();
-  // its changed-files popup still spans the screen, though the button sits at the row's right
+  // its content-sized changed-files popup stays on screen, though the button sits at the row's right
   await toolbar(page).getByRole('button', { name: /^Git status/u }).click();
   const changes = page.getByRole('region', { name: 'Changed files' });
-  await expect.poll(() => changes.evaluate(element => element.getBoundingClientRect().width)).toBeGreaterThan(400);
+  await expect(changes).toBeInViewport({ ratio: 1 });
   await page.mouse.click(4, 4);
   await expect(changes).toHaveCount(0);
 });

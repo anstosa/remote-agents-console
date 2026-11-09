@@ -364,7 +364,7 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       const flags = (await run(tmux, ['-S', socket, 'list-clients', '-F', '#{client_flags}'])).stdout;
       expect(flags).toContain('no-output');
       expect(flags).toContain('ignore-size');
-      expect(await adapter.size(ref, pane)).toEqual({ cols: 80, rows: 24 });
+      expect(await adapter.size(ref, pane)).toEqual({ cols: 80, rows: 24, window: { cols: 80, rows: 24 } });
       expect((await run(tmux, ['-S', socket, 'show-environment', '-t', 'fixture', 'DISPLAY'])).stdout.trim()).toBe('DISPLAY=keep-me');
       // browser subscribers keep a separate lifecycle and terminal membership
       expect(viewers.openPaneKeys().size).toBe(0);
@@ -559,7 +559,7 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       // with only the control client attached, the pane keeps its own size (80x24 here)
       // rather than being clamped to a phantom viewport
       const geometry = await new TmuxAdapter().size(ref, pane);
-      expect(geometry).toEqual({ cols: 80, rows: 24 });
+      expect(geometry).toEqual({ cols: 80, rows: 24, window: { cols: 80, rows: 24 } });
     } finally {
       client.dispose();
     }

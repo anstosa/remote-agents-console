@@ -194,16 +194,16 @@ for (const width of [390, 1280]) {
 }
 
 // preserve mobile launch access
-test('hides the mobile plus and keeps New Workspace reachable', async ({ page }) => {
+test('shows the plus at every width and keeps New Workspace reachable from the mobile dropdown', async ({ page }) => {
   await mount(page, [busy]);
   await page.goto('/');
   const plus = page.locator('.new-agent-tab');
   // cover small phones and both sides of the existing mobile breakpoint
   for (const width of [320, 390, 600, 768, 769, 1280]) {
     await page.setViewportSize({ width, height: 844 });
+    await expect(plus).toBeVisible();
     if (width <= 768) {
-      await expect(plus).toBeHidden();
-      // New Workspace remains reachable without the hidden main plus
+      // the workspace dropdown also offers New Workspace
       await page.locator('.workspace-dropdown').click();
       await page.getByRole('button', { name: /New Workspace/u }).click();
       const launcher = page.getByRole('group', { name: 'Agent launcher' });
@@ -214,7 +214,7 @@ test('hides the mobile plus and keeps New Workspace reachable', async ({ page })
       expect(menu!.x + menu!.width).toBeLessThanOrEqual(width);
       await page.keyboard.press('Escape');
       await expect(launcher).toHaveCount(0);
-    } else await expect(plus).toBeVisible();
+    }
   }
 });
 
