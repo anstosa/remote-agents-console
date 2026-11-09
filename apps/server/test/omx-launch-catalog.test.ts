@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,8 @@ import { testConfig, testProject, testWorktree } from './helpers/config.js';
 
 const directories: string[] = [];
 const executeFile = promisify(execFile);
+// the tmux on PATH (mise, Homebrew, a distro package); its watchdog test is skipped without one
+const tmux = execFileSync('/bin/sh', ['-c', 'command -v tmux || true'], { encoding: 'utf8' }).trim();
 
 // reproduce POSIX single-quote framing for transport assertions
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
@@ -339,7 +341,7 @@ describe('OMX fixed-helper transport', () => {
   });
 
   // prove the host watchdog kills the whole discovery job while its isolated tmux server remains reusable
-  it('kills an over-deadline host job and allows a later probe on the same isolated tmux server', async () => {
+  it.skipIf(tmux === '')('kills an over-deadline host job and allows a later probe on the same isolated tmux server', async () => {
     const checkout = await mkdtemp(join(tmpdir(), 'rac-omx-watchdog-'));
     directories.push(checkout);
     const scripts = join(checkout, 'scripts');
@@ -387,12 +389,12 @@ describe('OMX fixed-helper transport', () => {
       RAC_HOST_NODE_BIN: process.execPath,
       RAC_HOST_REPOSITORY: checkout,
       RAC_HOST_PATH: '/usr/local/bin:/usr/bin:/bin',
-      RAC_TMUX_BIN: '/usr/bin/tmux'
+      RAC_TMUX_BIN: tmux
     };
     const config = omxConfig({ program: '/fixture/omx', args: ['--profile', 'fixture'], env: {} });
     const context = { cwd: '/console/not-used', hostCwd: checkout, home: checkout };
 
-    await executeFile('/usr/bin/tmux', ['-S', socket, 'new-session', '-d', '-s', 'watchdog-fixture', '/bin/sleep', '60']);
+    await executeFile(tmux, ['-S', socket, 'new-session', '-d', '-s', 'watchdog-fixture', '/bin/sleep', '60']);
     try {
       await expect(probeOmxCatalog(config, context, 250, { environment, checkout })).rejects.toThrow('omx_discovery_unavailable');
       const slowPid = Number((await readFile(pidFile, 'utf8')).trim());
@@ -406,7 +408,7 @@ describe('OMX fixed-helper transport', () => {
       expect(await readdir(join(checkout, '.data'))).toEqual([]);
     } finally {
       // terminate only the exact socket created by this test
-      await executeFile('/usr/bin/tmux', ['-S', socket, 'kill-server']).catch(() => undefined);
+      await executeFile(tmux, ['-S', socket, 'kill-server']).catch(() => undefined);
     }
   });
 
