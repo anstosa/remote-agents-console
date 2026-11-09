@@ -897,7 +897,7 @@ describe('DiscoveryService dashboard', () => {
     const github = {
       branch: async () => ({}),
       repositoryAt: async () => ({ owner: 'anstosa', name: 'audiobookshelf' }),
-      repositoryParent: async () => ({ owner: 'advplyr', name: 'audiobookshelf' }),
+      knownRepositoryParent: () => ({ owner: 'advplyr', name: 'audiobookshelf' }),
       invalidateRepositories: () => {}
     };
     const service = new DiscoveryService(socketFinder(), paneLister([]) as never, processInspector({ codex: false }), github, undefined, [project], undefined, listImpl({ '/repo': [entry('/repo', 'main')] }));

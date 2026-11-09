@@ -75,6 +75,29 @@ describe('GitHub origins', () => {
     expect(scripted.calls).toHaveLength(2);
   });
 
+  it('answers the dashboard\'s fork hint from the last read without waiting on GitHub', async () => {
+    let now = 0;
+    const scripted = graphqlGithub({ 'anstosa/audiobookshelf': { forkOf: 'advplyr/audiobookshelf' } });
+    const service = github(scripted.request, { now: () => now });
+    const fork = { owner: 'anstosa', name: 'audiobookshelf' };
+    const parent = { owner: 'advplyr', name: 'audiobookshelf' };
+    const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+
+    // cold: nothing known yet, one read starts in the background and is joined, not repeated
+    expect(service.knownRepositoryParent(fork)).toBeUndefined();
+    expect(service.knownRepositoryParent(fork)).toBeUndefined();
+    await settle();
+    expect(service.knownRepositoryParent(fork)).toEqual(parent);
+    expect(scripted.calls).toHaveLength(1);
+
+    // expired: the last answer still shows while one refresh runs
+    now = 60_000;
+    expect(service.knownRepositoryParent(fork)).toEqual(parent);
+    expect(service.knownRepositoryParent(fork)).toEqual(parent);
+    await settle();
+    expect(scripted.calls).toHaveLength(2);
+  });
+
   it('refuses missing fork lineage instead of treating it as a confirmed non-fork', async () => {
     const service = github(async () => reply({ data: { repository: { parent: null } } }));
 

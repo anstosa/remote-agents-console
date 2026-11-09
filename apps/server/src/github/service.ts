@@ -565,6 +565,8 @@ export class GithubService {
   private readonly branches = new Map<string, BranchEntry>();
   private readonly origins = new Map<string, OriginEntry>();
   private readonly lineages = new Map<string, LineageEntry>();
+  // each repository's last parent read, kept past its proof's expiry for display only
+  private readonly knownParents = new Map<string, GithubRepository | undefined>();
   // GitHub's comparison of a closed pull request's final head with a checkout, which never changes
   private readonly compares = new Map<string, unknown>();
   private readonly command: Command;
@@ -699,6 +701,9 @@ export class GithubService {
     entry.pending = entry.pending.then(parent => {
       // start the ttl after github answers
       if (this.lineages.get(key) === entry) entry.expiresAt = this.now() + repositoryCacheTtlMs;
+      this.knownParents.delete(key);
+      if (this.knownParents.size >= lineageCacheLimit) this.knownParents.delete(this.knownParents.keys().next().value as string);
+      this.knownParents.set(key, parent);
       return parent;
     }, (error: unknown) => {
       // retry failed proofs on the next request
@@ -707,6 +712,18 @@ export class GithubService {
     });
     this.lineages.set(key, entry);
     return await entry.pending;
+  }
+
+  /**
+   * The direct parent last read for this repository, even past its proof's expiry, for display.
+   * Never waits on GitHub: with no live proof it starts (or joins) a read in the background, so
+   * the next call sees its answer. Anything that acts on lineage uses `repositoryParent`.
+   */
+  knownRepositoryParent(repository: GithubRepository): GithubRepository | undefined {
+    const key = repositoryKey(repository);
+    const entry = this.lineages.get(key);
+    if (entry === undefined || entry.expiresAt !== undefined && entry.expiresAt <= this.now()) void this.repositoryParent(repository).catch(() => undefined);
+    return this.knownParents.get(key);
   }
 
   /** A direct parent already authenticated for this repository, without starting a GitHub read. */
