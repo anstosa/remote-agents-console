@@ -636,21 +636,20 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // ready for a prompt (one that never gets there is closed). One spawn at a time, and none while
   // the Conductor has `maxWorkers` of any kind starting or live.
   let workerSpawns: Promise<unknown> = Promise.resolve();
-  const spawnWorker = (placeId: string, by: string, requested?: ConductorSpawnKind, model?: string): Promise<string | { enabled: ConductorSpawnKind[] } | 'not-allowed' | 'at-capacity' | undefined> => {
+  const spawnWorker = (placeId: string, by: string, requested?: ConductorSpawnKind, model?: string): Promise<string | { enabled: ConductorSpawnKind[] } | 'not-allowed' | 'no-place' | 'at-capacity' | undefined> => {
     const spawning = workerSpawns.then(async () => {
       const { spawnKinds: enabled, maxWorkers } = config.conductor!;
       const kind = requested ?? (enabled.includes('pi') ? 'pi' : enabled[0]!);
       if (!enabled.includes(kind)) return { enabled };
       if (model !== undefined && !(config.adapters[kind]?.allowedModels ?? []).some(entry => entry.model === model)) return 'not-allowed' as const;
+      const place = await resolvePlace(placeId);
+      if (place === undefined) return 'no-place' as const;
       const live = (await discovery.dashboard(true)).agents.filter(agent => agent.spawnedBy === by && (agent.structured === undefined || agent.structured.lifecycle === 'starting' || agent.structured.lifecycle === 'live'));
       if (live.length >= maxWorkers) return 'at-capacity' as const;
       const setting = model === undefined ? undefined : { model };
-      if (kind === 'pi') {
-        const place = await resolvePlace(placeId);
-        return place === undefined ? undefined : await structuredAgents.launch(place, kind, { sandboxed: true, spawnedBy: by, ...(setting === undefined ? {} : { model: setting }) });
-      }
+      if (kind === 'pi') return await structuredAgents.launch(place, kind, { sandboxed: true, spawnedBy: by, ...(setting === undefined ? {} : { model: setting }) });
       const outcome = await launchFresh({
-        launch: () => launchAgent(inWorktree(placeId), () => launch.launch(placeId, kind, setting, false, by)),
+        launch: () => launchAgent(atPlace(place.id), () => launch.launchAt(place, kind, setting, false, undefined, by)),
         waitForReadiness,
         close: agentId => prompts.close(agentId),
         // the Conductor's prompts reach it through its queue

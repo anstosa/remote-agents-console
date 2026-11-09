@@ -511,10 +511,10 @@ export class LaunchService implements HolderWindows {
   }
   // launch one ordinary scratch agent of the resolved (or requested) kind at the Scratch Place:
   // the configured Scratch directory when set, else the account home
-  async launchHome(kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
+  async launchHome(kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice, spawnedBy?: string): Promise<boolean> {
     // an offline account must not launch under a guessed scratch home
     if (this.config.launchHome === null && this.config.scratchDirectory === undefined) return false;
-    return await this.launchRemembering(await this.scratchPlace(), scratchLaunchKey, kind, model, sandboxed, prepared);
+    return await this.launchRemembering(await this.scratchPlace(), scratchLaunchKey, kind, model, sandboxed, prepared, spawnedBy);
   }
 
   // launch one agent directly in a non-git `directory` Project — the same in-place spawn
@@ -523,28 +523,30 @@ export class LaunchService implements HolderWindows {
   // under the Scratch persistence key for the directory. Only an available `directory` Project
   // launches this way: a `repository` Project launches through its Worktrees, and an
   // unavailable one has nothing to launch into. Remembers the kind under the Project scope.
-  async launchProjectDirectory(projectId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
+  async launchProjectDirectory(projectId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice, spawnedBy?: string): Promise<boolean> {
     const place = await this.directoryPlace(projectId);
-    return place !== undefined && await this.launchRemembering(place, projectId, kind, model, sandboxed, prepared);
+    return place !== undefined && await this.launchRemembering(place, projectId, kind, model, sandboxed, prepared, spawnedBy);
   }
 
   // launch a fresh agent at any Place through its own launch: a Worktree's, a directory
   // Project's, the Scratch folder's, or in place in an ad-hoc Scratch folder, remembering the kind
-  // under that folder's own scope. Only Open folder launches in an ad-hoc folder.
-  async launchAt(place: Place, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
-    if (place.kind === 'worktree') return await this.launch(place.id, kind, model, sandboxed, undefined, prepared);
-    if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind, model, sandboxed, prepared);
-    return place.adhoc === true ? await this.launchRemembering(place, place.id, kind, model, sandboxed, prepared) : await this.launchHome(kind, model, sandboxed, prepared);
+  // under that folder's own scope. Only Open folder launches in an ad-hoc folder. A Conductor's
+  // worker names it as `spawnedBy` (ADR 0018).
+  async launchAt(place: Place, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice, spawnedBy?: string): Promise<boolean> {
+    if (place.kind === 'worktree') return await this.launch(place.id, kind, model, sandboxed, spawnedBy, prepared);
+    if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind, model, sandboxed, prepared, spawnedBy);
+    return place.adhoc === true ? await this.launchRemembering(place, place.id, kind, model, sandboxed, prepared, spawnedBy) : await this.launchHome(kind, model, sandboxed, prepared, spawnedBy);
   }
 
   // launch in place at a directory-Project or Scratch Place with the resolved (or requested) kind,
-  // remembering it under `scope`; a storage failure never fails a live launch
-  private async launchRemembering(place: Place, scope: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
+  // remembering it under `scope` unless the Conductor chose it for a worker; a storage failure
+  // never fails a live launch
+  private async launchRemembering(place: Place, scope: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice, spawnedBy?: string): Promise<boolean> {
     const resolved = await this.resolveLaunchKind(scope, kind);
     // refuse an unconfigured or unlaunchable kind
     if (resolved === undefined) return false;
-    const launched = await this.launchInPlace(place, resolved, model, sandboxed, prepared);
-    if (launched) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
+    const launched = await this.launchInPlace(place, resolved, model, sandboxed, prepared, spawnedBy);
+    if (launched && spawnedBy === undefined) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
     return launched;
   }
 
@@ -577,7 +579,7 @@ export class LaunchService implements HolderWindows {
   }
 
   // launch into a directory-Project or Scratch Place without modifying an idle shell's input
-  private async launchInPlace(place: Place, kind: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice): Promise<boolean> {
+  private async launchInPlace(place: Place, kind: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice, spawnedBy?: string): Promise<boolean> {
     if (this.pending.has(place.id)) { console.warn(`[launch] ${place.home}: a launch is already in progress`); return false; }
     this.pending.add(place.id);
     try {
@@ -592,9 +594,10 @@ export class LaunchService implements HolderWindows {
       const command = await this.scratchCommand(kind, site.cwd, model, prepared);
       if (command === undefined) { console.warn(`[launch] ${place.home}: agent kind ${kind} produced no launch command`); return false; }
       const id = randomBytes(18).toString('base64url');
+      const marks: PaneMarks = { sandboxed: false, ...(spawnedBy === undefined ? {} : { spawnedBy }) };
       const joined = await this.placeSession(place);
       if (joined !== undefined) {
-        const pane = await this.launchInSessionWindow(site, command, id, { sandboxed: false }, joined, place.home);
+        const pane = await this.launchInSessionWindow(site, command, id, marks, joined, place.home);
         // the window failed or already rolled back
         if (pane === undefined) return false;
         // protect the pane until its label is complete
@@ -604,7 +607,7 @@ export class LaunchService implements HolderWindows {
       const pane = await this.openLaunchPane(site, command, id, session, place.home);
       if (pane === undefined) return false;
       // protect the pane until all place metadata is complete
-      return await this.finishCreatedPane(this.hostSocket, pane, place.home, async () => await this.markSessionPlace(this.hostSocket, pane, place.id) && await this.labelPane(this.hostSocket, pane, place.label) && await this.markConsoleManaged(this.hostSocket, pane));
+      return await this.finishCreatedPane(this.hostSocket, pane, place.home, async () => await this.markSessionPlace(this.hostSocket, pane, place.id) && await this.labelPane(this.hostSocket, pane, place.label) && await this.markConsoleManaged(this.hostSocket, pane) && await this.markLaunch(this.hostSocket, pane, marks));
     } finally {
       this.pending.delete(place.id);
     }

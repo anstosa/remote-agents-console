@@ -2197,6 +2197,16 @@ describe('the Conductor\'s dispatches', () => {
     expect(await call('spawn_agent', { worktree_id: worktree })).toMatchObject({ ok: true });
     await app.close();
   });
+  it('spawns a worker in its own directory Project, named by the placeId list_agents shows', async () => {
+    const fake = fakeAgent();
+    const { app, conductor, call, dashboardAgent } = await conducting(fake);
+    const own = (await call('list_agents', {}, false)).data.find((agent: { id: string }) => agent.id === conductor);
+    expect(own.placeId).toBe((await dashboardAgent(conductor)).placeId);
+    const spawned = await call('spawn_agent', { worktree_id: own.placeId });
+    expect(spawned).toMatchObject({ ok: true, data: { agent_id: expect.any(String) } });
+    expect(await dashboardAgent(spawned.data.agent_id)).toMatchObject({ placeId: own.placeId, sandboxed: true, spawnedBy: conductor });
+    await app.close();
+  });
   it('starts, stops and restarts Stack processes but never builds or migrates, and reads a process\'s log', async () => {
     const fake = fakeAgent();
     const { app, headers, call } = await conducting(fake);
@@ -2338,7 +2348,7 @@ describe('the Conductor\'s dispatches', () => {
     const spawned = await call('spawn_agent', { worktree_id: worktree.id, kind: 'claude' });
     expect(spawned).toMatchObject({ ok: true, data: { agent_id: expect.any(String) } });
     // it launches unsandboxed by the console, under the operator's own Claude configuration
-    expect(launches).toEqual([[worktree.id, 'claude', undefined, false, conductor]]);
+    expect(launches).toEqual([[worktree.id, 'claude', undefined, false, conductor, undefined]]);
     const claude = await dashboardAgent(spawned.data.agent_id as string);
     expect(claude).toMatchObject({ kind: 'claude', transport: 'tmux', spawnedBy: conductor });
     expect(claude.sandboxed).toBeUndefined();

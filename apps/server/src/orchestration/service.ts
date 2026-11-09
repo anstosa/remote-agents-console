@@ -102,12 +102,14 @@ export type OrchestrationDependencies = {
   startReview?: (agentId: string, input: ReviewTourInput, conductor?: string) => Promise<unknown>;
   /** The Conductor acting through these operations (ADR 0018), by its Agent id; none for the operator's integrations. */
   conductor?: string;
+  /** The Places these operations are scoped to, when scoped. */
+  admits?: PlaceScope;
   /**
    * Spawn a worker for the Conductor at a Place (ADR 0018), of `kind` or its default kind: its id,
    * or why not (the operator did not enable that kind, which names those enabled; the model is not
-   * allowed; the Conductor has its cap of live workers; or it could not start).
+   * allowed; there is no such Place; the Conductor has its cap of live workers; or it could not start).
    */
-  spawnWorker?: (placeId: string, conductor: string, kind?: ConductorSpawnKind, model?: string) => Promise<string | { enabled: ConductorSpawnKind[] } | 'not-allowed' | 'at-capacity' | undefined>;
+  spawnWorker?: (placeId: string, conductor: string, kind?: ConductorSpawnKind, model?: string) => Promise<string | { enabled: ConductorSpawnKind[] } | 'not-allowed' | 'no-place' | 'at-capacity' | undefined>;
   /** Create, pin, set up and open a Worktree, as the browser's Add dialog does. */
   createWorktree?: (projectId: string, input: AddInput, open: 'agent' | 'terminal' | 'empty', issue?: number) => Promise<CreatedWorktree>;
   /** The Notes of a Place (its notes key, the store, deletion and a Schedule aimed at the Conductor), and telling the web they changed. */
@@ -173,6 +175,7 @@ function agentStatus(agent: DashboardPayload['agents'][number]): AgentStatusV1 {
     label: agentLabel(agent),
     ...(agent.projectId === undefined ? {} : { projectId: agent.projectId }),
     ...(agent.worktreeId === undefined ? {} : { worktreeId: agent.worktreeId }),
+    ...(agent.placeId === undefined ? {} : { placeId: agent.placeId }),
     ...(agent.branch === undefined ? {} : { branch: agent.branch }),
     ...(agent.gitStatus === undefined ? {} : { gitStatus: agent.gitStatus }),
     ...(agent.gitPrStatus === undefined ? {} : { gitPrStatus: agent.gitPrStatus }),
@@ -201,6 +204,7 @@ export class OrchestrationService {
       ...this.dependencies,
       discovery: { target: (id, force) => discovery.target(id, force), worktreesNow: () => discovery.worktreesNow().filter(admits) },
       loadDashboard: async () => { const dashboard = await loadDashboard(); return { ...dashboard, agents: dashboard.agents.filter(inScope) }; },
+      admits,
       ...(conductor === undefined ? {} : { conductor })
     });
   }
@@ -764,14 +768,16 @@ export class OrchestrationService {
     return await this.operation(async () => success(await startReview(input.agentId, { scope: input.scope, includeTests: input.includeTests, includeDocs: input.includeDocs }, this.dependencies.conductor)));
   }
 
-  // spawn a worker for the Conductor in one Worktree within its scope
+  // spawn a worker for the Conductor at one Place within its scope: a Worktree, or a directory
+  // Project's or Scratch Place, its own included
   async spawnAgent(input: { worktreeId: string; kind?: ConductorSpawnKind; model?: string }): Promise<OrchestrationResult<{ agent_id: string }>> {
-    const { conductor, spawnWorker } = this.dependencies;
+    const { conductor, spawnWorker, admits } = this.dependencies;
     if (!validIdentifier(input.worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
     if (conductor === undefined || spawnWorker === undefined) return failure('unavailable', 'Only the Conductor spawns workers.');
-    if (this.worktree(input.worktreeId) === undefined) return failure('not_found', 'Worktree not found.');
+    if (admits?.({ id: input.worktreeId, projectId: projectIdOf(input.worktreeId) }) !== true) return failure('not_found', 'Place not found.');
     return await this.operation(async () => {
       const spawned = await spawnWorker(input.worktreeId, conductor, input.kind, input.model);
+      if (spawned === 'no-place') return failure('not_found', 'Place not found.');
       if (typeof spawned === 'object') return failure('invalid_request', `The operator has not enabled ${input.kind} workers; you may spawn ${spawned.enabled.join(', ')}.`);
       if (spawned === 'not-allowed') return failure('invalid_request', 'That model is not one of the operator\'s Allowed models.');
       if (spawned === 'at-capacity') return failure('conflict', 'You already have your most live workers: close one first.');

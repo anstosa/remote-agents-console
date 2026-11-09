@@ -31,6 +31,8 @@ export type AgentStatusV1 = {
   label: string;
   projectId?: string;
   worktreeId?: string;
+  /** The Place it runs at: its Worktree's id, or a directory Project's or Scratch Place's. */
+  placeId?: string;
   branch?: string;
   gitStatus?: GitStatusSummary;
   gitPrStatus?: GitComparisonSummary;

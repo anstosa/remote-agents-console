@@ -487,6 +487,19 @@ describe('LaunchService', () => {
     expect(store.rememberLaunchProfile).not.toHaveBeenCalled();
   });
 
+  it('marks a Conductor\'s worker in a directory Project with @rac_spawned_by and does not remember its kind there', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_bin: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%5' : '', stderr: '' }));
+    const store = { launchProfiles: async () => ({}), rememberLaunchProfile: vi.fn(async () => {}) };
+    const config = { adapters: { codex: { program: codexProgram, args: [], env: {}, launchable: true } }, projects: [{ id: 'notes', label: 'Notes', path: '/home/me/notes', identity: '/home/me/notes', mode: 'directory', available: true }] };
+    const service = new LaunchService(config as never, { find: async () => [] }, undefined, undefined, store as never);
+    const place = await service.directoryPlace('notes');
+
+    await expect(service.launchAt(place!, 'codex', undefined, false, undefined, 'conductor-1')).resolves.toBe(true);
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%5', '@rac_spawned_by', 'conductor-1']);
+    expect(store.rememberLaunchProfile).not.toHaveBeenCalled();
+  });
+
   it('records @rac_sandboxed on the fresh window beside an idle shell', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
     run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
