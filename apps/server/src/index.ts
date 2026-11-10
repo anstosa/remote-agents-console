@@ -47,7 +47,11 @@ const tmux = new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = n
 await push.initialize().catch(() => { process.stderr.write('[push] VAPID storage unavailable; push alerts disabled until storage is writable and valid.\n'); });
 const dashboardPollMs = config.pollIntervalMs;
 const notifications = new AgentNotificationCoordinator(notification => push.notify(notification), Math.max(2_000, dashboardPollMs * 2));
-const dashboardUpdates = new DashboardUpdates<DashboardPayload>(dashboardFingerprint);
+const dashboardUpdates = new DashboardUpdates<DashboardPayload>(dashboardFingerprint, {
+  thresholdMs: dashboardPollMs,
+  // record only slow loader operations with one private correlation id
+  record: (stage, observation) => { void push.diagnostics.record(stage, { eventId: observation.operationId, status: observation.status }, observation.at).catch(() => undefined); }
+});
 // carry any legacy saved prompts into Notes before the app builds, then hand buildApp the same
 // notes service; the source file is moved aside so a second boot is a no-op. This must run AFTER
 // acquireConfig (above), which re-keys a legacy saved-prompts file onto `<projectId>:<realpath>`

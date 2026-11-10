@@ -18,6 +18,7 @@ vi.mock('web-push', async importOriginal => {
 });
 
 import { PushService } from '../src/push-service.js';
+import { PushDiagnostics } from '../src/push-diagnostics.js';
 
 const savedEnvironment = {
   file: process.env.RAC_PUSH_SUBSCRIPTIONS_FILE,
@@ -30,6 +31,24 @@ const fixtureDirectories: string[] = [];
 const subscription = (name: string): PushSubscription => ({
   endpoint: `https://push.example.test/${name}`,
   keys: { auth: `auth-${name}`, p256dh: `p256dh-${name}` }
+});
+
+// build one correlated Agent event payload
+const eventMessage = (agentId: string, eventSequence = 1) => ({
+  schemaVersion: 1 as const,
+  eventId: `question-${eventSequence}`,
+  eventEpoch: '11111111-1111-4111-8111-111111111111',
+  eventSequence,
+  entityId: `agent:${agentId}`,
+  generatedAt: 1_700_000_000_000,
+  kind: 'question' as const,
+  agentId,
+  tag: `agent-status-${agentId}`,
+  displayTag: `rac-v1-agent-status-${agentId}`,
+  title: 'Question',
+  body: 'Choose',
+  url: `/#agent=${agentId}`,
+  worktreeId: 'shared'
 });
 
 // build one isolated enabled service
@@ -74,6 +93,7 @@ describe('PushService', () => {
 
   // restore caller state and remove temporary stores
   afterEach(async () => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     // remove every isolated subscription store
     for (const directory of fixtureDirectories.splice(0)) await rm(directory, { force: true, recursive: true });
@@ -94,10 +114,9 @@ describe('PushService', () => {
     const valid = subscription('valid');
     expect(await service.subscribe(valid)).toBe(true);
     expect(await service.subscribe({ ...valid, endpoint: 'http://push.example.test/insecure' })).toBe(false);
-    expect(await service.subscribe({ endpoint: 'https://push.example.test/missing', keys: { auth: '', p256dh: 'key' } })).toBe(true);
+    expect(await service.subscribe({ endpoint: 'https://push.example.test/missing', keys: { auth: '', p256dh: 'key' } })).toBe(false);
     expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({
-      [valid.endpoint]: valid,
-      'https://push.example.test/missing': { endpoint: 'https://push.example.test/missing', keys: { auth: '', p256dh: 'key' } }
+      [valid.endpoint]: valid
     });
     expect(webpush.setVapidDetails).not.toHaveBeenCalled();
   });
@@ -184,6 +203,7 @@ describe('PushService', () => {
     webpush.sendNotification.mockRejectedValue(providerFailure(statusCode));
     await service.notify({ kind: 'finished', title: 'Done', body: 'Ready', tag: 'agent-status-9', url: '/#agent=9' });
     expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({});
+    expect(await service.subscribeChecked(expired)).toEqual({ accepted: false, error: 'push_subscription_expired' });
   });
 
   // preserve subscriptions without retrying authentication failures
@@ -195,6 +215,7 @@ describe('PushService', () => {
     await service.notify({ kind: 'finished', title: 'Done', body: 'Ready', tag: 'agent-status-9', url: '/#agent=9' });
     expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ [retained.endpoint]: retained });
     expect(webpush.sendNotification).toHaveBeenCalledOnce();
+    expect(await service.subscribeChecked(retained)).toEqual({ accepted: false, error: 'push_provider_auth_rejected' });
   });
 
   // retry network, timeout, throttle, and server failures within the fixed bound
@@ -426,5 +447,91 @@ describe('PushService', () => {
     await Promise.all([old, current]);
     const titles = webpush.sendNotification.mock.calls.map(call => JSON.parse(call[1] as string).title as string);
     expect(titles).toEqual(['Old', 'Current']);
+  });
+
+  // separate Agent topics while preserving retry event metadata
+  it('uses Agent-scoped topics and stable event metadata across retries', async () => {
+    const { service } = await enabledService();
+    await service.subscribe(subscription('event-identity'));
+    webpush.sendNotification
+      .mockRejectedValueOnce(providerFailure(503, { 'Retry-After': '0' }))
+      .mockResolvedValue({ statusCode: 201, body: '', headers: {} });
+
+    const first = eventMessage('agent-one');
+    await service.notify(first);
+    await service.notify(eventMessage('agent-two'));
+
+    const payloads = webpush.sendNotification.mock.calls.map(call => JSON.parse(call[1] as string) as Record<string, unknown>);
+    expect(payloads.slice(0, 2).map(payload => [payload.eventId, payload.eventEpoch, payload.eventSequence, payload.generatedAt])).toEqual([
+      [first.eventId, first.eventEpoch, first.eventSequence, first.generatedAt],
+      [first.eventId, first.eventEpoch, first.eventSequence, first.generatedAt]
+    ]);
+    const topics = webpush.sendNotification.mock.calls.map(call => call[2]?.topic);
+    expect(topics[0]).toBe(topics[1]);
+    expect(topics[2]).not.toBe(topics[0]);
+  });
+
+  // prevent a delayed failure for generation A from poisoning replacement B
+  it.each([410, 403])('keeps replacement generation B healthy after delayed A status %i', async statusCode => {
+    const { file, service } = await enabledService();
+    const previous = subscription(`generation-race-${statusCode}`);
+    const replacement = { ...previous, expirationTime: 1_800_000_000_000, keys: { auth: `replacement-auth-${statusCode}`, p256dh: `replacement-key-${statusCode}` } };
+    await service.subscribe(previous);
+    let rejectPrevious!: (error: unknown) => void;
+    webpush.sendNotification.mockImplementationOnce(async () => await new Promise((_resolve, reject) => { rejectPrevious = reject; }));
+    const notifying = service.notify(eventMessage(`generation-race-${statusCode}`));
+    await waitForCalls(1);
+
+    expect(await service.subscribeChecked(replacement)).toEqual({ accepted: true });
+    rejectPrevious(providerFailure(statusCode));
+    await notifying;
+
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ [replacement.endpoint]: replacement });
+    expect(await service.subscribeChecked(replacement)).toEqual({ accepted: true });
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ [replacement.endpoint]: replacement });
+  });
+
+  // observe a slow provider request without fabricating a terminal timeout
+  it('records a pending provider request and waits for the underlying promise', async () => {
+    vi.useFakeTimers();
+    const directory = await mkdtemp(join(tmpdir(), 'rac-push-pending-'));
+    fixtureDirectories.push(directory);
+    const file = join(directory, 'subscriptions.json');
+    const diagnostics = new PushDiagnostics({ file: join(directory, 'diagnostics.json'), now: Date.now });
+    const service = new PushService({ file, diagnostics });
+    await service.initialize();
+    await service.subscribe(subscription('slow-provider'));
+    let resolveProvider!: (value: { statusCode: number; body: string; headers: Record<string, string> }) => void;
+    webpush.sendNotification.mockImplementationOnce(async () => await new Promise(resolve => { resolveProvider = resolve; }));
+
+    let settled = false;
+    const notifying = service.notify(eventMessage('slow-provider')).then(() => { settled = true; });
+    // yield through real filesystem work while fake time remains fixed
+    for (let attempt = 0; attempt < 20 && webpush.sendNotification.mock.calls.length === 0; attempt += 1) await readFile(file, 'utf8');
+    expect(webpush.sendNotification).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(10_001);
+    await vi.runAllTicks();
+    expect(settled).toBe(false);
+    expect((await diagnostics.snapshot()).map(record => record.stage)).toContain('provider_pending');
+
+    resolveProvider({ statusCode: 201, body: '', headers: {} });
+    await notifying;
+    expect(webpush.sendNotification).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
+  // isolate diagnostic persistence failures from provider acceptance
+  it('delivers when every diagnostic write fails', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-push-diagnostic-failure-'));
+    fixtureDirectories.push(directory);
+    const diagnostics = new PushDiagnostics({ file: join(directory, 'diagnostics.json') });
+    vi.spyOn(diagnostics, 'record').mockRejectedValue(new Error('diagnostic unavailable'));
+    const service = new PushService({ file: join(directory, 'subscriptions.json'), diagnostics });
+    await service.initialize();
+    await service.subscribe(subscription('diagnostic-failure'));
+    webpush.sendNotification.mockResolvedValue({ statusCode: 201, body: '', headers: {} });
+
+    await expect(service.notify(eventMessage('diagnostic-failure'))).resolves.toBeUndefined();
+    expect(webpush.sendNotification).toHaveBeenCalledOnce();
   });
 });

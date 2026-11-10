@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { msSince } from './timing.js';
 import type { Agent, CleanupTarget, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree } from '../domain/models.js';
@@ -9,6 +10,7 @@ import type { CodeReviewCapability } from '../code-review/contracts.js';
 import type { KeysConfig } from '../config/keys.js';
 import type { ButtonCatalog } from '../button-actions/catalog.js';
 import type { WatchSummary } from '../watches/service.js';
+import type { NotificationEvent, NotificationState } from '../notification-events.js';
 
 // one Worktree on the wire, augmented with the per-Worktree state the loader adds:
 // its stack controls and its resolved Launch profile
@@ -19,7 +21,7 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
   // is `scratchLaunch`); `scratchLaunch` is the Scratch group's resolution.
   // completionId stays stable from pending detection through unread publication
   // `watches`: the Watches the Agent set (ADR 0019)
-  agents: Array<Agent & { unread: boolean; completionId?: string; queuedPromptCount: number; stack?: StackState; launch?: LaunchResolution; watches?: WatchSummary[] }>;
+  agents: Array<Agent & { unread: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; queuedPromptCount: number; stack?: StackState; launch?: LaunchResolution; watches?: WatchSummary[] }>;
   // a non-git `directory` Project carries its own resolved Launch profile so the web renders
   // a Project-level Launch button (it has no Worktrees to launch through); omitted otherwise
   projects: Array<Omit<DashboardProject, 'worktrees'> & { worktrees: PayloadWorktree[]; launch?: LaunchResolution }>;
@@ -68,6 +70,13 @@ export type DashboardBuild = {
   eventLoop?: { utilization: number; maxDelayMs: number };
 };
 
+type DashboardObservation = { operationId: string; at: number; status: 'pending' | 'settled' | 'failed' };
+type DashboardObservationOptions = {
+  thresholdMs: number;
+  now?: () => number;
+  record: (stage: 'observation_started' | 'observation_settled', observation: DashboardObservation) => void;
+};
+
 export class DashboardUpdates<T = DashboardPayload> {
   private loader?: (build: DashboardBuild) => Promise<T>;
   private report?: (build: DashboardBuild, value: T | undefined) => void;
@@ -77,11 +86,13 @@ export class DashboardUpdates<T = DashboardPayload> {
   private building?: DashboardBuild;
   private readonly listeners = new Set<(value: T) => void>();
 
-  constructor(private readonly identify: (value: T) => string = value => JSON.stringify(value)) {}
+  // keep slow observation diagnostics optional
+  constructor(private readonly identify: (value: T) => string = value => JSON.stringify(value), private readonly observation?: DashboardObservationOptions) {}
 
   // `report` gets every settled build (its value undefined when the loader failed)
   setLoader(loader: (build: DashboardBuild) => Promise<T>, report?: (build: DashboardBuild, value: T | undefined) => void): void { this.loader = loader; this.report = report; }
 
+  // coalesce builds while retaining timing and observation identities
   refresh(trigger: DashboardTrigger = 'other'): Promise<T> {
     if (this.refreshInFlight !== undefined) {
       if (this.building !== undefined) this.building.callers.push({ trigger, atMs: msSince(this.building.startedAt) });
@@ -93,7 +104,26 @@ export class DashboardUpdates<T = DashboardPayload> {
     delay.enable();
     const busy = performance.eventLoopUtilization();
     let built: T | undefined;
-    const refresh = this.loader(build).then(value => {
+    // use wall time for durable diagnostic stages
+    const now = this.observation?.now ?? (() => Date.now());
+    const operationId = randomUUID();
+    const startedAt = now();
+    let slow = false;
+    let failed = false;
+    // record only observations exceeding the threshold
+    const slowTimer = this.observation === undefined ? undefined : setTimeout(() => {
+      slow = true;
+      // persist the true operation start only after the slow threshold
+      try { this.observation?.record('observation_started', { operationId, at: startedAt, status: 'pending' }); } catch { /* diagnostics never gate refresh */ }
+    }, this.observation.thresholdMs);
+    slowTimer?.unref?.();
+    // retain the loader failure for the terminal diagnostic stage
+    const loaded = this.loader(build).catch(error => {
+      failed = true;
+      throw error;
+    });
+    // publish the same instrumented build to every waiter
+    const refresh = loaded.then(value => {
       built = value;
       const publishing = performance.now();
       const fingerprint = this.identify(value);
@@ -108,6 +138,12 @@ export class DashboardUpdates<T = DashboardPayload> {
       build.steps.publish = msSince(publishing);
       return value;
     }).finally(() => {
+      // stop a fast observation before it can enter the journal
+      if (slowTimer !== undefined) clearTimeout(slowTimer);
+      // pair only slow observations with one terminal stage
+      if (slow) {
+        try { this.observation?.record('observation_settled', { operationId, at: now(), status: failed ? 'failed' : 'settled' }); } catch { /* diagnostics never gate refresh */ }
+      }
       if (this.refreshInFlight === refresh) this.refreshInFlight = undefined;
       build.ms = msSince(build.startedAt);
       delay.disable();

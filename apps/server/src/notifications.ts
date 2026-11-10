@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isReviewRun, type Agent } from './domain/models.js';
 import type { AttentionState } from './adapters/types.js';
 import type { ConsoleEvents } from './events.js';
+import { agentLogicalTag, createAgentNotificationEvent, type NotificationEvent, type NotificationState } from './notification-events.js';
 
 export type AgentAttentionState = AttentionState;
 export type AgentNotificationContext = {
@@ -9,7 +10,7 @@ export type AgentNotificationContext = {
   worktreeName: string;
   multipleWorktrees: boolean;
 };
-export type AgentNotification = {
+export type AgentNotificationContent = {
   kind: 'question' | 'finished';
   title: string;
   body: string;
@@ -17,6 +18,7 @@ export type AgentNotification = {
   url: string;
   worktreeId?: string;
 };
+export type AgentNotification = NotificationEvent & Pick<AgentNotificationContent, 'title' | 'body'>;
 export type CleanupNotification = {
   kind: 'cleanup';
   title: string;
@@ -56,7 +58,8 @@ export function agentPresentationAttentionState(agent: Pick<Agent, 'attention' |
   return agent.attention === 'finished' && agent.hasMessageQuestion === true ? 'question' : agent.attention;
 }
 
-export const agentNotificationTag = (agent: Pick<Agent, 'id' | 'worktreeId'>) => agent.worktreeId === undefined ? `agent-status-${agent.id}` : `worktree-status-${agent.worktreeId}`;
+// scope coalescing to one Agent even when Agents share a Worktree
+export const agentNotificationTag = (agent: Pick<Agent, 'id'>) => agentLogicalTag(agent.id);
 
 // build one review-ready push payload
 export function reviewNotification(worktreeId: string, projectName: string, worktreeName: string): ReviewNotification {
@@ -100,7 +103,7 @@ export function scheduleNotification(params: {
 }
 
 // build one agent-state push payload
-export function agentNotification(previous: AgentAttentionState | undefined, current: AgentAttentionState, agent: Agent, context?: AgentNotificationContext): AgentNotification | undefined {
+export function agentNotification(previous: AgentAttentionState | undefined, current: AgentAttentionState, agent: Agent, context?: AgentNotificationContext): AgentNotificationContent | undefined {
   if (previous === undefined || previous === current) return undefined;
   const fallbackName = agent.displayLabel ?? agent.home.split('/').filter(Boolean).at(-1) ?? agent.title;
   const projectName = context?.projectName ?? fallbackName;
@@ -126,8 +129,13 @@ export function agentNotification(previous: AgentAttentionState | undefined, cur
 
 export class AgentNotificationCoordinator {
   private readonly states = new Map<string, AgentAttentionState>();
+  private readonly semanticStates = new Map<string, string>();
   private readonly pendingCompletions = new Map<string, { id: string; timer: ReturnType<typeof setTimeout> }>();
   private readonly unread = new Map<string, string>();
+  private readonly events = new Map<string, NotificationEvent>();
+  private readonly revisions = new Map<string, NotificationState>();
+  private readonly eventEpoch = randomUUID();
+  private eventSequence = 0;
 
   constructor(private readonly deliver: NotificationDelivery, private readonly completionDelayMs = 2_000) {}
 
@@ -137,34 +145,58 @@ export class AgentNotificationCoordinator {
     const key = agent.id;
     const current = agentPresentationAttentionState(agent);
     const previous = this.states.get(key);
+    const semantic = current === 'question' ? `question:${agent.question?.id ?? 'message'}` : current;
+    const previousSemantic = this.semanticStates.get(key);
     this.states.set(key, current);
+    this.semanticStates.set(key, semantic);
 
-    // suppress intermediate queue completions
-    if (current === 'finished' && hasQueuedPrompt) {
-      this.cancelCompletion(key);
-      this.unread.delete(key);
+    // seed process-local state without replaying a startup snapshot
+    if (previousSemantic === undefined) {
+      this.advanceRevision(key);
       return;
     }
+    // cancel a completion when queued work appears on an unchanged finished poll
+    if (current === 'finished' && hasQueuedPrompt) {
+      const hadCompletion = this.completionId(agent) !== undefined;
+      this.cancelCompletion(key);
+      this.unread.delete(key);
+      this.events.delete(key);
+      // publish the queue-driven relevance change exactly once
+      if (previousSemantic !== semantic || hadCompletion) this.advanceRevision(key);
+      return;
+    }
+    // ignore unchanged polling snapshots
+    if (previousSemantic === semantic) return;
+    const revision = this.advanceRevision(key);
+    this.events.delete(key);
+
+    // suppress intermediate queue completions
     if (current !== 'finished') {
       this.cancelCompletion(key);
       this.unread.delete(key);
     }
-    const notification = agentNotification(previous, current, agent, context);
+    const notification = agentNotification(previous === current && current === 'question' ? 'working' : previous, current, agent, context);
     if (notification === undefined) return;
     if (notification.kind === 'question') {
-      this.deliverSafely(notification);
+      const event = this.eventFor(agent, notification, agent.question?.id ?? randomUUID(), revision);
+      this.events.set(key, event);
+      this.deliverSafely({ ...notification, ...event });
       return;
     }
 
     this.cancelCompletion(key);
     // identify the turn during grace so an early view can dismiss only this turn
     const id = randomUUID();
+    const event = this.eventFor(agent, notification, id, revision);
+    this.events.set(key, event);
     // promote the same identified turn after its grace period
     const timer = setTimeout(() => {
       this.pendingCompletions.delete(key);
+      // discard a completion superseded during its grace period
       if (this.states.get(key) !== 'finished') return;
       this.unread.set(key, id);
-      if (!quiet) this.deliverSafely(notification);
+      // preserve quiet completion read state without sending an alert
+      if (!quiet) this.deliverSafely({ ...notification, ...event });
     }, this.completionDelayMs);
     this.pendingCompletions.set(key, { id, timer });
   }
@@ -179,12 +211,24 @@ export class AgentNotificationCoordinator {
     return this.unread.get(agent.id) ?? this.pendingCompletions.get(agent.id)?.id;
   }
 
+  // expose the current exact event for authoritative reconciliation
+  notificationEvent(agent: Pick<Agent, 'id'>): NotificationEvent | undefined {
+    return this.events.get(agent.id);
+  }
+
+  // expose freshness even when the current state is not alertable
+  notificationState(agent: Pick<Agent, 'id'>): NotificationState | undefined {
+    return this.revisions.get(agent.id);
+  }
+
   // dismiss only the completed turn the browser actually viewed
   view(agent: Pick<Agent, 'id'>, completionId?: string): void {
     // a stale dismissal must not clear or cancel a newer completed turn
     if (completionId === undefined || this.completionId(agent) !== completionId) return;
     this.unread.delete(agent.id);
     this.cancelCompletion(agent.id);
+    this.events.delete(agent.id);
+    this.advanceRevision(agent.id);
   }
 
   // retire removed agents without transferring their state to replacements
@@ -195,7 +239,10 @@ export class AgentNotificationCoordinator {
       if (retained.has(key)) continue;
       this.cancelCompletion(key);
       this.states.delete(key);
+      this.semanticStates.delete(key);
       this.unread.delete(key);
+      this.events.delete(key);
+      this.revisions.delete(key);
     }
   }
 
@@ -205,6 +252,7 @@ export class AgentNotificationCoordinator {
     for (const pending of this.pendingCompletions.values()) clearTimeout(pending.timer);
     this.pendingCompletions.clear();
     this.unread.clear();
+    this.events.clear();
   }
 
   // cancel only the identified pending turn for this agent
@@ -216,6 +264,29 @@ export class AgentNotificationCoordinator {
     this.pendingCompletions.delete(agentId);
   }
 
+  // allocate one comparable revision within this process epoch
+  private advanceRevision(agentId: string): NotificationState {
+    this.eventSequence += 1;
+    const revision = { eventEpoch: this.eventEpoch, eventSequence: this.eventSequence };
+    this.revisions.set(agentId, revision);
+    return revision;
+  }
+
+  // bind visible content to one stable event identity and revision
+  private eventFor(agent: Agent, notification: AgentNotificationContent, eventId: string, revision: NotificationState): NotificationEvent {
+    return createAgentNotificationEvent({
+      agentId: agent.id,
+      eventId,
+      eventEpoch: revision.eventEpoch,
+      eventSequence: revision.eventSequence,
+      generatedAt: Date.now(),
+      kind: notification.kind,
+      url: notification.url,
+      ...(notification.worktreeId === undefined ? {} : { worktreeId: notification.worktreeId })
+    });
+  }
+
+  // isolate delivery failures from observation state
   private deliverSafely(notification: AgentNotification): void {
     void Promise.resolve(this.deliver(notification)).catch(() => {});
   }

@@ -54,6 +54,7 @@ import { useLineAsks } from './ask-thread.js';
 import { VoiceDialog, type VoiceWorktree } from './voice/voice-dialog.js';
 import { AdaptersContext, AgentLaunchSettingsContext, AgentAccountsMenuContext, LaunchOptionsContext, agentKindGlyph, agentKindLabel, agentKinds, configuredKinds, defaultSandboxed, LaunchMenu, LaunchSplitButton, LaunchTabBadge, launchRequestInit, originCopy, resolvedLaunchChoice, sandboxCopy, type AdapterCapabilities, type AgentKind, type AgentUpdateStatus, type LaunchMenuEntry, type LaunchResolution, type LaunchChoice } from './launch-profile.js';
 import type { LaunchSelectionTarget } from '../../server/src/launch/options-types.js';
+import type { NotificationEvent, NotificationState } from '../../server/src/notification-events.js';
 import { ScheduleEditor, defaultScheduleCron, lastRunNeedsAttention, scheduleInvalid, type Schedule, type ScheduleAdapterOption, type ScheduleSetBody, type ScheduleTarget, type ScheduleTargetOption } from './schedule-editor.js';
 import { useBrowserPermissionBroker } from './browser-permissions.js';
 import { FilesPanel } from './files-panel/files-panel.js';
@@ -75,6 +76,10 @@ import { normalizeGithubRepository, type GithubNewWorktreeContext } from './gith
 import { CodeLoading } from './code-panel/loading.js';
 import { ModelChip, type AgentModel } from './model-picker.js';
 import { WatchesButton, type WatchSummary } from './watches-button.js';
+import { commitAgentUpdateFingerprint, commitRacUpdateFingerprint, reserveAgentUpdateFingerprint, reserveRacUpdateFingerprint, releaseUpdateFingerprint, clearAgentUpdateFingerprint, clearRacUpdateFingerprint } from './notification-fingerprints.js';
+import { captureNotificationInventory, closeNotificationEvent, displayNotificationEvent, disposeNotificationCoordinator, isBrowserNotificationEvent, listenForWorkerNotificationDisplays, reconcileNotificationSnapshot, type CapturedNotificationInventory } from './notification-coordinator.js';
+import { flushNotificationJournal, recordNotificationJournal } from './notification-journal.js';
+import { PushSubscriptionLifecycle, type PushEnrollmentHealth } from './push-subscription-lifecycle.js';
 import './styles.css';
 
 // preserve both middle-click and context-menu presses
@@ -186,7 +191,7 @@ function CleanupSkeletons() {
 // `worktreeLabel`/`worktreeOrder` are no longer on the wire (the server carries them on the
 // Worktree); they remain as optional read-only fallbacks the tab bar consults when an Agent's
 // Worktree is not present in the payload, absent from the real server.
-type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
+type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
 type Worktree = { id: string; projectId: string; label: string; customLabel?: boolean; path: string; main: boolean; detached: boolean; locked: boolean; branch?: string; sha?: string; consoleShells?: number; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; available: boolean; pinned: boolean; order: number; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; stack?: Stack; launch?: LaunchResolution };
 // `mode: 'directory'` marks a non-git Project the console launches in place (like Scratch);
 // `launch` is its resolved Launch profile for the Project-level Launch button. A git
@@ -800,6 +805,30 @@ const request = async (url: string, init: RequestInit = {}, observeReachability 
     });
   }
 };
+// refresh signed session and csrf without taking console control
+const refreshNotificationAuthentication = async (signal: AbortSignal): Promise<boolean> => {
+  const response = await request('/api/auth/session', { cache: 'no-store', signal }, false);
+  // stop a superseded refresh before reading its body
+  if (signal.aborted) return false;
+  // wait for a later authenticated lifecycle edge after rejection
+  if (!response.ok) return false;
+  const session = await response.json().catch(() => undefined) as { csrfToken?: unknown } | undefined;
+  // stop a superseded refresh before mutating csrf
+  if (signal.aborted) return false;
+  // reject malformed session refreshes
+  if (typeof session?.csrfToken !== 'string') return false;
+  csrf = session.csrfToken;
+  return true;
+};
+const pushSubscriptionLifecycle = new PushSubscriptionLifecycle({
+  request,
+  refreshAuthentication: refreshNotificationAuthentication,
+  // journal and flush without blocking lifecycle repair
+  onResume: () => {
+    void recordNotificationJournal('page_resumed');
+    void flushNotificationJournal(request);
+  }
+});
 // keep background monitor failures from declaring the whole console unavailable
 const monitorRequest = (url: string, init?: RequestInit) => request(url, init, false);
 // preserve explicit json framing for otherwise bodyless mutations
@@ -952,18 +981,74 @@ const playNotificationSound = async (kind: 'question' | 'finished' | 'system', t
   }
 };
 
+const notificationDisplayTimeoutMs = 5_000;
+// read the current sound preference at each delivery boundary
+const notificationSoundsEnabled = (): boolean => readNotificationSounds();
+// bound one display operation without claiming an unknown outcome
+const boundedNotificationDisplay = async (display: Promise<boolean>): Promise<boolean> => await new Promise(resolve => {
+  let settled = false;
+  // settle once and release the display timer
+  const finish = (displayed: boolean) => {
+    // ignore a late display result
+    if (settled) return;
+    settled = true;
+    window.clearTimeout(timer);
+    resolve(displayed);
+  };
+  const timer = window.setTimeout(() => finish(false), notificationDisplayTimeoutMs);
+  void display.then(finish, () => finish(false));
+});
+// find the active notification registration within a finite wait
+const currentNotificationRegistration = async (): Promise<ServiceWorkerRegistration | undefined> => {
+  const serviceWorkers = navigator.serviceWorker;
+  let lookup: Promise<ServiceWorkerRegistration | undefined>;
+  try {
+    lookup = typeof serviceWorkers.getRegistration === 'function' ? serviceWorkers.getRegistration() : serviceWorkers.ready;
+  } catch {
+    return undefined;
+  }
+  return await new Promise(resolve => {
+    let settled = false;
+    // settle once and release the lookup timer
+    const finish = (registration: ServiceWorkerRegistration | undefined) => {
+      // ignore a late registration result
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      resolve(registration);
+    };
+    const timer = window.setTimeout(() => finish(undefined), 1_500);
+    void lookup.then(finish, () => finish(undefined));
+  });
+};
 // show alerts with durable worktree metadata
-const showNotification = async (kind: 'question' | 'finished' | 'system', title: string, body: string, tag: string, url = '/', worktreeId?: string) => {
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const sounds = readNotificationSounds();
+const showNotification = async (kind: 'question' | 'finished' | 'system', title: string, body: string, tag: string, url = '/', worktreeId?: string, notificationEvent?: NotificationEvent): Promise<boolean> => {
+  // stop before any notification or sound work without permission
+  if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+  const sounds = notificationSoundsEnabled();
+  // route strict agent events through the active worker arbiter
+  if (notificationEvent !== undefined && isBrowserNotificationEvent(notificationEvent)) {
+    return await boundedNotificationDisplay(displayNotificationEvent({ event: notificationEvent, title, body, soundRequested: sounds && kind !== 'system', soundStillRequested: () => notificationSoundsEnabled(), playCustomSound: () => playNotificationSound(kind, `${notificationEvent.entityId}:${notificationEvent.eventEpoch}:${notificationEvent.eventSequence}`) }));
+  }
   const customSoundPlayed = sounds && await playNotificationSound(kind, tag);
   const options = { body, tag, icon: '/favicon.svg', badge: '/notification-badge.png', requireInteraction: kind === 'question', silent: !sounds || customSoundPlayed, data: { url, kind, worktreeId } };
+  // preserve legacy registration display behavior
   if ('serviceWorker' in navigator) {
-    const registration = await navigator.serviceWorker.ready;
-    await registration.showNotification(title, options);
-    return;
+    const registration = await currentNotificationRegistration();
+    // report a missing or stalled registration as not displayed
+    if (registration === undefined) return false;
+    try {
+      return await boundedNotificationDisplay(registration.showNotification(title, options).then(() => true));
+    } catch {
+      return false;
+    }
   }
-  new Notification(title, options);
+  try {
+    new Notification(title, options);
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const dismissNotification = async (tag: string) => {
@@ -975,10 +1060,12 @@ const dismissNotification = async (tag: string) => {
 };
 
 // bind server acknowledgement to the completed turn visible in this snapshot
-const dismissAgentNotifications = (agent: Pick<Agent, 'id' | 'worktreeId' | 'completionId'>) => {
+const dismissAgentNotifications = (agent: Pick<Agent, 'id' | 'worktreeId' | 'completionId' | 'notificationEvent' | 'attention'>) => {
   const tags = new Set([agentNotificationTag(agent), `agent-status-${agent.id}`]);
-  // close the local notifications associated with this agent
+  // close only legacy local notifications directly
   for (const tag of tags) void dismissNotification(tag);
+  // serialize strict exact closure through the worker
+  if (agent.notificationEvent !== undefined) void closeNotificationEvent(agent.notificationEvent, agent.attention !== 'question');
   void request(`/api/agents/${encodeURIComponent(agent.id)}/notifications/dismiss`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ completionId: agent.completionId }) });
 };
 
@@ -1114,24 +1201,28 @@ const isServerUpdateAvailability = (value: unknown): value is ServerUpdateAvaila
     && (commitCount === undefined || Number.isSafeInteger(commitCount) && commitCount >= 0)
     && (targetSha === undefined || /^[0-9a-f]{40}$/u.test(targetSha));
 };
-const announcedAgentUpdates = new Map<AgentKind, string>();
 // announce each newly discovered agent version once
-const announceAgentUpdates = (statuses: AgentUpdateStatus[]) => {
+const announceAgentUpdates = (statuses: AgentUpdateStatus[], scope: string) => {
   // inspect every configured updater
   for (const status of statuses) {
     const current = status.currentVersion;
     const latest = status.latestVersion;
     // clear obsolete notifications and fingerprints
     if (!status.updateAvailable || current === undefined || latest === undefined) {
-      announcedAgentUpdates.delete(status.kind);
+      clearAgentUpdateFingerprint(scope, status.kind, agentKinds);
       void dismissNotification(`agent-update-${status.kind}`);
       continue;
     }
     const fingerprint = `${current}->${latest}`;
-    // suppress repeat polling alerts
-    if (announcedAgentUpdates.get(status.kind) === fingerprint) continue;
-    announcedAgentUpdates.set(status.kind, fingerprint);
-    void showNotification('system', `${agentKindLabel[status.kind]} update available`, status.pinned === true ? `${current} -> ${latest}: Pi is bundled in RAC; submit a local pin-update prompt from the launcher` : `${current} -> ${latest}`, `agent-update-${status.kind}`, '/#launch');
+    const reservation = reserveAgentUpdateFingerprint(scope, status.kind, fingerprint, agentKinds);
+    // suppress durable and concurrently pending targets
+    if (reservation === undefined) continue;
+    void (async () => {
+      const displayed = await showNotification('system', `${agentKindLabel[status.kind]} update available`, status.pinned === true ? `${current} -> ${latest}: Pi is bundled in RAC; submit a local pin-update prompt from the launcher` : `${current} -> ${latest}`, `agent-update-${status.kind}`, '/#launch').catch(() => false);
+      // commit only a confirmed still-current display
+      if (displayed) commitAgentUpdateFingerprint(scope, status.kind, reservation, agentKinds);
+      else releaseUpdateFingerprint(reservation);
+    })();
   }
 };
 // validate one bounded upstream commit
@@ -9089,24 +9180,35 @@ function WorkspaceDropdown({ items, current, onSelect, onNewWorkspace, onRenameW
 function NotificationControl() {
   const supported = 'Notification' in window;
   const [permission, setPermission] = useState<NotificationPermission | undefined>(() => supported ? Notification.permission : undefined);
-  const [publicKey, setPublicKey] = useState<string>();
-  useEffect(() => { void request('/api/push/public-key').then(response => response.ok ? response.json() : undefined).then((value: { publicKey?: unknown } | undefined) => typeof value?.publicKey === 'string' && setPublicKey(value.publicKey)); }, []);
-  const syncSubscription = async () => {
-    if (!publicKey || !('serviceWorker' in navigator)) return;
-    const registration = await navigator.serviceWorker.ready;
-    const key = Uint8Array.from(atob(publicKey.replace(/-/g, '+').replace(/_/g, '/')), character => character.charCodeAt(0));
-    const subscription = await registration.pushManager.getSubscription() ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-    await request('/api/push/subscriptions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(subscription) });
-  };
-  useEffect(() => { if (permission === 'granted') void syncSubscription(); }, [permission, publicKey]);
+  const [health, setHealth] = useState<PushEnrollmentHealth>(() => pushSubscriptionLifecycle.getHealth());
+  useEffect(() => {
+    const unsubscribe = pushSubscriptionLifecycle.onHealthChange(next => {
+      setHealth(next);
+      // reflect permission changes discovered on lifecycle resume
+      if ('Notification' in window) setPermission(Notification.permission);
+    });
+    pushSubscriptionLifecycle.start();
+    // flush retained receipts after authenticated mount
+    void flushNotificationJournal(request);
+    return () => { unsubscribe(); pushSubscriptionLifecycle.stop(); };
+  }, []);
   const enable = async () => {
-    if (!supported || permission !== 'default' || !publicKey || !('serviceWorker' in navigator)) return;
-    const next = await Notification.requestPermission();
+    // request permission only from the explicit control
+    if (!supported || permission !== 'default') return;
+    const next = await pushSubscriptionLifecycle.enable();
+    // ignore unsupported permission surfaces
+    if (next === undefined) return;
     setPermission(next);
-    if (next === 'granted') { await syncSubscription(); await showNotification('system', 'Alerts enabled', 'You will be notified when agents need attention and reviews or updates are ready.', 'rac-alerts-enabled'); }
+    // preserve the existing enable confirmation
+    if (next === 'granted' && pushSubscriptionLifecycle.getHealth() === 'healthy') await showNotification('system', 'Alerts enabled', 'You will be notified when agents need attention and reviews or updates are ready.', 'rac-alerts-enabled');
   };
-  if (!supported || !publicKey || permission === 'granted') return null;
-  if (permission === 'denied') return <span className="notification-status" title="Enable notifications for this site in your browser settings">Alerts blocked</span>;
+  // hide unsupported and checked healthy enrollment
+  if (!supported || health === 'unsupported' || permission === 'granted' && health === 'healthy') return null;
+  if (permission === 'denied' || health === 'blocked') return <span className="notification-status" title="Enable notifications for this site in your browser settings">Alerts blocked</span>;
+  // show bounded recovery without adding another surface
+  if (permission === 'granted' && (health === 'idle' || health === 'syncing' || health === 'retrying')) return <span className="notification-status" role="status">Restoring alerts…</span>;
+  // keep permanent and provider health visible for later lifecycle recovery
+  if (permission === 'granted' && health === 'attention') return <span className="notification-status" role="status">Alerts need attention</span>;
   return <button className="notification-control" type="button" onClick={() => void enable()}>Enable alerts</button>;
 }
 
@@ -9870,12 +9972,14 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     if (cleanupOpen) cleanupDialogRef.current?.focus({ preventScroll: true });
   }, [cleanupOpen]);
   const refreshInFlight = useRef(false);
+  const notificationRefreshQueued = useRef(false);
   const dashboardPushFreshUntil = useRef(0);
   const dashboardPushSynchronized = useRef(false);
   const dashboardContent = useRef('');
   const dashboardSnapshot = useRef<Dashboard | undefined>(undefined);
   const latestDashboardServerStartedAt = useRef<number | undefined>(undefined);
   const latestDashboardGeneration = useRef<number | undefined>(undefined);
+  const notificationSnapshotRevision = useRef(0);
   const selectedItemKey = useRef<string | undefined>(undefined);
   // the Agent each Place tab's switcher shows, by tab key; a tab with no choice (or whose chosen
   // Agent is gone) shows its first Agent
@@ -9893,7 +9997,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     setOperationFeedback({ ...feedback, id: operationFeedbackId.current, expires: feedback.tone === 'success' ? Date.now() + toastDurationMs : feedback.tone === 'error' ? feedback.expires : undefined });
   }, []);
   // remember the completion before clearing its optimistic highlight
-  const viewAgent = useCallback((agent: Pick<Agent, 'id' | 'worktreeId' | 'completionId'>) => {
+  const viewAgent = useCallback((agent: Pick<Agent, 'id' | 'worktreeId' | 'completionId' | 'notificationEvent' | 'attention'>) => {
     const latest = dashboardSnapshot.current?.agents.find(candidate => candidate.id === agent.id);
     // ignore callbacks rendered for an older completed turn or removed agent
     if (latest === undefined || latest.completionId !== agent.completionId) return;
@@ -9940,19 +10044,19 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     }
     pendingSessionLaunchesRef.current = [];
   }, []);
-  const applyDashboard = useCallback((payload: Dashboard) => {
+  const applyDashboard = useCallback((payload: Dashboard, inventory?: CapturedNotificationInventory): boolean => {
     const latestServerStartedAt = latestDashboardServerStartedAt.current;
     // reject snapshots from an older server process
-    if (payload.serverStartedAt !== undefined && latestServerStartedAt !== undefined && payload.serverStartedAt < latestServerStartedAt) return;
+    if (payload.serverStartedAt !== undefined && latestServerStartedAt !== undefined && payload.serverStartedAt < latestServerStartedAt) return false;
     // reject legacy snapshots after a scoped server snapshot arrives
-    if (payload.serverStartedAt === undefined && latestServerStartedAt !== undefined) return;
+    if (payload.serverStartedAt === undefined && latestServerStartedAt !== undefined) return false;
     // reset generation ordering across server processes
     if (payload.serverStartedAt !== undefined && payload.serverStartedAt !== latestServerStartedAt) {
       latestDashboardServerStartedAt.current = payload.serverStartedAt;
       latestDashboardGeneration.current = undefined;
     }
     // reject stale HTTP snapshots that finish after newer pushes
-    if (payload.generation !== undefined && latestDashboardGeneration.current !== undefined && payload.generation < latestDashboardGeneration.current) return;
+    if (payload.generation !== undefined && latestDashboardGeneration.current !== undefined && payload.generation < latestDashboardGeneration.current) return false;
     // retain the newest ordered snapshot boundary, and surface it reactively for the notes refetch
     if (payload.generation !== undefined) { latestDashboardGeneration.current = payload.generation; setDashboardGeneration(payload.generation); }
     const retainedWorktrees: Worktree[] = [];
@@ -9976,6 +10080,10 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const agents = payload.agents.map(agent => agent.completionId !== undefined && viewedCompletions.current.get(agent.id) === agent.completionId ? { ...agent, unread: false } : agent);
     const nextPayload = { ...payload, agents, ...(retainedWorktrees.length === 0 ? {} : { projects: mergeRetainedWorktrees(payload.projects, retainedWorktrees) }) };
     dashboardSnapshot.current = nextPayload;
+    notificationSnapshotRevision.current += 1;
+    const notificationSnapshotToken = `${nextPayload.serverStartedAt ?? 'legacy'}:${nextPayload.generation ?? 'unordered'}:${notificationSnapshotRevision.current}`;
+    // reconcile only after this ordered snapshot is accepted
+    void reconcileNotificationSnapshot(nextPayload.agents, notificationSnapshotToken, inventory);
     const activeAgentIds = new Set(nextPayload.agents.map(agent => agent.id));
     // bound viewed completion identities to agents still in the dashboard
     for (const id of viewedCompletions.current.keys()) {
@@ -10059,22 +10167,41 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       setData(nextPayload);
     }
     setUnavailable(false);
+    return true;
   }, [showOperationFeedback, updatePendingSessionLaunches]);
-  const refresh = useCallback(async () => {
+  const refresh: () => Promise<void> = useCallback(async () => {
     if (refreshInFlight.current) return;
     refreshInFlight.current = true;
+    notificationRefreshQueued.current = false;
     try {
+      // capture tray identities before obtaining their authoritative relevance snapshot
+      const inventory = await captureNotificationInventory();
+      // stop an old dashboard from publishing after disposal
+      if (!dashboardMounted.current) return;
       const response = await request('/api/dashboard', { signal: AbortSignal.timeout(8_000) });
       if (response.status === 401) return onUnauthorized();
       if (response.status === 423) return onInactive();
       if (!response.ok) throw new Error('dashboard unavailable');
       const payload: unknown = await response.json();
       if (!isDashboard(payload)) throw new Error('invalid dashboard response');
-      applyDashboard(payload);
-      if (dashboardPushSynchronized.current) dashboardPushFreshUntil.current = Date.now() + 60_000;
+      if (!dashboardMounted.current) return;
+      const accepted = applyDashboard(payload, inventory);
+      // recapture only identities that lost their authority snapshot
+      if (!accepted && inventory !== undefined && inventory.entries.length > 0) notificationRefreshQueued.current = true;
+      // extend freshness only from an accepted authoritative response
+      if (accepted && dashboardPushSynchronized.current) dashboardPushFreshUntil.current = Date.now() + 60_000;
     } catch { setUnavailable(true); }
-    finally { refreshInFlight.current = false; }
+    finally {
+      refreshInFlight.current = false;
+      // a push received during this request needs its own post-inventory snapshot
+      if (notificationRefreshQueued.current && dashboardMounted.current) void refresh();
+    }
   }, [applyDashboard, onInactive, onUnauthorized]);
+  useEffect(() => listenForWorkerNotificationDisplays(() => {
+    notificationRefreshQueued.current = true;
+    void refresh();
+  }), [refresh]);
+  useEffect(() => () => disposeNotificationCoordinator(), []);
   useEffect(() => {
     if (data === undefined) return;
     // a review lives as long as its Worktree, whatever Agents come and go there
@@ -10264,7 +10391,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     for (const agent of data.agents) {
       const state = agentState(agent);
       const previous = agentStates.current.get(agent.id);
-      const tag = agentNotificationTag(agent);
+      const notificationEvent = isBrowserNotificationEvent(agent.notificationEvent) ? agent.notificationEvent : undefined;
+      const tag = notificationEvent?.tag ?? agentNotificationTag(agent);
       const names = agentNotificationNames(agent, data.projects);
       const focused = viewedAgentId.current === agent.id && pageFocused();
       const hasQueuedPrompt = agent.queuedPromptCount > 0;
@@ -10280,7 +10408,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
           ? `${names.worktreeName}: has a question`
           : `${names.multipleWorktrees ? `${names.worktreeName}: ` : ''}${agent.question.text}`;
         if (focused) dismissAgentNotifications(agent);
-        else void showNotification('question', `Question in ${names.projectName}`, body, tag, `/#agent=${encodeURIComponent(agent.id)}`, agent.worktreeId);
+        else void showNotification('question', `Question in ${names.projectName}`, body, tag, `/#agent=${encodeURIComponent(agent.id)}`, agent.worktreeId, notificationEvent);
       }
       if (previous === 'working' && state === 'prompt-done' && !hasQueuedPrompt) {
         const delay = 2_000;
@@ -10289,7 +10417,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       } else if (state === 'prompt-done' && !hasQueuedPrompt && pendingCompletion !== undefined && Date.now() >= pendingCompletion.due) {
         window.clearTimeout(pendingCompletion.timer);
         pendingCompletions.current.delete(agent.id);
-        void showNotification('finished', `Done working in ${names.projectName}`, `${names.worktreeName} is ready for a new prompt`, tag, `/#agent=${encodeURIComponent(agent.id)}`, agent.worktreeId);
+        void showNotification('finished', `Done working in ${names.projectName}`, `${names.worktreeName} is ready for a new prompt`, tag, `/#agent=${encodeURIComponent(agent.id)}`, agent.worktreeId, notificationEvent);
       }
       // clear question notifications on every resolved presentation transition
       if (previous === 'action-required' && state !== 'action-required') void dismissNotification(tag);
@@ -11498,10 +11626,10 @@ function App() {
   const [versionCheckError, setVersionCheckError] = useState('');
   // reuse the serialized polling owner for manual retries
   const refreshAgentVersions = useRef<(() => void) | undefined>(undefined);
-  const announcedServerUpdateTarget = useRef<string | undefined>(undefined);
   const [reconnecting, setReconnecting] = useState(!consoleReachable);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const colorTheme = useColorTheme();
+  const notificationFingerprintScope = `${location.origin}|${serverInfo.url}`;
   // the controlling browser's theme colours the console's tmux panes; post it on gaining control,
   // on every toggle, and on each session refresh, so a restarted server (back on Mocha) relearns it
   useEffect(() => {
@@ -11647,7 +11775,7 @@ function App() {
           else {
             setAgentUpdateStatuses(result.agents);
             setVersionCheckError('');
-            announceAgentUpdates(result.agents);
+            announceAgentUpdates(result.agents, notificationFingerprintScope);
           }
         }
         // no queued intent remains to consume this request slot
@@ -11675,7 +11803,7 @@ function App() {
       window.clearInterval(interval);
       setAgentVersionsLoading(false);
     };
-  }, [agentUpdates, state]);
+  }, [agentUpdates, notificationFingerprintScope, state]);
   // update one agent and retain its version on failure
   const runAgentUpdate = useCallback(async (kind: AgentKind) => {
     // ignore concurrent installers
@@ -11690,10 +11818,10 @@ function App() {
     setAgentUpdateStatuses(current => [...current.filter(status => status.kind !== kind), updated]);
     // clear the completed update notification
     if (!updated.updateAvailable) {
-      announcedAgentUpdates.delete(kind);
+      clearAgentUpdateFingerprint(notificationFingerprintScope, kind, agentKinds);
       void dismissNotification(`agent-update-${kind}`);
     }
-  }, [updateAgent, updatingAgent]);
+  }, [notificationFingerprintScope, updateAgent, updatingAgent]);
   // refresh applied voice state only after the shared file transaction commits
   const refreshDavo = useCallback(async () => {
     try {
@@ -12018,22 +12146,25 @@ function App() {
       if (payload.available) setServerUpdateAvailable(true);
       // notify only for commits missing from local main
       if (!payload.available || payload.commitCount === undefined || payload.commitCount === 0) {
-        announcedServerUpdateTarget.current = undefined;
+        clearRacUpdateFingerprint(notificationFingerprintScope, agentKinds);
         void dismissNotification('rac-update');
         return;
       }
       const target = payload.targetSha ?? `count:${payload.commitCount}`;
-      // suppress repeat polling alerts
-      if (announcedServerUpdateTarget.current === target) return;
-      announcedServerUpdateTarget.current = target;
-      void showNotification('system', 'Remote Agent Console update available', `${payload.commitCount} ${payload.commitCount === 1 ? 'commit' : 'commits'} upstream`, 'rac-update', '/#server-update');
+      const reservation = reserveRacUpdateFingerprint(notificationFingerprintScope, target, agentKinds);
+      // suppress durable and concurrently pending targets
+      if (reservation === undefined) return;
+      const displayed = await showNotification('system', 'Remote Agent Console update available', `${payload.commitCount} ${payload.commitCount === 1 ? 'commit' : 'commits'} upstream`, 'rac-update', '/#server-update').catch(() => false);
+      // commit only a confirmed still-current display
+      if (displayed) commitRacUpdateFingerprint(notificationFingerprintScope, reservation, agentKinds);
+      else releaseUpdateFingerprint(reservation);
     };
     const stopPolling = pollWhileVisible(checkForServerUpdate, 300_000, true, 1_800_000);
     return () => {
       closed = true;
       stopPolling();
     };
-  }, [reconnectAttempt, state]);
+  }, [notificationFingerprintScope, reconnectAttempt, state]);
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -12079,7 +12210,8 @@ function App() {
   const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, loading: agentVersionsLoading, updating: updatingAgent, errors: Array.from(new Set([versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), retryVersions: versionCheckError ? () => { /* retry through the existing request owner */ refreshAgentVersions.current?.(); } : undefined, updateAgent: dispatchAgentUpdate }), [agentUpdateStatuses, agentVersionsLoading, updatingAgent, versionCheckError, dispatchAgentUpdate]);
   return <SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents />{piUpdateTarget !== undefined && <PiUpdateDialog target={piUpdateTarget} request={request} onClose={closePiUpdate} onSubmitted={submittedPiUpdate} />}<ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
 }
-if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js');
+// register without surfacing legacy or private-mode failures as unhandled rejections
+if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => undefined);
 // Reflect the stored flavour before the first render, now that the stylesheet is
 // registered so `--base` resolves for the browser-chrome colour. A future ticket
 // moves this ahead of first paint with an inline head script.

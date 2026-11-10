@@ -32,7 +32,7 @@ describe('agent notifications', () => {
       kind: 'question',
       title: 'Question in Remote Agents',
       body: 'Eric: Deploy now?',
-      tag: 'worktree-status-eric',
+      tag: 'agent-status-socket:%1',
       url: '/#agent=socket%3A%251',
       worktreeId: 'eric'
     });
@@ -40,7 +40,7 @@ describe('agent notifications', () => {
       kind: 'finished',
       title: 'Done working in Remote Agents',
       body: 'Eric is ready for a new prompt',
-      tag: 'worktree-status-eric',
+      tag: 'agent-status-socket:%1',
       url: '/#agent=socket%3A%251',
       worktreeId: 'eric'
     });
@@ -153,6 +153,29 @@ describe('agent notifications', () => {
     coordinator.stop();
   });
 
+  // cancel grace when queued work appears on an unchanged finished snapshot
+  it('suppresses a pending completion when a prompt becomes queued during grace', async () => {
+    vi.useFakeTimers();
+    const delivered: AgentNotification[] = [];
+    const coordinator = new AgentNotificationCoordinator(notification => delivered.push(notification), 2_000);
+
+    coordinator.observe(agent({ title: '⠋ Working' }));
+    coordinator.observe(agent());
+    const pending = coordinator.notificationEvent(agent());
+    expect(pending).toBeDefined();
+    coordinator.observe(agent(), true);
+    const queuedState = coordinator.notificationState(agent());
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(delivered).toEqual([]);
+    expect(coordinator.completionId(agent())).toBeUndefined();
+    expect(coordinator.notificationEvent(agent())).toBeUndefined();
+    expect(queuedState!.eventSequence).toBeGreaterThan(pending!.eventSequence);
+    coordinator.observe(agent(), true);
+    expect(coordinator.notificationState(agent())).toEqual(queuedState);
+    coordinator.stop();
+  });
+
   // publish one stable identity per completed turn and dismiss only its agent
   it('delivers completion after the agent remains finished', async () => {
     vi.useFakeTimers();
@@ -186,6 +209,64 @@ describe('agent notifications', () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(coordinator.completionId(agent())).toEqual(expect.any(String));
     expect(coordinator.completionId(agent())).not.toBe(completionId);
+    coordinator.stop();
+  });
+
+  // carry one exact completion event from grace through provider delivery
+  it('keeps completion identity and freshness stable through grace and read', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    const delivered: AgentNotification[] = [];
+    const coordinator = new AgentNotificationCoordinator(notification => delivered.push(notification), 2_000);
+
+    coordinator.observe(agent({ title: '⠋ Working' }));
+    const workingState = coordinator.notificationState(agent());
+    coordinator.observe(agent());
+    const pendingId = coordinator.completionId(agent());
+    const pendingEvent = coordinator.notificationEvent(agent());
+    expect(pendingEvent).toMatchObject({
+      schemaVersion: 1,
+      eventId: pendingId,
+      eventEpoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+      eventSequence: expect.any(Number),
+      entityId: 'agent:socket:%1',
+      generatedAt: 1_700_000_000_000,
+      kind: 'finished',
+      agentId: 'socket:%1',
+      tag: 'agent-status-socket:%1',
+      displayTag: 'rac-v1-agent-status-socket:%1',
+      url: '/#agent=socket%3A%251',
+      worktreeId: 'eric'
+    });
+    expect(pendingEvent?.eventSequence).toBeGreaterThan(workingState!.eventSequence);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(delivered).toEqual([{ title: 'Done working in Eric', body: 'Eric is ready for a new prompt', ...pendingEvent }]);
+    expect(coordinator.notificationEvent(agent())).toEqual(pendingEvent);
+    coordinator.view(agent(), pendingId);
+    expect(coordinator.notificationEvent(agent())).toBeUndefined();
+    expect(coordinator.notificationState(agent())?.eventSequence).toBeGreaterThan(pendingEvent!.eventSequence);
+    coordinator.stop();
+  });
+
+  // retain a live question id and separate Agents sharing one Worktree
+  it('keeps question identity stable and scopes tags by Agent', () => {
+    const delivered: AgentNotification[] = [];
+    const coordinator = new AgentNotificationCoordinator(notification => delivered.push(notification));
+    const first = agent({ id: 'agent-one', question: { id: 'question-one', text: 'First?', choices: ['Yes'], source: 'structured', pane: { targetPaneId: '%2' } } });
+    const second = agent({ id: 'agent-two', question: { id: 'question-two', text: 'Second?', choices: ['Yes'], source: 'structured', pane: { targetPaneId: '%3' } } });
+
+    coordinator.observe({ ...first, question: undefined, attention: 'working' });
+    coordinator.observe({ ...second, question: undefined, attention: 'working' });
+    coordinator.observe(first);
+    coordinator.observe(first);
+    coordinator.observe(second);
+
+    expect(delivered).toHaveLength(2);
+    expect(delivered.map(notification => notification.eventId)).toEqual(['question-one', 'question-two']);
+    expect(delivered.map(notification => notification.tag)).toEqual(['agent-status-agent-one', 'agent-status-agent-two']);
+    expect(delivered.map(notification => notification.displayTag)).toEqual(['rac-v1-agent-status-agent-one', 'rac-v1-agent-status-agent-two']);
+    expect(delivered.map(notification => notification.worktreeId)).toEqual(['eric', 'eric']);
     coordinator.stop();
   });
 

@@ -19,6 +19,7 @@ afterEach(async () => {
   for (const app of apps.splice(0)) await app.close();
   // remove only private fixture directories
   for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
@@ -83,5 +84,59 @@ describe('managed push identity API', () => {
     expect(recovered.statusCode).toBe(200);
     expect(recovered.json()).toEqual({ publicKey: restored.publicKey });
     expect(recovered.body).not.toContain(restored.privateKey);
+  }, 15_000);
+
+  // return exact content-free repair advice for provider-settled credential failures
+  it.each([
+    [410, 'push_subscription_expired'],
+    [403, 'push_provider_auth_rejected']
+  ] as const)('returns typed advice after provider status %i', async (statusCode, error) => {
+    const { app, directory, headers, push } = await fixture();
+    const registration = { endpoint: `https://push.example.test/provider-${statusCode}`, expirationTime: 1_800_000_000_000, keys: { auth: `auth-${statusCode}`, p256dh: `key-${statusCode}` } };
+    expect((await app.inject({ method: 'POST', url: '/api/push/subscriptions', headers, payload: registration })).statusCode).toBe(204);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(webpush, 'sendNotification').mockRejectedValueOnce(Object.assign(new Error('provider body sentinel'), { statusCode }));
+
+    await push.notify({ kind: 'finished', title: 'Done', body: 'Ready', tag: 'agent-status-provider', url: '/' });
+    const advice = await app.inject({ method: 'POST', url: '/api/push/subscriptions', headers, payload: registration });
+
+    expect(advice.statusCode).toBe(409);
+    expect(advice.json()).toEqual({ error });
+    expect(advice.body).not.toContain(registration.endpoint);
+    expect(advice.body).not.toContain(registration.keys.auth);
+    const stored = JSON.parse(await readFile(join(directory, 'push-subscriptions.json'), 'utf8')) as Record<string, unknown>;
+    expect(statusCode === 410 ? stored : stored[registration.endpoint]).toEqual(statusCode === 410 ? {} : registration);
+    expect(JSON.stringify(warning.mock.calls)).not.toContain('provider body sentinel');
+  }, 15_000);
+
+  // accept inactive authenticated receipts while enforcing Origin, CSRF, size, and schema
+  it('ingests bounded receipts for an inactive signed session', async () => {
+    const { app, headers, push } = await fixture();
+    const bootstrap = await app.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
+    const inactiveLogin = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': bootstrap.json().csrfToken }, payload: { password: 'synthetic-password' } });
+    expect(inactiveLogin.json().active).toBe(false);
+    const inactiveHeaders = { ...headers, cookie: String(inactiveLogin.headers['set-cookie']).split(';')[0]!, 'x-csrf-token': inactiveLogin.json().csrfToken as string };
+    const receipt = {
+      id: 'worker-stage-1',
+      stage: 'show_succeeded',
+      at: Date.now(),
+      eventId: 'question-1',
+      eventEpoch: '11111111-1111-4111-8111-111111111111',
+      eventSequence: 1,
+      kind: 'question'
+    };
+
+    expect((await app.inject({ method: 'POST', url: '/api/push/receipts', headers: inactiveHeaders, payload: { records: [receipt] } })).statusCode).toBe(204);
+    expect((await app.inject({ method: 'POST', url: '/api/push/receipts', headers: { ...inactiveHeaders, origin: 'https://evil.example' }, payload: { records: [receipt] } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: '/api/push/receipts', headers: { ...inactiveHeaders, 'x-csrf-token': 'wrong' }, payload: { records: [receipt] } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: '/api/push/receipts', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': inactiveHeaders['x-csrf-token'] }, payload: { records: [receipt] } })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'POST', url: '/api/push/receipts', headers: inactiveHeaders, payload: { records: [{ ...receipt, title: 'secret prompt' }] } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/api/push/receipts', headers: inactiveHeaders, payload: { records: Array.from({ length: 101 }, (_, index) => ({ ...receipt, id: `receipt-${index}` })) } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/api/push/receipts', headers: inactiveHeaders, payload: { records: [{ ...receipt, status: 'x'.repeat(70_000) }] } })).statusCode).toBe(413);
+
+    expect(await push.diagnostics.snapshot()).toEqual([
+      receipt,
+      expect.objectContaining({ stage: 'receipt_reported', eventId: receipt.eventId, status: 'accepted' })
+    ]);
   }, 15_000);
 });

@@ -1,9 +1,11 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import webpush, { type PushSubscription, type RequestOptions } from 'web-push';
 import type { PushMessage } from './notifications.js';
+import type { NotificationEvent } from './notification-events.js';
+import { defaultPushDiagnosticsFile, PushDiagnostics, type PushDiagnosticRecord, type PushDiagnosticStage } from './push-diagnostics.js';
 import { loadVapidKeys } from './push-vapid.js';
 
 type Stored = Record<string, PushSubscription>;
@@ -11,20 +13,36 @@ type Stored = Record<string, PushSubscription>;
 type DeliveryFailure = { headers?: Record<string, string>; statusCode?: number };
 // require the coalescing key for internal delivery
 type DeliveryOptions = RequestOptions & { topic: string };
-// retain rejected registrations for safe pruning
-type DeliveryResult = { stale: boolean; subscription: PushSubscription };
+type DeliveryOutcome = 'accepted' | 'auth_rejected' | 'expired' | 'failed' | 'superseded';
+// retain the exact registration and settled provider outcome
+type DeliveryResult = { outcome: DeliveryOutcome; subscription: PushSubscription };
 // distinguish storage failure stages
 type StoreOperation = 'parse' | 'read' | 'write';
+type RepairAdvice = 'push_subscription_expired' | 'push_provider_auth_rejected';
+type RepairHint = { advice: RepairAdvice; endpoint: string; expiresAt: number };
+export type PushSubscriptionResult = { accepted: true } | { accepted: false; error: 'invalid_push_subscription' | RepairAdvice };
+type PushServiceOptions = { diagnostics?: PushDiagnostics; file?: string; now?: () => number; generationKey?: Buffer };
 
 const deliveryAttempts = 3;
 const deliveryTimeoutMs = 10_000;
 const maximumRetryAfterMs = 30_000;
+const providerPendingThresholdMs = 10_000;
+const repairHintLifetimeMs = 24 * 60 * 60 * 1_000;
+const maximumRepairHints = 256;
 
 // derive a provider-safe coalescing key without exposing the application tag
 const messageTopic = (tag: string): string => createHash('sha256').update(tag).digest('base64url').slice(0, 32);
 
 // derive a short diagnostic identity without exposing the push endpoint
 const endpointFingerprint = (endpoint: string): string => createHash('sha256').update(endpoint).digest('base64url').slice(0, 12);
+
+// encode credential fields without ambiguous separators
+const credentialGenerationInput = (subscription: PushSubscription): string => [
+  subscription.endpoint,
+  subscription.expirationTime === undefined || subscription.expirationTime === null ? 'null' : String(subscription.expirationTime),
+  subscription.keys.auth,
+  subscription.keys.p256dh
+].map(value => `${Buffer.byteLength(value, 'utf8')}:${value}`).join('');
 
 // identify response statuses that may recover on a later attempt
 const retryableStatus = (status: number | undefined): boolean => status === undefined || status === 408 || status === 429 || status >= 500;
@@ -55,10 +73,23 @@ export class PushService {
   private keys?: { publicKey: string; privateKey: string };
   private initialization?: Promise<void>;
   private readonly legacyKeys = { publicKey: process.env.RAC_VAPID_PUBLIC_KEY, privateKey: process.env.RAC_VAPID_PRIVATE_KEY };
-  private readonly file = process.env.RAC_PUSH_SUBSCRIPTIONS_FILE ?? '.data/push-subscriptions.json';
+  private readonly file: string;
+  private readonly now: () => number;
+  private readonly generationKey: Buffer;
+  private readonly repairHints = new Map<string, RepairHint>();
   private storeOperations: Promise<void> = Promise.resolve();
   private readonly deliveryQueues = new Map<string, Promise<void>>();
   private readonly latestEvents = new Map<string, AbortController>();
+  private readonly diagnosticOperations = new Set<Promise<void>>();
+  readonly diagnostics: PushDiagnostics;
+
+  // retain process-local repair advice while keeping durable VAPID state unchanged
+  constructor(options: PushServiceOptions = {}) {
+    this.file = options.file ?? process.env.RAC_PUSH_SUBSCRIPTIONS_FILE ?? '.data/push-subscriptions.json';
+    this.now = options.now ?? (() => Date.now());
+    this.generationKey = options.generationKey ?? randomBytes(32);
+    this.diagnostics = options.diagnostics ?? new PushDiagnostics({ file: defaultPushDiagnosticsFile(this.file) });
+  }
 
   // reuse one durable identity before exposing keys or delivering notifications
   async initialize(): Promise<void> {
@@ -82,13 +113,27 @@ export class PushService {
 
   // validate and persist one subscription without racing other mutations
   async subscribe(subscription: PushSubscription) {
+    return (await this.subscribeChecked(subscription)).accepted;
+  }
+
+  // upsert one exact credential generation or return bounded repair advice
+  async subscribeChecked(subscription: PushSubscription): Promise<PushSubscriptionResult> {
     // reject malformed registrations before initializing storage
-    if (!this.valid(subscription)) return false;
+    if (!this.valid(subscription)) return { accepted: false, error: 'invalid_push_subscription' };
     await this.initialize();
+    this.pruneRepairHints();
+    const generation = this.generationDigest(subscription);
+    const hinted = this.repairHints.get(generation);
+    // return advice only for the exact failed credential generation
+    if (hinted !== undefined) return { accepted: false, error: hinted.advice };
     await this.mutate(async all => {
       all[subscription.endpoint] = subscription;
     });
-    return true;
+    // a replacement clears advice only for older generations at this endpoint
+    for (const [digest, hint] of this.repairHints) {
+      if (hint.endpoint === subscription.endpoint && digest !== generation) this.repairHints.delete(digest);
+    }
+    return { accepted: true };
   }
 
   // deliver one coalesced event to the current subscription snapshot
@@ -102,7 +147,8 @@ export class PushService {
     // interrupt only retry backoff for the superseded event
     if (previous !== undefined) previous.abort();
     try {
-      const payload = JSON.stringify({ ...message, sentAt: Date.now() });
+      const payload = JSON.stringify({ ...message, sentAt: this.now() });
+      this.recordDiagnostic('generated', message);
       const options: DeliveryOptions = {
         TTL: message.kind === 'finished' ? 15 * 60 : 60 * 60,
         timeout: deliveryTimeoutMs,
@@ -113,15 +159,12 @@ export class PushService {
       };
       // deliver to independent endpoints concurrently
       const results = await Promise.all(subscriptions.map(async subscription => await this.queuedDelivery(subscription, payload, options, message.kind, event)));
-      const stale: PushSubscription[] = [];
-      // collect provider-expired endpoints
-      for (const result of results) {
-        // retain only rejected registrations
-        if (result.stale) stale.push(result.subscription);
-      }
-      // remove provider-expired targets in one serialized mutation
-      if (stale.length > 0) await this.prune(stale);
+      const rejected = results.filter(result => result.outcome === 'expired' || result.outcome === 'auth_rejected');
+      // bind provider advice to generations still current after delivery settles
+      if (rejected.length > 0) await this.applyRepairAdvice(rejected);
     } finally {
+      // settle this notification's best-effort journal work before returning
+      await this.flushDiagnostics();
       // retain a newer event marker
       if (this.latestEvents.get(topic) === event) this.latestEvents.delete(topic);
     }
@@ -149,33 +192,51 @@ export class PushService {
 
   // send with bounded transient retries while this event remains newest
   private async deliver(subscription: PushSubscription, payload: string, options: DeliveryOptions, kind: PushMessage['kind'], event: AbortController): Promise<DeliveryResult> {
+    const message = JSON.parse(payload) as PushMessage;
     // cap provider attempts for one endpoint
     for (let attempt = 1; attempt <= deliveryAttempts; attempt += 1) {
       // suppress an older event before any later attempt
-      if (this.latestEvents.get(options.topic) !== event) return { stale: false, subscription };
+      if (this.latestEvents.get(options.topic) !== event) return { outcome: 'superseded', subscription };
+      this.recordDiagnostic('send_started', message, subscription, attempt);
+      let pendingTimer: ReturnType<typeof setTimeout> | undefined;
       try {
+        // observe a slow open request without imposing an application deadline
+        pendingTimer = setTimeout(() => {
+          this.recordDiagnostic('provider_pending', message, subscription, attempt, this.latestEvents.get(options.topic) === event ? 'request_active' : 'newer_waiting');
+        }, providerPendingThresholdMs);
+        pendingTimer.unref?.();
         await webpush.sendNotification(subscription, payload, options);
-        return { stale: false, subscription };
+        this.recordDiagnostic('provider_accepted', message, subscription, attempt, 'accepted');
+        return { outcome: 'accepted', subscription };
       } catch (error) {
         const failure = error as DeliveryFailure;
         const status = typeof failure.statusCode === 'number' ? failure.statusCode : undefined;
-        // let the caller prune expired provider registrations
+        this.recordDiagnostic('provider_failed', message, subscription, attempt, status === undefined ? 'network' : `http_${status}`);
+        // let the caller prune an exact expired registration
         if (status === 404 || status === 410) {
           this.logFailure(subscription, status, attempt, kind, false);
-          return { stale: true, subscription };
+          return { outcome: 'expired', subscription };
+        }
+        // preserve current credentials after provider authentication rejection
+        if (status === 401 || status === 403) {
+          this.logFailure(subscription, status, attempt, kind, false);
+          return { outcome: 'auth_rejected', subscription };
         }
         const canRetry = attempt < deliveryAttempts && retryableStatus(status);
-        const providerDelay = retryAfterMs(failure, Date.now());
+        const providerDelay = retryAfterMs(failure, this.now());
         const delay = providerDelay ?? 500 * 2 ** (attempt - 1);
         const willRetry = canRetry && delay <= maximumRetryAfterMs;
         this.logFailure(subscription, status, attempt, kind, willRetry);
         // stop on permanent, exhausted, or unreasonable-delay failures
-        if (!willRetry) return { stale: false, subscription };
+        if (!willRetry) return { outcome: 'failed', subscription };
         // release the queue promptly when a newer event supersedes this retry
-        if (!await this.waitForRetry(delay, event.signal)) return { stale: false, subscription };
+        if (!await this.waitForRetry(delay, event.signal)) return { outcome: 'superseded', subscription };
+      } finally {
+        // settle the observational timer with the owned provider request
+        if (pendingTimer !== undefined) clearTimeout(pendingTimer);
       }
     }
-    return { stale: false, subscription };
+    return { outcome: 'failed', subscription };
   }
 
   // wait for retry backoff without aborting an in-flight provider request
@@ -201,12 +262,70 @@ export class PushService {
     });
   }
 
+  // derive a private process-local identity for one full credential generation
+  private generationDigest(subscription: PushSubscription): string {
+    return createHmac('sha256', this.generationKey).update(credentialGenerationInput(subscription)).digest('base64url');
+  }
+
+  // retain one bounded repair hint without persisting credential identity
+  private rememberRepairAdvice(subscription: PushSubscription, advice: RepairAdvice): void {
+    this.pruneRepairHints();
+    const digest = this.generationDigest(subscription);
+    this.repairHints.delete(digest);
+    this.repairHints.set(digest, { advice, endpoint: subscription.endpoint, expiresAt: this.now() + repairHintLifetimeMs });
+    // discard the oldest insertion beyond the fixed process-local cap
+    while (this.repairHints.size > maximumRepairHints) {
+      const oldest = this.repairHints.keys().next().value as string | undefined;
+      // stop only if the map changed unexpectedly
+      if (oldest === undefined) break;
+      this.repairHints.delete(oldest);
+    }
+  }
+
+  // expire old advice using the same injected service clock
+  private pruneRepairHints(): void {
+    const now = this.now();
+    // inspect only the bounded process-local registry
+    for (const [digest, hint] of this.repairHints) {
+      if (hint.expiresAt <= now) this.repairHints.delete(digest);
+    }
+  }
+
+  // record bounded content-free delivery metadata without gating delivery
+  private recordDiagnostic(stage: PushDiagnosticStage, message: PushMessage, subscription?: PushSubscription, attempt?: number, status?: string): void {
+    const event = 'eventId' in message ? message as NotificationEvent : undefined;
+    const fields: Omit<PushDiagnosticRecord, 'id' | 'stage' | 'at'> = {
+      kind: message.kind,
+      ...(event === undefined ? {} : {
+        eventId: event.eventId,
+        eventEpoch: event.eventEpoch,
+        eventSequence: event.eventSequence
+      }),
+      ...(subscription === undefined ? {} : { endpointFingerprint: endpointFingerprint(subscription.endpoint) }),
+      ...(attempt === undefined ? {} : { attempt }),
+      ...(status === undefined ? {} : { status })
+    };
+    // isolate journal failures from provider work while retaining shutdown ordering
+    const operation = this.diagnostics.record(stage, fields).catch(() => undefined);
+    this.diagnosticOperations.add(operation);
+    void operation.then(() => { this.diagnosticOperations.delete(operation); });
+  }
+
+  // wait only after provider work so journal latency never delays a send attempt
+  private async flushDiagnostics(): Promise<void> {
+    // include every stage already scheduled for this process tick
+    while (this.diagnosticOperations.size > 0) await Promise.all([...this.diagnosticOperations]);
+  }
+
   // validate the browser subscription shape
   private valid(value: PushSubscription): value is PushSubscription {
     return typeof value?.endpoint === 'string'
       && value.endpoint.startsWith('https://')
       && typeof value.keys?.p256dh === 'string'
-      && typeof value.keys.auth === 'string';
+      && value.keys.p256dh.length > 0
+      && typeof value.keys.auth === 'string'
+      && value.keys.auth.length > 0
+      && (value.expirationTime === undefined || value.expirationTime === null || Number.isSafeInteger(value.expirationTime));
   }
 
   // read after all mutations already queued by this instance
@@ -217,15 +336,23 @@ export class PushService {
     return await snapshot;
   }
 
-  // remove only registrations unchanged since the failed delivery
-  private async prune(stale: PushSubscription[]): Promise<void> {
+  // apply provider advice only while the failed credentials remain current
+  private async applyRepairAdvice(rejected: DeliveryResult[]): Promise<void> {
+    const current: DeliveryResult[] = [];
     await this.mutate(async all => {
-      // preserve replacements registered during delivery
-      for (const subscription of stale) {
-        // remove only the exact rejected credentials
-        if (sameSubscription(all[subscription.endpoint], subscription)) delete all[subscription.endpoint];
+      // preserve replacements registered during an older delivery
+      for (const result of rejected) {
+        // ignore advice for credentials no longer stored
+        if (!sameSubscription(all[result.subscription.endpoint], result.subscription)) continue;
+        current.push(result);
+        // prune only exact expired credentials
+        if (result.outcome === 'expired') delete all[result.subscription.endpoint];
       }
     });
+    // publish hints only after the protected mutation succeeds
+    for (const result of current) {
+      this.rememberRepairAdvice(result.subscription, result.outcome === 'expired' ? 'push_subscription_expired' : 'push_provider_auth_rejected');
+    }
   }
 
   // serialize every read-modify-write operation on the subscription file

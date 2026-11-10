@@ -567,8 +567,23 @@ describe('client control', () => {
     expect(registration.statusCode).toBe(204);
     expect(subscribed).toHaveLength(1);
     expect(unreadDashboard.json().agents[0].unread).toBe(true);
+    expect(unreadDashboard.json().agents[0].notificationEvent).toMatchObject({
+      schemaVersion: 1,
+      eventId: unreadDashboard.json().agents[0].completionId,
+      kind: 'finished',
+      agentId: agent.id,
+      tag: `agent-status-${agent.id}`,
+      displayTag: `rac-v1-agent-status-${agent.id}`,
+      worktreeId: 'cora'
+    });
+    expect(unreadDashboard.json().agents[0].notificationState).toEqual({
+      eventEpoch: unreadDashboard.json().agents[0].notificationEvent.eventEpoch,
+      eventSequence: unreadDashboard.json().agents[0].notificationEvent.eventSequence
+    });
     expect(dismissal.statusCode).toBe(204);
     expect(viewedDashboard.json().agents[0].unread).toBe(false);
+    expect(viewedDashboard.json().agents[0].notificationEvent).toBeUndefined();
+    expect(viewedDashboard.json().agents[0].notificationState.eventSequence).toBeGreaterThan(unreadDashboard.json().agents[0].notificationState.eventSequence);
     expect(messages).toEqual([]);
     notifications.stop();
     await pushApp.close();
