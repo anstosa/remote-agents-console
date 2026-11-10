@@ -73,6 +73,12 @@ Docker's compact base-file placement without an inline editor-mode banner.
 Multi-instance federation follows the configured remote-server list automatically;
 do not expose a separate toggle or search result for the derived feature.
 
+MCP, Conductor, and Voice share one grouped Read/Write permission-table design.
+MCP sets the ceiling; child pages show denied operations as unchecked and disabled.
+Staged parent changes update child availability without rewriting child preferences.
+Keep legacy authority gates subordinate to the shared controls, preserving their
+runtime restrictions and the existing save/restart boundary.
+
 ## Components
 Reuse `SplitConfirmation`, `SettingsRevealButton`, the Settings navigation and
 host operation status. Add one feature-local Cloudflare setup component; no new

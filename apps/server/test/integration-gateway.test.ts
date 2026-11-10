@@ -18,12 +18,14 @@ import { conductorCallable } from '../src/integrations/mcp/catalog.js';
 import { validateToolSchema } from '../src/integrations/mcp/legacy-output.js';
 import { IntegrationPolicyService, IntegrationPolicyWriteError } from '../src/integrations/policy/service.js';
 import { IntegrationControlService } from '../src/integrations/control/index.js';
+import type { IntegrationConfig } from '../src/config/schema.js';
+import type { McpPermissions } from '../src/integrations/mcp/permissions.js';
 
 const principal: IntegrationPrincipal = { authentication: 'oauth', subjectId: 'user', clientId: 'chatgpt', audience: 'https://agents.example.com/mcp', scopes: ['status:read', 'prompts:write'] };
-const config = { enabled: true, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false }, realtime: { enabled: true, name: 'Davo', context: '', writeToolsEnabled: true }, multiInstance: { enabled: true } };
+const config: IntegrationConfig = { enabled: true, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false }, realtime: { enabled: true, name: 'Davo', context: '', writeToolsEnabled: true }, multiInstance: { enabled: true } };
 
 // create one private policy-backed gateway fixture
-async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> }, gates: Partial<typeof config> = {}, tools: DeveloperTool[] = [], forwardProbe?: (context: FederationForwardContext) => boolean) {
+async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> }, gates: Partial<typeof config> = {}, tools: DeveloperTool[] = [], forwardProbe?: (context: FederationForwardContext) => boolean, conductorPermissions?: McpPermissions) {
   const root = await mkdtemp(join(tmpdir(), 'rac-gateway-'));
   let queued = 0;
   const stackActions: unknown[] = [];
@@ -47,6 +49,7 @@ async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> },
   control.startVoice('browser-session', 'voice-session-123456789');
   const gateway = new IntegrationGateway({
     config: { ...config, ...gates },
+    ...(conductorPermissions === undefined ? {} : { conductorPermissions }),
     instanceId: 'https://agents.example.com',
     orchestration: orchestration as never,
     policy,
@@ -179,7 +182,7 @@ describe('IntegrationGateway', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it('gates the Conductor\'s writes and dangerous tools by its scopes alone, while the deployment gates keep holding OAuth', async () => {
+  it('gates Conductor mutations by its scopes and shared ceiling while deployment gates keep holding OAuth', async () => {
     const { root, gateway, queued } = await fixture(undefined, { enabled: false, mcp: { readEnabled: true, writeEnabled: false, dangerousEnabled: false } });
     try {
       const conductor: IntegrationPrincipal = { authentication: 'conductor', subjectId: 'conductor-1', clientId: 'conductor', audience: principal.audience, scopes: ['status:read', 'prompts:write', 'agents:control', 'admin:dangerous'], places: () => true };
@@ -198,6 +201,80 @@ describe('IntegrationGateway', () => {
       expect(oauth.gateway.listTools(principal).map(tool => tool.name)).not.toContain('queue_prompt');
       await expect(oauth.gateway.call(principal, 'queue_prompt', { agent_id: 'a', prompt: 'Lint', request_id: 'request-gate-4' })).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
     } finally { await rm(oauth.root, { recursive: true, force: true }); }
+  });
+
+  // intersect every principal with the configured ceiling
+  it('applies one shared per-tool ceiling before principal-specific authority', async () => {
+    const mcp = { ...config.mcp, permissions: { list_worktrees: { read: false }, queue_prompt: { write: false } } };
+    const { root, gateway } = await fixture(undefined, { mcp });
+    try {
+      const conductor: IntegrationPrincipal = { authentication: 'conductor', subjectId: 'conductor-1', audience: principal.audience, scopes: ['status:read', 'prompts:write'], places: () => true };
+      const realtime: IntegrationPrincipal = { authentication: 'realtime', subjectId: 'voice-1', audience: principal.audience, scopes: ['status:read'], leaseKey: 'voice-lease' };
+      // the shared ceiling precedes oauth, realtime, and conductor exceptions
+      for (const caller of [principal, realtime, conductor]) {
+        expect(gateway.listTools(caller).map(tool => tool.name)).not.toContain('list_worktrees');
+        await expect(gateway.call(caller, 'list_worktrees', {})).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+      }
+      expect(gateway.listTools(conductor).map(tool => tool.name)).not.toContain('queue_prompt');
+      await expect(gateway.call(conductor, 'queue_prompt', { agent_id: 'agent-1', prompt: 'Never dispatch', request_id: 'request-ceiling-1' })).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  // child reductions affect only their principal and cannot resurrect the shared ceiling
+  it('intersects independent Voice and Conductor preferences for listings and direct calls', async () => {
+    const gates = { realtime: { ...config.realtime, permissions: { list_worktrees: { read: false } } } };
+    const conductorPermissions = { queue_prompt: { write: false }, list_worktrees: { read: true } } satisfies McpPermissions;
+    const { root, gateway, queued } = await fixture(undefined, gates, [], undefined, conductorPermissions);
+    try {
+      const conductor: IntegrationPrincipal = { authentication: 'conductor', subjectId: 'conductor-1', audience: principal.audience, scopes: ['status:read', 'prompts:write'], places: () => true };
+      const realtime: IntegrationPrincipal = { authentication: 'realtime', subjectId: 'voice-1', audience: principal.audience, scopes: ['status:read'], leaseKey: 'voice-lease' };
+      expect(gateway.listTools(principal).map(tool => tool.name)).toContain('list_worktrees');
+      expect(gateway.listTools(conductor).map(tool => tool.name)).toContain('list_worktrees');
+      expect(gateway.listTools(realtime).map(tool => tool.name)).not.toContain('list_worktrees');
+      await expect(gateway.call(realtime, 'list_worktrees', {})).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+      expect(gateway.listTools(conductor).map(tool => tool.name)).not.toContain('queue_prompt');
+      expect(gateway.listTools(principal).map(tool => tool.name)).toContain('queue_prompt');
+      await expect(gateway.call(conductor, 'queue_prompt', { agent_id: 'agent-1', prompt: 'Never dispatch', request_id: 'request-child-deny' })).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+      expect(queued()).toBe(0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+
+    const ceiling = { ...config.mcp, permissions: { list_worktrees: { read: false } } };
+    const masked = await fixture(undefined, { mcp: ceiling, realtime: { ...config.realtime, permissions: { list_worktrees: { read: true } } } }, [], undefined, { list_worktrees: { read: true } });
+    try {
+      const conductor: IntegrationPrincipal = { authentication: 'conductor', subjectId: 'conductor-1', audience: principal.audience, scopes: ['status:read'], places: () => true };
+      const realtime: IntegrationPrincipal = { authentication: 'realtime', subjectId: 'voice-1', audience: principal.audience, scopes: ['status:read'], leaseKey: 'voice-lease' };
+      for (const caller of [principal, conductor, realtime]) {
+        expect(masked.gateway.listTools(caller).map(tool => tool.name)).not.toContain('list_worktrees');
+        await expect(masked.gateway.call(caller, 'list_worktrees', {})).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+      }
+    } finally { await rm(masked.root, { recursive: true, force: true }); }
+  });
+
+  // require explicit opt-in for branch-new davo capabilities
+  it('keeps branch-new Davo tools off until explicitly permitted without widening their audience', async () => {
+    const tool = internalTool('delegate_request', 'write');
+    const davo: IntegrationPrincipal = { authentication: 'realtime', subjectId: 'voice-1', audience: principal.audience, scopes: ['files:write'], leaseKey: 'voice-lease' };
+    const inherited = await fixture(undefined, {}, [tool]);
+    try {
+      expect(inherited.gateway.listTools(davo).map(item => item.name)).not.toContain('delegate_request');
+      await expect(inherited.gateway.call(davo, 'delegate_request', { request_id: 'request-davo-off' })).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+    } finally { await rm(inherited.root, { recursive: true, force: true }); }
+    const optedIn = await fixture(undefined, { mcp: { ...config.mcp, permissions: { delegate_request: { write: true } } } }, [tool]);
+    try {
+      expect(optedIn.gateway.listTools(davo).map(item => item.name)).toContain('delegate_request');
+      expect(optedIn.gateway.listTools(principal).map(item => item.name)).not.toContain('delegate_request');
+    } finally { await rm(optedIn.root, { recursive: true, force: true }); }
+  });
+
+  // require future developer tools to join the reviewed manifest before any principal sees them
+  it('fails closed for an unrecognized future capability in listings and direct calls', async () => {
+    const tool = internalTool('future_tool', 'read');
+    const { root, gateway } = await fixture(undefined, {}, [tool]);
+    try {
+      const conductor: IntegrationPrincipal = { authentication: 'conductor', subjectId: 'conductor-1', audience: principal.audience, scopes: ['files:read'], places: () => true };
+      expect(gateway.listTools(conductor).map(item => item.name)).not.toContain(tool.name);
+      await expect(gateway.call(conductor, tool.name, {})).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
 
@@ -278,7 +355,7 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
     } });
     // exercise replay through a synthetic admitted-tool alias without exposing raw review mutation
     const tools = createAgentTools({ create_pull_request_review_draft: port }).map(tool => tool.name === 'create_pull_request_review_draft' ? { ...tool, name: 'delegate_request' } : tool);
-    const instance = await fixture(undefined, {}, tools);
+    const instance = await fixture(undefined, { mcp: { ...config.mcp, permissions: { delegate_request: { write: true } } } }, tools);
     try {
       const credential = instance.control.startVoiceLease('browser-session', 'draft-session-123456789', ['github:write'])!;
       const davo = instance.control.authenticateRealtimeBearer(credential.bearer)!;
@@ -319,7 +396,7 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
   });
   // internal scopes never add new OAuth names or replace its existing schemas
   it('keeps developer extensions hidden from OAuth and validates actual internal output', async () => {
-    const tool = internalTool('internal_read', 'read', async () => developerSuccess({ unexpected: 'secret' }));
+    const tool = internalTool('get_agent_runtime', 'read', async () => developerSuccess({ unexpected: 'secret' }));
     const instance = await fixture(undefined, {}, [tool]);
     try {
       const oauth = { ...principal, scopes: ['files:read' as const, 'files:write' as const] };
@@ -346,8 +423,8 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
   it('sanitizes unexpected domain exceptions and preserves mutation uncertainty', async () => {
     let effects = 0;
     const write = internalTool('delegate_request', 'write', async () => { effects += 1; throw new Error('/sensitive/path secret'); });
-    const read = internalTool('internal_read_crash', 'read', async () => { throw new Error('/sensitive/path secret'); });
-    const instance = await fixture(undefined, {}, [write, read]);
+    const read = internalTool('get_agent_runtime', 'read', async () => { throw new Error('/sensitive/path secret'); });
+    const instance = await fixture(undefined, { mcp: { ...config.mcp, permissions: { delegate_request: { write: true } } } }, [write, read]);
     try {
       const credential = instance.control.startVoiceLease('browser-session', 'error-session-123456789', ['files:write', 'files:read'])!;
       const davo = instance.control.authenticateRealtimeBearer(credential.bearer)!;
@@ -367,7 +444,7 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
   it('reports unknown_outcome for an invalid mutation result without repeating its effect', async () => {
     let effects = 0;
     const tool = internalTool('delegate_request', 'write', async () => { effects += 1; return developerSuccess({ private: 'invalid result' }); });
-    const instance = await fixture(undefined, {}, [tool]);
+    const instance = await fixture(undefined, { mcp: { ...config.mcp, permissions: { delegate_request: { write: true } } } }, [tool]);
     try {
       const credential = instance.control.startVoiceLease('browser-session', 'invalid-output-session-1234', ['files:write'])!;
       const davo = instance.control.authenticateRealtimeBearer(credential.bearer)!;
@@ -385,7 +462,7 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
   it('dispatches domain cursors without generic idempotency records', async () => {
     let calls = 0;
     const tool = internalTool('bind_davo_target', 'write', async () => { calls += 1; return developerSuccess({ accepted: true }); }, true);
-    const instance = await fixture(undefined, {}, [tool]);
+    const instance = await fixture(undefined, { mcp: { ...config.mcp, permissions: { bind_davo_target: { write: true } } } }, [tool]);
     instance.policy.claim = async () => { throw new Error('generic claim must not run'); };
     try {
       const credential = instance.control.startVoiceLease('browser-session', 'domain-session-123456789', ['files:write'])!;
@@ -400,7 +477,7 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
   });
   // enumerate independent read, write, dangerous and voice-write flags
   it('preserves all sixteen Davo feature-gate combinations and Conductor asymmetry', async () => {
-    const tools = [internalTool('internal_read', 'read'), internalTool('internal_write', 'write'), internalTool('internal_danger', 'dangerous')];
+    const tools = [internalTool('get_agent_runtime', 'read'), internalTool('spawn_agent', 'write'), internalTool('execute_branch_removal', 'dangerous')];
     // each fixture uses its own private replay store and active lease
     for (let flags = 0; flags < 16; flags += 1) {
       const read = Boolean(flags & 1); const write = Boolean(flags & 2); const dangerous = Boolean(flags & 4); const voiceWrite = Boolean(flags & 8);
@@ -408,14 +485,14 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
       try {
         const davo: IntegrationPrincipal = { authentication: 'realtime', subjectId: 'owner', leaseKey: 'lease', audience: principal.audience, scopes: ['files:read', 'files:write', 'agents:control', 'admin:dangerous'] };
         const names = instance.gateway.listTools(davo).map(tool => tool.name);
-        expect(names.includes('internal_read')).toBe(read);
-        expect(names.includes('internal_write')).toBe(false);
-        expect(names.includes('internal_danger')).toBe(false);
+        expect(names.includes('get_agent_runtime')).toBe(read);
+        expect(names.includes('spawn_agent')).toBe(false);
+        expect(names.includes('execute_branch_removal')).toBe(false);
         const conductor: IntegrationPrincipal = { ...davo, authentication: 'conductor' };
         const conductorNames = instance.gateway.listTools(conductor).map(tool => tool.name);
-        expect(conductorNames.includes('internal_read')).toBe(read);
-        expect(conductorNames.includes('internal_write')).toBe(true);
-        expect(conductorNames.includes('internal_danger')).toBe(true);
+        expect(conductorNames.includes('get_agent_runtime')).toBe(read);
+        expect(conductorNames.includes('spawn_agent')).toBe(true);
+        expect(conductorNames.includes('execute_branch_removal')).toBe(true);
       } finally { await rm(instance.root, { recursive: true, force: true }); }
     }
   });

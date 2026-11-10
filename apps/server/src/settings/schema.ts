@@ -5,6 +5,7 @@ import { appApply, composeOptionSettings, protectedPath } from './catalog.js';
 import { sourceSchema } from '../config/schema.js';
 import { builtInTourPrompt } from '../review-runs/config.js';
 import { conductorOptInScopes, conductorScopes } from '../integrations/auth/types.js';
+import { mcpPermissionCapabilities } from '../integrations/mcp/permissions.js';
 
 type ApplicationSettingsPresentation = { scratchDirectory?: string };
 
@@ -20,7 +21,26 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
   // keep legacy source compatibility without publishing an obsolete control
   delete schema.properties!.integrations!.properties!.multiInstance;
   // capitalize product acronyms only in presentation metadata
-  schema.properties!.integrations!.properties!.mcp!.label = 'MCP';
+  const mcp = schema.properties!.integrations!.properties!.mcp!;
+  mcp.label = 'MCP';
+  mcp.description = 'Choose the maximum capabilities available through MCP.';
+  const sharedPermissions = mcp.properties!.permissions!;
+  // publish the same leaf presentation with surface-specific inherited defaults
+  const describePermissions = (permissions: SettingsSchema | undefined, inherited: boolean): void => {
+    if (permissions?.properties === undefined) return;
+    permissions.label = 'Capabilities';
+    // annotate every supported operation
+    for (const capability of mcpPermissionCapabilities) {
+      const field = permissions.properties[capability.name];
+      if (field?.properties?.[capability.mode] === undefined) continue;
+      field.label = capability.title;
+      field.description = capability.description;
+      Object.assign(field.properties[capability.mode]!, { label: capability.mode === 'read' ? 'Read' : 'Write', default: inherited ? true : capability.defaultEnabled });
+    }
+  };
+  describePermissions(sharedPermissions, false);
+  describePermissions(schema.properties!.integrations!.properties!.realtime!.properties?.permissions, true);
+  describePermissions(schema.properties!.conductor?.properties?.permissions, true);
   schema.properties!.adapters!.properties!.omx!.label = 'OMX';
   // present safe calendar policy separately from inbound tools
   const calendar = schema.properties?.googleCalendar;
@@ -63,7 +83,7 @@ function describeConductorSettings(schema: SettingsSchema): void {
   Object.assign(fields.project!, { label: 'Project', description: 'The ID of a configured directory Project: Conductor’s home folder, containing its files and standing AGENTS.md guidance. Use a non-Git directory. This does not limit which projects it can coordinate.' });
   Object.assign(fields.model!, { label: 'Model', description: 'Choose an available model from the API catalog for your configured providers.' });
   Object.assign(fields.effort!, { label: 'Effort', placeholder: 'Default', description: 'Default uses the selected model’s configured effort, or the agent default when no model effort is configured.' });
-  Object.assign(fields.scopes!, { label: 'Scopes', default: conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)) });
+  Object.assign(fields.scopes!, { label: 'Existing scopes', description: 'These legacy scope restrictions remain an additional limit on Conductor capabilities.', default: conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)) });
   Object.assign(fields.spawnKinds!, { label: 'Worker kinds', description: 'The kinds of Agent Conductor may spawn as workers (with the agents:spawn scope). Only Sandboxed Pi workers carry the console’s sandbox guarantee. Claude and Codex workers run under your own configuration of those agents, which the console does not sandbox or check, and text Conductor reads can steer what it asks them to do: before enabling one, make sure its permissions and sandbox settings restrict a worker as you want.' });
 }
 

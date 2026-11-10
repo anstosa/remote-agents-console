@@ -23,7 +23,7 @@ describe('RealtimeService', () => {
     const provider = vi.fn(async () => new Response(JSON.stringify({ value: 'ek_ephemeral-client-secret', expires_at: 1_800_000_000 }), { status: 200, headers: { 'content-type': 'application/json' } }));
     const service = new RealtimeService({ apiKey: 'provider-key', fetch: provider as typeof fetch });
 
-    await expect(service.create(request)).resolves.toEqual({ ok: true, clientSecret: { value: 'ek_ephemeral-client-secret', expires_at: 1_800_000_000 }, model: 'gpt-realtime-2.1' });
+    await expect(service.create({ ...request, allowedTools: [] })).resolves.toEqual({ ok: true, clientSecret: { value: 'ek_ephemeral-client-secret', expires_at: 1_800_000_000 }, model: 'gpt-realtime-2.1' });
     const [url, init] = provider.mock.calls[0]!;
     expect(url).toBe('https://api.openai.com/v1/realtime/client_secrets');
     expect(init.headers).toMatchObject({ authorization: 'Bearer provider-key', 'content-type': 'application/json' });

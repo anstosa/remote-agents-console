@@ -9,13 +9,14 @@ type PageHeaderCopy = {
 // keep every page's scope and purpose in one presentation contract
 const pageHeaders: Readonly<Record<string, PageHeaderCopy>> = {
   browser: { eyebrow: 'Browser settings', description: 'Manage this browser’s name and identity.' },
-  voice: { eyebrow: 'Server settings', description: 'Configure the voice assistant, its context, tools, and credentials.' },
+  voice: { eyebrow: 'Server settings', description: 'Configure the voice assistant and reduce its access below the MCP capability ceiling.' },
   'google-calendar': { eyebrow: 'Server settings', description: 'Capture supported agent work in a dedicated Google Calendar.' },
   keyboard: { eyebrow: 'Server settings', description: 'Configure server-wide keyboard shortcuts stored with the application.' },
   interface: { eyebrow: 'Application settings', description: 'Customize this browser’s appearance and configure application-wide buttons.' },
   app: { eyebrow: 'Server settings', description: 'Configure network access, integrations, and remote servers.' },
   agents: { eyebrow: 'Server settings', description: 'Configure agent programs, launch commands, and credentials.' },
-  conductor: { eyebrow: 'Server settings', description: 'Configure Conductor’s home Project, model, effort, worker limits, and permission scopes.' },
+  mcp: { eyebrow: 'Server settings', description: 'Set the maximum capabilities available to MCP, Conductor, and Voice.' },
+  conductor: { eyebrow: 'Server settings', description: 'Configure Conductor and reduce its access below the MCP capability ceiling.' },
   projects: { eyebrow: 'Server settings', description: 'Configure repositories, worktrees, project-specific commands, and this browser’s launcher behavior.' },
   reviews: { eyebrow: 'Server settings', description: 'Configure Review tours and optional AI code-review presets.' },
   tmux: { eyebrow: 'Server settings', description: 'Configure terminal discovery, polling, and the host tmux wrapper.' },

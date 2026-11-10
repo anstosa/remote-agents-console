@@ -122,7 +122,7 @@ function validRequest(request: RealtimeSessionRequest): boolean {
   // require the raw bounded authorization token
   if (!/^[A-Za-z0-9._~-]{20,4096}$/u.test(request.mcpAuthorization)) return false;
   // require a bounded unique tool allowlist large enough for the full internal catalog
-  if (request.allowedTools.length === 0 || request.allowedTools.length > maxAllowedTools || new Set(request.allowedTools).size !== request.allowedTools.length) return false;
+  if (request.allowedTools.length > maxAllowedTools || new Set(request.allowedTools).size !== request.allowedTools.length) return false;
   // require safe catalog names
   if (!request.allowedTools.every(tool => /^[a-z][a-z0-9_]{1,63}$/u.test(tool))) return false;
   // accept only bounded canonical context identifiers

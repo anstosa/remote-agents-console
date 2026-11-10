@@ -452,6 +452,24 @@ describe('configuration safety', () => {
     await expect(validateConfig({ ...scratch, integrations: { realtime: { name: '   ' } } })).rejects.toThrow();
     await expect(validateConfig({ ...scratch, integrations: { realtime: { context: 'x'.repeat(16_001) } } })).rejects.toThrow();
   });
+
+  // preserve sparse inheritance while rejecting unsupported policy keys
+  it('accepts only known MCP capability lanes without authoring inherited defaults', async () => {
+    const configured = await validateConfig({ ...scratch, integrations: { mcp: { permissions: { list_agents: { read: false }, delegate_request: { write: true } } } } });
+    expect(configured.integrations?.mcp.permissions).toEqual({ list_agents: { read: false }, delegate_request: { write: true } });
+    expect((await validateConfig(scratch)).integrations?.mcp).not.toHaveProperty('permissions');
+    await expect(validateConfig({ ...scratch, integrations: { mcp: { permissions: { list_agents: { write: true } } } } })).rejects.toThrow();
+    await expect(validateConfig({ ...scratch, integrations: { mcp: { permissions: { unknown_tool: { read: true } } } } })).rejects.toThrow();
+  });
+
+  // reuse the exact strict capability shape for voice reductions
+  it('accepts sparse Voice permissions and rejects unsupported lanes or tools', async () => {
+    const configured = await validateConfig({ ...scratch, integrations: { realtime: { permissions: { list_agents: { read: false }, delegate_request: { write: true } } } } });
+    expect(configured.integrations?.realtime.permissions).toEqual({ list_agents: { read: false }, delegate_request: { write: true } });
+    expect((await validateConfig(scratch)).integrations?.realtime).not.toHaveProperty('permissions');
+    await expect(validateConfig({ ...scratch, integrations: { realtime: { permissions: { list_agents: { write: false } } } } })).rejects.toThrow();
+    await expect(validateConfig({ ...scratch, integrations: { realtime: { permissions: { unknown_tool: { read: false } } } } })).rejects.toThrow();
+  });
   it('derives multi-instance federation only from configured remote servers', async () => {
     const none = await validateConfig({ ...scratch, integrations: { multiInstance: { enabled: true } } });
     const one = await validateConfig({ ...scratch, remoteServers: [{ url: 'https://peer.example.com' }], integrations: { multiInstance: { enabled: false } } });
@@ -750,6 +768,16 @@ describe('Conductor configuration', () => {
     // GitHub reads are the operator's to grant by name
     expect((await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', scopes: ['status:read', 'github:read'] }))).conductor?.scopes).toEqual(['status:read', 'github:read']);
     expect((await validateConfig({ publicOrigin: 'https://agents.example.com' })).conductor).toBeUndefined();
+  });
+
+  // retain sparse per-capability Conductor preferences beside legacy scopes
+  it('accepts strict Conductor permission reductions without materializing defaults', async () => {
+    const reduced = await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', permissions: { list_agents: { read: false }, queue_prompt: { write: true } } }));
+    expect(reduced.conductor?.permissions).toEqual({ list_agents: { read: false }, queue_prompt: { write: true } });
+    const inherited = await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6' }));
+    expect(inherited.conductor).not.toHaveProperty('permissions');
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', permissions: { list_agents: { write: false } } }))).rejects.toThrow();
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', permissions: { unknown_tool: { read: false } } }))).rejects.toThrow();
   });
 
   // disabling keeps authored settings while withholding every runtime capability

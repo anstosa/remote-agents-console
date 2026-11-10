@@ -8,9 +8,10 @@ import { digest, IntegrationPolicyWriteError, type IntegrationPolicyService } fr
 import { conductorCallable, integrationTools, type IntegrationTool } from './catalog.js';
 import type { DeveloperResult, DeveloperTool } from './developer-tool.js';
 import type { FederationForwardContext } from '../federation/service.js';
+import { mcpPrincipalPermitted, type McpPermissions } from './permissions.js';
 
 export type ToolCallResult = { content: Array<{ type: 'text'; text: string }>; structuredContent: Record<string, unknown>; isError?: boolean };
-export type IntegrationGatewayOptions = { config: IntegrationConfig; instanceId: string; orchestration: OrchestrationService; policy: IntegrationPolicyService; audit: Pick<IntegrationAuditService, 'record'>; control: IntegrationControlService; developerTools?: () => readonly DeveloperTool[]; forward?: (instanceId: string, principal: IntegrationPrincipal, name: string, args: Record<string, unknown>, context: FederationForwardContext) => Promise<ToolCallResult | undefined> };
+export type IntegrationGatewayOptions = { config: IntegrationConfig; conductorPermissions?: McpPermissions; instanceId: string; orchestration: OrchestrationService; policy: IntegrationPolicyService; audit: Pick<IntegrationAuditService, 'record'>; control: IntegrationControlService; developerTools?: () => readonly DeveloperTool[]; forward?: (instanceId: string, principal: IntegrationPrincipal, name: string, args: Record<string, unknown>, context: FederationForwardContext) => Promise<ToolCallResult | undefined> };
 type MutationArguments = Record<string, unknown> & { request_id: string };
 
 // route all transports through one policy boundary
@@ -173,8 +174,12 @@ export class IntegrationGateway {
 
   // apply deployment feature gates independently of OAuth scopes; the Conductor has its own parent
   // gate (its configuration), independent of the integrations', calls only what it may, and its
-  // writes and dangerous tools are held by its own scopes alone
+  // writes and dangerous tools are held by its scopes plus the shared capability ceiling
   private enabled(definition: IntegrationTool, principal: IntegrationPrincipal): boolean {
+    const mode = definition.risk === 'read' ? 'read' : 'write';
+    const reduction = principal.authentication === 'conductor' ? this.options.conductorPermissions : principal.authentication === 'realtime' ? this.options.config.realtime.permissions : undefined;
+    // intersect principal reductions with the shared ceiling before audience exceptions
+    if (!mcpPrincipalPermitted(this.options.config.mcp.permissions, reduction, definition.name, mode)) return false;
     // realtime mutations require exact admitted-turn davo contracts
     if (principal.authentication === 'realtime' && definition.risk !== 'read' && !['bind_davo_target', 'delegate_request', 'relay_agent_question_answer', 'answer_davo_choice'].includes(definition.name)) return false;
     // audience policy precedes scopes and feature gates

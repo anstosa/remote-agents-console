@@ -537,3 +537,21 @@ button.settings-installation-file-link:disabled { background: transparent; color
 .settings-center-page .settings-header-discard:not(:disabled):hover { border-color: var(--red); color: var(--red); }
 .settings-center-page .settings-header-save { border-color: var(--mauve); background: var(--mauve); color: var(--crust); }
 .settings-center-page .settings-header-save:not(:disabled):hover { border-color: var(--lavender); background: var(--lavender); color: var(--crust); }
+
+/* keep capability labels flexible beside two stable permission columns */
+.settings-mcp-table { width: 100%; table-layout: fixed; border-collapse: collapse; font: 500 .7rem/1.5 var(--font-mono); }
+.settings-mcp-table th, .settings-mcp-table td { border-bottom: 1px solid var(--surface-1); padding: .65rem .3rem; vertical-align: top; }
+.settings-mcp-table thead th { color: var(--subtext-0); text-align: center; }
+.settings-mcp-table th:first-child { width: auto; text-align: left; }
+.settings-mcp-table th:not(:first-child), .settings-mcp-table td { width: 3.2rem; }
+.settings-mcp-table tbody th { font-weight: 500; overflow-wrap: anywhere; }
+.settings-mcp-table strong, .settings-mcp-table code, .settings-mcp-table small { display: block; }
+.settings-mcp-table code, .settings-mcp-table small { color: var(--subtext-0); font-size: .62rem; }
+/* preserve a usable checkbox target without widening narrow settings panels */
+.settings-mcp-cell { display: grid; place-items: center; min-height: 2rem; cursor: pointer; }
+.settings-mcp-cell input { width: 1rem; height: 1rem; accent-color: var(--mauve); }
+.settings-mcp-cell:has(input:disabled) { cursor: default; opacity: .45; }
+.settings-mcp-gates { margin-top: 1.2rem; }
+
+/* keep read and write descriptions on separate lines within each capability */
+.settings-mcp-table small { white-space: pre-line; }

@@ -102,6 +102,7 @@ import { IntegrationAuthService, registerIntegrationAuthServer, type ConductorSp
 import { IntegrationPolicyService } from './integrations/policy/service.js';
 import { IntegrationAuditService } from './integrations/audit/service.js';
 import { IntegrationGateway, registerMcpServer } from './integrations/mcp/index.js';
+import { mcpPrincipalPermitted } from './integrations/mcp/permissions.js';
 import { RealtimeService } from './integrations/realtime/service.js';
 import { DavoStore, type DavoGenerationFenceOutcome } from './davo/store.js';
 import { davoNotificationMatchesRequest } from './davo/contracts.js';
@@ -735,7 +736,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     });
     const federationSecret = process.env.RAC_INTEGRATION_FEDERATION_SECRET?.trim() || instanceStatusSecret;
     developerOrchestration = orchestration;
-    const integrationGateway = new IntegrationGateway({ config: integrationConfig, instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, developerTools: () => developerTools, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret, config.publicOrigin.origin) } : {}) });
+    const integrationGateway = new IntegrationGateway({ config: integrationConfig, ...(config.conductor?.permissions === undefined ? {} : { conductorPermissions: config.conductor.permissions }), instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, developerTools: () => developerTools, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret, config.publicOrigin.origin) } : {}) });
     // freeze live authority to approved reads and the four prompt-scoped davo operations
     const realtimeScopes: IntegrationScope[] = ['status:read', 'logs:read', 'files:read', 'github:read', ...(integrationConfig.realtime.writeToolsEnabled ? ['prompts:write'] as IntegrationScope[] : [])];
     const conductorConfig = config.conductor;
@@ -825,7 +826,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         if (lease === undefined) return [];
         return integrationGateway.listTools({ authentication: 'realtime', subjectId: lease.stableOwnerKey, stableOwnerKey: lease.stableOwnerKey, leaseKey: lease.leaseKey, audience: resource, scopes: realtimeScopes }).map(tool => tool.name);
       } });
-      const davoBridge = createDavoBridge({ runtime: davoRuntime, prompts, operations: davoOperations, history: promptHistory, canWrite: () => integrationConfig.enabled && integrationConfig.realtime.enabled && integrationConfig.realtime.writeToolsEnabled && integrationConfig.mcp.writeEnabled, ...(federation === undefined ? {} : { remote: { peers: config.remoteServers.map(remote => remote.url.origin), secret: federationSecret, epoch: federation.destinationEpoch } }), instanceId: config.publicOrigin.origin, audit: integrationAudit, evaluator: new DavoRealtimeTextClient({ apiKey: process.env.RAC_OPENAI_API_KEY, settings: () => ({ name: integrationConfig.realtime.name, context: integrationConfig.realtime.context }), isGenerationCurrent: generation => generation === davoStore.currentGeneration }), target: async id => {
+      const davoBridge = createDavoBridge({ runtime: davoRuntime, prompts, operations: davoOperations, history: promptHistory, canWrite: tool => integrationConfig.enabled && integrationConfig.realtime.enabled && integrationConfig.realtime.writeToolsEnabled && integrationConfig.mcp.writeEnabled && mcpPrincipalPermitted(integrationConfig.mcp.permissions, integrationConfig.realtime.permissions, tool, 'write'), ...(federation === undefined ? {} : { remote: { peers: config.remoteServers.map(remote => remote.url.origin), secret: federationSecret, epoch: federation.destinationEpoch } }), instanceId: config.publicOrigin.origin, audit: integrationAudit, evaluator: new DavoRealtimeTextClient({ apiKey: process.env.RAC_OPENAI_API_KEY, settings: () => ({ name: integrationConfig.realtime.name, context: integrationConfig.realtime.context }), isGenerationCurrent: generation => generation === davoStore.currentGeneration }), target: async id => {
         const agent = (await discovery.dashboard()).agents.find(candidate => candidate.id === id);
         // davo delegates only to ordinary operator worktree agents, never another manager's workers
         if (agent?.worktreeId === undefined || agent.structured?.role === 'conductor' || agent.spawnedBy !== undefined || await structuredAgents.workerOwner(id) !== undefined) return undefined;

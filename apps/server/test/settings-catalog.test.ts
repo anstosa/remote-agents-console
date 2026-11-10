@@ -236,7 +236,7 @@ describe('settings schema metadata', () => {
     expect(conductor.properties!.enabled).toMatchObject({ type: 'boolean', optional: true, default: true });
     expect(conductor.properties!.effort).toMatchObject({ type: 'enum', optional: true, placeholder: 'Default' });
     expect(conductor.properties!.scopes).toMatchObject({ type: 'array', optional: true, default: conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)), items: { type: 'enum', options: [...conductorScopes] } });
-    expect(conductor.properties!.scopes!.description).toBeUndefined();
+    expect(conductor.properties!.scopes!.description).toContain('additional limit');
     // only Pi's sandbox is the console's guarantee; the others are the operator's to configure
     expect(conductor.properties!.spawnKinds).toMatchObject({ type: 'array', default: ['pi'], items: { type: 'enum', options: [...conductorSpawnKinds] } });
     expect(conductor.properties!.spawnKinds!.description).toMatch(/Only Sandboxed Pi workers carry the console’s sandbox guarantee/u);
@@ -319,7 +319,21 @@ describe('settings schema metadata', () => {
   // keep acronym display copy separate from authored identities
   it('capitalizes MCP and OMX presentation labels without changing their canonical keys or enum values', () => {
     const schema = applicationSettingsSchema();
-    expect(schema.properties!.integrations!.properties!.mcp!.label).toBe('MCP');
+    const mcp = schema.properties!.integrations!.properties!.mcp!;
+    expect(mcp.label).toBe('MCP');
+    expect(mcp.description).toContain('maximum capabilities');
+    const permissions = mcp.properties!.permissions!;
+    expect(Object.keys(permissions.properties!)).toHaveLength(135);
+    expect(permissions.properties!.list_agents!.properties).toEqual({ read: expect.objectContaining({ label: 'Read', default: true }) });
+    expect(permissions.properties!.delegate_request!.properties).toEqual({ write: expect.objectContaining({ label: 'Write', default: false }) });
+    expect(permissions.properties!.list_agents!.properties).not.toHaveProperty('write');
+    expect(permissions.properties!.delegate_request!.properties).not.toHaveProperty('read');
+    // child surfaces inherit allowed MCP operations without authoring defaults
+    for (const child of [schema.properties!.integrations!.properties!.realtime!.properties!.permissions!, schema.properties!.conductor!.properties!.permissions!]) {
+      expect(Object.keys(child.properties!)).toHaveLength(135);
+      expect(child.properties!.list_agents!.properties).toEqual({ read: expect.objectContaining({ label: 'Read', default: true }) });
+      expect(child.properties!.delegate_request!.properties).toEqual({ write: expect.objectContaining({ label: 'Write', default: true }) });
+    }
     expect(schema.properties!.adapters!.properties!.omx!.label).toBe('OMX');
     expect(schema.properties!.defaultAgent!.options).toContain('omx');
     expect(schema.properties!.defaultAgent!.options).not.toContain('OMX');

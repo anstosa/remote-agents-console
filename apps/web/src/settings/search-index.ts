@@ -1,3 +1,4 @@
+import { mcpPermissionGroups } from '../../../server/src/integrations/mcp/permission-groups.js';
 import { composeOptionSettings } from '../../../server/src/settings/catalog.js';
 import { isProtectedValue, type SettingsSchema, type SettingsSnapshot, type SettingsSource } from './contracts.js';
 import { agentEnvironmentKeys, agentEnvironmentOwnerForKey, googleCalendarEnvironmentKeys, storageEnvironmentKeys, voiceEnvironmentKeys } from './environment-fields.js';
@@ -58,6 +59,7 @@ const applicationDedicatedPaths = new Set([
   'googleCalendar',
   'proxy',
   'integrations.multiInstance',
+  'integrations.mcp',
   'integrations.realtime'
 ]);
 
@@ -230,8 +232,36 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
   if (source?.schema === undefined || source.value === undefined) return;
   const baseSchema = source.schema;
 
+  // index one grouped permission surface without exposing technical leaf controls
+  const addPermissionGroups = (pageId: 'mcp' | 'voice' | 'conductor', surface: string, root: string[], schema: SettingsSchema | undefined): void => {
+    const permissions = schema?.properties ?? {};
+    // match the rendered grouped operations and their tool-name aliases
+    for (const group of mcpPermissionGroups) {
+      // unsupported server operations have no searchable checkbox
+      for (const mode of ['read', 'write'] as const) {
+        const members = group[mode].filter(name => permissions[name]?.properties?.[mode] !== undefined);
+        // omit unavailable operations instead of inventing controls
+        if (members.length === 0) continue;
+        index.add(pageId, `${mode === 'read' ? 'Read' : 'Write'} ${group.title}`, [...root.slice(0, -1), 'capabilities', group.name, mode], [surface, group.title], [group.description, ...members, ...members.map(name => permissions[name]?.label)]);
+      }
+    }
+  };
+
   // whole-source mode hides the icon selector while retaining its artwork section
   if (!options.rawSourceIds.has(source.id)) index.add('app', 'Server icon', ['icon'], [], ['server instance artwork']);
+
+  const mcp = baseSchema.properties?.integrations?.properties?.mcp;
+  // index friendly groups while keeping tool names as searchable operation aliases
+  if (mcp !== undefined) {
+    const configured = childValue(childValue(source.value, 'integrations'), 'mcp');
+    // retain legacy deployment controls on their original source paths
+    for (const [key, schema] of Object.entries(mcp.properties ?? {})) {
+      // grouped controls replace the old technical permission tree
+      if (key === 'permissions') continue;
+      visitSchema(index, 'mcp', schema, childValue(configured, key), ['integrations', 'mcp', key], ['MCP'], { forceAbsentChildren: true });
+    }
+    addPermissionGroups('mcp', 'MCP', ['integrations', 'mcp', 'permissions'], mcp.properties?.permissions);
+  }
 
   const realtime = baseSchema.properties?.integrations?.properties?.realtime;
   // mirror the basic voice editor and its adjacent schema controls
@@ -246,9 +276,10 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
     }
     for (const [key, schema] of Object.entries(realtime.properties ?? {})) {
       // keep basic voice fields in their purpose-built controls
-      if (key === 'enabled' || key === 'name' || key === 'context') continue;
+      if (key === 'enabled' || key === 'name' || key === 'context' || key === 'permissions') continue;
       visitSchema(index, 'voice', schema, childValue(childValue(childValue(source.value, 'integrations'), 'realtime'), key), [...voicePath, key], []);
     }
+    addPermissionGroups('voice', 'Voice', [...voicePath, 'permissions'], realtime.properties?.permissions);
   }
 
   const googleCalendar = baseSchema.properties?.googleCalendar;
@@ -293,11 +324,14 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
 
   const conductor = baseSchema.properties?.conductor;
   // keep omitted Conductor fields searchable without creating configuration
-  if (conductor !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'conductor', conductor, childValue(source.value, 'conductor'), ['conductor'], [], {
-    forceAbsentChildren: true,
-    // omit the fixed implementation kind while retaining future choices
-    skip: path => path.length === 2 && path[0] === 'conductor' && path[1] === 'kind' && conductor.properties?.kind?.options?.length === 1
-  });
+  if (conductor !== undefined && !options.rawSourceIds.has(source.id)) {
+    visitSchema(index, 'conductor', conductor, childValue(source.value, 'conductor'), ['conductor'], [], {
+      forceAbsentChildren: true,
+      // omit the grouped permission tree and fixed implementation kind
+      skip: path => path.length === 2 && path[0] === 'conductor' && (path[1] === 'permissions' || path[1] === 'kind' && conductor.properties?.kind?.options?.length === 1)
+    });
+    addPermissionGroups('conductor', 'Conductor', ['conductor', 'permissions'], conductor.properties?.permissions);
+  }
 
   const projects = baseSchema.properties?.projects;
   // mirror Docker-only host overrides without indexing live path values

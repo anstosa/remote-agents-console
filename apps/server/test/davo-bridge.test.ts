@@ -26,6 +26,8 @@ async function fixture() {
   const operations = new PromptOperationLedger(join(directory, 'operations.json'));
   const agent = { id: 'agent', kind: 'codex', home: directory, attention: 'finished', title: 'Ready', transport: 'tmux', panel: 'terminal' } as Agent;
   let event: unknown;
+  let question: { id: string; text: string; choices: string[] } | undefined;
+  const answers: unknown[] = [];
   const delivered: string[] = [];
   const transport = { target: async () => ({ agent }), gate: async () => 'none', held: () => false, mark: async () => ({}), deliver: async (_id: string, text: string, _attachments: unknown, _options: unknown, rendering: (text: string) => void) => { rendering(text); delivered.push(text); return { status: 'submitted', prompt: text }; }, observe: async () => event, externalReset: async () => false, recoverAnswer: async () => 'settled', clearDraft: async () => true, answer: async () => true, interrupt: async () => 'not-working', close: async () => true, latestAnswer: async () => undefined, recentLines: async () => [] };
   const prompts = new PromptService({} as never, {} as never, history, queue, undefined, undefined, undefined, undefined, undefined, transport as never);
@@ -33,9 +35,11 @@ async function fixture() {
   const realtime = new RealtimeService({ apiKey: 'test', fetch: async () => new Response(JSON.stringify({ value: 'ek_test_ephemeral_key' })) });
   const runtime = new DavoRuntime({ store, control, realtime, apiKey: 'test', fetch: async url => String(url).endsWith('/hangup') ? new Response(null) : new Response('v=0\r\nanswer', { status: 201, headers: { location: '/v1/realtime/calls/rtc_bridge_test' } }), mcpUrl: 'https://rac.example/mcp', instanceId: 'https://rac.example', scopes: ['status:read', 'prompts:write'], allowedTools: () => ['list_agents', 'delegate_request'] });
   const evaluator = { evaluate: vi.fn(async () => ({ ok: true, generation: store.currentGeneration!, value: { recommendation: 'candidate_done', unmetCriterionIds: [], contradictions: [], safeSummary: 'Finished and verified.' } })), complete: vi.fn(async () => ({ ok: false, code: 'davo_provider_unavailable' })) };
+  const permittedWrites = new Set(['delegate_request', 'relay_agent_question_answer']);
+  const audit = { record: vi.fn(async () => undefined) };
   // rebuild the bridge to model loss of in-process lifecycle observers
-  const bridge = () => createDavoBridge({ runtime, prompts, operations, history, instanceId: 'https://rac.example', target: async () => ({ agentId: 'agent', worktreeId: 'worktree', projectId: 'project', placeId: 'worktree', processGeneration: 1, conversationId: 'conversation', modelId: 'model' }), question: async () => undefined, answerQuestion: async () => true, audit: { record: async () => undefined }, evaluator: evaluator as never });
-  return { store, runtime, control, agent, prompts, operations, delivered, bridge, evaluator, setEvent: (next: unknown) => { event = next; } };
+  const bridge = () => createDavoBridge({ runtime, prompts, operations, history, instanceId: 'https://rac.example', target: async () => ({ agentId: 'agent', worktreeId: 'worktree', projectId: 'project', placeId: 'worktree', processGeneration: 1, conversationId: 'conversation', modelId: 'model' }), question: async () => question, answerQuestion: async (_agentId, _questionId, answer) => { answers.push(answer); return true; }, audit, evaluator: evaluator as never, canWrite: name => name === undefined || permittedWrites.has(name) });
+  return { store, runtime, control, agent, prompts, operations, delivered, bridge, evaluator, permittedWrites, audit, answers, setQuestion: (next: typeof question) => { question = next; }, setEvent: (next: unknown) => { event = next; } };
 }
 
 describe('Davo integration bridge', () => {
@@ -68,20 +72,39 @@ describe('Davo integration bridge', () => {
     const bound = await first.tools.find(tool => tool.name === 'bind_davo_target')!.execute({ request_id: 'bind-operation', turn_capability: capability, agent_id: 'agent', worktree_id: 'worktree' }, principal);
     expect(bound.ok).toBe(true);
     const targetCapability = (bound as { value: { target_capability: string } }).value.target_capability;
+    context.permittedWrites.delete('delegate_request');
+    const denied = await first.tools.find(tool => tool.name === 'delegate_request')!.execute({ request_id: 'delegate-operation', turn_capability: capability, target_capability: targetCapability, criteria: ['The requested change works'], required_checks: ['unit tests'] }, principal);
+    expect(denied.ok).toBe(false);
+    expect(context.delivered).toEqual([]);
+    expect((await context.store.read()).requests).toEqual([]);
+    expect(context.audit.record).not.toHaveBeenCalled();
+    context.permittedWrites.add('delegate_request');
     const submitted = await first.tools.find(tool => tool.name === 'delegate_request')!.execute({ request_id: 'delegate-operation', turn_capability: capability, target_capability: targetCapability, criteria: ['The requested change works'], required_checks: ['unit tests'] }, principal);
     expect(submitted.ok).toBe(true);
     expect(context.delivered).toHaveLength(1);
     const request = (await context.store.read()).requests[0];
     expect(request.state).toBe('awaiting-agent');
-    first.close();
     context.agent.attention = 'working';
     context.setEvent({ type: 'started', mark: {} });
     await context.prompts.observe(context.agent);
     context.agent.attention = 'finished';
     const envelope = { requestId: request.id, promptId: request.dispatch.state === 'published' ? request.dispatch.promptId : '', outcome: 'complete', criteria: [{ id: 'criterion-1', status: 'satisfied', evidence: `implemented with ${secret}` }], checks: [{ name: 'unit tests', status: 'passed', evidence: `Bearer ${secret}` }], remaining: [] };
     context.setEvent({ type: 'settled', message: `API_KEY=${secret}\n<davo-completion-v1>${JSON.stringify(envelope)}</davo-completion-v1>` });
+    context.permittedWrites.delete('delegate_request');
     await context.prompts.observe(context.agent);
+    // allow the asynchronous lifecycle observer to settle
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(context.evaluator.evaluate).not.toHaveBeenCalled();
+    expect((await context.store.read()).requests[0].state).toBe('awaiting-agent');
+    expect((await context.store.read()).notificationOutbox).toEqual([]);
+    first.close();
     const recovered = context.bridge();
+    const retainedAuditCalls = context.audit.record.mock.calls.length;
+    await recovered.tick();
+    expect(context.evaluator.evaluate).not.toHaveBeenCalled();
+    expect(context.audit.record.mock.calls).toHaveLength(retainedAuditCalls);
+    expect((await context.store.read()).requests[0].state).toBe('awaiting-agent');
+    context.permittedWrites.add('delegate_request');
     await recovered.tick();
     const final = await context.store.read();
     expect(final.requests[0].state).toBe('done');
@@ -93,6 +116,47 @@ describe('Davo integration bridge', () => {
     expect(JSON.stringify(final)).not.toContain(secret);
     expect(final.messages.at(-1)?.text).toContain('Bearer [REDACTED]');
     recovered.close();
+    await context.runtime.stop('owner', voice);
+  });
+
+  // reject a local agent answer after named permission revocation
+  it('keeps a local pending question untouched when relay permission is disabled', async () => {
+    const context = await fixture();
+    const bridge = context.bridge();
+    const snapshot = await context.runtime.conversation();
+    const voice = { voiceSessionId: 'voice_123456789012345678901235', generation: snapshot.generation };
+    const opened = await context.runtime.open('owner', voice);
+    const negotiated = await context.runtime.negotiate('owner', { ...voice, negotiationId: opened.negotiationId, sdp: 'v=0\r\noffer' });
+    context.runtime.acknowledgeReady('owner', { ...voice, readinessId: negotiated.readinessId, responseId: 'readiness-response', importedTools: ['list_agents', 'delegate_request'] });
+    const delegatedTurn = await context.runtime.admit('owner', { ...voice, providerSessionId: 'session', providerItemId: 'item-delegate', text: 'Implement and test the change.' });
+    context.runtime.bind('owner', { ...voice, turnId: delegatedTurn.turnId, responseId: 'response-delegate' });
+    const delegatedBearer = (delegatedTurn.response.tools[0] as Record<string, unknown>).authorization as string;
+    const delegatedPrincipal = context.control.authenticateRealtimeBearer(delegatedBearer)!;
+    const delegatedCapability = /Turn capability: ([A-Za-z0-9_-]{43})/u.exec(delegatedTurn.response.instructions)![1];
+    const bound = await bridge.tools.find(tool => tool.name === 'bind_davo_target')!.execute({ request_id: 'bind-delegate', turn_capability: delegatedCapability, agent_id: 'agent', worktree_id: 'worktree' }, delegatedPrincipal);
+    const targetCapability = (bound as { value: { target_capability: string } }).value.target_capability;
+    const submitted = await bridge.tools.find(tool => tool.name === 'delegate_request')!.execute({ request_id: 'delegate-local-question', turn_capability: delegatedCapability, target_capability: targetCapability, criteria: ['The requested change works'], required_checks: ['unit tests'] }, delegatedPrincipal);
+    expect(submitted.ok).toBe(true);
+    context.runtime.finish('owner', { ...voice, turnId: delegatedTurn.turnId, responseId: 'response-delegate' });
+    context.setQuestion({ id: 'question-local', text: 'Choose exactly one.', choices: ['yes', 'no'] });
+    await context.store.transact(state => {
+      const request = state.requests[0];
+      request.state = 'awaiting-choice';
+      request.attention = { kind: 'agent_question', questionId: 'question-local', question: 'Choose exactly one.', agentProcessGeneration: 1, targetActivityEpoch: request.targetActivityEpoch, answerShape: 'single-choice', choices: ['yes', 'no'] };
+    });
+    const answerTurn = await context.runtime.admit('owner', { ...voice, providerSessionId: 'session', providerItemId: 'item-answer', text: 'yes' });
+    context.runtime.bind('owner', { ...voice, turnId: answerTurn.turnId, responseId: 'response-answer' });
+    const answerBearer = (answerTurn.response.tools[0] as Record<string, unknown>).authorization as string;
+    const answerPrincipal = context.control.authenticateRealtimeBearer(answerBearer)!;
+    const answerCapability = /Turn capability: ([A-Za-z0-9_-]{43})/u.exec(answerTurn.response.instructions)![1];
+    const answerBound = await bridge.tools.find(tool => tool.name === 'bind_davo_target')!.execute({ request_id: 'bind-answer', turn_capability: answerCapability, agent_id: 'agent', worktree_id: 'worktree' }, answerPrincipal);
+    const answerTargetCapability = (answerBound as { value: { target_capability: string } }).value.target_capability;
+    context.permittedWrites.delete('relay_agent_question_answer');
+    const denied = await bridge.tools.find(tool => tool.name === 'relay_agent_question_answer')!.execute({ request_id: 'answer-local-denied', turn_capability: answerCapability, target_capability: answerTargetCapability, question_id: 'question-local', answer: { index: 0 } }, answerPrincipal);
+    expect(denied.ok).toBe(false);
+    expect(context.answers).toEqual([]);
+    expect((await context.store.read()).requests[0].attention).toMatchObject({ kind: 'agent_question', questionId: 'question-local' });
+    bridge.close();
     await context.runtime.stop('owner', voice);
   });
 });

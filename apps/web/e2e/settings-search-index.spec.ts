@@ -23,6 +23,7 @@ const source = (id: string, format: SettingsSource['format'], schema?: SettingsS
 const pages: SettingsSearchPage[] = [
   { id: 'browser', label: 'This browser', group: 'Console' },
   { id: 'voice', label: 'Voice', group: 'Console' },
+  { id: 'mcp', label: 'MCP', group: 'Application' },
   { id: 'google-calendar', label: 'Google Calendar', group: 'Integrations' },
   { id: 'keyboard', label: 'Keyboard shortcuts', group: 'Console' },
   { id: 'app', label: 'Application', group: 'Application' },
@@ -30,6 +31,7 @@ const pages: SettingsSearchPage[] = [
   { id: 'agents', label: 'Agents', group: 'Integrations' },
   { id: 'projects', label: 'Projects', group: 'Application' },
   { id: 'reviews', label: 'Reviews', group: 'Application' },
+  { id: 'conductor', label: 'Conductor', group: 'Application' },
   { id: 'tmux', label: 'TMUX', group: 'Application' },
   { id: 'storage', label: 'Storage', group: 'Application' },
   { id: 'env', label: 'Environment & keys', group: 'Application' },
@@ -182,7 +184,7 @@ test('indexes Google Calendar fields only on the dedicated page', () => {
   const serialized = JSON.stringify(results);
   expect(serialized).not.toContain('PRIVATE {worktree} TITLE');
   expect(serialized).not.toContain('Timely');
-  expect(serialized).not.toMatch(/offset/iu);
+  expect(JSON.stringify(results.filter(result => result.pageId === 'google-calendar'))).not.toMatch(/offset/iu);
 });
 
 // normalize product acronyms only in search metadata, never canonical values
@@ -204,7 +206,7 @@ test('capitalizes MCP and OMX search labels and breadcrumbs without indexing the
     }
   });
   const results = build([application]);
-  const readEnabled = fieldAt(results, 'app', ['integrations', 'mcp', 'readEnabled']);
+  const readEnabled = fieldAt(results, 'mcp', ['integrations', 'mcp', 'readEnabled']);
   const program = fieldAt(results, 'agents', ['adapters', 'omx', 'program']);
 
   expect(readEnabled?.breadcrumbs).toContain('MCP');
@@ -298,7 +300,7 @@ for (const enabled of [false, true]) {
 
     expect(legacyResults).toEqual([]);
     expect(JSON.stringify(results)).not.toContain('Legacy federation setting from generated metadata.');
-    expect(fieldAt(results, 'app', ['integrations', 'mcp', 'endpoint'])?.label).toBe('Mcp endpoint');
+    expect(fieldAt(results, 'mcp', ['integrations', 'mcp', 'endpoint'])?.label).toBe('Mcp endpoint');
     expect(fieldAt(results, 'app', ['remoteServers'])).toBeDefined();
     expect(fieldAt(results, 'voice', ['integrations', 'realtime', 'writeToolsEnabled'])?.label).toBe('Write tools');
   });
@@ -872,4 +874,24 @@ test('omits hidden voice and tunnel setup fields until their forms are visible',
   expect(fieldAt(visible, 'voice', ['integrations', 'realtime', 'name'])).toBeDefined();
   expect(fieldAt(visible, 'cloudflare', ['cloudflare', 'token'])).toBeDefined();
   expect(fieldAt(visible, 'cloudflare', ['cloudflare', 'hostname'])).toBeDefined();
+});
+
+// search friendly capability operations while retaining technical tool aliases
+test('indexes grouped principal operations instead of individual tool permission controls', () => {
+  const results = build([source('app', 'json', applicationSettingsSchema(), {})]);
+  const read = fieldAt(results, 'mcp', ['integrations', 'mcp', 'capabilities', 'notes', 'read']);
+  const write = fieldAt(results, 'mcp', ['integrations', 'mcp', 'capabilities', 'notes', 'write']);
+  expect(read?.label).toBe('Read Notes');
+  expect(read?.keywords).toContain('get_note');
+  expect(read?.keywords).toContain('list_notes');
+  expect(write?.label).toBe('Write Notes');
+  expect(write?.keywords).toContain('update_note');
+  expect(write?.keywords).toContain('delete_note');
+  expect(fieldAt(results, 'mcp', ['integrations', 'mcp', 'permissions', 'get_note', 'read'])).toBeUndefined();
+  expect(results.filter(result => result.kind === 'field' && result.pageId === 'mcp' && result.path?.[2] === 'capabilities')).toHaveLength(22);
+  expect(fieldAt(results, 'voice', ['integrations', 'realtime', 'capabilities', 'notes', 'read'])?.label).toBe('Read Notes');
+  expect(fieldAt(results, 'conductor', ['conductor', 'capabilities', 'notes', 'write'])?.label).toBe('Write Notes');
+  expect(fieldAt(results, 'voice', ['integrations', 'realtime', 'permissions', 'get_note', 'read'])).toBeUndefined();
+  expect(fieldAt(results, 'conductor', ['conductor', 'permissions', 'get_note', 'read'])).toBeUndefined();
+  expect(results.filter(result => result.kind === 'field' && result.path?.includes('capabilities'))).toHaveLength(66);
 });

@@ -9,6 +9,8 @@ import { davoActivityFrontierSchema, davoCompletionEnvelopeSchema, davoInstanceQ
 import { canonicalFollowupPayload, canonicalRequestSeed, canonicalizeDavo, davoFollowupPayloadSchema, davoPromptId, davoQuestionAnswerDigest, davoQuestionAnswerOperationKey, davoRemoteDispatchActionSchema, davoRemoteOperationSchema, DavoRemoteContinuation, digestDavo, renderDavoFollowupV1, renderDavoOriginalV1, signFreshEnvelope, verifyFreshEnvelope, type DavoRemoteDispatchReceiptV1, type DavoRemoteGrantAdmission, type DavoRemoteReceiptBodyV1, type FreshFederationEnvelopeV1 } from './remote.js';
 import { expiryForAnchor } from './retention.js';
 
+export type DavoWriteTool = 'delegate_request' | 'relay_agent_question_answer';
+
 type Options = {
   store: DavoStore;
   prompts: PromptService;
@@ -22,7 +24,7 @@ type Options = {
   readLocal: (target: DavoTargetV1) => Promise<DavoActivityFrontierV1 | undefined>;
   question?: (target: DavoTargetV1) => Promise<{ id: string; text: string; choices: string[] } | undefined>;
   answerQuestion?: (target: DavoTargetV1, questionId: string, answer: DavoRemoteQuestionAnswerV1) => Promise<boolean>;
-  canWrite?: () => boolean;
+  canWrite: (tool: DavoWriteTool) => boolean;
   fetch?: typeof fetch;
 };
 
@@ -111,6 +113,9 @@ export function createDavoRemoteBridge(options: Options) {
   const destinations = new Map<string, DavoRemoteContinuation>();
   const seen = new Map<string, number>();
 
+  // intersect every retained authority with the current named permission
+  function canWrite(tool: DavoWriteTool): boolean { return options.canWrite(tool); }
+
   // reject unsigned, oversized, or substituted remote receipts
   async function exchange(destination: string, body: unknown, expiresAt: string): Promise<DavoRemoteDispatchReceiptV1 | DavoRemoteReceiptBodyV1> {
     // configuration, not a model-supplied url, owns network destinations
@@ -190,6 +195,8 @@ export function createDavoRemoteBridge(options: Options) {
 
   // locate one immutable origin-side grant for the exact request
   async function grantForRequest(request: DavoRequestV1): Promise<DavoRemoteGrantV1> {
+    // local revocation applies to retained and newly admitted grants
+    if (!canWrite('delegate_request')) throw new Error('davo_remote_unavailable');
     const state = await options.store.read();
     const existing = state.remoteGrants.find(grant => grant.originInstanceId === options.instanceId && grant.requestId === request.id);
     // resume persisted grants without creating a new authority
@@ -197,8 +204,6 @@ export function createDavoRemoteBridge(options: Options) {
     const message = state.messages.find(row => row.id === request.originalMessageId && row.kind === 'user');
     // no expired or detached request can mint a remote grant
     if (message === undefined) throw new Error('davo_expired');
-    // current deployment policy gates every new remote write grant
-    if (options.canWrite !== undefined && !options.canWrite()) throw new Error('davo_remote_unavailable');
     const destination = request.instanceQualifiedTarget.instanceId;
     const discovered = await probe(destination, request.instanceQualifiedTarget.agentId, request.instanceQualifiedTarget.worktreeId, request.principal.expiresAt);
     // preserve the exact target selected in the admitted utterance
@@ -233,7 +238,7 @@ export function createDavoRemoteBridge(options: Options) {
   // publish destination work through the same generic exact-operation serializer
   async function publishDestination(originInstanceId: string, input: Parameters<NonNullable<ConstructorParameters<typeof DavoRemoteContinuation>[0]['prompts']['publish']>>[0]) {
     // revoked deployment policy stops before prompt preparation
-    if (options.canWrite !== undefined && !options.canWrite()) return { status: 'unknown' as const };
+    if (!canWrite('delegate_request')) return { status: 'unknown' as const };
     const before = await options.readLocal(input.target);
     // canonical signed chain evidence must still be current at the destination
     if (before === undefined || before.pendingExternalMutation !== undefined || activityEpoch(before) !== input.targetActivityEpoch || before.chainHeadPromptId !== input.expectedPromptChainHead) return { status: 'unknown' as const };
@@ -242,7 +247,7 @@ export function createDavoRemoteBridge(options: Options) {
       const state = await options.store.read();
       const grant = state.remoteGrants.find(row => row.originInstanceId === originInstanceId && row.destinationInstanceId === options.instanceId && row.requestId === input.requestId && row.state === 'active');
       const observed = await options.readLocal(input.target);
-      return (options.canWrite === undefined || options.canWrite()) && grant !== undefined && grant.destinationEpoch === epoch && Date.now() < Date.parse(grant.expiresAt) && observed?.processGeneration === input.target.processGeneration && observed.conversationId === input.target.conversationId;
+      return canWrite('delegate_request') && grant !== undefined && grant.destinationEpoch === epoch && Date.now() < Date.parse(grant.expiresAt) && observed?.processGeneration === input.target.processGeneration && observed.conversationId === input.target.conversationId;
     });
     return result.kind === 'published' ? { status: 'published' as const, promptId: result.operation.promptId } : { status: 'unknown' as const };
   }
@@ -252,14 +257,15 @@ export function createDavoRemoteBridge(options: Options) {
     // expose question mutation only when both local ports exist
     const questions = options.question === undefined || options.answerQuestion === undefined ? {} : { questions: { read: options.question, answer: async (target: DavoTargetV1, questionId: string, answer: DavoRemoteQuestionAnswerV1) => {
       // revoked deployment policy stops before the agent mutation
-      if (options.canWrite !== undefined && !options.canWrite()) return false;
+      if (!canWrite('relay_agent_question_answer')) return false;
       return await options.answerQuestion!(target, questionId, answer);
     } } };
     destinations.set(peer, new DavoRemoteContinuation({ store: options.store, secret: options.secret, originInstanceId: peer, destinationInstanceId: options.instanceId, currentEpoch: () => epoch, activity: { read: options.readLocal }, ...questions, audit: {
       // map internal payload-free events into the shared append-only audit
       record: async event => {
+        const tool = event.kind === 'remote-question-answer' ? 'relay_agent_question_answer' : 'delegate_request';
         // dynamic write revocation wins before any intent record or effect
-        if (event.phase === 'intent' && options.canWrite !== undefined && !options.canWrite()) return false;
+        if (event.phase === 'intent' && !canWrite(tool)) return false;
         try {
           await options.audit.record({ phase: event.phase, timestamp: event.time, durationMs: 0, correlationId: event.operationId, principalHash: createHash('sha256').update(event.originInstanceId, 'utf8').digest('hex'), clientId: 'davo-remote', tool: event.kind, scopes: ['status:read', 'prompts:write'], risk: 'write', argumentsDigest: event.payloadDigest, result: event.result });
           return true;
@@ -273,7 +279,7 @@ export function createDavoRemoteBridge(options: Options) {
       // admission repeats the destination's canonical place/process check
       authorize: async grant => {
         // revoked deployment policy cannot admit a continuation grant
-        if (options.canWrite !== undefined && !options.canWrite()) return { ok: false };
+        if (!canWrite('delegate_request')) return { ok: false };
         const resolved = await options.resolveLocal(grant.target.agentId, grant.target.worktreeId, grant.expiresAt);
         return resolved === undefined || canonicalizeDavo(resolved.target) !== canonicalizeDavo(grant.target) ? { ok: false } : { ok: true, ...resolved };
       }
@@ -284,7 +290,7 @@ export function createDavoRemoteBridge(options: Options) {
   async function relay(input: DavoRemoteRelayInput): Promise<DavoRemoteRelayResult> {
     const parsed = relayInputSchema.parse(input);
     // revoked deployment policy stops before signed remote mutation
-    if (options.canWrite !== undefined && !options.canWrite()) throw new Error('davo_remote_unavailable');
+    if (!canWrite('relay_agent_question_answer')) throw new Error('davo_remote_unavailable');
     const now = Date.now();
     const admittedAt = Date.parse(parsed.admittedAt);
     // live assertions expire independently of the retained request
@@ -434,6 +440,14 @@ export function createDavoRemoteBridge(options: Options) {
       const operation = davoRemoteOperationSchema.safeParse(body);
       // reject every unrecognized signed action before store lookup
       if (!parsed.success && !operation.success) throw new Error('davo_remote_payload_mismatch');
+      // target discovery alone carries no continuation write authority
+      if (parsed.success && parsed.data.kind !== 'probe-target') {
+        const tool = parsed.data.kind === 'relay-question-answer' ? 'relay_agent_question_answer' : 'delegate_request';
+        // signed grants never widen the destination's local named policy
+        if (!canWrite(tool)) throw new Error('davo_remote_unavailable');
+      }
+      // retained continuation operations still require local delegation policy
+      if (operation.success && !canWrite('delegate_request')) throw new Error('davo_remote_unavailable');
       const state = await options.store.read();
       const grantId = operation.success ? operation.data.grantId : parsed.success && parsed.data.kind !== 'admit-grant' && parsed.data.kind !== 'probe-target' ? parsed.data.grantId : undefined;
       const origin = parsed.success && parsed.data.kind === 'admit-grant' ? parsed.data.grant.originInstanceId : parsed.success && parsed.data.kind === 'probe-target' ? parsed.data.originInstanceId : state.remoteGrants.find(grant => grant.grantId === grantId && grant.destinationInstanceId === options.instanceId)?.originInstanceId;
@@ -533,6 +547,8 @@ export function createDavoRemoteBridge(options: Options) {
     },
     // expose destination lifecycle persistence only to the local correlated prompt observer
     recordLifecycle: async (input: { requestId: string; operationId: string; promptId: string; state: 'completed' | 'failed' | 'question'; safeExcerpt?: string; completionEnvelope?: ReturnType<typeof import('./bridge.js').readDavoCompletion>; question?: z.infer<typeof davoRemoteQuestionSchema> }) => {
+      // local revocation stops retained destination continuation updates
+      if (!canWrite('delegate_request')) return;
       const state = await options.store.read();
       const grants = state.remoteGrants.filter(row => row.destinationInstanceId === options.instanceId
         && row.requestId === input.requestId

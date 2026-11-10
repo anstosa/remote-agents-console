@@ -14,6 +14,7 @@ import type { PromptService, PromptPublicationInput, PromptPublicationResult } f
 const fixtures: string[] = [];
 
 type Chain = { value: string };
+type DavoWriteTool = 'delegate_request' | 'relay_agent_question_answer';
 
 // build one real-ledger prompt sink
 function promptSink(ledger: PromptOperationLedger, chain: Chain, writes: string[]): PromptService {
@@ -104,6 +105,10 @@ describe('davo remote bridge', () => {
       })
     };
     const relayedAnswers: unknown[] = [];
+    const originPermissions = new Set<DavoWriteTool>(['delegate_request', 'relay_agent_question_answer']);
+    const destinationPermissions = new Set<DavoWriteTool>(['delegate_request', 'relay_agent_question_answer']);
+    const originCanWrite = (name?: DavoWriteTool) => name === undefined || originPermissions.has(name);
+    const destinationCanWrite = (name?: DavoWriteTool) => name === undefined || destinationPermissions.has(name);
     let pendingQuestion: { id: string; text: string; choices: string[] } | undefined;
     const originPrompts = promptSink(originLedger, originChain, originWrites);
     const destinationPrompts = promptSink(destinationLedger, destinationChain, destinationWrites);
@@ -144,6 +149,7 @@ describe('davo remote bridge', () => {
       peers: [originId],
       secret,
       audit,
+      canWrite: destinationCanWrite,
       epoch,
       resolveLocal: async () => destinationTarget(),
       readLocal: readDestination,
@@ -158,7 +164,7 @@ describe('davo remote bridge', () => {
       fetch: routedFetch as typeof fetch
     });
     const emptyLocal = async () => undefined;
-    let origin = createDavoRemoteBridge({ store: originStore, prompts: originPrompts, operations: originLedger, instanceId: originId, peers: [destinationId], secret, audit, epoch: 'origin-epoch-1', resolveLocal: emptyLocal, readLocal: emptyLocal, fetch: routedFetch as typeof fetch });
+    let origin = createDavoRemoteBridge({ store: originStore, prompts: originPrompts, operations: originLedger, instanceId: originId, peers: [destinationId], secret, audit, epoch: 'origin-epoch-1', resolveLocal: emptyLocal, readLocal: emptyLocal, canWrite: originCanWrite, fetch: routedFetch as typeof fetch });
     let destination = createDestination('destination-epoch-1');
     handlers.set(originId, envelope => origin.handle(envelope as never));
     handlers.set(destinationId, envelope => destination.handle(envelope as never));
@@ -255,6 +261,21 @@ describe('davo remote bridge', () => {
     });
     const answerMessage = await originStore.appendUserTranscript({ voiceSessionId: 'voice-2', providerSessionId: 'provider-2', providerItemId: 'item-2', text: 'yes' });
     const relayInput = { target: (await originStore.read()).requests[0].instanceQualifiedTarget, principalOwnerHash: 'a'.repeat(64), admittedMessageId: answerMessage.id, admittedAt: answerMessage.createdAt, turnId: 'turn-2', operationId: 'answer-operation-1', questionId: 'question-1', answer: { index: 0 } as const };
+    // an unrelated delegation grant cannot authorize an origin answer
+    originPermissions.delete('relay_agent_question_answer');
+    const localDeniedFetches = routedFetch.mock.calls.length;
+    await expect(origin.relay({ ...relayInput, operationId: 'answer-operation-origin-denied' })).rejects.toThrow();
+    expect(routedFetch.mock.calls).toHaveLength(localDeniedFetches);
+    expect(relayedAnswers).toEqual([]);
+    expect(auditEvents.some(event => event.correlationId === 'answer-operation-origin-denied')).toBe(false);
+    originPermissions.add('relay_agent_question_answer');
+    // the destination must independently reject a signed answer
+    destinationPermissions.delete('relay_agent_question_answer');
+    await expect(origin.relay({ ...relayInput, operationId: 'answer-operation-destination-denied' })).rejects.toThrow();
+    expect(relayedAnswers).toEqual([]);
+    expect(pendingQuestion?.id).toBe('question-1');
+    expect(auditEvents.some(event => event.correlationId === 'answer-operation-destination-denied')).toBe(false);
+    destinationPermissions.add('relay_agent_question_answer');
     // live answer intent audit failure leaves the question untouched
     failIntentFor = 'answer-operation-audit-fail';
     await expect(origin.relay({ ...relayInput, operationId: failIntentFor })).rejects.toThrow();
@@ -277,8 +298,14 @@ describe('davo remote bridge', () => {
     // persist and recover one exact lifecycle after the origin bridge restarts
     const completion = { requestId: current.id, promptId: current.dispatch.promptId, outcome: 'complete' as const, criteria: [{ id: 'criterion-1', status: 'satisfied' as const, evidence: 'done' }], checks: [{ name: 'tests', status: 'passed' as const, evidence: 'pass' }], remaining: [] };
     await destination.recordLifecycle({ requestId: current.id, operationId: current.dispatch.operationId, promptId: current.dispatch.promptId, state: 'completed', safeExcerpt: 'done', completionEnvelope: completion });
-    origin = createDavoRemoteBridge({ store: originStore, prompts: originPrompts, operations: originLedger, instanceId: originId, peers: [destinationId], secret, audit, epoch: 'origin-epoch-2', resolveLocal: emptyLocal, readLocal: emptyLocal, fetch: routedFetch as typeof fetch });
+    origin = createDavoRemoteBridge({ store: originStore, prompts: originPrompts, operations: originLedger, instanceId: originId, peers: [destinationId], secret, audit, epoch: 'origin-epoch-2', resolveLocal: emptyLocal, readLocal: emptyLocal, canWrite: originCanWrite, fetch: routedFetch as typeof fetch });
     handlers.set(originId, envelope => origin.handle(envelope as never));
+    // a retained grant cannot outlive the origin's local named permission
+    originPermissions.delete('delegate_request');
+    const retainedDeniedFetches = routedFetch.mock.calls.length;
+    await expect(origin.lifecycle((await originStore.read()).requests[0])).rejects.toThrow();
+    expect(routedFetch.mock.calls).toHaveLength(retainedDeniedFetches);
+    originPermissions.add('delegate_request');
     const recovered = await origin.lifecycle((await originStore.read()).requests[0]);
     expect(recovered).toMatchObject({ kind: 'lifecycle-receipt', promptId: current.dispatch.promptId, completionEnvelope: completion });
     const retained = (await originStore.read()).requests[0];
@@ -287,6 +314,13 @@ describe('davo remote bridge', () => {
     const failedIntentPayload = { version: 1 as const, rendererVersion: 1 as const, requestSeed: seed, requestSeedDigest: digestDavo(canonicalRequestSeed(seed)), cycle: 3, priorPromptId: retained.dispatch.promptId, unmetCriterionIds: ['criterion-1'], safeExcerpt: 'continue' };
     const failedIntentCanonical = canonicalFollowupPayload(failedIntentPayload);
     const failedIntentRendered = renderDavoFollowupV1(failedIntentCanonical);
+    // the destination cannot publish or claim policy after local revocation
+    destinationPermissions.delete('delegate_request');
+    const deniedOperation = 'request-1-followup-permission-denied';
+    await expect(origin.publish({ operationId: deniedOperation, promptId: continuationPromptId(deniedOperation), requestId: retained.id, destinationInstanceId: destinationId, target: retained.instanceQualifiedTarget, targetActivityEpoch: retained.targetActivityEpoch, expectedPromptChainHead: retained.expectedPromptChainHead, payload: failedIntentRendered, payloadDigest: continuationPayloadDigest(failedIntentRendered), canonicalPayload: failedIntentCanonical, expiresAt })).rejects.toThrow();
+    expect(destinationWrites).toHaveLength(3);
+    expect(auditEvents.some(event => event.correlationId === deniedOperation)).toBe(false);
+    destinationPermissions.add('delegate_request');
     failIntentFor = 'request-1-followup-3';
     await expect(origin.publish({ operationId: failIntentFor, promptId: continuationPromptId(failIntentFor), requestId: retained.id, destinationInstanceId: destinationId, target: retained.instanceQualifiedTarget, targetActivityEpoch: retained.targetActivityEpoch, expectedPromptChainHead: retained.expectedPromptChainHead, payload: failedIntentRendered, payloadDigest: continuationPayloadDigest(failedIntentRendered), canonicalPayload: failedIntentCanonical, expiresAt })).resolves.toEqual({ status: 'unknown' });
     expect(destinationWrites).toHaveLength(3);

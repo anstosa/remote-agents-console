@@ -22,6 +22,7 @@ import { inheritedHomeEnvironment, resolveLaunchUserHome } from '../places/launc
 import { parseKeysConfig, type KeysConfig } from './keys.js';
 import { applicationButtonsSchema, countButtonDefinitions, projectButtonsSchema, type ButtonSlots } from './buttons.js';
 import { googleCalendarConfigSchema, type GoogleCalendarConfig } from '../google-calendar/contracts.js';
+import { mcpPermissionCapabilities, type McpCapabilityName, type McpPermissions } from '../integrations/mcp/permissions.js';
 
 const loopback = new Set(['127.0.0.1', '::1']);
 // wildcard binds expose every interface; require an explicit address instead
@@ -134,11 +135,17 @@ const remoteServer = z.object({ url: z.string(), name: serverName.optional(), ic
 const davoName = z.string().trim().min(1).max(80).refine(value => !value.includes('\0'), 'NUL is forbidden');
 const davoContext = z.string().trim().max(16_000).refine(value => !value.includes('\0'), 'NUL is forbidden');
 const davoSettingsSchema = z.object({ enabled: z.boolean(), name: davoName, context: davoContext }).strict();
+// constrain authored policy to known supported lanes
+const mcpPermissionShape = Object.fromEntries(mcpPermissionCapabilities.map(capability => [
+  capability.name,
+  z.object({ [capability.mode]: z.boolean().optional() }).strict().optional()
+])) as unknown as Record<McpCapabilityName, z.ZodTypeAny>;
+const mcpPermissionsSchema = z.object(mcpPermissionShape).strict();
 // default every remote surface off
 const integrationFeatures = z.object({
   enabled: z.boolean().default(false),
-  mcp: z.object({ readEnabled: z.boolean().default(true), writeEnabled: z.boolean().default(false), dangerousEnabled: z.boolean().default(false) }).strict().default({}),
-  realtime: z.object({ enabled: z.boolean().default(false), name: davoName.default(defaultDavoName), context: davoContext.default(defaultDavoContext), writeToolsEnabled: z.boolean().default(false) }).strict().default({}),
+  mcp: z.object({ readEnabled: z.boolean().default(true), writeEnabled: z.boolean().default(false), dangerousEnabled: z.boolean().default(false), permissions: mcpPermissionsSchema.optional() }).strict().default({}),
+  realtime: z.object({ enabled: z.boolean().default(false), name: davoName.default(defaultDavoName), context: davoContext.default(defaultDavoContext), writeToolsEnabled: z.boolean().default(false), permissions: mcpPermissionsSchema.optional() }).strict().default({}),
   // accept legacy input while runtime derives federation from configured remotes
   multiInstance: z.object({ enabled: z.boolean().default(false) }).strict().default({})
 }).strict().default({});
@@ -151,6 +158,7 @@ const conductorSchema = z.object({
   model: agentModel,
   effort: z.enum(piEfforts).optional(),
   scopes: z.array(z.enum(conductorScopes)).max(conductorScopes.length).optional(),
+  permissions: mcpPermissionsSchema.optional(),
   // the kinds its workers may be: only Pi's sandbox is the console's own (ADR 0018)
   spawnKinds: z.array(z.enum(conductorSpawnKinds)).min(1).max(conductorSpawnKinds.length).refine(kinds => new Set(kinds).size === kinds.length, 'each kind once').default(['pi']),
   maxWorkers: z.number().int().min(1).max(16).default(4),
@@ -204,7 +212,7 @@ export type DavoSettings = z.output<typeof davoSettingsSchema>;
  * the kinds its workers may be, and limits; `unavailable` says why its Project cannot be used now,
  * which leaves it off.
  */
-export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; spawnKinds: ConductorSpawnKind[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
+export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; permissions?: McpPermissions; spawnKinds: ConductorSpawnKind[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
 // launchHome is runtime-only; null means account lookup failed, omission supports legacy callers
 export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; launchHome?: string | null; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable

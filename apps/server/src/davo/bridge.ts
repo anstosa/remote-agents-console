@@ -14,7 +14,7 @@ import { expiryForAnchor } from './retention.js';
 import { DavoRealtimeTextClient } from './realtime-client.js';
 import type { DavoRuntime } from './runtime.js';
 import { davoPromptId as promptId, renderDavoOriginalV1 } from './remote.js';
-import { createDavoRemoteBridge } from './remote-bridge.js';
+import { createDavoRemoteBridge, type DavoWriteTool } from './remote-bridge.js';
 import type { DavoLifecycleReceipt } from './coordinator.js';
 
 export type DavoHostTarget = { agentId: string; worktreeId: string; projectId: string; placeId: string; conversationId?: string; processGeneration: number; modelId?: string };
@@ -30,7 +30,7 @@ export type DavoBridgeOptions = {
   audit: Pick<IntegrationAuditService, 'record'>;
   evaluator: DavoRealtimeTextClient;
   remote?: { peers: string[]; secret: string; epoch: string };
-  canWrite?: () => boolean;
+  canWrite: (tool: DavoWriteTool) => boolean;
 };
 
 // hash canonical target identity for the generic publication ledger
@@ -60,6 +60,9 @@ export function createDavoBridge(options: DavoBridgeOptions) {
   let prunedGeneration: number | undefined;
   prompts.useOperations(operations);
 
+  // intersect retained davo authority with current named mcp policy
+  function canWrite(tool: DavoWriteTool): boolean { return options.canWrite(tool); }
+
   // observe authoritative content-free process and prompt frontiers
   async function readLocal(target: DavoInstanceQualifiedTargetV1): Promise<DavoActivityFrontierV1 | undefined> {
     const host = await options.target(target.agentId);
@@ -84,7 +87,7 @@ export function createDavoBridge(options: DavoBridgeOptions) {
     return { target: { ...fixed, targetActivityEpoch: activityEpoch(frontier), expectedPromptChainHead: frontier.chainHeadPromptId }, frontier };
   }
 
-  const remote = options.remote === undefined ? undefined : createDavoRemoteBridge({ ...options.remote, store, prompts, operations, instanceId, audit: options.audit, canWrite: options.canWrite, question: target => options.question(target.agentId), answerQuestion: (target, id, answer) => options.answerQuestion(target.agentId, id, answer, () => options.canWrite?.() !== false, true), resolveLocal, readLocal: target => readLocal({ ...target, instanceId }) });
+  const remote = options.remote === undefined ? undefined : createDavoRemoteBridge({ ...options.remote, store, prompts, operations, instanceId, audit: options.audit, canWrite: options.canWrite, question: target => options.question(target.agentId), answerQuestion: (target, id, answer) => options.answerQuestion(target.agentId, id, answer, () => canWrite('relay_agent_question_answer'), true), resolveLocal, readLocal: target => readLocal({ ...target, instanceId }) });
 
   // keep local observation and authenticated remote attestations separate
   async function readActivity(target: DavoInstanceQualifiedTargetV1): Promise<DavoActivityFrontierV1 | undefined> {
@@ -105,7 +108,7 @@ export function createDavoBridge(options: DavoBridgeOptions) {
   // publish through the existing queue and exact per-agent serializer
   async function publish(input: DavoPromptPublication): Promise<DavoPromptResult> {
     // derived continuation authority does not bypass current deployment gates
-    if (closed || options.canWrite?.() === false) return { status: 'conflict' };
+    if (closed || !canWrite('delegate_request')) return { status: 'conflict' };
     // do not turn an unsupported remote target into local execution
     if (input.destinationInstanceId !== instanceId) return await remote?.publish(input) ?? { status: 'conflict' };
     const observed = await readLocal(input.target);
@@ -118,7 +121,7 @@ export function createDavoBridge(options: DavoBridgeOptions) {
       const state = await store.read();
       const request = state.requests.find(candidate => candidate.id === input.requestId);
       const host = await options.target(input.target.agentId);
-      return !closed && options.canWrite?.() !== false && request !== undefined && request.admittedGeneration === state.retention.generation && Date.now() < Date.parse(request.principal.expiresAt) && request.targetActivityEpoch === input.targetActivityEpoch && host !== undefined && host.processGeneration === input.target.processGeneration && host.conversationId === input.target.conversationId && host.modelId === observed.modelId;
+      return !closed && canWrite('delegate_request') && request !== undefined && request.admittedGeneration === state.retention.generation && Date.now() < Date.parse(request.principal.expiresAt) && request.targetActivityEpoch === input.targetActivityEpoch && host !== undefined && host.processGeneration === input.target.processGeneration && host.conversationId === input.target.conversationId && host.modelId === observed.modelId;
     });
     // count only aggregate uncertain publication outcomes
     if (result.kind === 'unknown') runtime.metrics.count('publication_unknown');
@@ -128,6 +131,8 @@ export function createDavoBridge(options: DavoBridgeOptions) {
   const continuation = new DavoContinuationAuthority({ store, activity: { read: readActivity }, prompts: { publish, lookup }, audit: {
     // persist payload-free continuation intent before delegated effects
     record: async event => {
+      // disabled delegation cannot create an intent policy claim
+      if (event.phase === 'intent' && !canWrite('delegate_request')) return false;
       try {
         await options.audit.record({ phase: event.phase === 'intent' ? 'intent' : 'outcome', timestamp: event.time, durationMs: 0, correlationId: event.operationId, principalHash: createHash('sha256').update(event.originInstanceId).digest('hex'), clientId: 'davo-continuation', tool: event.kind, scopes: ['status:read', 'prompts:write'], risk: 'write', argumentsDigest: event.targetFingerprint, result: event.phase === 'intent' ? 'pending' : event.phase === 'accepted' ? 'success' : 'error' });
         return true;
@@ -174,6 +179,8 @@ export function createDavoBridge(options: DavoBridgeOptions) {
     },
     // persist the original request and continuation before queuing normal agent work
     delegate: async input => {
+      // imported realtime tools cannot bypass a revoked named permission
+      if (!canWrite('delegate_request')) return developerFailure('davo_permission_denied', 'Delegation is disabled.');
       const state = await store.read();
       const original = state.messages.find(message => message.id === input.turn.messageId && message.kind === 'user');
       // capture exact retained original and issuance-time scopes
@@ -195,6 +202,8 @@ export function createDavoBridge(options: DavoBridgeOptions) {
     },
     // relay only a newly spoken answer to the exact current question
     relay: async input => {
+      // imported realtime tools cannot bypass a revoked named permission
+      if (!canWrite('relay_agent_question_answer')) return developerFailure('davo_permission_denied', 'Question relay is disabled.');
       runtime.live.capability(input.principal.leaseKey!, input.turn.capability);
       const ownerHash = runtime.live.current().ownerHash;
       let after: DavoActivityFrontierV1 | undefined;
@@ -203,7 +212,7 @@ export function createDavoBridge(options: DavoBridgeOptions) {
         const state = await store.read();
         const message = state.messages.find(row => row.id === input.turn.messageId && row.kind === 'user');
         // never reconstruct live consent from background request text
-        if (message === undefined || remote === undefined || options.canWrite?.() === false) return developerFailure('davo_voice_inactive', 'The explicit answer is no longer eligible.');
+        if (message === undefined || remote === undefined || !canWrite('relay_agent_question_answer')) return developerFailure('davo_voice_inactive', 'The explicit answer is no longer eligible.');
         runtime.live.capability(input.principal.leaseKey!, input.turn.capability);
         const result = await remote.relay({ target: input.target, principalOwnerHash: ownerHash, admittedMessageId: message.id, admittedAt: message.createdAt, turnId: input.turn.id, operationId: input.operationId, questionId: input.questionId, answer: input.answer });
         after = result.frontier;
@@ -216,7 +225,7 @@ export function createDavoBridge(options: DavoBridgeOptions) {
         if (before === undefined || activityEpoch(before) !== input.target.targetActivityEpoch) return developerFailure('davo_target_chain_changed', 'The Agent changed before the answer.');
         const state = await store.read();
         const ownedQuestion = state.requests.some(request => request.instanceQualifiedTarget.instanceId === instanceId && request.instanceQualifiedTarget.agentId === input.target.agentId && request.principal.principalOwnerHash === ownerHash && request.attention?.kind === 'agent_question' && request.attention.questionId === input.questionId);
-        const accepted = await options.answerQuestion(input.target.agentId, input.questionId, input.answer, () => { try { runtime.live.capability(input.principal.leaseKey!, input.turn.capability); return options.canWrite?.() !== false; } catch { return false; } }, ownedQuestion);
+        const accepted = await options.answerQuestion(input.target.agentId, input.questionId, input.answer, () => { try { runtime.live.capability(input.principal.leaseKey!, input.turn.capability); return canWrite('relay_agent_question_answer'); } catch { return false; } }, ownedQuestion);
         // preserve the pending choice after rejected or uncertain answers
         if (!accepted) return developerFailure('davo_question_changed', 'The answer was not accepted.');
         after = await readActivity(input.target);
@@ -299,6 +308,8 @@ export function createDavoBridge(options: DavoBridgeOptions) {
 
   // recover only an exact correlated terminal prompt receipt
   async function terminal(request: DavoRequestV1, answer: string | undefined, outcome: string): Promise<void> {
+    // revoked delegation cannot evaluate or mutate a retained request
+    if (!canWrite('delegate_request')) return;
     // incomplete publication metadata cannot authorize evaluation
     if (request.dispatch.state !== 'published' || request.dispatch.promptId === undefined) return;
     // coalesce lifecycle duplicates without blocking provider cutoff timers
@@ -311,10 +322,18 @@ export function createDavoBridge(options: DavoBridgeOptions) {
   const unobserve = prompts.observePromptLifecycle({
     // correlate by stable prompt and operation ids, never the latest agent answer
     ended: async event => {
+      // current named policy wins before lifecycle recovery work
+      if (!canWrite('delegate_request')) return;
       const state = await store.read();
+      // recheck after durable state access
+      if (!canWrite('delegate_request')) return;
       const operation = event.operationKey === undefined ? undefined : await prompts.lookupOperation(event.operationKey);
+      // recheck after durable operation access
+      if (!canWrite('delegate_request')) return;
       // remote destinations persist only exact correlated logical lifecycle bodies
       if (operation?.promptId === event.promptId) await remote?.recordLifecycle({ requestId: operation.davoRequestId, operationId: operation.operationKey, promptId: event.promptId, state: event.outcome === 'completed' ? 'completed' : 'failed', safeExcerpt: excerpt(event.answer), completionEnvelope: readDavoCompletion(event.answer) });
+      // recheck after optional remote lifecycle persistence
+      if (!canWrite('delegate_request')) return;
       const request = state.requests.find(candidate => candidate.dispatch.state === 'published' && candidate.dispatch.promptId === event.promptId && (event.operationKey === undefined || candidate.dispatch.operationId === event.operationKey));
       // ignore unrelated, expired and already consumed lifecycle rows
       if (request === undefined || request.state !== 'awaiting-agent') return;
@@ -363,6 +382,8 @@ export function createDavoBridge(options: DavoBridgeOptions) {
       for (const request of state.requests) {
         // an in-process evaluator already owns this exact request
         if (running.has(request.id)) continue;
+        // retained requests cannot continue after named delegation revocation
+        if (!canWrite('delegate_request')) continue;
         // exact published operation receipts survive queue/history presentation eviction
         if (request.state === 'dispatching' || request.state === 'awaiting-agent' || request.state === 'evaluating' || request.state === 'operational-blocked' && request.dispatch.state !== 'published') {
           running.add(request.id);

@@ -133,7 +133,7 @@ const settingsPageHeaderExpectations: SettingsPageHeaderExpectation[] = [
     eyebrow: "Browser settings",
     description: "Manage this browser’s name and identity.",
   },
-  { id: "voice", title: "Voice", eyebrow: "Server settings" },
+  { id: "voice", title: "Voice", eyebrow: "Server settings", description: "Configure the voice assistant and reduce its access below the MCP capability ceiling." },
   {
     id: "keyboard",
     title: "Keyboard shortcuts",
@@ -161,6 +161,7 @@ const settingsPageHeaderExpectations: SettingsPageHeaderExpectation[] = [
       "Configure repositories, worktrees, project-specific commands, and this browser’s launcher behavior.",
   },
   { id: "reviews", title: "Reviews", eyebrow: "Server settings" },
+  { id: "mcp", title: "MCP", eyebrow: "Server settings", description: "Set the maximum capabilities available to MCP, Conductor, and Voice." },
   { id: "tmux", title: "TMUX", eyebrow: "Server settings" },
   { id: "storage", title: "Storage", eyebrow: "Server settings" },
   {
@@ -362,6 +363,7 @@ const settingsUnavailableSections = [
   { id: "installation", label: "Installation" },
   { id: "compose-override", label: "Docker" },
   { id: "cloudflare", label: "Cloudflare" },
+  { id: "mcp", label: "MCP" },
 ] as const;
 const protectedSourceMarker = `__RAC_PROTECTED_${"A".repeat(43)}__`;
 const agentEnvironmentKeys = [
@@ -2274,14 +2276,14 @@ for (const scenario of [
     await expect(
       application.getByRole("switch", { name: /multi instance/iu }),
     ).toHaveCount(0);
-    await expect(
-      application.getByRole("heading", { name: "Mcp", exact: true }),
-    ).toBeVisible();
-    await expect(
-      application
-        .locator('[data-settings-path="integrations.mcp.endpoint"]')
-        .getByRole("textbox"),
-    ).toBeEditable();
+    // dedicated MCP controls must not reappear beside remote-server settings
+    await expect(application.locator('[data-settings-path="integrations.mcp"]')).toHaveCount(0);
+    await selectSettingsSection(settings, "mcp", "MCP");
+    const mcp = settings.getByRole("region", { name: "MCP settings content", exact: true });
+    await expect(mcp.getByRole("heading", { name: "MCP", exact: true, level: 2 })).toBeVisible();
+    await mcp.getByText("Deployment gates", { exact: true }).click();
+    await expect(mcp.locator('[data-settings-path="integrations.mcp.endpoint"]').getByRole("textbox")).toBeEditable();
+    await selectSettingsSection(settings, "app", "Application");
 
     const addRemote = application.getByRole("button", {
       name: "+ Add Remote server",
@@ -3323,7 +3325,8 @@ test("moves structured TMUX settings into one Application tab and saves original
   );
   expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
   expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
-  expect(labels.indexOf("Conductor")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("MCP")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("Conductor")).toBe(labels.indexOf("MCP") + 1);
   expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Conductor") + 1);
   expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
   expect(labels.indexOf("Agents")).toBe(labels.indexOf("Storage") + 1);
@@ -4869,7 +4872,8 @@ test("moves Projects into its own Application section on desktop and mobile", as
   );
   expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
   expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
-  expect(labels.indexOf("Conductor")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("MCP")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("Conductor")).toBe(labels.indexOf("MCP") + 1);
   expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Conductor") + 1);
   expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
   expect(labels.indexOf("Agents")).toBe(labels.indexOf("Storage") + 1);
@@ -10574,7 +10578,8 @@ for (const width of [390, 780]) {
         exact: true,
       })
       .getByRole("group", { name: "Application", exact: true });
-    await expect(application.getByRole("option")).toHaveCount(7);
+    await expect(application.getByRole("option")).toHaveCount(8);
+    await expect(application.getByRole("option", { name: "MCP", exact: true })).toBeVisible();
     await expect(
       application.getByRole("option", {
         name: "Application",
@@ -12456,10 +12461,11 @@ test("renders MCP and OMX labels while preserving their lowercase application va
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
 
-  await selectSettingsSection(settings, "app", "Application");
+  await selectSettingsSection(settings, "mcp", "MCP");
   await expect(
-    settings.getByRole("heading", { name: "MCP", exact: true, level: 3 }),
+    settings.getByRole("heading", { name: "MCP", exact: true, level: 2 }),
   ).toBeVisible();
+  await settings.getByText("Deployment gates", { exact: true }).click();
   await expect(
     settings.locator(
       '[data-settings-path="integrations.mcp.readEnabled"]',

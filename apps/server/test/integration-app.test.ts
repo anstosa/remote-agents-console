@@ -80,7 +80,7 @@ describe('application integration surfaces', () => {
       trustedProxyIps: new Set(['127.0.0.1']),
       pollIntervalMs: 500,
       adapters: {},
-      integrations: { enabled: true, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false }, realtime: { enabled: true, name: 'Davo', context: '', writeToolsEnabled: true }, multiInstance: { enabled: false } },
+      integrations: { enabled: true, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false, permissions: { bind_davo_target: { write: true }, delegate_request: { write: true }, answer_davo_choice: { write: true } } }, realtime: { enabled: true, name: 'Davo', context: '', writeToolsEnabled: true, permissions: { list_notes: { read: false }, delegate_request: { write: false } } }, multiInstance: { enabled: false } },
       projects: []
     };
     const auth = new AuthService('$argon2id$unused', secret);
@@ -116,7 +116,9 @@ describe('application integration surfaces', () => {
       expect(JSON.stringify(realtime.json())).not.toContain('ek_testcredential');
       const negotiated = await app.inject({ method: 'POST', url: '/api/realtime/negotiate', headers: audioHeaders, payload: { voiceSessionId, generation, negotiationId: realtime.json().negotiationId, sdp: 'v=0\r\noffer' } });
       expect(negotiated.statusCode).toBe(200);
-      const ready = await app.inject({ method: 'POST', url: '/api/davo/session/ready', headers: audioHeaders, payload: { voiceSessionId, generation, readinessId: negotiated.json().readinessId, responseId: 'readiness-response', importedTools: negotiated.json().readinessResponse.tools[0].allowed_tools } });
+      const allowedTools = negotiated.json().readinessResponse.tools[0].allowed_tools;
+      expect(allowedTools).toEqual(expect.not.arrayContaining(['list_notes', 'delegate_request']));
+      const ready = await app.inject({ method: 'POST', url: '/api/davo/session/ready', headers: audioHeaders, payload: { voiceSessionId, generation, readinessId: negotiated.json().readinessId, responseId: 'readiness-response', importedTools: allowedTools } });
       expect(ready.statusCode).toBe(200);
       const admitted = await app.inject({ method: 'POST', url: '/api/davo/transcripts/user', headers: audioHeaders, payload: { voiceSessionId, generation, providerSessionId: 'session-test', providerItemId: 'item-test', text: 'What is running?' } });
       expect(admitted.statusCode).toBe(200);
@@ -125,8 +127,8 @@ describe('application integration surfaces', () => {
       const listed = await app.inject({ method: 'POST', url: '/mcp', headers: mcpHeaders, payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' } });
       expect(listed.statusCode).toBe(200);
       const names = listed.json().result.tools.map((tool: { name: string }) => tool.name);
-      expect(names).toEqual(expect.arrayContaining(['get_agent_runtime', 'list_agent_models', 'list_conversations', 'get_comparison', 'list_notes', 'bind_davo_target', 'delegate_request', 'relay_agent_question_answer', 'answer_davo_choice']));
-      expect(names).toEqual(expect.not.arrayContaining(['queue_prompt', 'restart_agent', 'launch_agent', 'begin_file_upload', 'create_note', 'spawn_agent', 'create_worktree', 'create_pull_request_review_draft']));
+      expect(names).toEqual(expect.arrayContaining(['get_agent_runtime', 'list_agent_models', 'list_conversations', 'get_comparison', 'bind_davo_target', 'relay_agent_question_answer', 'answer_davo_choice']));
+      expect(names).toEqual(expect.not.arrayContaining(['list_notes', 'delegate_request', 'queue_prompt', 'restart_agent', 'launch_agent', 'begin_file_upload', 'create_note', 'spawn_agent', 'create_worktree', 'create_pull_request_review_draft']));
       expect(names).not.toContain('watch_command');
       const denied = await app.inject({ method: 'POST', url: '/mcp', headers: mcpHeaders, payload: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'watch_command', arguments: { command: 'echo unsafe', description: 'unavailable', request_id: 'request-denied-command' } } } });
       expect(denied.json().error.code).toBe(-32602);

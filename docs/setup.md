@@ -522,11 +522,27 @@ The Conductor is one always-running Pi Agent that can act on the console itself,
 
 **Its MCP access.** At each start of its process the console mints a token, keeps only its hash, and hands it to the RAC Pi extension over Pi's RPC channel; the extension registers the console's `/mcp` (at your `publicOrigin`) with it. The token never enters a command's environment, never reaches the model and is redacted from Raw events. Commands cannot reach the endpoint anyway: the console's `publicOrigin` host and listener address are denied domains for every Pi's commands. The token stops working when the process exits or is restarted.
 
-- The Conductor needs no `integrations` block: `/mcp` is served whenever a Conductor is configured, though the OAuth and voice parts are not. Its `scopes` alone decide which writes and dangerous tools it may call: `integrations.mcp.writeEnabled` and `dangerousEnabled` gate only your OAuth and voice clients. `integrations.mcp.readEnabled` (on by default) still gates its reads.
+- `/mcp` is served whenever a Conductor is configured, though the OAuth and voice parts remain off without `integrations.enabled`. Its `scopes`, optional `conductor.permissions` restrictions, and the shared `integrations.mcp.permissions` ceiling decide which capabilities it may call. `integrations.mcp.writeEnabled` and `dangerousEnabled` gate only OAuth and voice clients, while `integrations.mcp.readEnabled` (on by default) still gates Conductor reads.
 - It acts without Davo's voice mode, has its own rate limit (120 calls a minute, counted per MCP call, so one script cannot hammer the console), and never reaches another console through federation. Every call is in the integration audit log.
 - It acts only within its scope: every configured Project, and any other Place while its Workspace exists. Worktrees and Agents elsewhere are not listed, and a call on one answers not found.
 - Its commands share every Pi's network allowlist (`sandbox` and `adapters.pi.sandbox`). Since it can read across your Projects, keep that list to what you would let it send data to. The denied console hosts are names and the listener address; a wildcard you allow that resolves to the same proxy can still reach `/mcp`, where only the token admits a caller.
 - It uses code mode to batch and filter console calls: a script calls them as `tools.mcp__rac__<tool>(args)`, and each result carries its data in `structuredContent`. Scripts get no `models` (no direct provider calls outside the Allowed models).
+
+**Shared capability permissions.** The MCP, Conductor, and Voice settings pages use
+the same grouped Read and Write controls. MCP is the maximum allowed access;
+Conductor and Voice can independently turn off capabilities within that ceiling.
+Their optional per-tool overrides are stored in `conductor.permissions` and
+`integrations.realtime.permissions`, using the same supported tool names and
+read/write lanes as `integrations.mcp.permissions`.
+
+An omitted child flag inherits MCP. A child `false` restricts that surface, while
+`true` never overrides an MCP denial. Lowering MCP masks existing child preferences
+without deleting them; restoring MCP still respects an explicit child `false`.
+Parent-disabled controls are unchecked and unavailable on both child pages.
+Turning off every Voice capability still allows audio chat with an empty MCP catalog.
+Changes apply after saving and restarting RAC. Existing scopes, feature gates,
+audience restrictions, leases, and approval checks remain independent limits;
+these settings do not grant Voice raw execution or replace Conductor's sandbox.
 
 **What it does with them.**
 

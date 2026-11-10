@@ -30,6 +30,7 @@ import { editableIconSources, InstanceIconPreview, instanceIcons, isInstanceIcon
 import { composeOptionSettings, environmentDescription, knownEnvironmentKeys, labels as sourceLabels, protectedSettingIdentity } from '../../../server/src/settings/catalog.js';
 import { buildSettingsSearchIndex, type SettingsSearchResult } from './search-index.js';
 import { SettingsSearch, SettingsSearchPath, useSettingsSearchNavigation, type SettingsSearchDestination } from './search.js';
+import { mcpPermissionGroups, type McpPermissionGroup } from '../../../server/src/integrations/mcp/permission-groups.js';
 import './settings.css';
 
 type Draft = SettingsDraft;
@@ -76,7 +77,7 @@ const pendingSourceFormats = { app: 'json', env: 'env', installation: 'installat
 // reuse the authoritative labels before the installation catalog arrives
 const pendingSourceNavigation: Pick<SettingsSource, 'id' | 'label' | 'format' | 'path'>[] = Object.entries(pendingSourceFormats).map(([id, format]) => ({ id, label: sourceLabels[id] ?? id, format }));
 // keep dedicated and automatically derived controls out of the application field tree
-const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'conductor', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', 'proxy', 'integrations.multiInstance', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
+const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'conductor', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', 'proxy', 'integrations.multiInstance', 'integrations.mcp', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
 // keep dedicated source selectors with their application and tmux consumers
 const dedicatedInstallationPaths = new Set(['version', 'sources']);
 
@@ -1023,16 +1024,75 @@ function ConductorModelField({ source, schema, value, issues, disabled, onPatch 
   </div>;
 }
 
-type ConductorEditorProps = Omit<Parameters<typeof SchemaField>[0], 'schema' | 'value' | 'path'> & { schema: SettingsSchema };
+type ApplicationSectionEditorProps = Omit<Parameters<typeof SchemaField>[0], 'schema' | 'value' | 'path'> & { schema: SettingsSchema };
+type CapabilityEditorProps = Pick<ApplicationSectionEditorProps, 'source' | 'issues' | 'disabled' | 'onPatch'> & {
+  surface: 'MCP' | 'Conductor' | 'Voice';
+  root: string[];
+  schema: SettingsSchema;
+  ceiling?: { root: string[]; schema: SettingsSchema };
+};
+
+// render one shared grouped capability set under an optional mcp ceiling
+function CapabilityEditor({ surface, root, schema, ceiling, source, issues, disabled, onPatch }: CapabilityEditorProps) {
+  const permissions = schema.properties ?? {};
+  const ceilingPermissions = ceiling?.schema.properties ?? {};
+  // resolve one authored flag against the schema's inherited default
+  const allowed = (permissionRoot: string[], permissionSchema: Record<string, SettingsSchema>, name: string, mode: 'read' | 'write', inherited: boolean): boolean => {
+    const authored = valueAt(source.value, [...permissionRoot, name, mode]);
+    const fallback = permissionSchema[name]?.properties?.[mode]?.default;
+    return typeof authored === 'boolean' ? authored : typeof fallback === 'boolean' ? fallback : inherited;
+  };
+  // expose only operations supported by this server's authoritative schema
+  const capabilities = mcpPermissionGroups.map(group => ({
+    ...group,
+    read: group.read.filter(name => permissions[name]?.properties?.read !== undefined),
+    write: group.write.filter(name => permissions[name]?.properties?.write !== undefined)
+  })).filter(group => group.read.length > 0 || group.write.length > 0);
+  // stage every member of one capability operation and no other permissions
+  const cell = (group: McpPermissionGroup, mode: 'read' | 'write') => {
+    const members = group[mode];
+    const path = [...root.slice(0, -1), 'capabilities', group.name, mode];
+    // a child can edit only operations that its live mcp ceiling permits
+    const eligible = ceiling === undefined ? members : members.filter(name => ceilingPermissions[name]?.properties?.[mode] !== undefined && allowed(ceiling.root, ceilingPermissions, name, mode, false));
+    const states = eligible.map(name => allowed(root, permissions, name, mode, ceiling === undefined ? false : true));
+    const checked = states.length > 0 && states.every(Boolean);
+    const mixed = states.some(Boolean) && !checked;
+    const label = `${mode === 'read' ? 'Read' : 'Write'} ${group.title}`;
+    const unavailable = members.length > 0 && eligible.length === 0;
+    return <td data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}><label className="settings-mcp-cell"><input type="checkbox" aria-label={label} aria-checked={mixed ? 'mixed' : checked} checked={checked} ref={input => { /* preserve partial overrides without authoring them */ if (input !== null) input.indeterminate = mixed; }} disabled={disabled || members.length === 0 || unavailable} title={unavailable ? 'Disabled in MCP.' : members.length === 0 ? `This capability has no ${mode} operation.` : mixed ? 'Some operations are allowed. Change this checkbox to set them all.' : undefined} onChange={event => {
+      const value = event.currentTarget.checked;
+      // enabling touches only currently eligible leaves; disabling also records future reductions
+      for (const name of value ? eligible : members) onPatch(source, { op: 'set', path: [...root, name, mode], value });
+    }} /></label>{members.map(name => <FieldIssues key={name} issues={issues} sourceId={source.id} path={[...root, name, mode]} />)}</td>;
+  };
+  return <section className="settings-mcp" data-permission-surface={surface.toLowerCase()} data-settings-path={root.slice(0, -1).join('.')} aria-label={`${surface} permissions`}>
+    <table className="settings-mcp-table" aria-label={`${surface} capabilities`}><thead><tr><th scope="col">Capability</th><th scope="col">Read</th><th scope="col">Write</th></tr></thead><tbody>{capabilities.map(group => <tr key={group.name} data-mcp-group={group.name} data-settings-path={[...root.slice(0, -1), 'capabilities', group.name].join('.')}><th scope="row"><strong>{group.title}</strong><small>{group.description}</small></th>{cell(group, 'read')}{cell(group, 'write')}</tr>)}</tbody></table>
+    {capabilities.length === 0 && <p role="note">{surface} capability settings are unavailable in this configuration.</p>}
+    <FieldIssues issues={issues} sourceId={source.id} path={root} />
+  </section>;
+}
+
+// aggregate existing tool permissions without rewriting individual defaults or overrides
+function McpEditor({ source, schema, issues, disabled, onPatch, ...fields }: ApplicationSectionEditorProps) {
+  const permissionSchema = schema.properties?.permissions;
+  const gates = Object.entries(schema.properties ?? {}).filter(([key]) => key !== 'permissions');
+  return <section data-settings-path="integrations.mcp" data-settings-search-path={JSON.stringify(['integrations', 'mcp'])} aria-label="MCP permissions">
+    {permissionSchema !== undefined && <CapabilityEditor surface="MCP" root={['integrations', 'mcp', 'permissions']} schema={permissionSchema} source={source} issues={issues} disabled={disabled} onPatch={onPatch} />}
+    <details className="settings-mcp-gates"><summary>Deployment gates</summary><p className="settings-field-guidance">These existing gates remain separate from capability permissions. Conductor also keeps its existing scope-based restrictions.</p>{gates.map(([key, property]) => <SchemaField {...fields} key={key} source={source} schema={property} value={valueAt(source.value, ['integrations', 'mcp', key])} path={['integrations', 'mcp', key]} issues={issues} disabled={disabled} onPatch={onPatch} />)}</details>
+  </section>;
+}
 
 // render Conductor's permanent enable boundary and fixed field set
-function ConductorEditor({ source, schema, issues, disabled, onPatch, ...fields }: ConductorEditorProps) {
+function ConductorEditor({ source, schema, issues, disabled, onPatch, ...fields }: ApplicationSectionEditorProps) {
   const configured = valueAt(source.value, ['conductor']);
   const record = configured !== null && typeof configured === 'object' && !Array.isArray(configured) ? configured as Record<string, unknown> : undefined;
   const enabled = record !== undefined && record.enabled !== false;
   const kindSchema = schema.properties?.kind;
   const hideKind = kindSchema?.options?.length === 1;
-  const properties = Object.entries(schema.properties ?? {}).filter(([key]) => key !== 'enabled' && !(key === 'kind' && hideKind));
+  const properties = Object.entries(schema.properties ?? {}).filter(([key]) => key !== 'enabled' && key !== 'permissions' && key !== 'scopes' && !(key === 'kind' && hideKind));
+  const permissionSchema = schema.properties?.permissions;
+  const mcpPermissionSchema = source.schema?.properties?.integrations?.properties?.mcp?.properties?.permissions;
+  const scopes = schema.properties?.scopes;
 
   // preserve existing fields when toggling an authored configuration
   const toggleEnabled = (next: boolean) => {
@@ -1052,9 +1112,11 @@ function ConductorEditor({ source, schema, issues, disabled, onPatch, ...fields 
       <FieldIssues issues={issues} sourceId={source.id} path={['conductor', 'enabled']} />
     </div>
     {schema.description && <p className="settings-preference-description">{schema.description}</p>}
+    {permissionSchema !== undefined && mcpPermissionSchema !== undefined && <CapabilityEditor surface="Conductor" root={['conductor', 'permissions']} schema={permissionSchema} ceiling={{ root: ['integrations', 'mcp', 'permissions'], schema: mcpPermissionSchema }} source={source} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />}
     <div className="settings-object-fields">{properties.map(([key, property]) => key === 'model'
       ? <ConductorModelField key={key} source={source} schema={property} value={record?.[key]} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />
       : <SchemaField {...fields} key={key} source={source} schema={property} value={record?.[key]} path={['conductor', key]} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />)}</div>
+    {scopes !== undefined && <details className="settings-mcp-gates"><summary>Existing scope restrictions</summary><SchemaField {...fields} source={source} schema={scopes} value={record?.scopes} path={['conductor', 'scopes']} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} /></details>}
     <FieldIssues issues={issues} sourceId={source.id} path={['conductor']} />
   </section>;
 }
@@ -1629,6 +1691,8 @@ function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
       if (page !== undefined) pages.add(page);
       // realtime fields belong to Voice rather than general integrations
       if (section === 'integrations' && key === 'realtime') pages.add('voice');
+      // capability validation belongs to the shared MCP page
+      if (section === 'integrations' && key === 'mcp') pages.add('mcp');
     }
     // dotenv fields retain their original source and dedicated editor
     if (sourceId === 'env' && section !== undefined) {
@@ -1665,6 +1729,7 @@ const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode =
     'google-calendar': 'M5 3v3m14-3v3M4 8h16v12H4zM8 12h3v3H8z',
     agents: 'M12 3v3M5 7h14v13H5zM2 11v5m20-5v5M8 12h2m4 0h2m-7 4h6',
     conductor: 'M4 5h16v14H4zM8 9h8m-8 4h5m4 0h.01',
+    mcp: 'M8 3v5H3m18 0h-5V3M3 16h5v5m8 0v-5h5M8 8h8v8H8z',
     reviews: 'M5 3h14v18H5zM8 7h8M8 11h5m-5 5 2 2 5-5',
     storage: 'M20 6c0 2-3.6 3-8 3S4 8 4 6s3.6-3 8-3 8 1 8 3v12c0 2-3.6 3-8 3s-8-1-8-3V6m0 6c0 2 3.6 3 8 3s8-1 8-3',
     projects: 'M3 6h6l2 2h10v12H3zM3 6V4h7l2 2h7v2',
@@ -1678,7 +1743,7 @@ const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode =
     wrapper: 'M3 4h18v16H3zm3 5 3 3-3 3m6 0h4',
     svg: 'M3 3h18v18H3zM3 16l6-6 6 6 3-3 3 3M16 7h.01'
   };
-  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : id === 'browser' || id === 'interface' || id === 'voice' || id === 'google-calendar' || id === 'keyboard' || id === 'tmux' || id === 'projects' || id === 'agents' || id === 'conductor' || id === 'reviews' || id === 'storage' ? glyphs[id] : glyphs[format ?? 'json']} />;
+  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : id === 'browser' || id === 'interface' || id === 'voice' || id === 'google-calendar' || id === 'keyboard' || id === 'tmux' || id === 'projects' || id === 'agents' || id === 'conductor' || id === 'mcp' || id === 'reviews' || id === 'storage' ? glyphs[id] : glyphs[format ?? 'json']} />;
 };
 
 // bind tmux controls and wrapper contents to their existing installed sources
@@ -1860,12 +1925,33 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
       if (generation !== loadGeneration.current) return;
       // require the versioned snapshot boundary
       if (!isSettingsSnapshot(payload)) { setError('Settings returned an unsupported response.'); return; }
-      setSnapshot(payload);
-      setSources(payload.sources);
+      let snapshot = payload;
+      // reconnect only the reserved controller before retrying stale observer metadata
+      if (runtime.canMutate && snapshot.sources.some(source => source.id === 'app' && !source.writable)) {
+        const restored = await runtime.request('/api/auth/session', { cache: 'no-store', signal: AbortSignal.timeout(8_000) }).catch(() => undefined);
+        // discard proof obtained for a replaced catalog read
+        if (generation !== loadGeneration.current) return;
+        const authority: unknown = restored?.ok ? await restored.json().catch(() => undefined) : undefined;
+        // discard parsed authority after catalog replacement
+        if (generation !== loadGeneration.current) return;
+        // an active session permits one authoritative retry, never a client-side writable override
+        if (authority !== null && typeof authority === 'object' && 'active' in authority && authority.active === true) {
+          const refreshed = await runtime.request('/api/settings', { cache: 'no-store', signal: AbortSignal.timeout(8_000) }).catch(() => undefined);
+          // discard metadata received after a newer load
+          if (generation !== loadGeneration.current) return;
+          const updated: unknown = refreshed?.ok ? await refreshed.json().catch(() => undefined) : undefined;
+          // only a current validated snapshot may replace read-only metadata
+          if (generation !== loadGeneration.current) return;
+          // retain the original lock after a failed or unsupported refresh
+          if (isSettingsSnapshot(updated)) snapshot = updated;
+        }
+      }
+      setSnapshot(snapshot);
+      setSources(snapshot.sources);
       // retain virtual pages and redirect removed standalone tabs
       setSelectedId(current => {
         const next = current === 'compose' ? 'compose-override' : current === 'wrapper' ? 'tmux' : current === 'cloudflared' || current === 'cloudflared-credentials' ? 'cloudflare' : current;
-        return next === 'browser' || next === 'interface' || next === 'voice' || next === 'google-calendar' || next === 'keyboard' || next === 'tmux' || next === 'projects' || next === 'agents' || next === 'conductor' || next === 'reviews' || next === 'storage' || next === 'cloudflare' || payload.sources.some(source => source.id === next) ? next : 'browser';
+        return next === 'browser' || next === 'interface' || next === 'voice' || next === 'google-calendar' || next === 'keyboard' || next === 'tmux' || next === 'projects' || next === 'agents' || next === 'conductor' || next === 'mcp' || next === 'reviews' || next === 'storage' || next === 'cloudflare' || snapshot.sources.some(source => source.id === next) ? next : 'browser';
       });
       if (!preserveDrafts) { setDrafts({}); setIssues([]); setWarnings([]); setCatalogEditorEpoch(current => current + 1); }
       setError('');
@@ -1877,7 +1963,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
       // only the newest read may release the shared loading lock
       if (generation === loadGeneration.current) setLoading(false);
     }
-  }, [loadGeneration, runtime.refreshStatus, runtime.request, setDrafts, setLoading, setSnapshot, setSources]);
+  }, [loadGeneration, runtime.canMutate, runtime.refreshStatus, runtime.request, setDrafts, setLoading, setSnapshot, setSources]);
 
   // lock refresh and discard before waiting for disclosure revocation
   const reloadFiles = async () => {
@@ -2116,12 +2202,14 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   if (changes.some(change => editableIconSources.has(change.sourceId) || change.sourceId === 'installation' && change.patches?.some(patch => patch.path[0] === 'sources' && patch.path[1] === 'icons'))) changedSourceIds.add('app');
   // surface edits from every backing source on the virtual TMUX tab
   if (changes.some(isTmuxSettingsChange)) changedSourceIds.add('tmux');
-  // surface moved environment drafts on their dedicated voice page
-  if (changes.some(change => change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => voiceEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('voice');
+  // surface voice policy and environment drafts on their dedicated page
+  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'integrations' && (next.path.length === 1 || next.path[1] === 'realtime') || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => voiceEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('voice');
   // keep calendar config and credential drafts on their dedicated page
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'googleCalendar' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => googleCalendarEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('google-calendar');
   // keep both original backing sources visible on the dedicated Agents page
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'adapters' || next.path[0] === 'defaultAgent' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => agentEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('agents');
+  // keep capability edits attached to their application transaction
+  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'integrations' && (next.path.length === 1 || next.path[1] === 'mcp') || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('mcp');
   // keep Conductor edits attached to their application transaction
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'conductor' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('conductor');
   // keep data-location drafts visible on Storage without changing either backing source
@@ -2276,14 +2364,20 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // reject only explicitly authored empty model policies
   const emptyAgentModelKind = Object.entries(agentAdapters).find(([, entry]) => entry !== null && typeof entry === 'object' && Object.hasOwn(entry, 'allowedModels') && Array.isArray((entry as Record<string, unknown>).allowedModels) && ((entry as Record<string, unknown>).allowedModels as unknown[]).length === 0)?.[0];
   const voiceSchema = voiceSource?.schema?.properties?.integrations?.properties?.realtime;
-  const voiceFields = Object.entries(voiceSchema?.properties ?? {}).filter(([key]) => !dedicatedApplicationPaths.has(`integrations.realtime.${key}`));
+  const voiceFields = Object.entries(voiceSchema?.properties ?? {}).filter(([key]) => key !== 'permissions' && key !== 'writeToolsEnabled' && !dedicatedApplicationPaths.has(`integrations.realtime.${key}`));
   const voiceFileDraft = voiceSource === undefined || !changedSourceIds.has(voiceSource.id) ? undefined : drafts[voiceSource.id];
+  // share the application source lock across every structured policy editor
+  const applicationFieldsDisabled = loading || saving || !runtime.canMutate || voiceSource === undefined || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true;
 
   // retain blank voice names locally until the operator corrects them
   const voiceNameInvalid = changes.some(change => change.sourceId === 'app' && change.patches?.some(patch => patch.op === 'set' && patch.path.join('.') === 'integrations.realtime.name' && typeof patch.value === 'string' && !patch.value));
   const voiceEditor = <VoiceEditor source={voiceSource} voice={voice} draft={voiceFileDraft} disabled={loading || saving || !runtime.canMutate || voiceSource === undefined || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true} disclosures={disclosures} issues={issues} onPatch={patch} onReveal={reveal} onRemask={remask} />;
+  const voicePermissions = voiceSchema?.properties?.permissions;
+  const sharedMcpPermissions = voiceSource?.schema?.properties?.integrations?.properties?.mcp?.properties?.permissions;
+  const voicePermissionEditor = voiceSource !== undefined && voicePermissions !== undefined && sharedMcpPermissions !== undefined && <CapabilityEditor surface="Voice" root={['integrations', 'realtime', 'permissions']} schema={voicePermissions} ceiling={{ root: ['integrations', 'mcp', 'permissions'], schema: sharedMcpPermissions }} source={voiceSource} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} onPatch={patch} />;
+  const voiceWriteGate = voiceSchema?.properties?.writeToolsEnabled;
   // keep source-backed voice controls below context and before credentials
-  const voiceFieldsEditor = voiceSource !== undefined && voiceFields.length > 0 && <div className="settings-voice-fields">{voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing these fields.</p>}{voiceFields.map(([key, schema]) => <SchemaField key={`${key}:${catalogEditorEpoch}`} source={voiceSource} schema={schema} value={valueAt(voiceSource.value, ['integrations', 'realtime', key])} path={['integrations', 'realtime', key]} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={disabled || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} navigationDisabled={loading || saving} />)}</div>;
+  const voiceFieldsEditor = voiceSource !== undefined && <div className="settings-voice-fields">{voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing these fields.</p>}{voicePermissionEditor}{voiceFields.map(([key, schema]) => <SchemaField key={`${key}:${catalogEditorEpoch}`} source={voiceSource} schema={schema} value={valueAt(voiceSource.value, ['integrations', 'realtime', key])} path={['integrations', 'realtime', key]} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={disabled || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} navigationDisabled={loading || saving} />)}{voiceWriteGate !== undefined && <details className="settings-mcp-gates"><summary>Existing write restriction</summary><SchemaField source={voiceSource} schema={voiceWriteGate} value={valueAt(voiceSource.value, ['integrations', 'realtime', 'writeToolsEnabled'])} path={['integrations', 'realtime', 'writeToolsEnabled']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={disabled || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} navigationDisabled={loading || saving} /></details>}</div>;
   const environmentSource = sources.find(source => source.id === 'env');
   const environmentDraft = drafts.env;
   // keep setup keys available while voice is disabled without competing with raw file drafts
@@ -2341,8 +2435,6 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   else if (typeof defaultCalendarTitleTemplate === 'string') googleCalendarTitleTemplate = defaultCalendarTitleTemplate;
   const googleCalendarEditor = <GoogleCalendarSettings setup={googleCalendar} configuration={googleCalendarConfiguration} environment={googleCalendarEnvironment} titleTemplate={googleCalendarTitleTemplate} disabled={loading || saving || !runtime.canMutate} blockedByDrafts={dirtyCount > 0} confirmationTarget={confirmationTarget} onNotice={onSaveNotice} />;
 
-  // share source locks across application-backed structured editors
-  const applicationFieldsDisabled = loading || saving || !runtime.canMutate || voiceSource === undefined || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true;
   const adaptersSchema = voiceSource?.schema?.properties?.adapters;
   const defaultAgentSchema = voiceSource?.schema?.properties?.defaultAgent;
   const defaultAgentValue = valueAt(voiceSource?.value, ['defaultAgent']);
@@ -2467,6 +2559,22 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
           </>}
   </div>;
 
+  const configuredMcp = valueAt(voiceSource?.value, ['integrations', 'mcp']);
+  // retain authored deployment controls when an older catalog omits presentation metadata
+  const mcpSchema = voiceSource?.schema?.properties?.integrations?.properties?.mcp ?? (configuredMcp === undefined ? undefined : inferSchema(configuredMcp));
+  const mcpEditor = <div className="settings-mcp-editor">
+    {voiceSource === undefined ? <p role="note">Load the Application configuration before editing MCP permissions.</p>
+      : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing MCP permissions.</p>
+        : mcpSchema === undefined ? <p role="note">MCP settings are unavailable in this configuration.</p>
+          : <>
+            {!voiceSource.writable && <p role="note">MCP settings are read-only in this installation.</p>}
+            {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing MCP permissions.</p>}
+            {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing MCP permissions.</p>}
+            {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing MCP permissions.</p>}
+            <McpEditor key={`mcp:${catalogEditorEpoch}`} source={voiceSource} schema={mcpSchema} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} />
+          </>}
+  </div>;
+
   const conductorSchema = voiceSource?.schema?.properties?.conductor;
   const conductorEditor = <div className="settings-conductor">
     {voiceSource === undefined ? <p role="note">Load Application configuration before editing Conductor.</p>
@@ -2513,6 +2621,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     { id: 'interface', group: 'Application', label: 'Interface', keywords: 'custom buttons actions slots shell command agent prompt appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers', content: interfaceEditor },
     { id: 'projects', group: 'Application', label: 'Projects', keywords: 'projects repositories directories dynamic worktrees launcher paths overrides commands tasks button overrides', content: projectsEditor },
     { id: 'reviews', group: 'Application', label: 'Reviews', keywords: 'review tours code review presets prompts model effort codex claude headless interactive', content: reviewsEditor },
+    { id: 'mcp', group: 'Application', label: 'MCP', keywords: 'mcp capabilities permissions read write tools conductor davo access', content: mcpEditor },
     { id: 'conductor', group: 'Application', label: 'Conductor', keywords: 'conductor orchestration workers pi model effort scopes permissions home project AGENTS.md', content: conductorEditor },
     { id: 'tmux', group: 'Application', label: 'TMUX', keywords: `tmux polling pollIntervalMs wrapper executable connection discovery socket ${[...tmuxEnvironmentKeys].join(' ')} ${sources.find(source => source.id === 'wrapper')?.path ?? ''}`, content: <TmuxSettings sources={sources} installationKind={snapshot?.installationKind} drafts={drafts} disclosures={disclosures} issues={issues} disabled={loading || saving || !runtime.canMutate} navigationDisabled={loading || saving} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} /> },
     { id: 'storage', group: 'Application', label: 'Storage', keywords: `storage data .data files paths directories scratchDirectory scratch notes prompts history worktrees integrations previews ${[...storageEnvironmentKeys].join(' ')}`, content: storageEditor },
@@ -2534,7 +2643,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // share the concise application name with its header and scroll region
   const selectedLabel = selected?.id === 'app' ? 'Application' : selectedPreference?.label ?? selected?.label ?? navigationSources.find(source => source.id === selectedId)?.label ?? 'This browser';
   // lock every tab during reads and retain unavailable-source guards afterward
-  const sectionDisabled = (id: string): boolean => loading || snapshot === undefined && (id === 'tmux' || id === 'agents' || id === 'conductor' || id === 'reviews' || id === 'storage' || id === 'google-calendar' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
+  const sectionDisabled = (id: string): boolean => loading || snapshot === undefined && (id === 'tmux' || id === 'agents' || id === 'conductor' || id === 'mcp' || id === 'reviews' || id === 'storage' || id === 'google-calendar' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
   const issuePageIds = settingsIssuePageIds(issues);
   // announce validation failures before ordinary unsaved changes
   const navigationLabel = (id: string, label: string): string => `${label}${issuePageIds.has(id) ? ' · Validation issues' : changedSourceIds.has(id) ? ' · Unsaved changes' : ''}`;
