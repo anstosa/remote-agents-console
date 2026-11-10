@@ -13,7 +13,7 @@ import { ControlService } from './auth/control.js';
 import { DeviceService } from './auth/devices.js';
 import { TicketStore } from './auth/tickets.js';
 import { DiscoveryService } from './discovery/service.js';
-import { adapterFor, structuredAdapterFor } from './adapters/registry.js';
+import { adapterFor, launchTransport, structuredAdapterFor } from './adapters/registry.js';
 import { agentChoiceProblem, agentEffort, agentEfforts, agentModel } from './launch/agent-choice.js';
 import type { ModelSetting } from './transports/structured.js';
 import type { ConversationTarget, LaunchOutcome, SwitchOutcome } from './transports/transport.js';
@@ -667,7 +667,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const live = (await discovery.dashboard(true)).agents.filter(agent => agent.spawnedBy === by && (agent.structured === undefined || agent.structured.lifecycle === 'starting' || agent.structured.lifecycle === 'live'));
       if (live.length >= maxWorkers) return 'at-capacity' as const;
       const setting = model === undefined ? undefined : { model };
-      if (kind === 'pi') return await structuredAgents.launch(place, kind, { sandboxed: true, spawnedBy: by, ...(setting === undefined ? {} : { model: setting }) });
+      if (launchTransport(kind, config.adapters) === 'structured') return await structuredAgents.launch(place, kind, { sandboxed: structuredAdapterFor(kind)?.sandbox === true, spawnedBy: by, ...(setting === undefined ? {} : { model: setting }) });
       const outcome = await launchFresh({
         launch: () => launchAgent(atPlace(place.id), () => launch.launchAt(place, kind, setting, false, undefined, by)),
         waitForReadiness,

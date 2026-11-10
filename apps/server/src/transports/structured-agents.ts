@@ -511,7 +511,7 @@ export class StructuredAgents {
         await this.readStderr(record, live);
         return;
       }
-      // rotate a bridged Pi before attach when this console cannot prove its sandbox is current
+      // rotate a bridged sandbox before attach when this console cannot prove it is current
       if (await this.rotateStaleSandbox(record, live)) return;
       const generation = live.generation += 1;
       // a deploy may have raised the minimum: an older process restarts once idle
@@ -544,8 +544,8 @@ export class StructuredAgents {
   private async rotateStaleSandbox(record: StructuredRecord, live: Live): Promise<boolean> {
     const holder = record.holder;
     const bridged = holder?.host === true || process.env.RAC_HOST_TMUX_DIR !== undefined;
-    // native, unsandboxed and non-Pi processes preserve their normal reattach path
-    if (holder === undefined || !bridged || !record.sandboxed || record.kind !== 'pi') return false;
+    // native and unsandboxed processes, and kinds the console does not sandbox, keep their normal reattach path
+    if (holder === undefined || !bridged || !record.sandboxed || structuredAdapterFor(record.kind)?.sandbox !== true) return false;
     const current = await this.processes.sandboxGeneration?.(record.kind).catch(() => undefined);
     // only the exact current generation may keep running across a deploy
     if (current !== undefined && holder.sandboxGeneration === current) return false;

@@ -26,13 +26,20 @@ export const AgentAccountsMenuContext = createContext<AgentAccountsMenu | undefi
 // share authenticated launch-option reads without coupling cards to the dashboard
 export const LaunchOptionsContext = createContext<((url: string, init?: RequestInit) => Promise<Response>) | undefined>(undefined);
 
-// The capability record the Dashboard publishes per registered kind (ADR 0002). The web
-// reads presence and reasons; it never re-derives capabilities. `sandbox*` stay undefined
+// The capability record the Dashboard publishes per kind and Transport (ADR 0002, ADR 0015). The
+// web reads presence and reasons; it never re-derives capabilities. `sandbox*` stay undefined
 // until chunk 4 arms the sandbox, so every launch is unsandboxed here.
-export type AdapterCapability = { launchable: boolean; unavailableReason?: string; program?: string; stateSource: 'reported' | 'title' | 'both'; turnCapture: boolean; inlineQuestions: boolean; steer?: boolean; commands: boolean; sandbox: boolean; sandboxUnavailableReason?: string; /** absent uses the native default; empty denies launches */ allowedModels?: AllowedModel[]; efforts?: string[] };
+export type TransportCapability = { launchable: boolean; unavailableReason?: string; program?: string; stateSource: 'reported' | 'title' | 'both'; turnCapture: boolean; inlineQuestions: boolean; steer?: boolean; commands: boolean; sandbox: boolean; sandboxUnavailableReason?: string; /** absent uses the native default; empty denies launches */ allowedModels?: AllowedModel[]; efforts?: string[] };
 // one of a kind's Allowed models: an exact `provider/id`, with the Effort it defaults to
 export type AllowedModel = { model: string; effort?: string };
+export type Transport = 'tmux' | 'structured';
+// per kind: its capability over each Transport it can launch on, and flat, over the one its
+// launches use by default; Launch controls read the flat record
+export type AdapterCapability = TransportCapability & { transport: Transport; transports: Partial<Record<Transport, TransportCapability>> };
 export type AdapterCapabilities = Partial<Record<AgentKind, AdapterCapability>>;
+// an Agent's capability is its kind's over the Transport the Agent is driven over
+export const agentCapability = (adapters: AdapterCapabilities | undefined, agent: { kind?: AgentKind; panel: 'terminal' | 'transcript' }): TransportCapability | undefined =>
+  agent.kind === undefined ? undefined : adapters?.[agent.kind]?.transports[agent.panel === 'transcript' ? 'structured' : 'tmux'];
 
 export type LaunchScope = 'worktree' | 'project' | 'scratch';
 export type LaunchOrigin = LaunchScope | 'default';
@@ -48,7 +55,7 @@ export const AdaptersContext = createContext<AdapterCapabilities | undefined>(un
 // the configured kinds (those with a program), in registry order
 export const configuredKinds = (adapters: AdapterCapabilities | undefined): AgentKind[] => agentKinds.filter(kind => adapters?.[kind]?.program !== undefined);
 // a launch of this kind starts Sandboxed by default whenever the console can enforce it
-export const defaultSandboxed = (capability: AdapterCapability | undefined): boolean => capability?.sandbox === true && capability.sandboxUnavailableReason === undefined;
+export const defaultSandboxed = (capability: TransportCapability | undefined): boolean => capability?.sandbox === true && capability.sandboxUnavailableReason === undefined;
 
 // what a one-click Launch sends: the resolved kind, Sandboxed when it can be; no choice lets the
 // server pick when the dashboard resolved no kind
@@ -59,7 +66,7 @@ export const resolvedLaunchChoice = (adapters: AdapterCapabilities | undefined, 
 export const launchRequestInit = (choice: LaunchChoice): RequestInit => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(choice) });
 
 // sandbox line per kind and state — copy from the effort's Launch profile section
-export const sandboxCopy = (kind: AgentKind, capability: AdapterCapability | undefined, sandboxed: boolean): string => {
+export const sandboxCopy = (kind: AgentKind, capability: TransportCapability | undefined, sandboxed: boolean): string => {
   if (capability === undefined) return '';
   // Codex (and OMX, which runs Codex) names its own sandbox; other kinds say nothing until chunk 4 arms `sandbox`
   if (!capability.sandbox) return kind === 'codex' || kind === 'omx' ? "Uses Codex's own sandbox" : '';
@@ -137,7 +144,7 @@ export type LaunchMenuEntry = { key: string; label: string; detail: string; icon
 // build a truthful compatibility manifest while the lazy endpoint is loading
 function capabilityManifest(
   kind: AgentKind,
-  capability: AdapterCapability,
+  capability: TransportCapability,
   verb: LaunchVerb,
 ): LaunchKindManifest {
   const allowed = capability.allowedModels ?? [];
@@ -303,7 +310,7 @@ function launchCardChoice(
   effortDirty: boolean,
   security: NativeLaunchSecurity,
   securityDirty: boolean,
-  capability: AdapterCapability,
+  capability: TransportCapability,
 ): LaunchChoice {
   const sandbox = security.sandbox;
   const sandboxed = sandbox === undefined ? defaultSandboxed(capability) : sandbox === "on";
@@ -321,7 +328,7 @@ function launchCardChoice(
 type AgentLaunchCardProps = {
   verb: LaunchVerb;
   kind: AgentKind;
-  capability: AdapterCapability;
+  capability: TransportCapability;
   manifest: LaunchKindManifest;
   disabled: boolean;
   loading: boolean;

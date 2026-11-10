@@ -130,7 +130,7 @@ async function mountVoicePage(page: Page, options: VoiceOptions = {}) {
       dashboardReads += 1;
       return route.fulfill({ json: {
       generation,
-      adapters: { codex: { steer: true } },
+      adapters: { codex: { transports: { tmux: { steer: true } } } },
       agents: [
         { id: 'agent-1', sessionId: 'socket:$1', panel: 'terminal', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', kind: 'codex', title: question === undefined ? options.working ? 'Working' : 'Ready' : 'Question', attention: question === undefined ? options.working ? 'working' : 'finished' : 'question', queuedPromptCount: 0, ...(question === undefined ? {} : { question }) },
         ...(options.secondAgent ? [{ id: 'agent-2', sessionId: 'socket:$2', panel: 'terminal', home: '/worktrees/owen', worktreeId: 'owen', worktreeLabel: 'Owen', kind: 'codex', title: 'Ready', attention: 'finished', queuedPromptCount: 0 }] : [])

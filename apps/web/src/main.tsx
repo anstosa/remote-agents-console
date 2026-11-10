@@ -52,7 +52,7 @@ import { isReviewJob, type ReviewJob, type ReviewRunLink } from './review-jobs.j
 import { useAskThreads } from './asks.js';
 import { useLineAsks } from './ask-thread.js';
 import { VoiceDialog, type VoiceWorktree } from './voice/voice-dialog.js';
-import { AdaptersContext, AgentLaunchSettingsContext, AgentAccountsMenuContext, LaunchOptionsContext, agentKindGlyph, agentKindLabel, agentKinds, configuredKinds, defaultSandboxed, LaunchMenu, LaunchSplitButton, LaunchTabBadge, launchRequestInit, originCopy, resolvedLaunchChoice, sandboxCopy, type AdapterCapabilities, type AgentKind, type AgentUpdateStatus, type LaunchMenuEntry, type LaunchResolution, type LaunchChoice } from './launch-profile.js';
+import { AdaptersContext, agentCapability, AgentLaunchSettingsContext, AgentAccountsMenuContext, LaunchOptionsContext, agentKindGlyph, agentKindLabel, agentKinds, configuredKinds, defaultSandboxed, LaunchMenu, LaunchSplitButton, LaunchTabBadge, launchRequestInit, originCopy, resolvedLaunchChoice, sandboxCopy, type AdapterCapabilities, type AgentKind, type AgentUpdateStatus, type LaunchMenuEntry, type LaunchResolution, type LaunchChoice } from './launch-profile.js';
 import type { LaunchSelectionTarget } from '../../server/src/launch/options-types.js';
 import type { NotificationEvent, NotificationState } from '../../server/src/notification-events.js';
 import { ScheduleEditor, defaultScheduleCron, lastRunNeedsAttention, scheduleInvalid, type Schedule, type ScheduleAdapterOption, type ScheduleSetBody, type ScheduleTarget, type ScheduleTargetOption } from './schedule-editor.js';
@@ -8291,7 +8291,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const dashboardQuestion = shownQuestion === undefined ? undefined : { ...choiceQuestionFromInline(shownQuestion), ...(agent.panel === 'transcript' ? { dismissable: true as const } : {}), ...(openQuestions.length > 1 ? { page: { index: pageIndex, count: openQuestions.length, next: () => setQuestionPage(pageIndex + 1) } } : {}) };
   // Steer is offered while the Agent works, where its kind and Transport can steer
   const adapters = useContext(AdaptersContext);
-  const steers = agent.kind !== undefined && adapters?.[agent.kind]?.steer === true;
+  const steers = agentCapability(adapters, agent)?.steer === true;
   const steering = steers && agent.attention === 'working' ? { pending: agent.structured?.steers ?? [] } : undefined;
   const conversationName = useCurrentConversationName(agent.id, [agent.conversationId, workspace.conversations.currentName]);
   const panelState = agentPanelState(agent, startingNewTask);

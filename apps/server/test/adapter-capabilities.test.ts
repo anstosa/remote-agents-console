@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adapterCapabilities } from '../src/adapters/registry.js';
+import { adapterCapabilities, launchTransport } from '../src/adapters/registry.js';
 
 describe('adapterCapabilities', () => {
   it('publishes intrinsic Codex capabilities unlaunchable in an observe-only configuration', () => {
@@ -47,5 +47,28 @@ describe('adapterCapabilities', () => {
 
   it('offers a Sandboxed launch for Pi, whose extension confines its tool calls', () => {
     expect(adapterCapabilities({ pi: { program: process.execPath, args: [], env: {}, launchable: true } }).pi).toMatchObject({ launchable: true, sandbox: true });
+  });
+
+  it('publishes each kind over every Transport it launches on, flattened over its default one', () => {
+    const published = adapterCapabilities({});
+    expect(Object.keys(published)).toEqual(['codex', 'omx', 'claude', 'pi']);
+    for (const [kind, capability] of Object.entries(published)) {
+      const { transport, transports, ...flat } = capability!;
+      expect(flat, kind).toEqual(transports[transport]);
+    }
+    expect(published.claude).toMatchObject({ transport: 'tmux', transports: { tmux: { inlineQuestions: true, steer: false } } });
+    expect(published.claude?.transports.structured).toBeUndefined();
+    expect(published.pi).toMatchObject({ transport: 'structured', transports: { structured: { stateSource: 'reported', turnCapture: true, sandbox: true } } });
+    expect(published.pi?.transports.tmux).toBeUndefined();
+  });
+});
+
+describe('launchTransport', () => {
+  it('launches a single-Transport kind over its only Transport, and an unregistered kind over none', () => {
+    expect(launchTransport('codex', {})).toBe('tmux');
+    expect(launchTransport('omx', {})).toBe('tmux');
+    expect(launchTransport('claude', {})).toBe('tmux');
+    expect(launchTransport('pi', {})).toBe('structured');
+    expect(launchTransport('opencode', {})).toBeUndefined();
   });
 });

@@ -539,14 +539,15 @@ export class DiscoveryService {
     // reader once so a shared rollout yields a single row, never one per sharing kind. The
     // row is tagged with the first (registry-order) kind that owns the reader; the console
     // re-attributes a codex-family row to the Worktree's remembered Launch kind.
+    // A kind registered for both Transports has one store, read once.
     const seen = new Set<unknown>();
-    const listers = adapters.filter(adapter => {
+    const stores = [...adapters, ...structuredAdapters].flatMap(adapter => {
       const list = adapter.conversations?.list;
-      if (list === undefined || seen.has(list)) return false;
+      if (list === undefined || seen.has(list) || seen.has(adapter.kind)) return [];
       seen.add(list);
-      return true;
+      seen.add(adapter.kind);
+      return [{ kind: adapter.kind, list }];
     });
-    const stores = [...listers.map(adapter => ({ kind: adapter.kind, list: adapter.conversations!.list! })), ...structuredAdapters.map(adapter => ({ kind: adapter.kind, list: adapter.conversations.list }))];
     const perKind = await Promise.all(stores
       .map(async store => (await store.list(directories).catch(() => []))
         .map(summary => ({ ...summary, kind: store.kind }))));

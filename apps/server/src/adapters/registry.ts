@@ -3,7 +3,7 @@ import { omxAdapter } from './omx.js';
 import { claudeAdapter } from './claude.js';
 import { piAdapter } from './pi.js';
 import type { Pane } from '../domain/models.js';
-import type { Adapter, AdapterCapability, AdapterConfigs, AgentKind, ReviewRuns, StructuredAdapter } from './types.js';
+import { agentKinds, type Adapter, type AdapterCapability, type AdapterConfigs, type AgentKind, type ReviewRuns, type StructuredAdapter, type TransportCapability } from './types.js';
 import type { Transport } from '../transports/transport.js';
 
 /**
@@ -40,10 +40,23 @@ export function adapterFor(kind: AgentKind): Adapter | undefined {
   return adapters.find((adapter) => adapter.kind === kind);
 }
 
-/** The structured-only kinds (ADR 0015): driven through a protocol client, never recognised in a pane. */
+/**
+ * The kinds driven through a protocol client (ADR 0015). A kind here only is never recognised in
+ * a pane; a kind also in `adapters` can launch over either Transport.
+ */
 export const structuredAdapters: readonly StructuredAdapter[] = [piAdapter];
 export function structuredAdapterFor(kind: AgentKind): StructuredAdapter | undefined {
   return structuredAdapters.find(adapter => adapter.kind === kind);
+}
+
+/**
+ * The Transport a launch of `kind` uses, undefined for an unregistered kind: the only one it has,
+ * or for a kind with both, its configured default (tmux until `configs` can name one). Every
+ * decision to launch over a structured Transport is made here.
+ */
+export function launchTransport(kind: AgentKind, configs: AdapterConfigs): Transport | undefined {
+  if (adapterFor(kind) !== undefined) return 'tmux';
+  return structuredAdapterFor(kind) === undefined ? undefined : 'structured';
 }
 
 /** The first registered Adapter that recognises the process, by registry order. */
@@ -58,21 +71,27 @@ export function paneExcluded(pane: Pane): boolean {
 
 /**
  * The capability record the Dashboard publishes per registered kind (ADR 0002), derived from the
- * kind's Adapter and the Transport it is driven over (ADR 0015): tmux, or structured for a
- * structured-only kind. Launchability is config-gated: a kind is launchable only when its program is
+ * kind's Adapter over each Transport it can launch on (ADR 0015), flattened over the one its
+ * launches use. Launchability is config-gated: a kind is launchable only when its program is
  * configured and executable (`unavailableReason`/`program` carry the details); an observe-only
  * console (empty `adapters`) recognises every kind and launches none.
  */
 export function adapterCapabilities(configs: AdapterConfigs): Partial<Record<AgentKind, AdapterCapability>> {
-  return Object.fromEntries([
-    ...adapters.map((adapter) => [adapter.kind, capability(adapter, 'tmux', configs[adapter.kind])]),
-    ...structuredAdapters.map(adapter => [adapter.kind, structuredCapability(adapter, configs[adapter.kind])])
-  ]);
+  return Object.fromEntries(agentKinds.flatMap(kind => {
+    const tmux = adapterFor(kind);
+    const structured = structuredAdapterFor(kind);
+    const transports: Partial<Record<Transport, TransportCapability>> = {
+      ...(tmux === undefined ? {} : { tmux: capability(tmux, configs[kind]) }),
+      ...(structured === undefined ? {} : { structured: structuredCapability(structured, configs[kind]) }),
+    };
+    const transport = launchTransport(kind, configs);
+    return transport === undefined ? [] : [[kind, { ...transports[transport]!, transport, transports }]];
+  }));
 }
 
 // a structured kind reports its own state, Turns and questions, names its Conversations in place,
 // and steers where its protocol client can; the rest arrive with later protocol features
-function structuredCapability(adapter: StructuredAdapter, configured: AdapterConfigs[AgentKind]): AdapterCapability {
+function structuredCapability(adapter: StructuredAdapter, configured: AdapterConfigs[AgentKind]): TransportCapability {
   return {
     ...launchability(configured),
     stateSource: 'reported',
@@ -88,7 +107,7 @@ function structuredCapability(adapter: StructuredAdapter, configured: AdapterCon
   };
 }
 
-const launchability = (configured: AdapterConfigs[AgentKind]): Pick<AdapterCapability, 'launchable' | 'unavailableReason' | 'program'> => ({
+const launchability = (configured: AdapterConfigs[AgentKind]): Pick<TransportCapability, 'launchable' | 'unavailableReason' | 'program'> => ({
   // explicit empty Allowed models disable launches without hiding configuration
   launchable: (configured?.launchable ?? false) && configured?.allowedModels?.length !== 0,
   ...(configured?.allowedModels?.length === 0
@@ -97,17 +116,16 @@ const launchability = (configured: AdapterConfigs[AgentKind]): Pick<AdapterCapab
   ...(configured?.program === undefined ? {} : { program: configured.program }),
 });
 
-// The pane-based members (Turn capture from the screen, questions read off the pane, a rename
-// pasted into the composer) count only over tmux; a structured Transport reports its own.
-function capability(adapter: Adapter, transport: Transport, configured: AdapterConfigs[AgentKind]): AdapterCapability {
-  const tmux = transport === 'tmux';
+// over tmux, from the pane-based members (Turn capture from the screen, questions read off the
+// pane, a rename pasted into the composer)
+function capability(adapter: Adapter, configured: AdapterConfigs[AgentKind]): TransportCapability {
   return {
     ...launchability(configured),
     stateSource: adapter.stateSource,
-    turnCapture: tmux && adapter.turns !== undefined,
+    turnCapture: adapter.turns !== undefined,
     conversations: adapter.conversations?.list !== undefined,
-    naming: tmux && adapter.conversations?.rename !== undefined,
-    inlineQuestions: tmux && adapter.questions !== undefined,
+    naming: adapter.conversations?.rename !== undefined,
+    inlineQuestions: adapter.questions !== undefined,
     steer: false,
     commands: adapter.commands !== undefined,
     sandbox: adapter.sandbox !== undefined,

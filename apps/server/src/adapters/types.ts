@@ -14,6 +14,7 @@
 import type { HostProcess } from '../discovery/processes.js';
 import type { CleanupTarget, Pane } from '../domain/models.js';
 import type { ModelSetting, ProtocolClient } from '../transports/structured.js';
+import type { Transport } from '../transports/transport.js';
 
 export const agentKinds = ['codex', 'omx', 'claude', 'pi', 'opencode'] as const;   // closed union in resolution order; the registry is code, not plugins
 export type AgentKind = typeof agentKinds[number];
@@ -526,13 +527,13 @@ export type AdapterLaunchConfig = { program: string; args: string[]; env: Record
 export type AdapterConfigs = Partial<Record<AgentKind, AdapterLaunchConfig>>;
 
 /**
- * The capability record the console derives per registered kind and publishes on
- * the Dashboard (ADR 0002). Presence of an optional capability object becomes a
- * boolean the web reads; the resolution logic itself never leaves the server.
- * `launchable` is config-gated (a configured, executable program), and `program`
- * / `unavailableReason` carry the configured path and the reason it cannot launch.
+ * The capability record the console derives per kind and Transport (ADR 0002, ADR 0015).
+ * Presence of an optional capability object becomes a boolean the web reads; the
+ * resolution logic itself never leaves the server. `launchable` is config-gated (a
+ * configured, executable program), and `program` / `unavailableReason` carry the
+ * configured path and the reason it cannot launch.
  */
-export type AdapterCapability = {
+export type TransportCapability = {
   launchable: boolean;
   unavailableReason?: string;
   program?: string;
@@ -551,3 +552,9 @@ export type AdapterCapability = {
   allowedModels?: AllowedModel[];
   efforts?: string[];
 };
+/**
+ * What the Dashboard publishes per registered kind: its capability over each Transport it can
+ * launch on (`transports`), and flat, over the one its launches use by default (`transport`).
+ * Launch controls read the flat record; an Agent's own capability is its Transport's entry.
+ */
+export type AdapterCapability = TransportCapability & { transport: Transport; transports: Partial<Record<Transport, TransportCapability>> };

@@ -1,3 +1,4 @@
+import { structuredAdapterFor } from '../../adapters/registry.js';
 import type { ValidatedConfig } from '../../config/schema.js';
 import type { Place } from '../../places/places.js';
 import type { StructuredAgents } from '../../transports/structured-agents.js';
@@ -45,7 +46,7 @@ export function createWorkerTools(deps: DeveloperWorkerDependencies): DeveloperT
         const workers = await deps.structured.ownedWorkers(owner);
         // retain the configured live/starting worker budget per stable owner
         if (workers.filter(agent => agent.structured?.lifecycle === 'live' || agent.structured?.lifecycle === 'starting').length >= (deps.config.conductor?.maxWorkers ?? 4)) return developerFailure('capacity', 'The worker limit has been reached.', true);
-        const id = await deps.structured.launch(place, kind, { sandboxed: kind === 'pi', workerOwner: { kind: 'davo', id: owner }, ...(model === undefined ? {} : { model: { model } }) });
+        const id = await deps.structured.launch(place, kind, { sandboxed: structuredAdapterFor(kind)?.sandbox === true, workerOwner: { kind: 'davo', id: owner }, ...(model === undefined ? {} : { model: { model } }) });
         return id === undefined ? developerFailure('operation_failed', 'The worker could not start.', true) : developerSuccess({ agent_id: id });
       });
       spawning = operation.then(() => undefined, () => undefined);

@@ -166,8 +166,7 @@ function claudeSettings(adapterArgs: readonly string[]): string[] {
 
 /** compile one complete native argv, with operator conflicts removed before canonical flags. */
 export function compileNativeLaunch(kind: AgentKind, input: LaunchInput, operatorArgs: readonly string[], choice: NativeLaunchChoice | undefined, adapterSpec: LaunchSpec): LaunchSpec {
-  // structured Pi owns its separate launch grammar
-  if (kind === 'pi' || choice === undefined) return { ...adapterSpec, args: [...adapterSpec.args, ...operatorArgs] };
+  if (choice === undefined) return { ...adapterSpec, args: [...adapterSpec.args, ...operatorArgs] };
   if (kind === 'codex' || kind === 'omx') {
     const security = choice.security ?? {};
     // preparation must reject unrepresentable presets before any side effect

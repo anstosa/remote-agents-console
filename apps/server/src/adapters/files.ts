@@ -103,7 +103,8 @@ export async function renderAdapterFiles(env: NodeJS.ProcessEnv = process.env, s
       await replaceRenderedFile(path, content);
       paths[name] = path;
     }
-    rendered[adapter.kind] = paths;
+    // a kind registered for both Transports renders into one directory
+    rendered[adapter.kind] = { ...rendered[adapter.kind], ...paths };
   }
   return rendered;
 }

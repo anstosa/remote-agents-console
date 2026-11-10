@@ -10,7 +10,7 @@ import { recolorConsolePanes, terminalColorFallbackArgv, type PaneTheme } from '
 import { holderAgentOption, holderPaneRole, processPaneRole } from '../tmux/stack-sessions.js';
 import { ProcSocketFinder, workspaceRoot, type SocketFinder } from '../discovery/service.js';
 import { projectIdOf, worktreeHostRoot, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
-import { adapterCapabilities, adapterFor, structuredAdapterFor } from '../adapters/registry.js';
+import { adapterCapabilities, adapterFor, launchTransport, structuredAdapterFor } from '../adapters/registry.js';
 import { adapterFileContext, hostVisibleRepoRoot, renderAdapterFiles, type RenderedAdapterFiles } from '../adapters/files.js';
 import { hostPiRuntime, verifyHostPiNode } from '../adapters/pi-runtime.js';
 import { canonical, staticPolicy } from '../adapters/pi-sandbox.js';
@@ -587,7 +587,7 @@ export class LaunchService implements HolderWindows {
       const validatedModel = resolveAllowedLaunchModel(kind, this.config.adapters[kind], model, { nativeDefaultValidated: prepared !== undefined });
       model = prepared === undefined ? validatedModel : model === undefined ? undefined : { ...model };
       // a structured Agent runs under a holder rather than in a pane (ADR 0015)
-      if (structuredAdapterFor(kind) !== undefined) return await this.launchStructured(place, kind, { ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, sandboxed), ...(prepared === undefined ? {} : { nativeDefaultValidated: true as const }) });
+      if (launchTransport(kind, this.config.adapters) === 'structured') return await this.launchStructured(place, kind, { ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, sandboxed), ...(prepared === undefined ? {} : { nativeDefaultValidated: true as const }) });
       // under the Docker bridge the host-visible path is what the host tmux can cd into; HOME is
       // the default account home for every directory-Project and Scratch launch
       const site: LaunchSite = { cwd: placeHostRoot(place), home: this.agentHome() };
@@ -741,19 +741,20 @@ export class LaunchService implements HolderWindows {
       // refuse an unconfigured or unlaunchable kind
       if (kind === undefined) { console.warn(`[launch] ${worktree.identity}: no launchable agent kind (check adapters.*.launchable and the agent binary)`); return false; }
       // validate policy before launching a replacement process
-      const keepRestored = input.prepared?.keepCurrent === true || (structuredAdapterFor(kind) !== undefined && input.mode !== 'fresh' && input.model === undefined && input.prepared === undefined);
+      const structured = launchTransport(kind, this.config.adapters) === 'structured';
+      const keepRestored = input.prepared?.keepCurrent === true || (structured && input.mode !== 'fresh' && input.model === undefined && input.prepared === undefined);
       const validatedModel = keepRestored ? undefined : resolveAllowedLaunchModel(kind, this.config.adapters[kind], input.model, { nativeDefaultValidated: input.prepared !== undefined });
       const model = input.prepared === undefined ? validatedModel : input.model === undefined ? undefined : { ...input.model };
-      const sandboxed = structuredAdapterFor(kind) !== undefined && (input.prepared?.security.sandbox === 'off' ? false : input.prepared?.security.sandbox === 'on' ? true : input.sandboxed === true);
       let launched: boolean;
-      if (structuredAdapterFor(kind) !== undefined) {
+      if (structured) {
         launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.mode === 'continue' ? { continue: true as const } : {}), ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, input.prepared?.security.sandbox === 'off' ? false : input.prepared?.security.sandbox === 'on' ? true : input.sandboxed), ...(input.prepared === undefined ? {} : { nativeDefaultValidated: true as const }) });
       } else {
         const id = randomBytes(18).toString('base64url');
-        const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed, ...(model === undefined ? {} : { model }), ...(input.prepared === undefined ? {} : { prepared: input.prepared }) });
+        // a tmux launch is never Sandboxed by the console here
+        const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed: false, ...(model === undefined ? {} : { model }), ...(input.prepared === undefined ? {} : { prepared: input.prepared }) });
         // a worktree with no launch command (and no override) cannot start
         if (command === undefined) { console.warn(`[launch] ${worktree.identity}: agent kind ${kind} produced no launch command`); return false; }
-        launched = await this.dispatchWorktreeLaunch(worktree, command, id, { sandboxed, ...(input.spawnedBy === undefined ? {} : { spawnedBy: input.spawnedBy }) });
+        launched = await this.dispatchWorktreeLaunch(worktree, command, id, { sandboxed: false, ...(input.spawnedBy === undefined ? {} : { spawnedBy: input.spawnedBy }) });
       }
       // record the kind so it resolves first next time — for this Worktree and for its
       // Project (which seeds a fresh Worktree), but not the kind the Conductor chose for a
