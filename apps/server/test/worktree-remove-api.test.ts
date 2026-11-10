@@ -363,6 +363,19 @@ describe('DELETE /api/worktrees/:id', () => {
 });
 
 describe('POST /api/projects/:id/worktrees/prune', () => {
+  // accept the explicit empty json mutation sent through the browser tunnel
+  it('accepts an authenticated empty json object and prunes only the requested project', async () => {
+    const pruned: string[] = [];
+    // record the authorized service boundary without touching real checkouts
+    const worktreeManagement = { prune: async (projectId: string) => { pruned.push(projectId); return { ok: true }; } } as never;
+    const server = await app({ discovery: discoveryStub(), worktreeManagement, ...(await stores()) });
+    try {
+      const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees/prune', headers: { ...mutationHeaders, 'content-type': 'application/json' }, payload: '{}' });
+      expect(response.statusCode).toBe(204);
+      expect(pruned).toEqual(['proj']);
+    } finally { await server.close(); }
+  });
+
   it('prunes, deletes orphaned records, and returns 204', async () => {
     const worktreeManagement = { prune: async () => ({ ok: true }) } as never;
     const { worktreeStore, queuedPrompts, promptHistory } = await stores();

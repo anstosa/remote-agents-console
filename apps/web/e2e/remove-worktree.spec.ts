@@ -15,8 +15,11 @@ const dashboard = {
 
 const facts = { main: false, detached: false, locked: false, branch: 'feat', dirtyCount: 2, pushed: true, merged: false, ahead: 1, behind: 0, blockers: [], stopsProcesses: [] };
 
+// retain the prune mutation's parser and authentication framing
+type PruneTransport = { contentType: string | undefined; body: string | null; csrf: string | undefined };
+
 // isolate dashboard state and handle removal and pin requests
-async function stub(page: import('@playwright/test').Page, handlers: { onDelete?: (body: unknown) => void; onPrune?: (contentType: string | undefined) => void; removal?: unknown; closedPullRequests?: unknown; pinned?: boolean } = {}) {
+async function stub(page: import('@playwright/test').Page, handlers: { onDelete?: (body: unknown) => void; onPrune?: (transport: PruneTransport) => void; pruneError?: string; removal?: unknown; closedPullRequests?: unknown; pinned?: boolean } = {}) {
   const currentDashboard = structuredClone(dashboard);
   const feature = currentDashboard.projects[0]!.worktrees[1]!;
   feature.pinned = handlers.pinned ?? false;
@@ -40,8 +43,15 @@ async function stub(page: import('@playwright/test').Page, handlers: { onDelete?
       handlers.onDelete?.(request.postDataJSON());
       return route.fulfill({ status: 200, json: { removed: true } });
     }
+    // model the tunnel rejecting untyped mutations before pruning can run
     if (path === '/api/projects/repo/worktrees/prune' && request.method() === 'POST') {
-      handlers.onPrune?.(request.headers()['content-type']);
+      const transport = { contentType: request.headers()['content-type'], body: request.postData(), csrf: request.headers()['x-csrf-token'] };
+      handlers.onPrune?.(transport);
+      // reject missing or empty json framing rather than hiding the parser error
+      if (transport.contentType !== 'application/json' || transport.body !== '{}') return route.fulfill({ status: 415, json: { error: 'Unsupported Media Type' } });
+      // retain stale paths when the service refuses the operation
+      if (handlers.pruneError !== undefined) return route.fulfill({ status: 409, json: { error: handlers.pruneError } });
+      currentDashboard.projects[0]!.stalePaths = [];
       return route.fulfill({ status: 204, body: '' });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -176,9 +186,11 @@ test('refuses removal while a blocker runs', async ({ page }) => {
   await expect(dialog.getByRole('button', { name: 'Remove worktree', exact: true })).toBeDisabled();
 });
 
-test('prunes a project\'s stale checkouts from the launcher header', async ({ page }) => {
-  let pruned: { contentType: string | undefined } | undefined;
-  await stub(page, { onPrune: contentType => { pruned = { contentType }; } });
+// send explicit empty json without bypassing confirmation or csrf
+test('prunes a project\'s stale checkouts from the launcher header', async ({ page }, testInfo) => {
+  const pruned: PruneTransport[] = [];
+  // capture only confirmed prune requests
+  await stub(page, { onPrune: transport => { pruned.push(transport); } });
   await page.goto('/');
   await page.locator('.new-agent-tab').click();
   const launcher = page.getByRole('group', { name: 'Agent launcher' });
@@ -190,13 +202,55 @@ test('prunes a project\'s stale checkouts from the launcher header', async ({ pa
   await expect(dialog.getByText('/repo/wts/gone')).toBeVisible();
   await expect(dialog.getByText('/repo/wts/orphan')).toBeVisible();
   await expect(dialog.getByText(/does not mount can look stale/u)).toBeVisible();
+  expect(pruned).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath('prune-confirmation.png') });
   await dialog.getByRole('button', { name: 'Prune', exact: true }).click();
 
-  await expect.poll(() => pruned !== undefined).toBe(true);
-  // a body-less POST must not claim a JSON body: Fastify answers that pair with 400
-  // "Body cannot be empty when content-type is set to 'application/json'"
-  expect(pruned?.contentType).toBeUndefined();
+  await expect.poll(() => pruned.length).toBe(1);
+  expect(pruned).toEqual([{ contentType: 'application/json', body: '{}', csrf: 'csrf-token' }]);
   await expect(dialog).toBeHidden();
+  await expect(page.getByText('Worktrees pruned', { exact: true })).toBeVisible();
+});
+
+// cancellation must never issue a destructive request
+test('cancels pruning without touching stale checkouts', async ({ page }) => {
+  const pruned: PruneTransport[] = [];
+  // retain any unexpected prune request
+  await stub(page, { onPrune: transport => { pruned.push(transport); } });
+  await page.goto('/');
+  await page.locator('.new-agent-tab').click();
+  await page.getByRole('button', { name: '2 stale · Prune' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Prune worktrees' });
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('button', { name: '2 stale · Prune' })).toBeVisible();
+  expect(pruned).toEqual([]);
+});
+
+// a refusal stays visible until the user explicitly retries
+test('keeps prune failures in the modal and allows an explicit retry', async ({ page }) => {
+  const pruned: PruneTransport[] = [];
+  // refuse the first confirmed operation without losing stale records
+  const handlers: { pruneError?: string; onPrune: (transport: PruneTransport) => void } = { pruneError: 'Pruning is blocked.', onPrune: transport => { pruned.push(transport); } };
+  await stub(page, handlers);
+  await page.goto('/');
+  await page.locator('.new-agent-tab').click();
+  await page.getByRole('button', { name: '2 stale · Prune' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Prune worktrees' });
+  await dialog.getByRole('button', { name: 'Prune', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Pruning is blocked.');
+  await expect(dialog.getByRole('button', { name: 'Prune', exact: true })).toBeEnabled();
+  await expect(dialog.getByText('/repo/wts/gone')).toBeVisible();
+  expect(pruned).toHaveLength(1);
+  expect(pruned[0]).toEqual({ contentType: 'application/json', body: '{}', csrf: 'csrf-token' });
+  // clear the refusal only for the next explicit confirmation
+  delete handlers.pruneError;
+  await dialog.getByRole('button', { name: 'Prune', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(pruned).toEqual([
+    { contentType: 'application/json', body: '{}', csrf: 'csrf-token' },
+    { contentType: 'application/json', body: '{}', csrf: 'csrf-token' }
+  ]);
 });
 
 // a worktree whose pull request merged or closed is offered for removal, never removed

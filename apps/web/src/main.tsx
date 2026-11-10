@@ -9780,11 +9780,12 @@ function PruneWorktreesDialog({ project, request, onClose, onPruned }: { project
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const stale = project.stalePaths ?? [];
+  // confirm pruning with the same explicit json framing as other mutations
   const prune = async () => {
     setError(undefined);
     setPending(true);
     try {
-      const response = await request(`/api/projects/${encodeURIComponent(project.id)}/worktrees/prune`, { method: 'POST' }).catch(() => undefined);
+      const response = await request(`/api/projects/${encodeURIComponent(project.id)}/worktrees/prune`, emptyJsonMutation('POST')).catch(() => undefined);
       if (response === undefined) return setError('Unable to reach the console.');
       if (!response.ok) return setError(await launchError(response));
       onPruned();
