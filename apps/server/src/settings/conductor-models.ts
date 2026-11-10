@@ -32,7 +32,7 @@ type CatalogOptions = {
 const DEFAULT_TTL_MS = 5 * 60_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_CATALOG_CONTEXTS = 32;
-// mirror pinned Pi 1.5.0 DEFAULT_THINKING_LEVEL
+// mirror pinned Pi 1.5.2 DEFAULT_THINKING_LEVEL
 const PINNED_PI_DEFAULT_EFFORT = 'medium';
 
 // resolve the effective Pi state without mutating process env
@@ -59,7 +59,7 @@ function modelEfforts(model: RuntimeModel): string[] {
   return piEfforts.filter(level => map[level] !== null && ((level !== 'xhigh' && level !== 'max') || map[level] !== undefined));
 }
 
-// mirror pinned pi-ai 1.5.0 clampThinkingLevel over projected levels
+// mirror pinned pi-ai 1.5.2 clampThinkingLevel over projected levels
 function clampPiEffort(efforts: readonly string[], requested: string): string {
   // preserve supported requests exactly
   if (efforts.includes(requested)) return requested;
