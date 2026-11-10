@@ -8,11 +8,15 @@ import { DavoStore } from '../src/davo/store.js';
 
 const fixtures: string[] = [];
 
+// freeze storage and authority inside the retained fixture window
+const storeNow = () => new Date('2026-11-05T12:00:00.000Z');
+const now = () => new Date('2026-11-05T12:02:00.000Z');
+
 // create one isolated coordinator store
 async function fixture(): Promise<DavoStore> {
   const directory = await mkdtemp(join(tmpdir(), 'rac-davo-coordinator-'));
   fixtures.push(directory);
-  return new DavoStore({ file: join(directory, 'state.json'), now: () => new Date('2026-11-05T12:00:00.000Z') });
+  return new DavoStore({ file: join(directory, 'state.json'), now: storeNow });
 }
 
 // build the frozen target frontier
@@ -46,7 +50,7 @@ describe('davo coordinator', () => {
     const user = await store.appendUserTranscript({ voiceSessionId: 'voice-1', providerSessionId: 'provider-1', providerItemId: 'item-1', text: 'finish safely' });
     const current = frontier();
     const continuation = { publish: vi.fn().mockResolvedValue({ status: 'published', promptId: 'prompt-0' }), lookup: vi.fn() };
-    const coordinator = new DavoCoordinator({ store, continuation, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ recommendation: 'candidate_done', unmetCriterionIds: [], contradictions: [], safeSummary: 'verified' }) }, now: () => new Date('2026-11-05T12:02:00.000Z') });
+    const coordinator = new DavoCoordinator({ store, now, continuation, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ recommendation: 'candidate_done', unmetCriterionIds: [], contradictions: [], safeSummary: 'verified' }) } });
     await coordinator.admit(admission(user.id, current));
     await coordinator.markPublished('request-1', 'initial-op', 'prompt-0');
     const result = await coordinator.acceptLifecycle({ requestId: 'request-1', operationId: 'initial-op', promptId: 'prompt-0', generation: 0, requestRevision: 1, targetActivityEpoch: activityEpoch(current), state: 'completed', completionEnvelope: { requestId: 'request-1', promptId: 'prompt-0', outcome: 'complete', criteria: [{ id: 'criterion-1', status: 'satisfied', evidence: 'implemented' }], checks: [{ name: 'tests', status: 'passed', evidence: 'pass' }], remaining: [] }, safeExcerpt: 'all done' });
@@ -69,7 +73,7 @@ describe('davo coordinator', () => {
     const current = frontier();
     const published = { ...current, promptActivityRevision: 2, chainHeadPromptId: 'prompt-1' };
     const continuation = { publish: vi.fn().mockResolvedValue({ status: 'published', promptId: 'prompt-1', activity: published }), lookup: vi.fn() };
-    const coordinator = new DavoCoordinator({ store, continuation, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ ...advisory, safeSummary: 'must not terminalize' }) } });
+    const coordinator = new DavoCoordinator({ store, now, continuation, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ ...advisory, safeSummary: 'must not terminalize' }) } });
     await coordinator.admit(admission(user.id, current));
     await coordinator.markPublished('request-1', 'initial-op', 'prompt-0');
     const result = await coordinator.acceptLifecycle({ requestId: 'request-1', operationId: 'initial-op', promptId: 'prompt-0', generation: 0, requestRevision: 1, targetActivityEpoch: activityEpoch(current), state: 'completed', completionEnvelope: { requestId: 'request-1', promptId: 'prompt-0', outcome: 'complete', criteria: [{ id: 'criterion-1', status: 'satisfied', evidence: 'implemented' }], checks: [{ name: 'tests', status: 'passed', evidence: 'pass' }], remaining: [] }, safeExcerpt: 'all done' });
@@ -87,7 +91,7 @@ describe('davo coordinator', () => {
     const current = frontier();
     const published = { ...current, promptActivityRevision: 2, chainHeadPromptId: 'prompt-1' };
     const continuation = { publish: vi.fn().mockResolvedValue({ status: 'published', promptId: 'prompt-1', activity: published }), lookup: vi.fn() };
-    const coordinator = new DavoCoordinator({ store, continuation, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ recommendation: 'continue', unmetCriterionIds: ['criterion-1'], contradictions: [], safeSummary: 'tests failed' }) } });
+    const coordinator = new DavoCoordinator({ store, now, continuation, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ recommendation: 'continue', unmetCriterionIds: ['criterion-1'], contradictions: [], safeSummary: 'tests failed' }) } });
     await coordinator.admit(admission(user.id, current));
     await coordinator.markPublished('request-1', 'initial-op', 'prompt-0');
     await coordinator.acceptLifecycle({ requestId: 'request-1', operationId: 'initial-op', promptId: 'prompt-0', generation: 0, requestRevision: 1, targetActivityEpoch: activityEpoch(current), state: 'completed', completionEnvelope: { requestId: 'request-1', promptId: 'prompt-0', outcome: 'partial', criteria: [{ id: 'criterion-1', status: 'unsatisfied', evidence: 'missing' }], checks: [{ name: 'tests', status: 'failed', evidence: 'failure' }], remaining: ['fix tests'] }, safeExcerpt: 'not done' });
@@ -102,7 +106,7 @@ describe('davo coordinator', () => {
     const user = await store.appendUserTranscript({ voiceSessionId: 'voice-1', providerSessionId: 'provider-1', providerItemId: 'item-1', text: 'finish safely' });
     const current = frontier();
     const continuation = { publish: vi.fn(), lookup: vi.fn() };
-    const coordinator = new DavoCoordinator({ store, continuation, activity: { read: async () => current }, evaluator: { evaluate: async () => { throw new Error('offline'); } } });
+    const coordinator = new DavoCoordinator({ store, now, continuation, activity: { read: async () => current }, evaluator: { evaluate: async () => { throw new Error('offline'); } } });
     await coordinator.admit(admission(user.id, current));
     await coordinator.markPublished('request-1', 'initial-op', 'prompt-0');
     await expect(coordinator.acceptLifecycle({ requestId: 'request-1', operationId: 'initial-op', promptId: 'prompt-0', generation: 0, requestRevision: 1, targetActivityEpoch: activityEpoch(current), state: 'completed', safeExcerpt: 'not done' })).resolves.toEqual({ status: 'blocked' });
@@ -128,6 +132,7 @@ describe('davo coordinator', () => {
     let evaluation = 0;
     const coordinator = new DavoCoordinator({
       store,
+      now,
       continuation,
       activity: { read: async () => current },
       evaluator: { evaluate: async () => ({ recommendation: evaluation++ < 2 ? 'continue' : 'candidate_done', unmetCriterionIds: evaluation <= 2 ? ['criterion-1'] : [], contradictions: [], safeSummary: 'verified' }) }
@@ -172,7 +177,7 @@ describe('davo coordinator', () => {
     const user = await store.appendUserTranscript({ voiceSessionId: 'voice-1', providerSessionId: 'provider-1', providerItemId: 'item-1', text: 'finish safely' });
     const current = frontier();
     const continuation = { publish: vi.fn(), lookup: vi.fn() };
-    const coordinator = new DavoCoordinator({ store, continuation, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
+    const coordinator = new DavoCoordinator({ store, now, continuation, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
     await expect(coordinator.admit(admission(user.id, current), () => false)).rejects.toThrow('davo_turn_changed');
     expect((await store.read()).requests).toEqual([]);
     await coordinator.admit(admission(user.id, current), () => true);
@@ -196,7 +201,7 @@ describe('davo coordinator', () => {
     const current = frontier();
     const drifted = { ...current, promptActivityRevision: 2, chainHeadPromptId: 'unrelated-prompt' };
     const continuation = { publish: vi.fn(), lookup: vi.fn() };
-    const coordinator = new DavoCoordinator({ store, continuation, activity: { read: async () => drifted }, evaluator: { evaluate: vi.fn() } });
+    const coordinator = new DavoCoordinator({ store, now, continuation, activity: { read: async () => drifted }, evaluator: { evaluate: vi.fn() } });
     await coordinator.admit(admission(user.id, current));
     await coordinator.markPublished('request-1', 'initial-op', 'prompt-0');
     await store.transact(state => {
@@ -235,13 +240,13 @@ describe('davo coordinator', () => {
       });
       throw new Error('coordinator crash');
     });
-    const first = new DavoCoordinator({ store, continuation: { publish, lookup: vi.fn() }, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ recommendation: 'continue', unmetCriterionIds: ['criterion-1'], contradictions: [], safeSummary: '' }) } });
+    const first = new DavoCoordinator({ store, now, continuation: { publish, lookup: vi.fn() }, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ recommendation: 'continue', unmetCriterionIds: ['criterion-1'], contradictions: [], safeSummary: '' }) } });
     await first.admit(admission(user.id, current));
     await first.markPublished('request-1', 'initial-op', 'prompt-0');
     await expect(first.acceptLifecycle({ requestId: 'request-1', operationId: 'initial-op', promptId: 'prompt-0', generation: 0, requestRevision: 1, targetActivityEpoch: activityEpoch(frontier()), state: 'completed', completionEnvelope: { requestId: 'request-1', promptId: 'prompt-0', outcome: 'partial', criteria: [{ id: 'criterion-1', status: 'unsatisfied', evidence: 'remaining' }], checks: [{ name: 'tests', status: 'failed', evidence: 'failure' }], remaining: ['finish'] }, safeExcerpt: 'partial' })).rejects.toThrow('coordinator crash');
     expect((await store.read()).requests[0]).toMatchObject({ state: 'evaluating', dispatch: { operationId: 'request-1-followup-1', promptId: 'prompt-1' }, coordination: { activeFollowupBytes: expect.any(Number) } });
     const lookup = vi.fn().mockResolvedValue({ status: 'published', promptId: 'prompt-1' });
-    const recovered = new DavoCoordinator({ store, continuation: { publish, lookup }, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
+    const recovered = new DavoCoordinator({ store, now, continuation: { publish, lookup }, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
     await expect(recovered.reconcile('request-1')).resolves.toEqual({ status: 'continued', promptId: 'prompt-1' });
     expect(publish).toHaveBeenCalledOnce();
     expect(lookup).toHaveBeenCalledOnce();
@@ -255,7 +260,7 @@ describe('davo coordinator', () => {
     const current = frontier();
     const publish = vi.fn();
     const lookup = vi.fn().mockResolvedValue({ status: 'unknown' });
-    const first = new DavoCoordinator({ store, continuation: { publish, lookup }, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
+    const first = new DavoCoordinator({ store, now, continuation: { publish, lookup }, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
     await first.admit(admission(user.id, current));
     await store.transact(state => {
       const request = state.requests[0];
@@ -263,7 +268,7 @@ describe('davo coordinator', () => {
       request.dispatch = { state: 'unknown', operationId: 'initial-op', payloadDigest: 'b'.repeat(64) };
     });
     await first.markPublicationUnknown('request-1', 'initial-op');
-    const recovered = new DavoCoordinator({ store, continuation: { publish, lookup }, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
+    const recovered = new DavoCoordinator({ store, now, continuation: { publish, lookup }, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
     await expect(recovered.reconcile('request-1')).resolves.toEqual({ status: 'blocked' });
     await expect(recovered.reconcile('request-1')).resolves.toEqual({ status: 'blocked' });
     await expect(recovered.reconcile('request-1')).resolves.toEqual({ status: 'choice' });
@@ -282,7 +287,7 @@ describe('davo coordinator', () => {
       const user = await store.appendUserTranscript({ voiceSessionId: 'voice-1', providerSessionId: 'provider-1', providerItemId: 'item-1', text: 'finish safely' });
       const current = frontier();
       const lookup = vi.fn().mockResolvedValue({ status: 'unknown' });
-      const coordinator = new DavoCoordinator({ store, continuation: { publish: vi.fn(), lookup }, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
+      const coordinator = new DavoCoordinator({ store, now, continuation: { publish: vi.fn(), lookup }, activity: { read: async () => current }, evaluator: { evaluate: vi.fn() } });
       await coordinator.admit(admission(user.id, current));
       await store.transact(state => {
         const request = state.requests[0];
@@ -325,7 +330,7 @@ describe('davo coordinator', () => {
         current = { ...current, promptActivityRevision: 2, chainHeadPromptId: 'prompt-1' };
         return { status: 'published', promptId: 'prompt-1', activity: current };
       });
-    const coordinator = new DavoCoordinator({ store, continuation: { publish, lookup }, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ recommendation: 'continue', unmetCriterionIds: ['criterion-1'], contradictions: [], safeSummary: '' }) } });
+    const coordinator = new DavoCoordinator({ store, now, continuation: { publish, lookup }, activity: { read: async () => current }, evaluator: { evaluate: async () => ({ recommendation: 'continue', unmetCriterionIds: ['criterion-1'], contradictions: [], safeSummary: '' }) } });
     await coordinator.admit(admission(user.id, current));
     await coordinator.markPublished('request-1', 'initial-op', 'prompt-0');
     await expect(coordinator.acceptLifecycle({ requestId: 'request-1', operationId: 'initial-op', promptId: 'prompt-0', generation: 0, requestRevision: 1, targetActivityEpoch: activityEpoch(current), state: 'completed', completionEnvelope: { requestId: 'request-1', promptId: 'prompt-0', outcome: 'partial', criteria: [{ id: 'criterion-1', status: 'unsatisfied', evidence: 'remaining' }], checks: [{ name: 'tests', status: 'failed', evidence: 'failure' }], remaining: ['finish'] } })).resolves.toEqual({ status: 'blocked' });

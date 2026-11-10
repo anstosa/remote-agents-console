@@ -46,6 +46,9 @@ describe('RealtimeService', () => {
     expect(body.session.instructions).toContain('persistent engineering partner');
     expect(body.session.instructions).toContain('ambient audio');
     expect(body.session.instructions).toContain('bind_davo_target');
+    expect(body.session.instructions).toContain('For Davo action tools omit request_id');
+    expect(body.session.instructions).toContain('never ask the user to provide them');
+    expect(body.session.instructions).toContain('already finalized by the client');
     expect(body.session.instructions).toContain('Never infer approval');
     expect(body.session.instructions).toContain('worktree_id=cora');
   });
@@ -98,6 +101,50 @@ describe('RealtimeService', () => {
     await expect(service.create(request)).resolves.toMatchObject({ ok: true });
     const body = JSON.parse(String(provider.mock.calls[0]![1].body));
     expect(body.session.instructions).toBe(instructions);
+  });
+
+  // keep status replies about evidenced work rather than repository inventory
+  it('guides status replies toward meaningful local work without file or change counts', async () => {
+    const provider = vi.fn(async () => new Response(JSON.stringify({ value: 'ek_ephemeral-client-secret' })));
+    const service = new RealtimeService({ apiKey: 'provider-key', fetch: provider as typeof fetch });
+    const instructions = service.instructions(request.context);
+
+    expect(instructions).toContain('summarize what the user is actually working on');
+    expect(instructions).toContain('Do not list changed files or report file, line, or change counts');
+    expect(instructions).toContain('get_comparison with mode working');
+    expect(instructions).toContain('get_comparison_file');
+    expect(instructions).toContain('recent agent responses or prompt history');
+    expect(instructions).toContain('If evidence is unavailable, say what you could not verify rather than guessing or substituting counts');
+    expect(instructions).toContain('Status requests are read-only');
+    await expect(service.create(request)).resolves.toMatchObject({ ok: true });
+    expect(JSON.parse(String(provider.mock.calls[0]![1].body)).session.instructions).toBe(instructions);
+  });
+
+  // lead with task themes instead of repeating discovery metadata or old replies
+  it('requires topic-first status grounded beyond discovery results', async () => {
+    const provider = vi.fn(async () => new Response(JSON.stringify({ value: 'ek_ephemeral-client-secret' })));
+    const service = new RealtimeService({ apiKey: 'provider-key', fetch: provider as typeof fetch });
+    const instructions = service.instructions(request.context);
+
+    expect(instructions).toContain('Lead with one short sentence per relevant project or worktree');
+    expect(instructions).toContain('Remote Agents is working on changes to Davo, Conductor, and the MCP.');
+    expect(instructions).toContain('illustrative, not a fixed answer');
+    expect(instructions).toContain('list_agents, list_worktrees, get_worktree_status, and summarize_workspace are discovery results, not an answer about the actual work');
+    expect(instructions).toContain('Do not stop after discovery when further permitted evidence reads are available');
+    expect(instructions).toContain('Previous assistant status replies are not current evidence');
+    expect(instructions).toContain('Uncommitted changes and upstream divergence do not by themselves prove poor quality, unfinished work, or a blocker');
+    expect(instructions).toContain('Do not replace counts with vague phrases such as "a pile of changes"');
+    await expect(service.create(request)).resolves.toMatchObject({ ok: true });
+    expect(JSON.parse(String(provider.mock.calls[0]![1].body)).session.instructions).toBe(instructions);
+  });
+
+  // tool progress belongs to the interface rather than narrated assistant replies
+  it('keeps automatic idle and MCP activity lines silent', () => {
+    const instructions = new RealtimeService().instructions(request.context);
+    expect(instructions).toContain('The interface automatically displays idle status and per-call MCP activity');
+    expect(instructions).toContain('Do not narrate routine tool starts or completions');
+    expect(instructions).toContain('read these status lines aloud');
+    expect(instructions).toContain('Reserve speech and assistant replies for meaningful answers');
   });
 
   it('rejects oversized configured instructions without minting', async () => {

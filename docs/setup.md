@@ -540,6 +540,10 @@ An omitted child flag inherits MCP. A child `false` restricts that surface, whil
 without deleting them; restoring MCP still respects an explicit child `false`.
 Parent-disabled controls are unchecked and unavailable on both child pages.
 Turning off every Voice capability still allows audio chat with an empty MCP catalog.
+While talking to Davo, finish a complete request with **over**. Pauses do not send
+the request: Davo collects the speech until that final cue, then acts or replies.
+Muting or closing listening discards unfinished speech. Request and operation IDs
+are generated and tracked by RAC; the operator is never asked to provide them.
 Changes apply after saving and restarting RAC. Existing scopes, feature gates,
 audience restrictions, leases, and approval checks remain independent limits;
 these settings do not grant Voice raw execution or replace Conductor's sandbox.

@@ -15,6 +15,7 @@ import {
   type DavoStateV1
 } from './contracts.js';
 import { localDateForInstant, retentionWindow } from './retention.js';
+import { davoMcpActivityText, type DavoMcpActivityPhase } from './tool-activity.js';
 
 export type DavoStoreErrorCode = 'davo_store_unavailable' | 'davo_capacity' | 'davo_store_invalid' | 'davo_idempotency_conflict';
 
@@ -193,7 +194,19 @@ function initialState(now: Date): DavoStateV1 {
 
 // identify a quota violation before schema parsing
 function exceedsCapacity(value: DavoStateV1): boolean {
-  return value.messages.length > DAVO_MESSAGE_MAX_COUNT || value.requests.length > DAVO_REQUEST_MAX_COUNT || utf8Bytes(JSON.stringify(value)) > DAVO_STATE_MAX_BYTES;
+  let reservedBytes = utf8Bytes(JSON.stringify(value));
+  // preserve enough room to replace every provisional activity row in place
+  for (const message of value.messages) {
+    if (message.kind !== 'status' || message.source.kind !== 'mcp-activity' || message.source.phase !== 'running' && message.source.phase !== 'interrupted') continue;
+    const currentBytes = utf8Bytes(JSON.stringify(message));
+    let maximumBytes = currentBytes;
+    // reserve the exact largest legal reconciliation for this tool
+    for (const phase of ['interrupted', 'succeeded', 'failed', 'unknown'] as DavoMcpActivityPhase[]) {
+      maximumBytes = Math.max(maximumBytes, utf8Bytes(JSON.stringify({ ...message, text: davoMcpActivityText(message.source.tool, phase), source: { ...message.source, phase } })));
+    }
+    reservedBytes += maximumBytes - currentBytes;
+  }
+  return value.messages.length > DAVO_MESSAGE_MAX_COUNT || value.requests.length > DAVO_REQUEST_MAX_COUNT || reservedBytes > DAVO_STATE_MAX_BYTES;
 }
 
 export class DavoStore {
@@ -640,8 +653,12 @@ export class DavoStore {
             && candidate.source.eventId === parsed.data.source.eventId;
         }
         // match one request status event
-        if (parsed.data.kind === 'status') {
-          return candidate.kind === 'status' && candidate.requestId === parsed.data.requestId && candidate.source.statusKey === parsed.data.source.statusKey;
+        if (parsed.data.kind === 'status' && parsed.data.source.kind === 'request-status') {
+          return candidate.kind === 'status' && candidate.source.kind === 'request-status' && candidate.requestId === parsed.data.requestId && candidate.source.statusKey === parsed.data.source.statusKey;
+        }
+        // match one mcp activity correlation
+        if (parsed.data.kind === 'status' && parsed.data.source.kind === 'mcp-activity') {
+          return candidate.kind === 'status' && candidate.source.kind === 'mcp-activity' && candidate.source.correlationId === parsed.data.source.correlationId;
         }
         return false;
       });

@@ -36,6 +36,8 @@ const mockNoteCounts = async (page: Page, fixture: NoteCountsFixture) => {
     const url = new URL(request.url());
     // authenticate the fixture
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // mount the legitimate empty retained davo history
+    if (url.pathname === '/api/davo/conversation') return route.fulfill({ json: { conversationId: 'davo-conversation', generation: 4, revision: '33333333-3333-4333-8333-333333333333', retainedFrom: '2026-11-03T08:00:00.000Z', serverNow: new Date().toISOString(), retentionCutoffAt: new Date(Date.now() + 3_600_000).toISOString(), nextSequence: 1, hasMore: false, pendingChoices: [], messages: [] } });
     // expose one worktree and its note revision
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: dashboardSnapshot(fixture) });
     // enable controlled metadata pushes

@@ -10,10 +10,12 @@ type SessionReceipt = { negotiationId: string; model: string; conversationId: st
 type NegotiationReceipt = { sdp: string; generation: number; readinessId: string; readinessResponse: Record<string, unknown> };
 type AdmissionReceipt = { messageId: string; turnId: string; generation: number; response: Record<string, unknown> };
 type ActiveSession = { voiceSessionId: string; generation: number; providerSessionId?: string; leaseExpiresAt: number; retentionCutoffAt: number };
-type ActiveTurn = { turnId: string; messageId: string; responseId?: string; bound: boolean; text: string; pendingFinal?: { responseId: string; text: string } };
+type RuntimeWork = { session: ActiveSession; kind: 'foreground' | 'projection' };
+type McpCall = { terminal: boolean; itemDone: boolean };
+type ActiveTurn = { turnId: string; messageId: string; responseId?: string; bound: boolean; text: string; mcpCalls: Map<string, McpCall>; work: RuntimeWork; responseDone?: boolean; continuingMcp?: boolean; pendingFinal?: { responseId: string; text: string; intermediate?: boolean } };
 type ReadinessImportItem = { itemId: string; serverLabel: string; tools: string[]; responseId?: string };
 type ReadinessTracker = { readinessId: string; expectedServerLabels: string[]; expectedTools: string[]; responseId?: string; responseDone: boolean; mcpCompleted: boolean; completedItemId?: string; completedServerLabel?: string; completedResponseId?: string; importItems: ReadinessImportItem[]; importedTools?: string[]; failed: boolean };
-type PendingRawItem = { timer: number; session: ActiveSession; channel: RTCDataChannel };
+type PendingRawItem = { timer: number; session: ActiveSession; channel: RTCDataChannel; bufferEpoch: number };
 type DeletionWait = { session: ActiveSession; channel: RTCDataChannel; settle: (deleted: boolean) => void };
 type AssistantReceiptFlight = { session: ActiveSession; channel: RTCDataChannel; turn: ActiveTurn };
 type MutationResult = { kind: 'accepted'; response: Response } | { kind: 'conflict' } | { kind: 'ambiguous' };
@@ -25,6 +27,8 @@ export type RealtimeVoice = {
   inputLevel: number;
   outputLevel: number;
   muted: boolean;
+  awaitingOver: boolean;
+  working: boolean;
   start: () => Promise<void>;
   stop: () => void;
   toggleMute: () => void;
@@ -36,6 +40,8 @@ const receiptRetryMilliseconds = 750;
 const readinessTimeoutMilliseconds = 15_000;
 const cleanupTimeoutMilliseconds = 20_000;
 const heartbeatMilliseconds = 10_000;
+const mcpTimeoutMilliseconds = 120_000;
+const transcriptBudgetBytes = 12 * 1_024;
 
 // manage one replaceable audio transport over durable Davo history
 export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelectWorktree: SelectWorktree | undefined, assistantName: string): RealtimeVoice {
@@ -45,7 +51,9 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
   const [inputLevel, setInputLevel] = useState(0);
   const [outputLevel, setOutputLevel] = useState(0);
   const [muted, setMuted] = useState(false);
+  const [awaitingOver, setAwaitingOver] = useState(false);
   const [inputActive, setInputActive] = useState(false);
+  const [runtimeWorking, setRuntimeWorking] = useState(false);
   const [projectionRevision, setProjectionRevision] = useState(0);
   const peer = useRef<RTCPeerConnection | undefined>(undefined);
   const stream = useRef<MediaStream | undefined>(undefined);
@@ -63,8 +71,10 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
   const eventFrontier = useRef(Promise.resolve());
   const projectionPending = useRef(false);
   const projectionResponseId = useRef<string | undefined>(undefined);
+  const projectionWork = useRef<RuntimeWork | undefined>(undefined);
   const projectionSettlers = useRef(new Set<(settled: boolean) => void>());
   const assistantReceiptTimer = useRef<number | undefined>(undefined);
+  const mcpTimer = useRef<number | undefined>(undefined);
   const assistantReceiptInFlight = useRef<AssistantReceiptFlight | undefined>(undefined);
   const spokenMessages = useRef(new Set<string>());
   const priorMessages = useRef(new Set<string>());
@@ -72,9 +82,13 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
   const outputSpeaking = useRef(false);
   const outputEpoch = useRef(0);
   const inputEpochs = useRef(new Map<string, number>());
+  const inputBufferEpochs = useRef(new Map<string, number>());
   const quarantinedItems = useRef(new Set<string>());
   const pendingRawItems = useRef(new Map<string, PendingRawItem>());
   const pendingBackgroundMessages = useRef(new Map<string, DavoMessage>());
+  const bufferedTranscripts = useRef<string[]>([]);
+  const inputTurnPending = useRef(false);
+  const bufferEpoch = useRef(0);
   const meterFrame = useRef<number | undefined>(undefined);
   const inputAnalyser = useRef<AnalyserNode | undefined>(undefined);
   const outputAnalyser = useRef<AnalyserNode | undefined>(undefined);
@@ -83,8 +97,58 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
   const outputSource = useRef<MediaStreamAudioSourceNode | undefined>(undefined);
   const startRef = useRef<() => Promise<void>>(async () => undefined);
   const persistAssistantRef = useRef<(expectedSession: ActiveSession, expectedChannel: RTCDataChannel, expectedTurn: ActiveTurn) => Promise<void>>(async () => undefined);
+  const bufferedOwner = useRef(`${target.worktreeId ?? ''}\u0000${target.agentId ?? ''}`);
+  const activeWork = useRef(new Set<RuntimeWork>());
+  const activityRefreshInFlight = useRef(false);
+  const activityRefreshQueued = useRef(false);
   const selectWorktree = useRef(onSelectWorktree);
   selectWorktree.current = onSelectWorktree;
+
+  // publish one exact runtime work lease
+  const beginRuntimeWork = useCallback((work: RuntimeWork) => {
+    activeWork.current.add(work);
+    setRuntimeWorking(true);
+  }, []);
+
+  // release only one exact runtime work lease
+  const endRuntimeWork = useCallback((work: RuntimeWork | undefined) => {
+    // ignore absent or already retired work
+    if (work === undefined || !activeWork.current.delete(work)) return;
+    setRuntimeWorking(activeWork.current.size > 0);
+  }, []);
+
+  // retire one projected response before releasing its cancellation waits
+  const finishProjection = useCallback(() => {
+    projectionPending.current = false;
+    projectionResponseId.current = undefined;
+    endRuntimeWork(projectionWork.current);
+    projectionWork.current = undefined;
+    // release every waiter after the work token is gone
+    for (const finish of [...projectionSettlers.current]) finish(true);
+    setProjectionRevision(revision => revision + 1);
+  }, [endRuntimeWork]);
+
+  // coalesce provider activity refreshes to one active and one trailing read
+  const refreshMcpActivity = useCallback(() => {
+    activityRefreshQueued.current = true;
+    // reuse the active history read
+    if (activityRefreshInFlight.current) return;
+    activityRefreshInFlight.current = true;
+    activityRefreshQueued.current = false;
+    void conversation.refreshAfterCurrent().finally(() => {
+      activityRefreshInFlight.current = false;
+      // retain one trailing refresh for events received during the first read
+      if (activityRefreshQueued.current) refreshMcpActivity();
+    });
+  }, [conversation.refreshAfterCurrent]);
+
+  // discard audio that has not reached its spoken cue
+  const clearBufferedTranscripts = useCallback(() => {
+    bufferEpoch.current += 1;
+    bufferedTranscripts.current = [];
+    inputTurnPending.current = false;
+    setAwaitingOver(false);
+  }, []);
 
   // send one provider data-channel event
   const send = useCallback((expectedSession: ActiveSession, expectedChannel: RTCDataChannel, payload: Record<string, unknown>): boolean => {
@@ -156,9 +220,12 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     if (heartbeat.current !== undefined) window.clearInterval(heartbeat.current);
     if (deadline.current !== undefined) window.clearTimeout(deadline.current);
     if (assistantReceiptTimer.current !== undefined) window.clearTimeout(assistantReceiptTimer.current);
+    // retire only this transport's pending tool deadline
+    if (mcpTimer.current !== undefined) window.clearTimeout(mcpTimer.current);
     heartbeat.current = undefined;
     deadline.current = undefined;
     assistantReceiptTimer.current = undefined;
+    mcpTimer.current = undefined;
     const currentChannel = channel.current;
     const currentPeer = peer.current;
     const currentStream = stream.current;
@@ -181,16 +248,21 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     eventFrontier.current = Promise.resolve();
     projectionPending.current = false;
     projectionResponseId.current = undefined;
+    projectionWork.current = undefined;
+    activeWork.current.clear();
+    setRuntimeWorking(false);
     // release projection waits during transport replacement
     for (const settle of [...projectionSettlers.current]) settle(false);
     projectionSettlers.current.clear();
     assistantReceiptInFlight.current = undefined;
     inputEpochs.current.clear();
+    inputBufferEpochs.current.clear();
     quarantinedItems.current.clear();
     // cancel every raw-item deadline with its transport
     for (const pending of pendingRawItems.current.values()) window.clearTimeout(pending.timer);
     pendingRawItems.current.clear();
     pendingBackgroundMessages.current.clear();
+    clearBufferedTranscripts();
     mutedRef.current = false;
     setMuted(false);
     stopMeter();
@@ -202,7 +274,7 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     return request('/api/realtime/session/stop', { ...json({ voiceSessionId: currentSession.voiceSessionId, generation: currentSession.generation }, true), signal: AbortSignal.timeout(cleanupTimeoutMilliseconds) })
       .then(response => response.ok, () => false)
       .finally(retire);
-  }, [request, stopMeter]);
+  }, [clearBufferedTranscripts, request, stopMeter]);
 
   // stop provider control and local media
   const stop = useCallback(() => {
@@ -217,9 +289,14 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     const result = await exactMutation(request, '/api/davo/responses/finish', { voiceSessionId: expectedSession.voiceSessionId, generation: expectedSession.generation, turnId: expectedTurn.turnId, ...(responseId === undefined ? {} : { responseId }) });
     // retire only after the server confirms the exact turn
     if (session.current !== expectedSession || turn.current !== expectedTurn || result.kind !== 'accepted') return false;
+    // final completion ends the pending tool budget
+    if (mcpTimer.current !== undefined) window.clearTimeout(mcpTimer.current);
+    mcpTimer.current = undefined;
     turn.current = undefined;
+    endRuntimeWork(expectedTurn.work);
+    void conversation.refreshAfterCurrent();
     return true;
-  }, [request]);
+  }, [conversation, endRuntimeWork, request]);
 
   // stop after ambiguous raw-item deletion
   const rotate = useCallback(async (expectedSession: ActiveSession, expectedChannel: RTCDataChannel) => {
@@ -262,7 +339,7 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
       // rotate only the transport that owns this deadline
       if (pending?.timer === timer && pending.session === expectedSession && pending.channel === expectedChannel) void rotate(expectedSession, expectedChannel);
     }, deleteTimeoutMilliseconds);
-    pendingRawItems.current.set(itemId, { timer, session: expectedSession, channel: expectedChannel });
+    pendingRawItems.current.set(itemId, { timer, session: expectedSession, channel: expectedChannel, bufferEpoch: inputBufferEpochs.current.get(itemId) ?? bufferEpoch.current });
   }, [rotate]);
 
   // release one raw item only after exact deletion acknowledgement
@@ -326,16 +403,16 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
   }, [send]);
 
   // admit one final transcript only after quarantine clears
-  const admitTranscript = useCallback(async (expectedSession: ActiveSession, expectedChannel: RTCDataChannel, itemId: string, transcript: string) => {
+  const admitTranscript = useCallback(async (expectedSession: ActiveSession, expectedChannel: RTCDataChannel, itemId: string, transcript: string, expectedBufferEpoch: number, work: RuntimeWork) => {
     // reject stale callbacks before durable admission
-    if (session.current !== expectedSession || channel.current !== expectedChannel || expectedSession.providerSessionId === undefined) return;
+    if (session.current !== expectedSession || channel.current !== expectedChannel || bufferEpoch.current !== expectedBufferEpoch || expectedSession.providerSessionId === undefined) return;
     if (Date.now() >= expectedSession.retentionCutoffAt) return rotate(expectedSession, expectedChannel);
     // never infer while any raw provider item remains undeleted
     if (pendingRawItems.current.size > 0) return rotate(expectedSession, expectedChannel);
     // never overlap foreground work with projected speech
     const projectionSettled = await settleProjection(expectedSession, expectedChannel);
     // discard work resolved after transport replacement
-    if (session.current !== expectedSession || channel.current !== expectedChannel) return;
+    if (session.current !== expectedSession || channel.current !== expectedChannel || bufferEpoch.current !== expectedBufferEpoch) return;
     // expire only the exact captured transport
     if (Date.now() >= expectedSession.retentionCutoffAt) return rotate(expectedSession, expectedChannel);
     if (!projectionSettled) return rotate(expectedSession, expectedChannel);
@@ -382,7 +459,7 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     }
     // never infer without one exact durable receipt
     if (receipt === undefined || receipt.generation !== expectedSession.generation) return rotate(expectedSession, expectedChannel);
-    const admittedTurn: ActiveTurn = { turnId: receipt.turnId, messageId: receipt.messageId, bound: false, text: '' };
+    const admittedTurn: ActiveTurn = { turnId: receipt.turnId, messageId: receipt.messageId, bound: false, text: '', mcpCalls: new Map(), work };
     turn.current = admittedTurn;
     await conversation.refresh();
     // preserve a successor or competing exact turn
@@ -391,6 +468,68 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     // create only the server-authored response
     if (!send(expectedSession, expectedChannel, { type: 'response.create', response: receipt.response })) return rotate(expectedSession, expectedChannel);
   }, [conversation, request, rotate, send, settleProjection, stopForPendingAdmission]);
+
+  // buffer quarantined speech until one terminal over cue
+  const bufferTranscript = useCallback(async (expectedSession: ActiveSession, expectedChannel: RTCDataChannel, itemId: string, transcript: string, expectedBufferEpoch: number) => {
+    // reject audio invalidated before its deletion acknowledgement
+    if (bufferEpoch.current !== expectedBufferEpoch) return;
+    inputTurnPending.current = true;
+    // stop only projected speech before retaining a new user turn
+    if (projectionPending.current) {
+      const settled = await settleProjection(expectedSession, expectedChannel);
+      // discard cancellation completion after replacement
+      if (session.current !== expectedSession || channel.current !== expectedChannel || bufferEpoch.current !== expectedBufferEpoch) return;
+      if (!settled) return rotate(expectedSession, expectedChannel);
+    }
+    const parsed = overCue(transcript);
+    const chunks = parsed.text === '' ? bufferedTranscripts.current : [...bufferedTranscripts.current, parsed.text];
+    const combined = chunks.join(' ').trim();
+    // reject oversized turns without inference or truncation
+    if (new TextEncoder().encode(combined).byteLength > transcriptBudgetBytes) {
+      clearBufferedTranscripts();
+      setError('That turn was too long. Please say it again more briefly, ending with “over”.');
+      setProjectionRevision(revision => revision + 1);
+      return;
+    }
+    bufferedTranscripts.current = chunks;
+    // never admit an unfinished spoken turn
+    if (!parsed.complete) {
+      setAwaitingOver(inputTurnPending.current);
+      return;
+    }
+    bufferedTranscripts.current = [];
+    // an empty cue has no turn authority
+    if (combined === '') {
+      inputTurnPending.current = false;
+      setAwaitingOver(false);
+      setProjectionRevision(revision => revision + 1);
+      return;
+    }
+    inputTurnPending.current = true;
+    setAwaitingOver(false);
+    const work: RuntimeWork = { session: expectedSession, kind: 'foreground' };
+    beginRuntimeWork(work);
+    try {
+      await admitTranscript(expectedSession, expectedChannel, itemId, combined, expectedBufferEpoch, work);
+    } finally {
+      // admitted turns retain their lease through exact server completion
+      if (turn.current?.work !== work) endRuntimeWork(work);
+      // release only the transport that owned this admission
+      if (session.current === expectedSession && channel.current === expectedChannel && bufferEpoch.current === expectedBufferEpoch) {
+        inputTurnPending.current = false;
+        setProjectionRevision(revision => revision + 1);
+      }
+    }
+  }, [admitTranscript, beginRuntimeWork, clearBufferedTranscripts, endRuntimeWork, rotate, settleProjection]);
+
+  // fail one current unfinished turn without touching admitted work
+  const failBufferedTranscript = useCallback((expectedBufferEpoch: number) => {
+    // ignore stale, muted, empty, and already admitted audio
+    if (bufferEpoch.current !== expectedBufferEpoch || mutedRef.current || turn.current !== undefined || bufferedTranscripts.current.length === 0 && !inputTurnPending.current) return;
+    clearBufferedTranscripts();
+    setError('Davo could not transcribe that turn. Please say it again, ending with “over”.');
+    setProjectionRevision(revision => revision + 1);
+  }, [clearBufferedTranscripts]);
 
   // execute one server-authorized browser-local selection continuation
   const selectLocalWorktree = useCallback(async (expectedSession: ActiveSession, expectedChannel: RTCDataChannel, expectedTurn: ActiveTurn, payload: Record<string, unknown>) => {
@@ -415,8 +554,45 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     expectedTurn.responseId = undefined;
     expectedTurn.bound = false;
     expectedTurn.text = '';
+    expectedTurn.mcpCalls.clear();
+    expectedTurn.responseDone = false;
     send(expectedSession, expectedChannel, { type: 'response.create', response: receipt.response });
   }, [finishTurn, request, rotate, send]);
+
+  // resume the original admitted request only after every asynchronous tool result settles
+  const continueMcp = useCallback(async (expectedSession: ActiveSession, expectedChannel: RTCDataChannel, expectedTurn: ActiveTurn) => {
+    // stale, incomplete and duplicate callbacks cannot mint another response
+    if (session.current !== expectedSession || channel.current !== expectedChannel || turn.current !== expectedTurn || !expectedTurn.bound || expectedTurn.responseId === undefined || !expectedTurn.responseDone || expectedTurn.continuingMcp || expectedTurn.pendingFinal !== undefined || expectedTurn.mcpCalls.size === 0 || [...expectedTurn.mcpCalls.values()].some(call => !call.terminal || !call.itemDone)) return;
+    // never infer through unresolved raw provider audio
+    if (pendingRawItems.current.size > 0) return rotate(expectedSession, expectedChannel);
+    const responseId = expectedTurn.responseId;
+    expectedTurn.continuingMcp = true;
+    try {
+      const continued = await request('/api/davo/responses/mcp', { ...json({ voiceSessionId: expectedSession.voiceSessionId, generation: expectedSession.generation, turnId: expectedTurn.turnId, responseId, itemIds: [...expectedTurn.mcpCalls.keys()] }), signal: AbortSignal.timeout(15_000) });
+      // discard a receipt resolved after its transport or response was replaced
+      if (session.current !== expectedSession || channel.current !== expectedChannel || turn.current !== expectedTurn || expectedTurn.responseId !== responseId) return;
+      const receipt = continued.ok ? admissionFrom(await continued.json()) : undefined;
+      // parsing never grants authority to a successor
+      if (session.current !== expectedSession || channel.current !== expectedChannel || turn.current !== expectedTurn || expectedTurn.responseId !== responseId) return;
+      // a missing exact receipt cannot silently become final prose or an automatic retry
+      if (receipt === undefined || receipt.turnId !== expectedTurn.turnId || receipt.messageId !== expectedTurn.messageId || receipt.generation !== expectedSession.generation || Date.now() >= expectedSession.retentionCutoffAt || pendingRawItems.current.size > 0) throw new Error('davo_tool_continuation_failed');
+      if (mcpTimer.current !== undefined) window.clearTimeout(mcpTimer.current);
+      mcpTimer.current = undefined;
+      expectedTurn.responseId = undefined;
+      expectedTurn.bound = false;
+      expectedTurn.text = '';
+      expectedTurn.responseDone = false;
+      expectedTurn.continuingMcp = false;
+      expectedTurn.mcpCalls.clear();
+      // inference uses only the server's retained context and exact tool item references
+      if (!send(expectedSession, expectedChannel, { type: 'response.create', response: receipt.response })) throw new Error('davo_tool_continuation_failed');
+    } catch {
+      // keep a successor untouched and make failure explicit without retrying a possible effect
+      if (session.current !== expectedSession || channel.current !== expectedChannel || turn.current !== expectedTurn) return;
+      void closeLocal('error');
+      setError('Davo could not finish reading the tool results. Reopen listening to try again.');
+    }
+  }, [closeLocal, request, rotate, send]);
 
   // retry one exact assistant receipt until durable or fenced
   const persistAssistantReceipt = useCallback(async (expectedSession: ActiveSession, expectedChannel: RTCDataChannel, expectedTurn: ActiveTurn) => {
@@ -450,9 +626,15 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     await conversation.refresh();
     // discard refresh completion for a replaced exact turn
     if (session.current !== expectedSession || channel.current !== expectedChannel || turn.current !== expectedTurn) return;
+    // retain spoken progress in chat without ending the original tool-backed request
+    if (pending.intermediate) {
+      expectedTurn.pendingFinal = undefined;
+      await continueMcp(expectedSession, expectedChannel, expectedTurn);
+      return;
+    }
     // finish only after durable transcript confirmation
     if (!await finishTurn(expectedSession, expectedTurn, pending.responseId)) return rotate(expectedSession, expectedChannel);
-  }, [conversation, finishTurn, request, rotate]);
+  }, [continueMcp, conversation, finishTurn, request, rotate]);
   persistAssistantRef.current = persistAssistantReceipt;
 
   // retain one completed response until its receipt is durable
@@ -462,16 +644,28 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     const responseId = text(response.id);
     // settle only the exact background speech projection
     if (responseId !== undefined && responseId === projectionResponseId.current) {
-      projectionPending.current = false;
-      projectionResponseId.current = undefined;
-      for (const finish of [...projectionSettlers.current]) finish(true);
-      setProjectionRevision(revision => revision + 1);
+      finishProjection();
       return;
     }
     // reject late or unbound response completion
     if (expectedTurn === undefined || turn.current !== expectedTurn || responseId === undefined || expectedTurn.responseId !== responseId || !expectedTurn.bound) return;
     const status = text(response.status);
     const finalText = expectedTurn.text.trim() || responseText(response);
+    // response.done closes inference, not an asynchronous MCP-backed user turn
+    if (Array.isArray(response.output)) {
+      // retain calls even when their earlier streamed item event was unavailable
+      for (const item of response.output) trackMcpItem(expectedTurn, object(item), false);
+    }
+    // do not mistake a spoken preamble for the requested result
+    if (status === 'completed' && expectedTurn.mcpCalls.size > 0) {
+      expectedTurn.responseDone = true;
+      // spoken progress belongs in retained chat but never retires tool authority
+      if (finalText !== '') {
+        expectedTurn.pendingFinal = { responseId, text: finalText, intermediate: true };
+        await persistAssistantReceipt(expectedSession, expectedChannel, expectedTurn);
+      } else await continueMcp(expectedSession, expectedChannel, expectedTurn);
+      return;
+    }
     // persist only a completed nonempty assistant final
     if (status === 'completed' && finalText !== '') {
       expectedTurn.pendingFinal = { responseId, text: finalText };
@@ -480,13 +674,50 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     }
     // retire canceled and empty exact responses without persistence
     if (!await finishTurn(expectedSession, expectedTurn, responseId)) await rotate(expectedSession, expectedChannel);
-  }, [finishTurn, persistAssistantReceipt, rotate]);
+  }, [continueMcp, finishProjection, finishTurn, persistAssistantReceipt, rotate]);
 
   // handle one provider event under a serialized frontier
   const handlePayload = useCallback(async (expectedSession: ActiveSession, expectedChannel: RTCDataChannel, payload: Record<string, unknown>) => {
     // reject every callback from a replaced transport
     if (session.current !== expectedSession || channel.current !== expectedChannel) return;
     const type = text(payload.type) ?? '';
+    // surface rejected provider continuations instead of leaving a completed-looking preamble
+    if (type === 'error' && turn.current !== undefined) {
+      void closeLocal('error');
+      setError('Davo could not complete that request. Reopen listening to try again.');
+      return;
+    }
+    // track exact MCP output items separately from response inference completion
+    if (type === 'response.output_item.added' || type === 'response.output_item.done') {
+      const currentTurn = turn.current;
+      // never attach another response's tool item to this admitted turn
+      if (currentTurn?.bound && text(payload.response_id) === currentTurn.responseId && trackMcpItem(currentTurn, object(payload.item), type === 'response.output_item.done')) {
+        refreshMcpActivity();
+        // bound a stalled remote operation without retrying or claiming success
+        if (mcpTimer.current === undefined) mcpTimer.current = window.setTimeout(() => {
+          // an old tool deadline cannot close a successor transport or turn
+          if (session.current !== expectedSession || channel.current !== expectedChannel || turn.current !== currentTurn) return;
+          void closeLocal('error');
+          setError('Davo is still waiting for a tool result. Reopen listening to check its status.');
+        }, mcpTimeoutMilliseconds);
+        await continueMcp(expectedSession, expectedChannel, currentTurn);
+        return;
+      }
+    }
+    // terminal MCP events identify their registered output item rather than a response id
+    if (type === 'response.mcp_call.completed' || type === 'response.mcp_call.failed') {
+      const currentTurn = turn.current;
+      const itemId = text(payload.item_id);
+      const call = itemId === undefined ? undefined : currentTurn?.mcpCalls.get(itemId);
+      // unrelated or repeated old items cannot advance the current response
+      if (currentTurn?.bound && call !== undefined) {
+        call.terminal = true;
+        refreshMcpActivity();
+        // success and failure both wait for the exact finalized item before referencing it
+        await continueMcp(expectedSession, expectedChannel, currentTurn);
+      }
+      return;
+    }
     // retain the provider session identity for transcript receipts
     if (type === 'session.created') {
       const provider = object(payload.session);
@@ -549,7 +780,11 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
       setInputActive(true);
       const itemId = text(payload.item_id);
       // bind overlap to this raw item at speech start
-      if (itemId !== undefined) inputEpochs.current.set(itemId, outputSpeaking.current ? outputEpoch.current : 0);
+      if (itemId !== undefined) {
+        inputEpochs.current.set(itemId, outputSpeaking.current ? outputEpoch.current : 0);
+        // bind mute and owner authority at the earliest item identity
+        if (!inputBufferEpochs.current.has(itemId)) inputBufferEpochs.current.set(itemId, bufferEpoch.current);
+      }
       return;
     }
     if (type === 'input_audio_buffer.speech_stopped') { inputSpeaking.current = false; setInputActive(false); return; }
@@ -578,11 +813,14 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
       // a later terminal item cannot pass an earlier pending commit
       if ([...pendingRawItems.current.keys()].some(pendingId => pendingId !== itemId)) return rotate(expectedSession, expectedChannel);
       quarantineRawItem(expectedSession, expectedChannel, itemId);
+      const failedBufferEpoch = pendingRawItems.current.get(itemId)?.bufferEpoch ?? inputBufferEpochs.current.get(itemId) ?? bufferEpoch.current;
       const deleted = await deleteItem(expectedSession, expectedChannel, itemId);
       // discard deletion completion from a replaced transport
       if (session.current !== expectedSession || channel.current !== expectedChannel) return;
       if (!deleted) return rotate(expectedSession, expectedChannel);
       releaseRawItem(expectedSession, expectedChannel, itemId);
+      inputBufferEpochs.current.delete(itemId);
+      failBufferedTranscript(failedBufferEpoch);
       return;
     }
     if (type === 'conversation.item.input_audio_transcription.completed') {
@@ -595,13 +833,16 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
         // discard repeated deletion completion after replacement
         if (session.current !== expectedSession || channel.current !== expectedChannel) return;
         if (!deleted) await rotate(expectedSession, expectedChannel);
+        inputBufferEpochs.current.delete(itemId);
         return;
       }
       // a later item cannot cross an unresolved earlier commit
       if ([...pendingRawItems.current.keys()].some(pendingId => pendingId !== itemId)) return rotate(expectedSession, expectedChannel);
       quarantineRawItem(expectedSession, expectedChannel, itemId);
+      const expectedBufferEpoch = pendingRawItems.current.get(itemId)?.bufferEpoch ?? inputBufferEpochs.current.get(itemId) ?? bufferEpoch.current;
       const overlapEpoch = inputEpochs.current.get(itemId) ?? (outputSpeaking.current ? outputEpoch.current : 0);
       inputEpochs.current.delete(itemId);
+      inputBufferEpochs.current.delete(itemId);
       const deleted = await deleteItem(expectedSession, expectedChannel, itemId);
       // discard deletion completion from a replaced transport
       if (session.current !== expectedSession || channel.current !== expectedChannel) return;
@@ -610,13 +851,18 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
       releaseRawItem(expectedSession, expectedChannel, itemId);
       // discard overlap, duplicate and stale raw items after quarantine
       if (overlapEpoch > 0) return;
-      if (transcript === undefined) return;
+      // discard audio invalidated while transcription or deletion was pending
+      if (bufferEpoch.current !== expectedBufferEpoch) return;
+      // missing text invalidates the whole unfinished turn
+      if (transcript === undefined) { failBufferedTranscript(expectedBufferEpoch); return; }
       // muted mode recognizes only the configured exact name
       if (mutedRef.current) {
         if (normalized(transcript) === normalized(assistantName)) { mutedRef.current = false; setMuted(false); }
         return;
       }
-      await admitTranscript(expectedSession, expectedChannel, itemId, transcript);
+      // discard speech while an earlier exact turn remains active
+      if (turn.current !== undefined) return;
+      await bufferTranscript(expectedSession, expectedChannel, itemId, transcript, expectedBufferEpoch);
       return;
     }
     // bind provider response before accepting callbacks
@@ -671,7 +917,7 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
       }
       if (response !== undefined) await completeResponse(expectedSession, expectedChannel, turn.current, response);
     }
-  }, [admitTranscript, assistantName, completeResponse, deleteItem, finishTurn, quarantineRawItem, releaseRawItem, request, rotate, selectLocalWorktree, send]);
+  }, [assistantName, bufferTranscript, closeLocal, completeResponse, continueMcp, deleteItem, failBufferedTranscript, finishTurn, quarantineRawItem, refreshMcpActivity, releaseRawItem, request, rotate, selectLocalWorktree, send]);
 
   // start one server-owned WebRTC projection
   const start = useCallback(async () => {
@@ -770,17 +1016,24 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
           const response = object(providerEvent.response);
           const responseId = response === undefined ? undefined : text(response.id);
           if (responseId !== undefined && responseId === projectionResponseId.current) {
-            projectionPending.current = false;
-            projectionResponseId.current = undefined;
-            for (const finish of [...projectionSettlers.current]) finish(true);
-            setProjectionRevision(revision => revision + 1);
+            finishProjection();
             return;
           }
         }
         // serialize only callbacks from the captured transport
         if (providerEvent !== undefined) eventFrontier.current = eventFrontier.current
           .then(() => handlePayload(active, data, providerEvent))
-          .catch(() => session.current === active && channel.current === data ? rotate(active, data) : undefined);
+          .catch(error => {
+            // an old frontier cannot recover or stop a successor
+            if (session.current !== active || channel.current !== data) return;
+            // capacity rejection is explicit and never retries possibly completed tool work
+            if (error instanceof Error && error.message === 'davo_tool_capacity') {
+              void closeLocal('error');
+              setError('Davo reached the tool continuation limit. Reopen listening to continue.');
+              return;
+            }
+            return rotate(active, data);
+          });
       });
       const openedChannel = new Promise<void>((resolve, reject) => {
         const timer = window.setTimeout(() => reject(new Error('Davo provider channel timed out.')), 15_000);
@@ -831,15 +1084,17 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
       void closeLocal('error');
       setError(failure instanceof Error ? failure.message : 'Davo could not start listening.');
     }
-  }, [closeLocal, connectMeter, conversation, handlePayload, request, rotate, stop, target.agentId, target.worktreeId]);
+  }, [closeLocal, connectMeter, conversation, finishProjection, handlePayload, request, rotate, stop, target.agentId, target.worktreeId]);
   startRef.current = start;
 
   // toggle logical wake mode without stopping microphone transmission
   const toggleMute = useCallback(() => {
     const next = !mutedRef.current;
+    clearBufferedTranscripts();
     mutedRef.current = next;
     setMuted(next);
-  }, []);
+    setProjectionRevision(revision => revision + 1);
+  }, [clearBufferedTranscripts]);
 
   // speak new server-authored background replies while open
   useEffect(() => {
@@ -853,7 +1108,7 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
       if (message.kind === 'assistant' && !spokenMessages.current.delete(message.id)) pendingBackgroundMessages.current.set(message.id, message);
     }
     // wait for input, raw deletion, and existing output to clear
-    if (state !== 'connected' || inputActive || inputSpeaking.current || pendingRawItems.current.size > 0 || turn.current !== undefined || projectionPending.current) return;
+    if (state !== 'connected' || inputActive || inputSpeaking.current || inputBufferEpochs.current.size > 0 || pendingRawItems.current.size > 0 || inputTurnPending.current || turn.current !== undefined || projectionPending.current) return;
     const message = pendingBackgroundMessages.current.values().next().value as DavoMessage | undefined;
     if (message === undefined) return;
     const currentSession = session.current;
@@ -862,9 +1117,16 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     if (currentSession === undefined || currentChannel === undefined) return;
     pendingBackgroundMessages.current.delete(message.id);
     projectionPending.current = true;
+    const work: RuntimeWork = { session: currentSession, kind: 'projection' };
+    projectionWork.current = work;
+    beginRuntimeWork(work);
     // release the projection latch when provider dispatch fails
-    if (!send(currentSession, currentChannel, { type: 'response.create', response: { conversation: 'none', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: `Speak this update exactly once: ${message.text}` }] }], tools: [], tool_choice: 'none', output_modalities: ['audio'] } })) projectionPending.current = false;
-  }, [conversation.messages, inputActive, projectionRevision, send, state]);
+    if (!send(currentSession, currentChannel, { type: 'response.create', response: { conversation: 'none', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: `Speak this update exactly once: ${message.text}` }] }], tools: [], tool_choice: 'none', output_modalities: ['audio'] } })) {
+      projectionPending.current = false;
+      projectionWork.current = undefined;
+      endRuntimeWork(work);
+    }
+  }, [awaitingOver, beginRuntimeWork, conversation.messages, endRuntimeWork, inputActive, projectionRevision, send, state]);
 
   // close immediately when the document cannot run deadlines
   useEffect(() => {
@@ -886,7 +1148,30 @@ export function useRealtimeVoice(request: Request, target: VoiceTarget, onSelect
     if (current !== undefined && conversation.snapshot !== undefined && current.generation !== conversation.snapshot.generation) stop();
   }, [conversation.snapshot, stop]);
 
-  return { state, error: error ?? conversation.error, conversation, inputLevel, outputLevel, muted, start, stop, toggleMute };
+  // never carry unfinished audio across a target owner change
+  useEffect(() => {
+    const owner = `${target.worktreeId ?? ''}\u0000${target.agentId ?? ''}`;
+    // retain an admission already owned by its captured server session
+    if (bufferedOwner.current === owner) return;
+    bufferedOwner.current = owner;
+    clearBufferedTranscripts();
+    setProjectionRevision(revision => revision + 1);
+  }, [clearBufferedTranscripts, target.agentId, target.worktreeId]);
+
+  return { state, error: error ?? conversation.error, conversation, inputLevel, outputLevel, muted, awaitingOver, working: runtimeWorking || conversation.snapshot?.working === true, start, stop, toggleMute };
+}
+
+// split one terminal standalone spoken cue from its content
+function overCue(value: string): { complete: boolean; text: string } {
+  const cueOnly = /^[\s\p{P}]*over[\s\p{P}]*$/iu;
+  // accept a cue-only transcription with spoken punctuation
+  if (cueOnly.test(value)) return { complete: true, text: '' };
+  const terminal = /(?:\s|[.,;:!?…])over[\s\p{P}]*$/iu.exec(value);
+  // keep mid-sentence and substring uses as ordinary speech
+  if (terminal === null) return { complete: false, text: value.trim() };
+  const boundary = value[terminal.index] ?? '';
+  const contentEnd = /\s/u.test(boundary) ? terminal.index : terminal.index + boundary.length;
+  return { complete: true, text: value.slice(0, contentEnd).trim() };
 }
 
 // build one JSON mutation request
@@ -1034,6 +1319,19 @@ function pendingAdmission(value: unknown): boolean {
   return object(value)?.pending === true;
 }
 
+// register only provider MCP items belonging to an already bound response
+function trackMcpItem(turn: ActiveTurn, item: Record<string, unknown> | undefined, itemDone: boolean): boolean {
+  // readiness catalogs and ordinary assistant content are not asynchronous calls
+  if (item?.type !== 'mcp_call') return false;
+  const id = text(item.id);
+  // bound pending calls independently of the provider or server context budgets
+  if (id === undefined || id.length > 256 || !turn.mcpCalls.has(id) && turn.mcpCalls.size >= 16) throw new Error('davo_tool_capacity');
+  const call = turn.mcpCalls.get(id) ?? { terminal: false, itemDone: false };
+  call.itemDone ||= itemDone;
+  turn.mcpCalls.set(id, call);
+  return true;
+}
+
 // read one completed provider response transcript
 function responseText(response: Record<string, unknown>): string {
   // require provider output items
@@ -1093,8 +1391,6 @@ function integer(value: unknown): value is number {
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
-
-export type { DavoMessage };
 
 // reconcile one idempotent mutation with its exact request body
 async function exactMutation(request: Request, url: string, body: unknown): Promise<MutationResult> {

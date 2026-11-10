@@ -15,15 +15,22 @@ export type DavoToolPorts = {
 };
 const capability = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
 const capabilitySchema = { type: 'string', minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' };
-const common = { request_id: developerRequestId, turn_capability: capability };
-const commonProperties = { request_id: developerRequestSchema, turn_capability: capabilitySchema };
+// retain optional legacy keys without depending on caller-generated operation identities
+const common = { request_id: developerRequestId.optional(), turn_capability: capability };
+const commonProperties = { request_id: { ...developerRequestSchema, description: 'Optional legacy transport key. Omit this field; RAC generates internal operation IDs. Never ask the user for it.' }, turn_capability: capabilitySchema };
 const output = z.record(z.unknown());
 const humanAnswer = z.union([z.object({ index: z.number().int().min(0).max(99) }).strict(), z.object({ text: z.string().min(1).max(8000) }).strict(), z.object({ dismiss: z.literal(true) }).strict()]);
 const humanAnswerSchema = { oneOf: [{ type: 'object', properties: { index: { type: 'integer', minimum: 0, maximum: 99 } }, required: ['index'], additionalProperties: false }, { type: 'object', properties: { text: { type: 'string', minLength: 1, maxLength: 8000 } }, required: ['text'], additionalProperties: false }, { type: 'object', properties: { dismiss: { const: true } }, required: ['dismiss'], additionalProperties: false }] };
 
 // bind one-use authority to tool kind and every canonical argument
 function actionDigest(name: string, input: Record<string, unknown>): string {
-  return digestDavo(canonicalizeDavo({ name, arguments: JSON.parse(JSON.stringify(input)) }));
+  const { request_id: _requestId, turn_capability: _turnCapability, ...arguments_ } = input;
+  return digestDavo(canonicalizeDavo({ name, arguments: JSON.parse(JSON.stringify(arguments_)) }));
+}
+
+// derive one stable internal operation from an already authorized user turn
+function operationId(name: string, turn: DavoLiveTurn): string {
+  return `davo-${digestDavo(canonicalizeDavo({ name, turn: turn.id }))}`;
 }
 
 // expose only admitted-turn mutations to the realtime principal
@@ -43,7 +50,7 @@ export function createDavoTools(ports: DavoToolPorts): DeveloperTool[] {
 
   // share paired schemas and audited gateway policy
   function tool(name: string, description: string, shape: z.ZodRawShape, properties: Record<string, unknown>, execute: DeveloperTool['execute']): DeveloperTool {
-    return developerTool({ name, title: name.replaceAll('_', ' '), description, audiences: ['realtime'], requiredScopes: ['status:read', 'prompts:write'], risk: 'write', idempotency: 'domain_cursor', schema: z.object({ ...common, ...shape }).strict(), inputSchema: { type: 'object', properties: { ...commonProperties, ...properties }, required: [...Object.keys(commonProperties), ...Object.keys(properties).filter(key => key !== 'target_instance_id')], additionalProperties: false }, output, dataSchema: { type: 'object', additionalProperties: true }, execute });
+    return developerTool({ name, title: name.replaceAll('_', ' '), description, audiences: ['realtime'], requiredScopes: ['status:read', 'prompts:write'], risk: 'write', idempotency: 'domain_cursor', schema: z.object({ ...common, ...shape }).strict(), inputSchema: { type: 'object', properties: { ...commonProperties, ...properties }, required: ['turn_capability', ...Object.keys(properties).filter(key => key !== 'target_instance_id')], additionalProperties: false }, output, dataSchema: { type: 'object', additionalProperties: true }, execute });
   }
 
   return [
@@ -57,18 +64,21 @@ export function createDavoTools(ports: DavoToolPorts): DeveloperTool[] {
     })),
     tool('delegate_request', 'Delegate the original admitted user request to the bound ordinary RAC Agent. The immutable transcript supplies the task; criteria and checks do not replace it.', { target_capability: capability, criteria: z.array(z.string().min(1).max(512)).min(1).max(32), required_checks: z.array(z.string().min(1).max(128)).max(16) }, { target_capability: capabilitySchema, criteria: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 512 } }, required_checks: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: 128 } } }, async (input, principal) => guarded(async () => {
       const turn = await admitted(input, principal);
-      const target = ports.live.consumeTarget(principal.leaseKey!, turn.capability, turn.responseId!, input.target_capability as string, input.request_id as string, actionDigest('delegate_request', input)) as DavoInstanceQualifiedTargetV1;
-      return await ports.delegate({ target, turn, principal, operationId: input.request_id as string, criteria: input.criteria as string[], requiredChecks: input.required_checks as string[] });
+      const id = operationId('delegate_request', turn);
+      const target = ports.live.consumeTarget(principal.leaseKey!, turn.capability, turn.responseId!, input.target_capability as string, id, actionDigest('delegate_request', input)) as DavoInstanceQualifiedTargetV1;
+      return await ports.delegate({ target, turn, principal, operationId: id, criteria: input.criteria as string[], requiredChecks: input.required_checks as string[] });
     })),
     tool('relay_agent_question_answer', 'Relay only an explicit answer in this newly admitted user audio to one exact currently pending Agent question. Never infer approval or choose a default.', { target_capability: capability, question_id: developerIdentifier, answer: humanAnswer }, { target_capability: capabilitySchema, question_id: developerIdSchema, answer: humanAnswerSchema }, async (input, principal) => guarded(async () => {
       const turn = await admitted(input, principal);
-      const target = ports.live.consumeTarget(principal.leaseKey!, turn.capability, turn.responseId!, input.target_capability as string, input.request_id as string, actionDigest('relay_agent_question_answer', input)) as DavoInstanceQualifiedTargetV1;
-      return await ports.relay({ target, turn, principal, questionId: input.question_id as string, answer: input.answer as DavoHumanAnswer, operationId: input.request_id as string });
+      const id = operationId('relay_agent_question_answer', turn);
+      const target = ports.live.consumeTarget(principal.leaseKey!, turn.capability, turn.responseId!, input.target_capability as string, id, actionDigest('relay_agent_question_answer', input)) as DavoInstanceQualifiedTargetV1;
+      return await ports.relay({ target, turn, principal, questionId: input.question_id as string, answer: input.answer as DavoHumanAnswer, operationId: id });
     })),
     tool('answer_davo_choice', 'Answer an exact pending Davo continuation choice from this newly admitted user audio. This is not an Agent question or permission grant.', { davo_request_id: developerIdentifier, choice_id: developerIdentifier, answer: z.string().min(1).max(512) }, { davo_request_id: developerIdSchema, choice_id: developerIdSchema, answer: { type: 'string', minLength: 1, maxLength: 512 } }, async (input, principal) => guarded(async () => {
       const turn = await admitted(input, principal);
-      ports.live.consumeAction(principal.leaseKey!, turn.capability, input.request_id as string, actionDigest('answer_davo_choice', input));
-      return await ports.answerChoice({ requestId: input.davo_request_id as string, choiceId: input.choice_id as string, answer: input.answer as string, turn, principal, operationId: input.request_id as string });
+      const id = operationId('answer_davo_choice', turn);
+      ports.live.consumeAction(principal.leaseKey!, turn.capability, id, actionDigest('answer_davo_choice', input));
+      return await ports.answerChoice({ requestId: input.davo_request_id as string, choiceId: input.choice_id as string, answer: input.answer as string, turn, principal, operationId: id });
     }))
   ];
 }

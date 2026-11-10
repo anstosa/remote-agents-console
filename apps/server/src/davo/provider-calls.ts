@@ -7,14 +7,14 @@ const maxSessionBytes = 32 * 1024;
 const defaultRequestTimeoutMs = 15_000;
 const defaultProviderMaximumMs = 60 * 60 * 1000;
 
-export type DavoProviderCallPrivateRecord = DavoProviderCallV1;
+type DavoProviderCallPrivateRecord = DavoProviderCallV1;
 
 export type DavoProviderCallPersistenceState = {
   providerCalls: DavoProviderCallPrivateRecord[];
   providerQuarantineUntil?: string;
 };
 
-export type DavoProviderCallMutation<T> = { state: DavoProviderCallPersistenceState; result: T };
+type DavoProviderCallMutation<T> = { state: DavoProviderCallPersistenceState; result: T };
 
 export type DavoProviderCallPersistence = {
   mode: 0o600;
@@ -22,7 +22,7 @@ export type DavoProviderCallPersistence = {
   mutate<T>(mutation: (state: DavoProviderCallPersistenceState) => DavoProviderCallMutation<T>): Promise<T>;
 };
 
-export type DavoProviderSessionConfig = { model: string; clientSecret?: string; [key: string]: unknown };
+type DavoProviderSessionConfig = { model: string; clientSecret?: string; [key: string]: unknown };
 
 export type DavoProviderNegotiation = {
   voiceSessionId: string;

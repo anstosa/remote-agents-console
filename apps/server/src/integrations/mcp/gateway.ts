@@ -11,7 +11,12 @@ import type { FederationForwardContext } from '../federation/service.js';
 import { mcpPrincipalPermitted, type McpPermissions } from './permissions.js';
 
 export type ToolCallResult = { content: Array<{ type: 'text'; text: string }>; structuredContent: Record<string, unknown>; isError?: boolean };
-export type IntegrationGatewayOptions = { config: IntegrationConfig; conductorPermissions?: McpPermissions; instanceId: string; orchestration: OrchestrationService; policy: IntegrationPolicyService; audit: Pick<IntegrationAuditService, 'record'>; control: IntegrationControlService; developerTools?: () => readonly DeveloperTool[]; forward?: (instanceId: string, principal: IntegrationPrincipal, name: string, args: Record<string, unknown>, context: FederationForwardContext) => Promise<ToolCallResult | undefined> };
+export type IntegrationToolActivityOutcome = 'success' | 'error' | 'unknown';
+export type IntegrationToolActivity = {
+  start: (event: { correlationId: string; tool: string; leaseKey: string }) => Promise<string | undefined>;
+  finish: (handle: string, event: { correlationId: string; tool: string; outcome: IntegrationToolActivityOutcome }) => Promise<void>;
+};
+export type IntegrationGatewayOptions = { config: IntegrationConfig; conductorPermissions?: McpPermissions; instanceId: string; orchestration: OrchestrationService; policy: IntegrationPolicyService; audit: Pick<IntegrationAuditService, 'record'>; control: IntegrationControlService; activity?: IntegrationToolActivity; developerTools?: () => readonly DeveloperTool[]; forward?: (instanceId: string, principal: IntegrationPrincipal, name: string, args: Record<string, unknown>, context: FederationForwardContext) => Promise<ToolCallResult | undefined> };
 type MutationArguments = Record<string, unknown> & { request_id: string };
 
 // route all transports through one policy boundary
@@ -52,6 +57,8 @@ export class IntegrationGateway {
     let strictOutcomeAudit = false;
     let effectMayHaveStarted = false;
     const leaseKey = principal.authentication === 'realtime' ? principal.leaseKey : this.options.control.currentLease()?.leaseKey;
+    let activityHandle: string | undefined;
+    let activityUnavailable = false;
     let result: ToolCallResult;
 
     // write one payload-free audit event
@@ -75,8 +82,15 @@ export class IntegrationGateway {
       });
     };
 
+    // register only local realtime calls with a canonical tool and exact lease
+    if (principal.authentication === 'realtime' && principal.federated === undefined && definition !== undefined && leaseKey !== undefined && this.options.activity !== undefined) {
+      try { activityHandle = await this.options.activity.start({ correlationId, tool: definition.name, leaseKey }); }
+      catch { activityUnavailable = true; }
+    }
+
     // reject unknown, disabled, or malformed calls before dispatch
-    if (definition === undefined) result = errorResult('unknown_tool', 'The requested tool does not exist.', correlationId);
+    if (activityUnavailable) result = errorResult('activity_unavailable', 'The operation was not run because its activity receipt could not be stored.', correlationId, true);
+    else if (definition === undefined) result = errorResult('unknown_tool', 'The requested tool does not exist.', correlationId);
     else if (!this.enabled(definition, principal)) result = errorResult('tool_disabled', 'The requested tool is disabled.', correlationId);
     else if (!definition.requiredScopes.every(scope => principal.scopes.includes(scope))) result = errorResult('insufficient_scope', 'The access token lacks a required scope.', correlationId);
     else if (instanceId !== undefined && (typeof instanceId !== 'string' || instanceId.length === 0 || instanceId.length > 240 || instanceId.includes('\0'))) result = errorResult('invalid_request', 'The instance identifier is invalid.', correlationId);
@@ -88,11 +102,21 @@ export class IntegrationGateway {
       // require local purple Davo mode before forwarding mutations
       if (!control.ok) result = errorResult(control.code, controlMessage(control.code), correlationId, true);
       else {
-        // only OAuth reads may skip the exact issuance-time lease recheck
-        const forwarded = this.options.config.multiInstance.enabled && this.options.forward !== undefined ? await this.options.forward(instanceId, principal, name, parsed.data, { ...(definition.risk === 'read' || leaseKey === undefined ? {} : { controlLeaseKey: leaseKey }), authorize: () => definition.risk === 'read' && principal.authentication === 'oauth' || this.authorize(principal, leaseKey).ok }) : undefined;
-        result = forwarded ?? errorResult('instance_unavailable', 'The requested instance is unavailable.', correlationId, true);
+        try {
+          // only OAuth reads may skip the exact issuance-time lease recheck
+          const forwarded = this.options.config.multiInstance.enabled && this.options.forward !== undefined ? await this.options.forward(instanceId, principal, name, parsed.data, { ...(definition.risk === 'read' || leaseKey === undefined ? {} : { controlLeaseKey: leaseKey }), authorize: () => definition.risk === 'read' && principal.authentication === 'oauth' || this.authorize(principal, leaseKey).ok }) : undefined;
+          result = forwarded ?? errorResult('instance_unavailable', 'The requested instance is unavailable.', correlationId, true);
+        } catch {
+          result = errorResult(definition.risk === 'read' ? 'operation_failed' : 'unknown_outcome', definition.risk === 'read' ? 'The requested read is unavailable.' : 'The forwarded operation may have completed.', correlationId, true);
+        }
       }
-    } else if (definition.risk === 'read') result = await this.executeResult(definition, parsed.data, principal, correlationId);
+    } else if (definition.risk === 'read') {
+      const localRealtime = principal.authentication === 'realtime' && principal.federated === undefined;
+      const finalControl = localRealtime ? this.authorize(principal, leaseKey) : { ok: true as const };
+      // a completed activity receipt cannot let a stale realtime lease dispatch a read
+      if (!finalControl.ok) result = errorResult('voice_lease_changed', controlMessage('voice_lease_changed'), correlationId, true);
+      else result = await this.executeResult(definition, parsed.data, principal, correlationId);
+    }
     else {
       const mutation = parsed.data as MutationArguments;
       requestId = mutation.request_id;
@@ -155,8 +179,13 @@ export class IntegrationGateway {
     try {
       await audit('outcome', result.isError ? 'error' : 'success', errorCode);
     } catch {
-      // surface missing outcome audit after any possible side effect
-      if (strictOutcomeAudit) return resultVersion(errorResult('unknown_outcome', 'The operation may have completed but its audit outcome could not be stored. Retry only with the same request identifier.', correlationId, true), definition);
+      // keep internal domain tracking out of user-facing recovery instructions
+      if (strictOutcomeAudit) result = resultVersion(errorResult('unknown_outcome', requestId === undefined ? 'The operation may have completed but confirmation could not be stored. Check its status before retrying the exact same call; RAC handles internal tracking automatically.' : 'The operation may have completed but its audit outcome could not be stored. Retry only with the same request identifier.', correlationId, true), definition);
+    }
+    // update only the exact registered receipt after all result rewriting
+    if (activityHandle !== undefined && this.options.activity !== undefined && definition !== undefined) {
+      try { await this.options.activity.finish(activityHandle, { correlationId, tool: definition.name, outcome: activityOutcome(result) }); }
+      catch { /* activity persistence never repeats or masks an executed tool */ }
     }
     return result;
   }
@@ -350,6 +379,13 @@ function controlMessage(code: string): string {
 // read one gateway error code
 function resultErrorCode(result: ToolCallResult): string | undefined {
   return typeof result.structuredContent.error === 'object' && result.structuredContent.error !== null ? String((result.structuredContent.error as { code?: unknown }).code ?? 'error') : undefined;
+}
+
+// classify only the final validated and audited gateway result
+function activityOutcome(result: ToolCallResult): IntegrationToolActivityOutcome {
+  if (resultErrorCode(result) === 'unknown_outcome') return 'unknown';
+  if (result.isError === true || result.structuredContent.ok !== true) return 'error';
+  return 'success';
 }
 
 // serialize objects with stable key order for policy digests

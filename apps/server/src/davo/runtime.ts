@@ -1,16 +1,22 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IntegrationControlService } from '../integrations/control/service.js';
 import type { IntegrationScope } from '../integrations/auth/index.js';
 import type { RealtimeService, RealtimeSessionContext } from '../integrations/realtime/service.js';
 import { buildLiveContext, pendingChoiceDescriptors } from './context.js';
-import { expiryForAnchor, retentionWindow } from './retention.js';
+import { expiryForAnchor, localDateForInstant, retentionWindow } from './retention.js';
 import { DavoLive } from './live.js';
 import { DavoAdmissionPendingError, DavoStore } from './store.js';
 import { DavoProviderCalls, type DavoProviderCallPersistence } from './provider-calls.js';
-import { utf8Bytes } from './contracts.js';
+import { DAVO_REQUEST_MAX_COUNT, utf8Bytes } from './contracts.js';
 import { DavoMetrics } from './metrics.js';
+import { davoMcpActivityPhase, davoMcpActivityText, type DavoMcpActivityOutcome } from './tool-activity.js';
 
 type Pending = { id: string; ownerId: string; voiceSessionId: string; generation: number; secret: string; model: string; expiresAt: number; descriptor: Record<string, unknown> };
+type McpActivitySlot = { epoch: number };
+type McpActivityRegistration = { handle: string; correlationId: string; tool: string; voiceSessionId: string; generation: number; expiresAt: string; slot: McpActivitySlot };
+type McpActivityReceipt = { registration: McpActivityRegistration; outcome: DavoMcpActivityOutcome };
+// bound ephemeral provider context per admitted turn
+const maximumMcpReferences = 32;
 export type DavoRuntimeOptions = {
   store: DavoStore;
   control: IntegrationControlService;
@@ -39,6 +45,11 @@ export class DavoRuntime {
   private readiness?: { id: string; voiceSessionId: string; generation: number; expectedTools: string[]; responseId?: string };
   private descriptor?: Record<string, unknown>;
   private responseInput?: Array<Record<string, unknown>>;
+  private readonly activeMcpActivities = new Set<string>();
+  private readonly mcpActivitySlots = new Map<string, McpActivitySlot>();
+  private readonly mcpActivityRegistrations = new Map<string, McpActivityRegistration>();
+  private readonly pendingMcpReceipts = new Map<string, McpActivityReceipt>();
+  private mcpActivityEpoch = 0;
   private frontier: Promise<void> = Promise.resolve();
   private readonly now: () => number;
 
@@ -87,11 +98,35 @@ export class DavoRuntime {
   }
 
   // recover uncertain provider cleanup before reopening the microphone
-  async recover(): Promise<void> { await this.options.store.ensureCurrent(); await this.calls.recover(); }
+  async recover(): Promise<void> {
+    await this.options.store.ensureCurrent();
+    let providerFailure: unknown;
+    try {
+      const recovered = await this.calls.recover();
+      // resolved provider failures retain their stable public code
+      if (!recovered.ok) providerFailure = new Error(recovered.code);
+    }
+    catch (error) { providerFailure = error; }
+    // activity reconciliation cannot block proven provider cleanup
+    try { await this.interruptMcpActivities(); }
+    catch (error) {
+      // the app records one primary provider failure after propagation
+      if (providerFailure === undefined) this.recordFailure(error);
+    }
+    // preserve the provider recovery result over status receipt faults
+    if (providerFailure !== undefined) throw providerFailure;
+  }
 
   // erase live context and revoke the real lease before sanitized store persistence
   fence(): void {
     this.live.close();
+    this.mcpActivityEpoch += 1;
+    this.activeMcpActivities.clear();
+    this.mcpActivitySlots.clear();
+    this.mcpActivityRegistrations.clear();
+    this.pendingMcpReceipts.clear();
+    // reconcile after any in-flight store frontier releases
+    void this.interruptMcpActivities().catch(error => this.recordFailure(error));
     // revoke only the actual current browser voice session
     if (this.activeVoice !== undefined && this.activeOwner !== undefined) this.options.control.stopVoice(this.activeOwner, this.activeVoice.voiceSessionId);
     this.pending = undefined;
@@ -119,10 +154,238 @@ export class DavoRuntime {
       serverNow: new Date(this.now()).toISOString(),
       retentionCutoffAt: retentionWindow(this.now()).nextSweepAt,
       nextSequence: state.nextSequence,
+      working: this.live.working() || this.activeMcpActivities.size > 0 || state.requests.some(request => request.state === 'dispatching' || request.state === 'awaiting-agent' || request.state === 'evaluating'),
       pendingChoices: pendingChoiceDescriptors(state),
       hasMore: eligible.length > selected.length,
       messages: selected.map(message => ({ id: message.id, sequence: message.sequence, kind: message.kind, text: message.text, createdAt: message.createdAt, expiresAt: expiryForAnchor(message.retentionAnchorAt), ...(message.requestId === undefined ? {} : { requestId: message.requestId }) }))
     };
+  }
+
+  // register one exact realtime mcp call against its admitted user turn
+  async startMcpActivity(input: { correlationId: string; tool: string; leaseKey: string }): Promise<string | undefined> {
+    let observed;
+    try { observed = this.live.activity(input.leaseKey); }
+    catch { return undefined; }
+    // legacy reads without an admitted turn stay observable only through their normal result
+    if (observed === undefined) return undefined;
+    const existingSlot = this.mcpActivitySlots.get(input.correlationId);
+    const existingRegistration = this.mcpActivityRegistrations.get(input.correlationId);
+    // reserve worst-case reconciliation before the first awaited store operation
+    if (existingSlot === undefined && this.mcpActivitySlots.size >= DAVO_REQUEST_MAX_COUNT) throw new Error('davo_capacity');
+    // concurrent reuse cannot share an uncommitted reservation
+    const activityEpoch = this.mcpActivityEpoch;
+    const slot = existingSlot ?? { epoch: activityEpoch };
+    if (existingSlot !== undefined && existingRegistration?.slot !== existingSlot) throw new Error('davo_activity_conflict');
+    if (existingSlot === undefined) this.mcpActivitySlots.set(input.correlationId, slot);
+    const createdAt = new Date(this.now()).toISOString();
+    let registration: Omit<McpActivityRegistration, 'slot'> & { running: boolean };
+    try {
+      registration = await this.options.store.transact(state => {
+        const original = state.messages.find(message => message.id === observed.messageId);
+        // require the exact retained transcript selected by the live lease
+        if (original === undefined || original.kind !== 'user' || original.generation !== observed.generation || original.source.voiceSessionId !== observed.voiceSessionId) throw new Error('davo_activity_unavailable');
+        const existing = state.messages.find(message => message.kind === 'status' && message.source.kind === 'mcp-activity' && message.source.correlationId === input.correlationId);
+        // exact callback retries reuse one immutable row
+        if (existing !== undefined) {
+          if (existing.kind !== 'status' || existing.source.kind !== 'mcp-activity') throw new Error('davo_activity_conflict');
+          if (existing.source.tool !== input.tool || existing.source.voiceSessionId !== observed.voiceSessionId || existing.source.inReplyToMessageId !== original.id) throw new Error('davo_activity_conflict');
+          return { handle: existing.id, correlationId: input.correlationId, tool: input.tool, voiceSessionId: observed.voiceSessionId, generation: observed.generation, expiresAt: expiryForAnchor(existing.retentionAnchorAt), running: existing.source.phase === 'running' };
+        }
+        const message = {
+          sequence: state.nextSequence,
+          id: randomUUID(),
+          conversationId: state.logicalConversationId,
+          generation: state.retention.generation,
+          createdAt,
+          localDate: localDateForInstant(createdAt),
+          retentionAnchorAt: original.retentionAnchorAt,
+          retentionAnchorLocalDate: original.retentionAnchorLocalDate,
+          kind: 'status' as const,
+          text: davoMcpActivityText(input.tool, 'running'),
+          source: { kind: 'mcp-activity' as const, correlationId: input.correlationId, tool: input.tool, phase: 'running' as const, voiceSessionId: observed.voiceSessionId, inReplyToMessageId: original.id }
+        };
+        state.messages.push(message);
+        state.nextSequence += 1;
+        return { handle: message.id, correlationId: input.correlationId, tool: input.tool, voiceSessionId: observed.voiceSessionId, generation: observed.generation, expiresAt: expiryForAnchor(message.retentionAnchorAt), running: true };
+      });
+    } catch (error) {
+      // only the caller that created the reservation can roll it back
+      if (existingSlot === undefined && activityEpoch === this.mcpActivityEpoch && this.mcpActivitySlots.get(input.correlationId) === slot) this.mcpActivitySlots.delete(input.correlationId);
+      throw error;
+    }
+    // a session fence during persistence cannot revive stale activity authority
+    if (activityEpoch !== this.mcpActivityEpoch || this.mcpActivitySlots.get(input.correlationId) !== slot) {
+      try { await this.interruptMcpActivity({ ...registration, slot }); }
+      catch (error) { this.recordFailure(error); }
+      throw new Error('davo_activity_unavailable');
+    }
+    const { running, ...retained } = registration;
+    // exact start retries retain the original in-memory authority identity
+    if (existingRegistration !== undefined) {
+      if (this.mcpActivityRegistrations.get(input.correlationId) !== existingRegistration || existingRegistration.handle !== retained.handle
+        || existingRegistration.tool !== retained.tool || existingRegistration.voiceSessionId !== retained.voiceSessionId
+        || existingRegistration.generation !== retained.generation || existingRegistration.expiresAt !== retained.expiresAt) throw new Error('davo_activity_conflict');
+    } else {
+      if (this.mcpActivityRegistrations.has(input.correlationId)) throw new Error('davo_activity_conflict');
+      this.mcpActivityRegistrations.set(input.correlationId, { ...retained, slot });
+    }
+    // count only calls with a durable running receipt
+    if (running) this.activeMcpActivities.add(input.correlationId);
+    return registration.handle;
+  }
+
+  // finish only a previously registered activity row
+  async finishMcpActivity(handle: string, input: { correlationId: string; tool: string; outcome: DavoMcpActivityOutcome }): Promise<void> {
+    const registration = this.mcpActivityRegistrations.get(input.correlationId);
+    const ownsRegistration = registration !== undefined && registration.handle === handle && registration.tool === input.tool
+      && this.mcpActivitySlots.get(input.correlationId) === registration.slot;
+    // stale callbacks cannot change current-session working state
+    if (ownsRegistration) this.activeMcpActivities.delete(input.correlationId);
+    const pending = this.pendingMcpReceipts.get(input.correlationId);
+    // terminal reconciliation identity and outcome are immutable
+    if (pending !== undefined && (pending.registration.handle !== handle || pending.registration.tool !== input.tool || pending.outcome !== input.outcome)) throw new Error('davo_activity_conflict');
+    let failure: unknown;
+    // retry only the activity receipt, never the tool effect
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.persistMcpActivity({ handle, correlationId: input.correlationId, tool: input.tool, outcome: input.outcome }, ownsRegistration ? registration : undefined);
+        failure = undefined;
+        break;
+      } catch (error) {
+        failure = error;
+        // let one transient persistence frontier recover
+        if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    }
+    const stillOwnsRegistration = ownsRegistration && registration !== undefined && this.mcpActivityRegistrations.get(input.correlationId) === registration
+      && this.mcpActivitySlots.get(input.correlationId) === registration.slot;
+    // successful or missing rows need no further receipt authority
+    if (failure === undefined) {
+      // release only the reservation owned by this exact callback
+      if (stillOwnsRegistration) {
+        this.mcpActivitySlots.delete(input.correlationId);
+        this.mcpActivityRegistrations.delete(input.correlationId);
+        if (this.pendingMcpReceipts.get(input.correlationId)?.registration === registration) this.pendingMcpReceipts.delete(input.correlationId);
+      }
+      return;
+    }
+    // retain only bounded same-generation unexpired reconciliation identity
+    const canQueue = stillOwnsRegistration && registration !== undefined
+      && registration.generation === this.options.store.currentGeneration && Date.parse(registration.expiresAt) > this.now();
+    if (canQueue && registration !== undefined) {
+      // preserve the exact receipt object while reconciliation may hold it
+      if (pending === undefined) this.pendingMcpReceipts.set(input.correlationId, { registration, outcome: input.outcome });
+    } else if (stillOwnsRegistration) {
+      this.mcpActivitySlots.delete(input.correlationId);
+      this.mcpActivityRegistrations.delete(input.correlationId);
+    }
+    // leave the actual audited tool result authoritative on persistent receipt failure
+    throw failure;
+  }
+
+  // update one exact existing activity row without creating it
+  private async persistMcpActivity(input: { handle: string; correlationId: string; tool: string; outcome: DavoMcpActivityOutcome }, registration?: McpActivityRegistration): Promise<void> {
+    const phase = davoMcpActivityPhase(input.outcome);
+    await this.options.store.transact(state => {
+      const message = state.messages.find(candidate => candidate.id === input.handle && candidate.kind === 'status' && candidate.source.kind === 'mcp-activity'
+        && candidate.source.correlationId === input.correlationId && candidate.source.tool === input.tool);
+      // expiration or missing registration can never recreate a row
+      if (message === undefined || message.kind !== 'status' || message.source.kind !== 'mcp-activity') return;
+      // retained reconciliation must preserve its original exact identity
+      if (registration !== undefined && (message.generation !== registration.generation || message.source.voiceSessionId !== registration.voiceSessionId
+        || expiryForAnchor(message.retentionAnchorAt) !== registration.expiresAt || Date.parse(registration.expiresAt) <= this.now())) return;
+      // confirmed outcomes never regress on duplicate callbacks
+      if (message.source.phase === 'succeeded' || message.source.phase === 'failed' || message.source.phase === 'unknown') return;
+      message.source.phase = phase;
+      message.text = davoMcpActivityText(input.tool, phase);
+    });
+  }
+
+  // interrupt only the stale row persisted by one fenced start
+  private async interruptMcpActivity(registration: McpActivityRegistration): Promise<void> {
+    await this.options.store.transact(state => {
+      const message = state.messages.find(candidate => candidate.id === registration.handle && candidate.kind === 'status' && candidate.source.kind === 'mcp-activity'
+        && candidate.source.correlationId === registration.correlationId && candidate.source.tool === registration.tool);
+      // preserve mismatched, expired and terminal rows
+      if (message === undefined || message.kind !== 'status' || message.source.kind !== 'mcp-activity' || message.generation !== registration.generation
+        || message.source.voiceSessionId !== registration.voiceSessionId || expiryForAnchor(message.retentionAnchorAt) !== registration.expiresAt
+        || message.source.phase !== 'running') return;
+      message.source.phase = 'interrupted';
+      message.text = davoMcpActivityText(message.source.tool, 'interrupted');
+    });
+  }
+
+  // reconcile bounded terminal receipts through the existing runtime tick
+  private async reconcileMcpActivities(): Promise<void> {
+    const generation = this.options.store.currentGeneration;
+    // prune memory authority at its original generation and expiry frontier
+    for (const [correlationId, receipt] of this.pendingMcpReceipts) {
+      const registration = receipt.registration;
+      if (registration.generation !== generation || Date.parse(registration.expiresAt) <= this.now()) {
+        this.pendingMcpReceipts.delete(correlationId);
+        // prune only the reservation captured by this exact receipt
+        if (this.mcpActivityRegistrations.get(correlationId) === registration && this.mcpActivitySlots.get(correlationId) === registration.slot) {
+          this.mcpActivitySlots.delete(correlationId);
+          this.mcpActivityRegistrations.delete(correlationId);
+        }
+      }
+    }
+    const pending = [...this.pendingMcpReceipts.values()];
+    // avoid empty persistence writes on ordinary ticks
+    if (pending.length === 0) return;
+    try {
+      const resolved = await this.options.store.transact(state => {
+        const completed: number[] = [];
+        // update every exact retained row in one bounded transaction
+        for (let index = 0; index < pending.length; index += 1) {
+          const receipt = pending[index]!;
+          const registration = receipt.registration;
+          const message = state.messages.find(candidate => candidate.id === registration.handle && candidate.kind === 'status' && candidate.source.kind === 'mcp-activity'
+            && candidate.source.correlationId === registration.correlationId && candidate.source.tool === registration.tool);
+          // missing, expired or replaced rows release only memory authority
+          if (message === undefined || message.kind !== 'status' || message.source.kind !== 'mcp-activity'
+            || message.generation !== registration.generation || message.source.voiceSessionId !== registration.voiceSessionId
+            || expiryForAnchor(message.retentionAnchorAt) !== registration.expiresAt || Date.parse(registration.expiresAt) <= this.now()) {
+            completed.push(index);
+            continue;
+          }
+          const phase = davoMcpActivityPhase(receipt.outcome);
+          // only provisional rows accept the immutable terminal outcome
+          if (message.source.phase === 'running' || message.source.phase === 'interrupted') {
+            message.source.phase = phase;
+            message.text = davoMcpActivityText(registration.tool, phase);
+          }
+          completed.push(index);
+        }
+        return completed;
+      });
+      // release only receipts proven applied or absent in that transaction
+      for (const index of resolved) {
+        const receipt = pending[index];
+        // ignore malformed transaction results without widening authority
+        if (receipt === undefined) continue;
+        const registration = receipt.registration;
+        const correlationId = registration.correlationId;
+        // awaited reconciliation cannot release a successor's authority
+        if (this.pendingMcpReceipts.get(correlationId) !== receipt || this.mcpActivityRegistrations.get(correlationId) !== registration
+          || this.mcpActivitySlots.get(correlationId) !== registration.slot) continue;
+        this.pendingMcpReceipts.delete(correlationId);
+        this.mcpActivitySlots.delete(correlationId);
+        this.mcpActivityRegistrations.delete(correlationId);
+      }
+    } catch (error) { this.recordFailure(error); }
+  }
+
+  // mark abandoned running receipts without blocking provider cleanup
+  private async interruptMcpActivities(): Promise<void> {
+    await this.options.store.transact(state => {
+      // preserve terminal rows while making abandoned work explicit
+      for (const message of state.messages) {
+        if (message.kind !== 'status' || message.source.kind !== 'mcp-activity' || message.source.phase !== 'running') continue;
+        message.source.phase = 'interrupted';
+        message.text = davoMcpActivityText(message.source.tool, 'interrupted');
+      }
+    });
   }
 
   // mint a pending negotiation without returning provider credentials
@@ -260,7 +523,7 @@ export class DavoRuntime {
 
   // freeze response-scoped tools around explicitly retained text only
   private response(capability: string, input = this.responseInput) {
-    const instructions = `${this.options.realtime.instructions(this.voiceContext)} Respond only to the admitted user text. Turn capability: ${capability}. Include this exact turn_capability in every Davo tool call. Never substitute another message. For development work resolve and bind the canonical target then delegate_request. No raw mutation tool is permitted.`;
+    const instructions = `${this.options.realtime.instructions(this.voiceContext)} Respond only to the admitted user text. Turn capability: ${capability}. Include this exact turn_capability in every Davo tool call. Never substitute another message. For development work resolve and bind the canonical target then delegate_request. No raw mutation tool is permitted. Never say you are doing, checking, or waiting on work unless the corresponding tool call has started. After gathering enough evidence for the original request, report the answer instead of stopping at a preamble or echoing the first tool result. Do not stop at discovery metadata when the request needs task or change evidence; continue with the permitted read tools.`;
     return { conversation: 'none', input: structuredClone(input), instructions, tools: this.responseTools(), output_modalities: ['audio'] };
   }
 
@@ -280,8 +543,10 @@ export class DavoRuntime {
       await this.ensureCurrent();
       this.owned(ownerId, input);
       this.live.bound(input.voiceSessionId, input.generation, input.turnId, input.responseId);
+      // count only browser-local selection continuations
+      const localSelections = this.responseInput?.filter(item => item.type === 'function_call' && item.name === 'select_worktree').length ?? 0;
       // do not mint continuation authority for unresolved selections
-      if (!await this.options.selectWorktree?.(input.worktreeId) || this.responseInput === undefined || this.responseInput.length > 9) throw new Error('davo_target_changed');
+      if (!await this.options.selectWorktree?.(input.worktreeId) || this.responseInput === undefined || localSelections >= 5) throw new Error('davo_target_changed');
       const turn = this.live.advance(input.voiceSessionId, input.generation, input.turnId, input.responseId);
       this.voiceContext = { instanceId: this.options.instanceId, worktreeId: input.worktreeId };
       this.responseInput.push({ type: 'function_call', call_id: input.callId, name: 'select_worktree', arguments: JSON.stringify({ worktree_id: input.worktreeId }) }, { type: 'function_call_output', call_id: input.callId, output: JSON.stringify({ selected: true, worktree_id: input.worktreeId }) });
@@ -289,6 +554,41 @@ export class DavoRuntime {
       // every continuation obeys the same complete envelope ceiling
       if (utf8Bytes(JSON.stringify(response)) > 40_960) { this.live.finish(input.voiceSessionId, input.generation, turn.id); this.responseInput = undefined; throw new Error('davo_context_capacity'); }
       return { ok: true, messageId: turn.messageId, turnId: turn.id, generation: input.generation, response };
+    });
+  }
+
+  // continue one exact response from completed provider mcp items
+  continueMcp(ownerId: string, input: { voiceSessionId: string; generation: number; turnId: string; responseId: string; itemIds: string[] }) {
+    return this.serialize(async () => {
+      await this.ensureCurrent();
+      this.owned(ownerId, input);
+      this.live.bound(input.voiceSessionId, input.generation, input.turnId, input.responseId);
+      const currentInput = this.responseInput;
+      const unique = new Set(input.itemIds);
+      // accept only bounded new provider item identities
+      if (currentInput === undefined || input.itemIds.length === 0 || input.itemIds.length > 16 || unique.size !== input.itemIds.length || input.itemIds.some(itemId => typeof itemId !== 'string' || itemId.length === 0 || itemId.length > 256 || itemId.includes('\0'))) throw new Error('davo_turn_changed');
+      // recover prior opaque references from server-owned input only
+      const referenced = new Set(currentInput.flatMap(item => item.type === 'item_reference' && typeof item.id === 'string' ? [item.id] : []));
+      // a provider item can extend this admitted turn only once
+      if (input.itemIds.some(itemId => referenced.has(itemId))) throw new Error('davo_turn_changed');
+      // cap ephemeral references independently of the total envelope
+      if (referenced.size + input.itemIds.length > maximumMcpReferences) throw new Error('davo_context_capacity');
+      // append no client-authored tool content
+      const nextInput = [...currentInput, ...input.itemIds.map(id => ({ type: 'item_reference', id }))];
+      const turn = this.live.advance(input.voiceSessionId, input.generation, input.turnId, input.responseId);
+      try {
+        const response = this.response(turn.capability, nextInput);
+        // apply the same complete-envelope limit before releasing inference
+        if (utf8Bytes(JSON.stringify(response)) > 40_960) throw new Error('davo_context_capacity');
+        this.responseInput = nextInput;
+        return { ok: true, messageId: turn.messageId, turnId: turn.id, generation: input.generation, response };
+      } catch (error) {
+        this.responseInput = undefined;
+        // retire rotated authority after continuation preflight failure
+        try { this.live.finish(input.voiceSessionId, input.generation, turn.id); }
+        catch { this.fence(); }
+        throw error;
+      }
     });
   }
 
@@ -351,6 +651,7 @@ export class DavoRuntime {
   // enforce cutoff and lease loss even when browser javascript is frozen
   async tick(): Promise<void> {
     await this.ensureCurrent();
+    await this.reconcileMcpActivities();
     const state = await this.options.store.read();
     // close only stale or unowned provider sessions
     for (const call of state.providerCalls) {
@@ -358,7 +659,12 @@ export class DavoRuntime {
       try { this.live.current(call.voiceSessionId, call.generation); }
       catch { active = false; }
       // revoke locally before issuing a provider hangup
-      if (!active || Date.parse(call.hardCutoffAt) <= this.now()) { this.live.close(call.voiceSessionId); await this.calls.stop(call); }
+      if (!active || Date.parse(call.hardCutoffAt) <= this.now()) {
+        // exact session fencing also releases bounded activity reconciliation
+        if (this.live.matches(call.voiceSessionId, call.generation)) this.fence();
+        else this.live.close(call.voiceSessionId);
+        await this.calls.stop(call);
+      }
     }
     // erase credentials when their negotiation deadline passes
     if (this.pending !== undefined && this.pending.expiresAt <= this.now()) { this.live.close(this.pending.voiceSessionId); this.pending = undefined; }

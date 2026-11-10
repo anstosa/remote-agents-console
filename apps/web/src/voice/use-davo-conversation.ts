@@ -29,6 +29,7 @@ export type DavoConversationSnapshot = {
   retentionCutoffAt: string;
   nextSequence: number;
   hasMore: boolean;
+  working: boolean;
   pendingChoices: DavoPendingChoice[];
   messages: DavoMessage[];
 };
@@ -40,6 +41,7 @@ export type DavoConversation = {
   loadingOlder: boolean;
   error?: string;
   refresh: () => Promise<DavoConversationSnapshot | undefined>;
+  refreshAfterCurrent: () => Promise<DavoConversationSnapshot | undefined>;
   loadOlder: () => Promise<void>;
 };
 
@@ -104,6 +106,14 @@ export function useDavoConversation(request: Request): DavoConversation {
     return operation;
   }, [request]);
 
+  // start one read after any already-active projection settles
+  const refreshAfterCurrent = useCallback(async (): Promise<DavoConversationSnapshot | undefined> => {
+    const currentRefresh = inFlight.current;
+    // preserve ordering behind the captured older projection
+    if (currentRefresh !== undefined) await currentRefresh;
+    return refresh();
+  }, [refresh]);
+
   // page backward without resetting newer rows
   const loadOlder = useCallback(async () => {
     const oldest = messages[0];
@@ -141,7 +151,7 @@ export function useDavoConversation(request: Request): DavoConversation {
     };
   }, [purge, refresh]);
 
-  return { snapshot, messages, loading, loadingOlder, error, refresh, loadOlder };
+  return { snapshot, messages, loading, loadingOlder, error, refresh, refreshAfterCurrent, loadOlder };
 }
 
 // merge exact message ids in sequence order
@@ -161,7 +171,7 @@ function unexpired(messages: DavoMessage[], serverOffset: number): DavoMessage[]
 // validate one server conversation projection
 function conversationFrom(value: unknown): DavoConversationSnapshot | undefined {
   // require all top-level retention fields
-  if (!record(value) || typeof value.conversationId !== 'string' || !integer(value.generation) || typeof value.revision !== 'string' || typeof value.retainedFrom !== 'string' || typeof value.serverNow !== 'string' || typeof value.retentionCutoffAt !== 'string' || !integer(value.nextSequence) || typeof value.hasMore !== 'boolean' || !Array.isArray(value.pendingChoices) || !Array.isArray(value.messages)) return undefined;
+  if (!record(value) || typeof value.conversationId !== 'string' || !integer(value.generation) || typeof value.revision !== 'string' || typeof value.retainedFrom !== 'string' || typeof value.serverNow !== 'string' || typeof value.retentionCutoffAt !== 'string' || !integer(value.nextSequence) || typeof value.hasMore !== 'boolean' || value.working !== undefined && typeof value.working !== 'boolean' || !Array.isArray(value.pendingChoices) || !Array.isArray(value.messages)) return undefined;
   const pendingChoices: DavoPendingChoice[] = [];
   // validate every public choice descriptor
   for (const candidate of value.pendingChoices) {
@@ -178,7 +188,7 @@ function conversationFrom(value: unknown): DavoConversationSnapshot | undefined 
     if (message === undefined) return undefined;
     messages.push(message);
   }
-  return { conversationId: value.conversationId, generation: value.generation, revision: value.revision, retainedFrom: value.retainedFrom, serverNow: value.serverNow, retentionCutoffAt: value.retentionCutoffAt, nextSequence: value.nextSequence, hasMore: value.hasMore, pendingChoices, messages };
+  return { conversationId: value.conversationId, generation: value.generation, revision: value.revision, retainedFrom: value.retainedFrom, serverNow: value.serverNow, retentionCutoffAt: value.retentionCutoffAt, nextSequence: value.nextSequence, hasMore: value.hasMore, working: value.working === true, pendingChoices, messages };
 }
 
 // validate one public audio-only choice descriptor

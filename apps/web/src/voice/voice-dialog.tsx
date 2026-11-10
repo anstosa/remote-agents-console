@@ -1,5 +1,7 @@
 import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
-import { useRealtimeVoice, type DavoMessage } from './use-realtime-voice.js';
+import { Skeleton } from '../skeleton.js';
+import { useRealtimeVoice } from './use-realtime-voice.js';
+import type { DavoMessage } from './use-davo-conversation.js';
 import './loading.css';
 
 type Request = (url: string, init?: RequestInit) => Promise<Response>;
@@ -11,6 +13,16 @@ type WorktreeSelection = { worktreeId: string; worktreeLabel: string };
 const soundwaveBars = Array.from({ length: 28 }, (_, index) => index);
 const mobileWakeLockMedia = '(max-width: 600px), (pointer: coarse)';
 const historyClock = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+
+// reserve the retained-chat geometry while voice transport becomes ready
+function VoiceConnectingSkeleton() {
+  return <div className="voice-connecting-skeleton" aria-hidden="true">
+    <div className="voice-connecting-toolbar"><Skeleton /><Skeleton /></div>
+    <div className="voice-connecting-message voice-connecting-assistant"><Skeleton /><Skeleton /></div>
+    <div className="voice-connecting-message voice-connecting-user"><Skeleton /><Skeleton /></div>
+    <div className="voice-connecting-message voice-connecting-assistant"><Skeleton /><Skeleton /></div>
+  </div>;
+}
 
 // format one retained timestamp
 function historyTime(timestamp: string): string {
@@ -109,6 +121,7 @@ export function VoiceDialog({ name, open, openRequest, context, request, onHide,
   const assistantName = name.trim() || 'Davo';
   const voice = useRealtimeVoice(request, { ...(context.worktreeId === undefined ? {} : { worktreeId: context.worktreeId }), ...(context.worktree === undefined ? {} : { worktreeLabel: context.worktree }), ...(context.agentId === undefined ? {} : { agentId: context.agentId }) }, onSelectWorktree, assistantName);
   const active = voice.state === 'connecting' || voice.state === 'connected';
+  const visibleInputLevel = voice.muted ? 0 : voice.inputLevel;
   useMobileScreenWakeLock(open && active);
   const connection = formatVoiceContext(context);
   const [historyQuery, setHistoryQuery] = useState('');
@@ -135,9 +148,9 @@ export function VoiceDialog({ name, open, openRequest, context, request, onHide,
   useEffect(() => {
     const root = document.documentElement;
     root.style.setProperty('--davo-output-level', voice.outputLevel.toFixed(3));
-    root.style.setProperty('--davo-input-level', voice.inputLevel.toFixed(3));
-    root.style.setProperty('--davo-activity-level', Math.max(voice.outputLevel, voice.inputLevel).toFixed(3));
-  }, [voice.inputLevel, voice.outputLevel]);
+    root.style.setProperty('--davo-input-level', visibleInputLevel.toFixed(3));
+    root.style.setProperty('--davo-activity-level', Math.max(voice.outputLevel, visibleInputLevel).toFixed(3));
+  }, [visibleInputLevel, voice.outputLevel]);
 
   // remove global levels after unmount
   useEffect(() => () => {
@@ -160,6 +173,8 @@ export function VoiceDialog({ name, open, openRequest, context, request, onHide,
   else if (voice.conversation.messages.length === 0) history = <p className="voice-history-empty">Speak while listening is open. There is no typed message box.</p>;
   else if (visibleMessages.length === 0) history = <p className="voice-history-empty">No history matches “{historyQuery.trim()}”.</p>;
   else history = visibleMessages.map(message => {
+    // render server activity without chat-bubble chrome
+    if (message.kind === 'status') return <div key={message.id} className="voice-status-line" title={message.text}>{message.text}</div>;
     const role = message.kind === 'user' ? 'user' : 'assistant';
     const time = new Date(message.createdAt);
     return <p key={message.id} className={`voice-${role} voice-${message.kind}`}><strong>{message.kind === 'user' ? 'You' : message.kind === 'assistant' ? assistantName : message.kind}</strong><time dateTime={time.toISOString()} title={time.toLocaleString()}>{historyTime(message.createdAt)}</time><span>{message.text}</span></p>;
@@ -173,29 +188,32 @@ export function VoiceDialog({ name, open, openRequest, context, request, onHide,
 
   // keep hidden history mounted but absent from accessibility
   if (!open) return null;
-  const soundwaveStyle = { '--mic-level': voice.inputLevel.toFixed(3), '--davo-level': voice.outputLevel.toFixed(3) } as CSSProperties;
+  const soundwaveStyle = { '--mic-level': visibleInputLevel.toFixed(3), '--davo-level': voice.outputLevel.toFixed(3) } as CSSProperties;
   const busy = voice.state === 'connecting';
-  const status = voice.state === 'connected' ? voice.muted ? `Muted — say ${assistantName}` : 'Listening' : voice.state === 'connecting' ? 'Opening listening…' : 'Listening is off';
+  const activity = busy ? 'Opening listening...' : voice.working ? 'Working...' : 'Waiting for instructions...';
+  const status = voice.state === 'connected' ? voice.muted ? `Muted — say ${assistantName}` : voice.awaitingOver ? 'Listening — waiting for “over”' : 'Listening — say “over” when finished' : voice.state === 'connecting' ? 'Opening listening…' : 'Listening is off';
 
-  return <div className="dialog voice-dialog" role="dialog" aria-modal={window.matchMedia('(max-width: 600px)').matches} aria-labelledby="voice-title">
+  // keep the external panel toggle accessible at every viewport size
+  return <div className="dialog voice-dialog" role="dialog" aria-modal={false} aria-labelledby="voice-title">
     <div style={soundwaveStyle}>
-      <div className="voice-soundwaves" aria-hidden="true"><div className="voice-soundwave davo">{soundwaveBars.map(index => <i key={index} style={{ animationDelay: `${index * -47}ms` }} />)}</div><div className="voice-soundwave mic">{soundwaveBars.map(index => <i key={index} style={{ animationDelay: `${index * -47}ms` }} />)}</div></div>
+      <div className="voice-soundwaves" aria-hidden="true"><div className="voice-soundwave davo">{soundwaveBars.map(index => <i key={index} style={{ animationDelay: `${index * -47}ms` }} />)}</div>{/* hide input motion while wake detection remains active */}{!voice.muted && <div className="voice-soundwave mic">{soundwaveBars.map(index => <i key={index} style={{ animationDelay: `${index * -47}ms` }} />)}</div>}</div>
       <header><div><small>OPENAI REALTIME</small><h2 id="voice-title">{assistantName}</h2></div><button ref={hideButton} className="voice-view-toggle" type="button" aria-label={`Show main UI while ${assistantName} remains available`} onClick={onHide}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg></button></header>
       <section className="voice-context" aria-label={`${assistantName} connection context`}>
         <div className="voice-context-card voice-context-active"><small>Active worktree</small><strong>{connection.activeWorktree}</strong>{connection.agent && <span>Agent · {connection.agent}</span>}</div>
         <div className="voice-context-card voice-context-server"><small>Server / instance</small><strong>{connection.server}</strong>{connection.serverLocation && <span>{connection.serverLocation}</span>}</div>
         <div className="voice-context-card voice-context-open"><small>Other open worktrees</small>{openWorktrees}</div>
       </section>
-      <div className={`voice-transcript-shell${busy ? ' progress-border progress-green progress-loading' : ''}`} aria-busy={busy || undefined}>
-        {busy && <span className="update-progress-ring" aria-hidden="true" />}
-        <section ref={transcript} className="voice-transcript" aria-live="polite">
+      <div className="voice-transcript-shell" aria-busy={busy || undefined} aria-label={busy ? `Connecting ${assistantName}` : undefined}>
+        <section ref={transcript} className="voice-transcript" aria-live="polite" aria-hidden={busy || undefined} inert={busy || undefined}>
           <div className="voice-history-toolbar"><strong>Recent history</strong><label className="voice-history-search"><span className="sr-only">Search {assistantName} history</span><input type="search" value={historyQuery} placeholder="Search history" onChange={event => setHistoryQuery(event.target.value)} /></label></div>
           {voice.conversation.snapshot?.hasMore && <button type="button" className="voice-load-older" disabled={voice.conversation.loadingOlder} onClick={() => void voice.conversation.loadOlder()}>{voice.conversation.loadingOlder ? 'Loading…' : 'Load older'}</button>}
-          {voice.conversation.snapshot?.pendingChoices.map(choice => <section key={`${choice.requestId}:${choice.choiceId}`} className="voice-pending-choice" aria-label="Pending voice question"><strong>{choice.question}</strong>{choice.options.length > 0 && <ul>{choice.options.map(option => <li key={option}>{option}</li>)}</ul>}<small>Answer by voice while listening is open.</small></section>)}
+          {voice.conversation.snapshot?.pendingChoices.map(choice => <section key={`${choice.requestId}:${choice.choiceId}`} className="voice-pending-choice" aria-label="Pending voice question"><strong>{choice.question}</strong>{choice.options.length > 0 && <ul>{choice.options.map(option => <li key={option}>{option}</li>)}</ul>}<small>Answer by voice and end with “over”.</small></section>)}
           {history}
         </section>
+        {busy && <VoiceConnectingSkeleton />}
       </div>
       {voice.error && <p className="auth-error" role="alert">{voice.error}</p>}
+      <p className="voice-work-status" role="status">{activity}</p>
       <footer>
         {voice.state === 'idle' || voice.state === 'error'
           ? <button type="button" className="voice-start" onClick={() => void voice.start()}>Open listening</button>

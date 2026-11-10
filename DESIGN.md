@@ -72,7 +72,6 @@ Application has one page title and a top-right Edit base file action, matching
 Docker's compact base-file placement without an inline editor-mode banner.
 Multi-instance federation follows the configured remote-server list automatically;
 do not expose a separate toggle or search result for the derived feature.
-
 MCP, Conductor, and Voice share one grouped Read/Write permission-table design.
 MCP sets the ceiling; child pages show denied operations as unchecked and disabled.
 Staged parent changes update child availability without rewriting child preferences.
@@ -135,9 +134,33 @@ retaining the last good snapshot where rollback is supported. Code's live soft
 refresh is an explicit exception: keep its patch, selection, and scroll until an
 authoritative replacement can swap atomically; hard loads use semantic skeletons.
 User actions and LLM work retain two accelerating/decelerating border half turns per
-two-second cycle. Voice connection and tool work share one non-scrolling chat-area
-border around a nested scrolling transcript; connecting takes precedence, connected
-idle has none. Agent and terminal connections use output-line skeletons for initial
+two-second cycle. Voice connecting covers the mounted scrolling transcript with
+message-shaped skeletons instead of a progress border; connected idle has neither
+treatment.
+Muted listening keeps wake detection active without showing microphone-input motion.
+Keep the Davo toggle visible and selected while its panel is open. Clicking it
+hides or reveals the panel without restarting active listening; selection follows
+panel visibility even when listening is off. On mobile, keep that same toggle
+reachable beside the panel header rather than behind the fullscreen surface.
+Voice pauses collect one unfinished turn; only a terminal spoken “over” releases
+that complete turn for work or a reply. Do not auto-submit on silence. Stop, mute,
+transport replacement, and retention expiry discard unfinished speech. Keep
+operation and request identifiers internal; ask users only about meaningful choices.
+For local-change status, summarize the purpose and progress of the work from
+representative diffs and recent agent context, not filenames or change counts.
+Lead with one short project or worktree sentence naming the evidenced task themes.
+Discovery metadata is not enough; continue with available task and edit reads.
+Do not substitute vague change-volume descriptions, Git-health judgments or
+unsolicited cleanup advice. Previous assistant summaries are not fresh evidence.
+Missing evidence is an explicit limitation, not permission to invent a task summary.
+Keep a persistent idle status reading “Waiting for instructions...” when Davo has
+no active work. Show each MCP call as a compact single-line activity entry in the
+saved chat, without an author header, timestamp, or speech bubble. Update that same
+entry from a friendly present-progress phrase to its confirmed outcome. Keep tool
+arguments, results, and identifiers out of these labels; failed or uncertain calls
+must not look successful. Activity rows are silent, excluded from model context,
+and share the existing three-day retention window.
+Agent and terminal connections use output-line skeletons for initial
 attachment and automatic reconnects, retaining the mounted terminal underneath.
 Their skeletons fill the entire available output height, adapting to split and font
 resizing. Agent placeholders alternate prompts, paragraphs and indented tool output;

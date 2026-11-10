@@ -458,6 +458,26 @@ describe('gateway authority, uncertainty and audience regression guards', () => 
       expect(effects).toBe(1);
     } finally { await rm(instance.root, { recursive: true, force: true }); }
   });
+  // uncertain domain receipts must not ask the operator for tracking identifiers
+  it('keeps omitted domain request ids internal after an uncertain outcome audit', async () => {
+    const tool = internalTool('bind_davo_target', 'write', async () => developerSuccess({ accepted: true }), true);
+    const instance = await fixture({ record: async event => {
+      // fail only the post-effect audit receipt
+      if (event.phase === 'outcome') throw new Error('audit unavailable');
+    } }, { mcp: { ...config.mcp, permissions: { bind_davo_target: { write: true } } } }, [tool]);
+    try {
+      const credential = instance.control.startVoiceLease('browser-session', 'internal-id-session-123456789', ['files:write'])!;
+      const davo = instance.control.authenticateRealtimeBearer(credential.bearer)!;
+      const result = await instance.gateway.call(davo, tool.name, {});
+      expect(result.structuredContent).toMatchObject({ ok: false, error: { code: 'unknown_outcome' } });
+      expect(JSON.stringify(result)).not.toContain('same request identifier');
+      expect(JSON.stringify(result)).toContain('RAC handles internal tracking automatically');
+    } finally {
+      // remove only this isolated gateway fixture
+      await rm(instance.root, { recursive: true, force: true });
+    }
+  });
+
   // offset and prefix retries must not fill the generic durable claim store
   it('dispatches domain cursors without generic idempotency records', async () => {
     let calls = 0;

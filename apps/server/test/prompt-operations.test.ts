@@ -34,16 +34,17 @@ const operationIdentity = (overrides: Partial<PromptOperationIdentity> = {}): Pr
 });
 
 // create a PromptService with one deterministic submitted transport
-const promptFixture = async () => {
+const promptFixture = async (clock: () => Date = () => new Date('2030-01-01T12:00:00.000Z')) => {
   const directory = await mkdtemp(join(tmpdir(), 'rac-prompt-operation-'));
   directories.push(directory);
   const queue = new QueuedPromptService(join(directory, 'queue.json'));
   const history = new PromptHistoryService(join(directory, 'history.json'));
-  const ledger = new PromptOperationLedger(join(directory, 'operations.json'), { clock: () => new Date('2030-01-01T12:00:00.000Z') });
+  const ledger = new PromptOperationLedger(join(directory, 'operations.json'), { clock });
   const agent = { id: agentId, kind: 'codex', home: directory, attention: 'finished', title: 'Ready' };
   const delivered: string[] = [];
   let nativeMark: Record<string, unknown> = {};
   let turnEvent: unknown;
+  let recoverAnswer: () => Promise<'settled'> = async () => 'settled';
   let answer: () => Promise<boolean> = async () => false;
   let interrupt: () => Promise<'ok' | 'not-working' | 'unavailable'> = async () => 'not-working';
   let close: () => Promise<boolean> = async () => true;
@@ -60,7 +61,7 @@ const promptFixture = async () => {
     observe: async () => turnEvent,
     externalReset: async () => false,
     forget: async () => undefined,
-    recoverAnswer: async () => 'settled',
+    recoverAnswer: async () => await recoverAnswer(),
     clearDraft: async () => true,
     answer: async () => await answer(),
     interrupt: async () => await interrupt(),
@@ -70,7 +71,7 @@ const promptFixture = async () => {
   };
   const service = new PromptService({} as never, {} as never, history, queue, undefined, undefined, undefined, undefined, undefined, transport as never);
   service.useOperations(ledger);
-  return { agent, directory, queue, history, ledger, service, delivered, transport, setAnswer: (next: typeof answer) => { answer = next; }, setClose: (next: typeof close) => { close = next; }, setInterrupt: (next: typeof interrupt) => { interrupt = next; }, setNativeMark: (next: Record<string, unknown>) => { nativeMark = next; }, setTurnEvent: (next: unknown) => { turnEvent = next; } };
+  return { agent, directory, queue, history, ledger, service, delivered, transport, setAnswer: (next: typeof answer) => { answer = next; }, setClose: (next: typeof close) => { close = next; }, setInterrupt: (next: typeof interrupt) => { interrupt = next; }, setNativeMark: (next: Record<string, unknown>) => { nativeMark = next; }, setRecoverAnswer: (next: typeof recoverAnswer) => { recoverAnswer = next; }, setTurnEvent: (next: unknown) => { turnEvent = next; } };
 };
 
 describe('PromptOperationLedger', () => {
@@ -194,6 +195,151 @@ describe('PromptService operation publication', () => {
     expect(delivered).toEqual(['do the work']);
     await expect(service.publishOperation({ ...input, payloadDigest: 'different' }, async () => true)).resolves.toEqual({ kind: 'conflict' });
     await expect(ledger.lookup(input.operationKey)).resolves.toMatchObject({ state: 'published', lifecycle: { state: 'delivered', historyEntryId: promptId } });
+  });
+
+  // retry one immutable end only after its durable receipt succeeds
+  it('recovers terminal persistence after lookup and write failures without duplicate delivery', async () => {
+    const fixture = await promptFixture();
+    const input: PromptPublicationInput = { ...operationIdentity(), text: 'do the work' };
+    const ended = vi.fn();
+    fixture.service.observePromptLifecycle({ ended });
+    await fixture.service.watchActivity(agentId, input.expiresAt);
+    await expect(fixture.service.publishOperation(input, async () => true)).resolves.toMatchObject({ kind: 'published' });
+    const lookupFailure = vi.spyOn(fixture.ledger, 'lookupByPrompt').mockRejectedValueOnce(new Error('lookup unavailable'));
+    let rejectTerminal!: () => void;
+    const rejectedTerminal = new Promise<void>(resolve => { rejectTerminal = resolve; });
+    const lifecycleFailure = vi.spyOn(fixture.ledger, 'recordLifecycle').mockImplementationOnce(async () => { rejectTerminal(); throw new Error('lifecycle unavailable'); });
+
+    fixture.agent.attention = 'working';
+    fixture.setTurnEvent({ type: 'started', mark: {} });
+    await fixture.service.observe(fixture.agent as never);
+    fixture.agent.attention = 'finished';
+    fixture.setTurnEvent({ type: 'settled', message: 'verified answer' });
+    await fixture.service.observe(fixture.agent as never);
+    await rejectedTerminal;
+
+    await expect(fixture.ledger.lookup(input.operationKey)).resolves.toMatchObject({ lifecycle: { state: 'delivered' } });
+    await expect(fixture.service.lookupOperation(input.operationKey)).resolves.toMatchObject({ lifecycle: { state: 'ended', outcome: 'completed' } });
+    await expect(fixture.service.lookupOperation(input.operationKey)).resolves.toMatchObject({ lifecycle: { state: 'ended', outcome: 'completed' } });
+    expect(fixture.delivered).toEqual(['do the work']);
+    expect(ended).not.toHaveBeenCalled();
+    expect(lookupFailure).toHaveBeenCalled();
+    expect(lifecycleFailure).toHaveBeenCalled();
+  });
+
+  // reconstruct completion only from the exact persisted answer after restart
+  it('repairs a restart between answer and lifecycle persistence from exact history', async () => {
+    const fixture = await promptFixture();
+    const input: PromptPublicationInput = { ...operationIdentity(), text: 'do the work' };
+    await fixture.service.watchActivity(agentId, input.expiresAt);
+    await fixture.service.publishOperation(input, async () => true);
+    let rejectTerminal!: () => void;
+    const rejectedTerminal = new Promise<void>(resolve => { rejectTerminal = resolve; });
+    vi.spyOn(fixture.ledger, 'recordLifecycle').mockImplementationOnce(async () => { rejectTerminal(); throw new Error('lifecycle unavailable'); });
+    fixture.agent.attention = 'working';
+    fixture.setTurnEvent({ type: 'started', mark: {} });
+    await fixture.service.observe(fixture.agent as never);
+    fixture.agent.attention = 'finished';
+    fixture.setTurnEvent({ type: 'settled', message: 'durable answer' });
+    await fixture.service.observe(fixture.agent as never);
+    await rejectedTerminal;
+    await expect(fixture.history.findExact(promptScope(agentId), input.operationKey, input.promptId)).resolves.toMatchObject({ answer: 'durable answer' });
+
+    const restartedLedger = new PromptOperationLedger(join(fixture.directory, 'operations.json'), { clock: () => new Date('2030-01-01T12:00:00.000Z') });
+    const restarted = new PromptService({} as never, {} as never, fixture.history, fixture.queue, undefined, undefined, undefined, undefined, undefined, fixture.transport as never);
+    restarted.useOperations(restartedLedger);
+    await expect(restarted.lookupOperation(input.operationKey)).resolves.toMatchObject({ lifecycle: { state: 'ended', outcome: 'completed' } });
+    expect(fixture.delivered).toEqual(['do the work']);
+  });
+
+  // preserve an explicit interruption when restart history cannot prove completion
+  it('interrupts exact idle answerless history after restart instead of inventing completion', async () => {
+    const fixture = await promptFixture();
+    const input: PromptPublicationInput = { ...operationIdentity(), text: 'do the work' };
+    await fixture.service.watchActivity(agentId, input.expiresAt);
+    await fixture.service.publishOperation(input, async () => true);
+    const unanswered = await fixture.history.findExact(promptScope(agentId), input.operationKey, input.promptId);
+    expect(unanswered).toMatchObject({ id: promptId });
+    expect(unanswered?.answer).toBeUndefined();
+
+    const restartedLedger = new PromptOperationLedger(join(fixture.directory, 'operations.json'), { clock: () => new Date('2030-01-01T12:00:00.000Z') });
+    const restarted = new PromptService({} as never, {} as never, fixture.history, fixture.queue, undefined, undefined, undefined, undefined, undefined, fixture.transport as never);
+    restarted.useOperations(restartedLedger);
+    fixture.agent.attention = 'finished';
+    fixture.setTurnEvent(undefined);
+    await restarted.observe(fixture.agent as never);
+
+    await expect(restartedLedger.lookup(input.operationKey)).resolves.toMatchObject({ lifecycle: { state: 'ended', outcome: 'interrupted' } });
+    expect(fixture.delivered).toEqual(['do the work']);
+  });
+
+  // a stale restart observer cannot interrupt a newly phased publication
+  it('rechecks phase ownership after gated restart recovery before interrupting', async () => {
+    const fixture = await promptFixture();
+    const original: PromptPublicationInput = { ...operationIdentity(), text: 'old work' };
+    await fixture.service.watchActivity(agentId, original.expiresAt);
+    await fixture.service.publishOperation(original, async () => true);
+
+    const restartedLedger = new PromptOperationLedger(join(fixture.directory, 'operations.json'), { clock: () => new Date('2030-01-01T12:00:00.000Z') });
+    const restarted = new PromptService({} as never, {} as never, fixture.history, fixture.queue, undefined, undefined, undefined, undefined, undefined, fixture.transport as never);
+    restarted.useOperations(restartedLedger);
+    const ended = vi.fn();
+    restarted.observePromptLifecycle({ ended });
+    let enterRecovery!: () => void;
+    let releaseRecovery!: () => void;
+    const recoveryEntered = new Promise<void>(resolve => { enterRecovery = resolve; });
+    const recoveryReleased = new Promise<void>(resolve => { releaseRecovery = resolve; });
+    fixture.setRecoverAnswer(async () => { enterRecovery(); await recoveryReleased; return 'settled'; });
+    fixture.agent.attention = 'finished';
+    fixture.setTurnEvent(undefined);
+    const staleObservation = restarted.observe(fixture.agent as never);
+    await recoveryEntered;
+
+    const activity = await restarted.activitySnapshot(agentId);
+    const fresh: PromptPublicationInput = { ...operationIdentity({ operationKey: 'operation-fresh', promptId: 'StablePromptId_fresh12', davoRequestId: 'davo-request-fresh', expectedActivityEpoch: activity?.epoch ?? -1 }), text: 'fresh work' };
+    await expect(restarted.publishOperation(fresh, async () => true)).resolves.toMatchObject({ kind: 'published' });
+    releaseRecovery();
+    await staleObservation;
+    await expect(restartedLedger.lookup(fresh.operationKey)).resolves.not.toMatchObject({ lifecycle: { state: 'ended', outcome: 'interrupted' } });
+
+    fixture.agent.attention = 'working';
+    fixture.setTurnEvent({ type: 'started', mark: {} });
+    await restarted.observe(fixture.agent as never);
+    fixture.agent.attention = 'finished';
+    fixture.setTurnEvent({ type: 'settled', message: 'fresh answer' });
+    await restarted.observe(fixture.agent as never);
+    await expect(restarted.lookupOperation(fresh.operationKey)).resolves.toMatchObject({ lifecycle: { state: 'ended', outcome: 'completed' } });
+    expect(ended).toHaveBeenCalledOnce();
+    expect(fixture.delivered).toEqual(['old work', 'fresh work']);
+  });
+
+  // stop terminal retries at the original operation expiry
+  it('does not retry a terminal receipt after operation expiry', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2030-01-01T12:00:00.000Z'));
+      const fixture = await promptFixture(() => new Date());
+      const input: PromptPublicationInput = { ...operationIdentity({ expiresAt: '2030-01-02T12:00:00.000Z' }), text: 'do the work' };
+      const ended = vi.fn();
+      fixture.service.observePromptLifecycle({ ended });
+      await fixture.service.watchActivity(agentId, input.expiresAt);
+      await fixture.service.publishOperation(input, async () => true);
+      let rejectTerminal!: () => void;
+      const rejectedTerminal = new Promise<void>(resolve => { rejectTerminal = resolve; });
+      vi.spyOn(fixture.ledger, 'recordLifecycle').mockImplementationOnce(async () => { rejectTerminal(); throw new Error('lifecycle unavailable'); });
+      fixture.agent.attention = 'working';
+      fixture.setTurnEvent({ type: 'started', mark: {} });
+      await fixture.service.observe(fixture.agent as never);
+      fixture.agent.attention = 'finished';
+      fixture.setTurnEvent({ type: 'settled', message: 'durable answer' });
+      await fixture.service.observe(fixture.agent as never);
+      await rejectedTerminal;
+
+      vi.setSystemTime(new Date('2030-01-03T12:00:00.000Z'));
+      await expect(fixture.service.lookupOperation(input.operationKey)).resolves.toBeUndefined();
+      expect(ended).not.toHaveBeenCalled();
+      expect(fixture.delivered).toEqual(['do the work']);
+    } finally { vi.useRealTimers(); }
   });
 
   it('keeps ledger truth after 2,000-row lookup and global history eviction', async () => {

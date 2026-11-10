@@ -603,6 +603,81 @@ const unseenRows = (overview: typeof busy, unseen: Record<number, string[]>) => 
 });
 const fresh = unseenRows(busy, { 220: ['octo/repo#220:conflicts'], 90: ['octo/repo#90:review:q'] });
 
+// read rendered compact-badge geometry and clipping state
+const compactBadgeMetrics = (badge: Locator) => badge.evaluate(element => {
+  const bounds = element.getBoundingClientRect();
+  const style = getComputedStyle(element);
+  return {
+    width: bounds.width,
+    height: bounds.height,
+    fontFamily: style.fontFamily,
+    fontSize: style.fontSize,
+    fontWeight: style.fontWeight,
+    lineHeight: style.lineHeight,
+    padding: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft],
+    border: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth],
+    radius: style.borderTopLeftRadius,
+    clientWidth: element.clientWidth,
+    clientHeight: element.clientHeight,
+    scrollWidth: element.scrollWidth,
+    scrollHeight: element.scrollHeight
+  };
+});
+
+// compare github counts with the rendered notes reference on both toolbar surfaces
+for (const layout of [
+  { name: 'desktop toolbar corner', width: 1440, mobile: false },
+  { name: 'mobile More menu row', width: 390, mobile: true }
+]) {
+  test(`matches Notes badge geometry in the ${layout.name}`, async ({ page }, testInfo) => {
+    const github = { revision: 1, badge: 1 };
+    let notes = [{ id: 'note-1', title: 'Note 1', text: 'Reference' }];
+    await mount(page, [busy], [], github);
+    // override only the notes read after the broad github fixture route
+    await page.route('**/api/**', route => {
+      const path = decodeURIComponent(new URL(route.request().url()).pathname);
+      if (path === '/api/worktrees/repo:/repo/notes' && route.request().method() === 'GET') return route.fulfill({ json: { notes } });
+      return route.fallback();
+    });
+    await page.setViewportSize({ width: layout.width, height: layout.mobile ? 844 : 900 });
+    const widths: number[] = [];
+    // exercise one-, two- and three-digit badges against the same Notes count
+    for (const count of [1, 12, 123]) {
+      notes = Array.from({ length: count }, (_, index) => ({ id: `note-${index + 1}`, title: `Note ${index + 1}`, text: 'Reference' }));
+      github.badge = count;
+      github.revision += 1;
+      await page.goto('/');
+      const notesButton = page.locator('.workspace-toolbar .notes-toggle');
+      await expect(notesButton).toHaveAccessibleName(`Notes (${count})`);
+      const notesBadge = notesButton.locator('.notes-count-other');
+      await expect(notesBadge).toHaveText(String(count));
+      const githubBadge = layout.mobile
+        ? page.locator('.github-panel-row .github-badge')
+        : page.locator('.workspace-toolbar .github-toggle .github-badge.corner');
+      // reveal the phone's inline github row before measuring it
+      if (layout.mobile) await page.locator('.workspace-toolbar').getByRole('button', { name: 'More options' }).click();
+      await expect(githubBadge).toHaveText(String(count));
+      const [reference, actual] = await Promise.all([compactBadgeMetrics(notesBadge), compactBadgeMetrics(githubBadge)]);
+      widths.push(actual.width);
+      expect(actual.width).toBeCloseTo(reference.width, 1);
+      expect(actual.height).toBeCloseTo(reference.height, 1);
+      expect(actual.fontFamily).toBe(reference.fontFamily);
+      expect(actual.fontSize).toBe(reference.fontSize);
+      expect(actual.fontWeight).toBe(reference.fontWeight);
+      expect(actual.lineHeight).toBe(reference.lineHeight);
+      expect(actual.padding).toEqual(reference.padding);
+      expect(actual.border).toEqual(reference.border);
+      expect(actual.radius).toBe(reference.radius);
+      expect(Math.abs(actual.width - actual.height)).toBeLessThanOrEqual(1);
+      expect(actual.scrollWidth).toBeLessThanOrEqual(actual.clientWidth);
+      expect(actual.scrollHeight).toBeLessThanOrEqual(actual.clientHeight);
+      // retain one bounded visual artifact for each layout
+      if (count === 123) await page.screenshot({ path: testInfo.outputPath(`github-badge-${layout.width}.png`), fullPage: true });
+    }
+    expect(widths[2]).toBeGreaterThan(widths[0]!);
+  });
+}
+
 test('badges the Pull requests with something new, which drops as their rows show while their dots stay for the visit', async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1280, height: 900 });

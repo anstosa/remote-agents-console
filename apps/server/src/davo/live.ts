@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 export type DavoLiveSession = { voiceSessionId: string; leaseKey: string; ownerHash: string; generation: number; hardCutoffAt: number };
 export type DavoLiveTurn = { id: string; capability: string; messageId: string; providerItemId: string; responseId?: string; actionOperationId?: string; actionDigest?: string; target?: { token: string; canonical: Record<string, unknown>; operationId?: string } };
+export type DavoLiveActivity = { voiceSessionId: string; generation: number; messageId: string };
 type Options = { generation: () => number | undefined; authorize: (leaseKey: string) => boolean; now?: () => number };
 
 // compare opaque tokens without prefix timing differences
@@ -55,6 +56,21 @@ export class DavoLive {
     // require the real browser lease and absolute cutoff
     if (this.now() >= session.hardCutoffAt || !this.options.authorize(session.leaseKey)) throw new Error('davo_voice_inactive');
     return { ...session };
+  }
+
+  // observe one admitted turn without granting action authority
+  activity(leaseKey: string): DavoLiveActivity | undefined {
+    const session = this.current();
+    // never attach a call from another lease or an unadmitted response
+    if (!equal(session.leaseKey, leaseKey) || this.turn === undefined) return undefined;
+    return { voiceSessionId: session.voiceSessionId, generation: session.generation, messageId: this.turn.messageId };
+  }
+
+  // report only a currently authorized admitted turn
+  working(): boolean {
+    try { this.current(); }
+    catch { return false; }
+    return this.turn !== undefined;
   }
 
   // reject overlapping input before durable transcript admission

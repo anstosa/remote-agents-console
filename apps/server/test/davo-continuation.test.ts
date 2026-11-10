@@ -8,11 +8,15 @@ import type { DavoRequestV1 } from '../src/davo/contracts.js';
 
 const fixtures: string[] = [];
 
+// freeze storage and authority inside the retained fixture window
+const storeNow = () => new Date('2026-11-05T12:00:00.000Z');
+const now = () => new Date('2026-11-05T12:01:00.000Z');
+
 // create one isolated durable store
 async function store(): Promise<DavoStore> {
   const directory = await mkdtemp(join(tmpdir(), 'rac-davo-continuation-'));
   fixtures.push(directory);
-  return new DavoStore({ file: join(directory, 'state.json'), now: () => new Date('2026-11-05T12:00:00.000Z') });
+  return new DavoStore({ file: join(directory, 'state.json'), now: storeNow });
 }
 
 // build one exact activity frontier
@@ -60,7 +64,7 @@ describe('davo continuation', () => {
       activity: { read: async () => current },
       prompts: { publish, lookup: async () => ({ status: 'published', promptId: continuationPromptId('followup-1') }) },
       audit: { record: async () => true },
-      now: () => new Date('2026-11-05T12:01:00.000Z')
+      now
     });
     const payload = 'continue original work';
     const input = { requestId: 'request-1', expectedRevision: 1, operationId: 'followup-1', kind: 'followup' as const, payload, payloadDigest: continuationPayloadDigest(payload) };
@@ -83,7 +87,7 @@ describe('davo continuation', () => {
     const authority = new DavoContinuationAuthority({
       store: durable,
       activity: { read: async () => ({ ...admitted, promptActivityRevision: 5, pendingExternalMutation: 'pane-1' }) },
-      prompts: { publish, lookup: vi.fn() }, audit: { record: async () => true }
+      prompts: { publish, lookup: vi.fn() }, audit: { record: async () => true }, now
     });
     await expect(authority.publish({ requestId: 'request-1', expectedRevision: 1, operationId: 'followup-1', kind: 'followup', payload: 'continue', payloadDigest: continuationPayloadDigest('continue') })).resolves.toEqual({ status: 'diverged' });
     expect(publish).not.toHaveBeenCalled();

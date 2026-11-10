@@ -238,7 +238,17 @@ const statusMessageSchema = z.object({
   ...messageBase,
   kind: z.literal('status'),
   text: boundedText(DAVO_EXCERPT_MAX_BYTES, 1),
-  source: z.object({ kind: z.literal('request-status'), statusKey: identifier }).strict()
+  source: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('request-status'), statusKey: identifier }).strict(),
+    z.object({
+      kind: z.literal('mcp-activity'),
+      correlationId: identifier,
+      tool: identifier,
+      phase: z.enum(['running', 'interrupted', 'succeeded', 'failed', 'unknown']),
+      voiceSessionId: identifier,
+      inReplyToMessageId: identifier
+    }).strict()
+  ])
 }).strict();
 export const davoMessageSchema = z.discriminatedUnion('kind', [userMessageSchema, assistantMessageSchema, statusMessageSchema])
   .refine(value => utf8Bytes(JSON.stringify(value)) <= DAVO_MESSAGE_MAX_BYTES, 'message exceeds byte limit');
@@ -492,6 +502,7 @@ export const davoStateSchema = z.object({
 }).strict().superRefine((value, context) => {
   const messageIds = new Set<string>();
   const sequences = new Set<number>();
+  const activityCorrelations = new Set<string>();
   // validate message identities and state ownership
   for (const message of value.messages) {
     // reject duplicate message identities
@@ -502,6 +513,18 @@ export const davoStateSchema = z.object({
     sequences.add(message.sequence);
     // bind every row to the stable conversation
     if (message.conversationId !== value.logicalConversationId) context.addIssue({ code: z.ZodIssueCode.custom, message: 'message conversation mismatch', path: ['messages'] });
+    // bind mcp activity to one exact retained user turn
+    if (message.kind === 'status' && message.source.kind === 'mcp-activity') {
+      const source = message.source;
+      const original = value.messages.find(candidate => candidate.id === source.inReplyToMessageId);
+      // reject duplicate calls or renewed activity anchors
+      if (activityCorrelations.has(source.correlationId) || original === undefined || original.kind !== 'user'
+        || original.source.voiceSessionId !== source.voiceSessionId || original.generation !== message.generation
+        || original.retentionAnchorAt !== message.retentionAnchorAt || original.retentionAnchorLocalDate !== message.retentionAnchorLocalDate) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: 'mcp activity provenance mismatch', path: ['messages'] });
+      }
+      activityCorrelations.add(source.correlationId);
+    }
   }
   const greatestSequence = value.messages.reduce((greatest, message) => Math.max(greatest, message.sequence), 0);
   // keep the next sequence strictly ahead

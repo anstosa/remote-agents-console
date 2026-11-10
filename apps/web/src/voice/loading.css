@@ -13,6 +13,69 @@
   overflow-y: auto;
 }
 
-.voice-dialog .voice-transcript-shell > .update-progress-ring {
+/* keep retained history mounted while connection placeholders own the surface */
+.voice-transcript-shell[aria-busy='true'] > .voice-transcript {
+  visibility: hidden;
+}
+
+.voice-connecting-skeleton {
+  position: absolute;
   inset: 0;
+  z-index: 1;
+  display: grid;
+  align-content: start;
+  gap: .65rem;
+  overflow: hidden;
+  padding: .75rem;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--base) 95%, transparent);
+  pointer-events: none;
+}
+
+.voice-connecting-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: .15rem;
+}
+
+.voice-connecting-toolbar > .skeleton:first-child {
+  width: 5.5rem;
+  height: .55rem;
+}
+
+.voice-connecting-toolbar > .skeleton:last-child {
+  width: min(9rem, 42%);
+  height: 1.75rem;
+}
+
+.voice-connecting-message {
+  display: grid;
+  width: min(78%, 23rem);
+  gap: .38rem;
+}
+
+.voice-connecting-message > .skeleton:first-child {
+  width: 4rem;
+  height: .5rem;
+}
+
+.voice-connecting-message > .skeleton:last-child {
+  width: 100%;
+  height: 2.6rem;
+  border-radius: .55rem;
+}
+
+.voice-connecting-user {
+  justify-self: end;
+}
+
+.voice-connecting-user > .skeleton:first-child {
+  justify-self: end;
+  width: 2.5rem;
+}
+
+.voice-connecting-user > .skeleton:last-child {
+  background: color-mix(in srgb, var(--blue) 20%, var(--surface-1));
 }

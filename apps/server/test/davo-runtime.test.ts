@@ -11,7 +11,7 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 
 // assemble real persistence and control around a fake provider boundary
-async function fixture() {
+async function fixture(allowedTools = ['list_agents', 'delegate_request']) {
   const directory = await mkdtemp(join(tmpdir(), 'davo-runtime-'));
   directories.push(directory);
   let now = Date.parse('2026-11-05T22:00:00.000Z');
@@ -27,7 +27,9 @@ async function fixture() {
   const control = new IntegrationControlService(() => 'owner', () => now, 25_000);
   const provider = vi.fn(async (url: string | URL | Request) => String(url).endsWith('/hangup') ? new Response(null, { status: 200 }) : new Response('v=0\r\nanswer', { status: 201, headers: { location: '/v1/realtime/calls/rtc_private_test' } }));
   const realtime = new RealtimeService({ apiKey: 'private-key', fetch: async () => new Response(JSON.stringify({ value: 'ek_private_ephemeral_secret' })) });
-  runtime = new DavoRuntime({ store, control, realtime, apiKey: 'private-key', fetch: provider, now: () => now, mcpUrl: 'https://rac.example/mcp', instanceId: 'https://rac.example', scopes: ['status:read', 'prompts:write'], allowedTools: () => ['list_agents', 'delegate_request'] });
+  // accept canonical fixture worktree selections
+  const selectWorktree = async () => true;
+  runtime = new DavoRuntime({ store, control, realtime, apiKey: 'private-key', fetch: provider, now: () => now, mcpUrl: 'https://rac.example/mcp', instanceId: 'https://rac.example', scopes: ['status:read', 'prompts:write'], allowedTools: () => allowedTools, selectWorktree });
   return { store, runtime, realtime, provider, advance: (value: string) => { now = Date.parse(value); } };
 }
 
@@ -45,6 +47,56 @@ function expectNegotiationFenced(runtime: DavoRuntime): void {
 }
 
 describe('DavoRuntime', () => {
+  it('surfaces structured provider recovery failures and keeps provider creation blocked', async () => {
+    const { runtime, store, provider } = await fixture();
+    const generation = (await store.read()).retention.generation;
+    await store.transact(state => {
+      state.providerCalls.push({
+        voiceSessionId: 'voice_recovery_123456789012345', generation, ownerHash: 'a'.repeat(64), callId: 'rtc_recovery123',
+        createdAt: '2026-11-05T22:00:00.000Z', hardCutoffAt: '2026-11-06T11:00:00.000Z', providerMaximumEndsAt: '2026-11-05T23:00:00.000Z',
+        hangup: { state: 'dispatching', attemptId: 'attempt-recovery', attemptedAt: '2026-11-05T22:00:01.000Z', definitelyNotSentRetries: 0 }
+      });
+    });
+
+    const recoveryFailure = await runtime.recover().then(() => undefined, error => error as Error);
+    expect(recoveryFailure).toEqual(expect.objectContaining({ message: 'davo_provider_hangup_ambiguous' }));
+    expect(runtime.status().counters.provider_quarantines).toBe(0);
+    runtime.recordFailure(recoveryFailure);
+    expect(runtime.status().counters.provider_quarantines).toBe(1);
+    expect((await store.read())).toMatchObject({ providerCalls: [], providerQuarantineUntil: '2026-11-05T23:00:00.000Z' });
+    const voice = { voiceSessionId: 'voice_after_recovery_1234567890', generation };
+    const opened = await runtime.open('owner', voice);
+    await expect(runtime.negotiate('owner', { ...voice, negotiationId: opened.negotiationId, sdp: 'v=0\r\noffer' })).rejects.toThrow('davo_provider_hangup_ambiguous');
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it('surfaces persisted and process-local provider quarantine without clearing it', async () => {
+    const persisted = await fixture();
+    const generation = (await persisted.store.read()).retention.generation;
+    await persisted.store.transact(state => { state.providerQuarantineUntil = '2026-11-05T23:00:00.000Z'; });
+    await expect(persisted.runtime.recover()).rejects.toThrow('davo_provider_hangup_ambiguous');
+    expect((await persisted.store.read()).providerQuarantineUntil).toBe('2026-11-05T23:00:00.000Z');
+    const persistedVoice = { voiceSessionId: 'voice_persisted_quarantine_12345', generation };
+    const opened = await persisted.runtime.open('owner', persistedVoice);
+    await expect(persisted.runtime.negotiate('owner', { ...persistedVoice, negotiationId: opened.negotiationId, sdp: 'v=0\r\noffer' })).rejects.toThrow('davo_provider_hangup_ambiguous');
+    expect(persisted.provider).not.toHaveBeenCalled();
+
+    const memory = await fixture();
+    (memory.runtime.calls as unknown as { memoryQuarantineUntil: number }).memoryQuarantineUntil = Date.parse('2026-11-05T23:00:00.000Z');
+    await expect(memory.runtime.recover()).rejects.toThrow('davo_store_unavailable');
+    expect((memory.runtime.calls as unknown as { memoryQuarantineUntil: number }).memoryQuarantineUntil).toBe(Date.parse('2026-11-05T23:00:00.000Z'));
+    const memoryGeneration = (await memory.store.read()).retention.generation;
+    const memoryVoice = { voiceSessionId: 'voice_memory_quarantine_1234567', generation: memoryGeneration };
+    const memoryOpened = await memory.runtime.open('owner', memoryVoice);
+    await expect(memory.runtime.negotiate('owner', { ...memoryVoice, negotiationId: memoryOpened.negotiationId, sdp: 'v=0\r\noffer' })).rejects.toThrow('davo_store_unavailable');
+    expect(memory.provider).not.toHaveBeenCalled();
+  });
+
+  it('keeps successful provider recovery unchanged', async () => {
+    const { runtime } = await fixture();
+    await expect(runtime.recover()).resolves.toBeUndefined();
+  });
+
   it('erases private negotiation state after an ambiguous provider create failure', async () => {
     const { runtime, store, provider } = await fixture();
     const snapshot = await runtime.conversation();
@@ -135,6 +187,24 @@ describe('DavoRuntime', () => {
     expect(runtime.acknowledgeReady('owner', { ...voice, readinessId: negotiated.readinessId, responseId: 'ready-exact', importedTools: ['delegate_request', 'list_agents'] })).toEqual({ ok: true });
   });
 
+  // accept an exact empty import without weakening nonempty catalog matching
+  it('accepts empty readiness only when the expected MCP catalog is empty', async () => {
+    const empty = await fixture([]);
+    const emptySnapshot = await empty.runtime.conversation();
+    const emptyVoice = { voiceSessionId: 'voice_empty_1234567890123456789', generation: emptySnapshot.generation };
+    const emptyOpened = await empty.runtime.open('owner', emptyVoice);
+    const emptyNegotiated = await empty.runtime.negotiate('owner', { ...emptyVoice, negotiationId: emptyOpened.negotiationId, sdp: 'v=0\r\noffer' });
+    expect(emptyNegotiated.readinessResponse.tools[0]).toMatchObject({ type: 'mcp', allowed_tools: [] });
+    expect(empty.runtime.acknowledgeReady('owner', { ...emptyVoice, readinessId: emptyNegotiated.readinessId, responseId: 'ready-empty', importedTools: [] })).toEqual({ ok: true });
+
+    const nonempty = await fixture();
+    const nonemptySnapshot = await nonempty.runtime.conversation();
+    const nonemptyVoice = { voiceSessionId: 'voice_nonempty_1234567890123456', generation: nonemptySnapshot.generation };
+    const nonemptyOpened = await nonempty.runtime.open('owner', nonemptyVoice);
+    const nonemptyNegotiated = await nonempty.runtime.negotiate('owner', { ...nonemptyVoice, negotiationId: nonemptyOpened.negotiationId, sdp: 'v=0\r\noffer' });
+    expect(() => nonempty.runtime.acknowledgeReady('owner', { ...nonemptyVoice, readinessId: nonemptyNegotiated.readinessId, responseId: 'forged-empty', importedTools: [] })).toThrow('davo_provider_not_ready');
+  });
+
   it('does not persist a transcript when response preflight rejects it', async () => {
     const { runtime, realtime, store } = await fixture();
     const snapshot = await runtime.conversation();
@@ -208,6 +278,9 @@ describe('DavoRuntime', () => {
     const receipt = await runtime.admit('owner', { ...voice, providerSessionId: 'provider-session', providerItemId: 'item-1', text: 'Inspect this worktree.' });
     expect(receipt.response.conversation).toBe('none');
     expect(receipt.response.instructions).toContain('turn_capability');
+    expect(receipt.response.instructions).toContain('Lead with one short sentence per relevant project or worktree');
+    expect(receipt.response.instructions).toContain('After gathering enough evidence for the original request');
+    expect(receipt.response.instructions).not.toContain('After a tool call, report its result');
     await expect(runtime.admit('owner', { ...voice, providerSessionId: 'provider-session', providerItemId: 'item-2', text: 'Overlapping text' })).rejects.toThrow('davo_response_active');
     expect((await store.read()).messages).toHaveLength(1);
     runtime.bind('owner', { ...voice, turnId: receipt.turnId, responseId: 'response-1' });
@@ -219,6 +292,68 @@ describe('DavoRuntime', () => {
     expect(after.conversationId).toBe(conversation.conversationId);
     expect(after.messages.map(row => row.text)).toEqual(['Inspect this worktree.', 'I will inspect it.']);
     expect(JSON.stringify(after)).not.toMatch(/provider-session|item-1|response-1|rtc_private|ek_private/u);
+  });
+
+  it('continues completed mcp calls from bounded provider item references', async () => {
+    const { runtime } = await fixture();
+    const conversation = await runtime.conversation();
+    const voice = { voiceSessionId: 'voice_mcp_continue_1234567890123', generation: conversation.generation };
+    const opened = await runtime.open('owner', voice);
+    const answer = await runtime.negotiate('owner', { ...voice, negotiationId: opened.negotiationId, sdp: 'v=0\r\noffer' });
+    runtime.acknowledgeReady('owner', { ...voice, readinessId: answer.readinessId, responseId: 'readiness-response', importedTools: ['list_agents', 'delegate_request'] });
+    const admitted = await runtime.admit('owner', { ...voice, providerSessionId: 'provider-session', providerItemId: 'item-mcp', text: 'Inspect every worktree.' });
+    runtime.bind('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-1' });
+
+    // fill one maximum-size provider continuation
+    const firstIds = Array.from({ length: 16 }, (_, index) => `mcp-item-${index}`);
+    const first = await runtime.continueMcp('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-1', itemIds: firstIds });
+    expect(first.response).toMatchObject({ conversation: 'none', input: expect.arrayContaining(firstIds.map(id => ({ type: 'item_reference', id }))), output_modalities: ['audio'] });
+    expect(JSON.stringify(first.response)).not.toContain('tool output text');
+    expect(first.response.instructions).not.toBe(admitted.response.instructions);
+    expect(first.response.instructions).toContain('After gathering enough evidence for the original request');
+    expect(first.response.instructions).toContain('Do not stop at discovery metadata when the request needs task or change evidence');
+    expect(first.response.instructions).toContain('Lead with one short sentence per relevant project or worktree');
+    expect(first.response.instructions).not.toContain('After a tool call, report its result');
+    runtime.bind('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-2' });
+
+    await expect(runtime.continueMcp('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-2', itemIds: [firstIds[0]!] })).rejects.toThrow('davo_turn_changed');
+    await expect(runtime.continueMcp('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-2', itemIds: ['duplicate', 'duplicate'] })).rejects.toThrow('davo_turn_changed');
+    // reach the complete per-turn reference ceiling
+    const secondIds = Array.from({ length: 16 }, (_, index) => `mcp-item-${index + 16}`);
+    const second = await runtime.continueMcp('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-2', itemIds: secondIds });
+    expect((second.response.input as Array<Record<string, unknown>>).filter(item => item.type === 'item_reference')).toHaveLength(32);
+    runtime.bind('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-3' });
+    await expect(runtime.continueMcp('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-3', itemIds: ['mcp-item-over-cap'] })).rejects.toThrow('davo_context_capacity');
+    runtime.finish('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-3' });
+  });
+
+  it('keeps mcp references outside the bounded local selection budget', async () => {
+    const { runtime } = await fixture();
+    const conversation = await runtime.conversation();
+    const voice = { voiceSessionId: 'voice_mcp_select_123456789012345', generation: conversation.generation };
+    const opened = await runtime.open('owner', voice);
+    const answer = await runtime.negotiate('owner', { ...voice, negotiationId: opened.negotiationId, sdp: 'v=0\r\noffer' });
+    runtime.acknowledgeReady('owner', { ...voice, readinessId: answer.readinessId, responseId: 'readiness-response', importedTools: ['list_agents', 'delegate_request'] });
+    const admitted = await runtime.admit('owner', { ...voice, providerSessionId: 'provider-session', providerItemId: 'item-mcp-select', text: 'Inspect and select this worktree.' });
+    runtime.bind('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-mcp' });
+    // fill one complete mcp continuation batch before local selection
+    const itemIds = Array.from({ length: 16 }, (_, index) => `mcp-select-item-${index}`);
+    await runtime.continueMcp('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-mcp', itemIds });
+    runtime.bind('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-select-0' });
+    let selected = await runtime.continue('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-select-0', callId: 'select-call-0', worktreeId: 'worktree-0' });
+
+    // permit the remaining four historical local selections
+    for (let index = 1; index < 5; index += 1) {
+      const responseId = `response-select-${index}`;
+      runtime.bind('owner', { ...voice, turnId: admitted.turnId, responseId });
+      selected = await runtime.continue('owner', { ...voice, turnId: admitted.turnId, responseId, callId: `select-call-${index}`, worktreeId: `worktree-${index}` });
+    }
+    const responseInput = selected.response.input as Array<Record<string, unknown>>;
+    expect(responseInput.filter(item => item.type === 'item_reference')).toHaveLength(16);
+    expect(responseInput.filter(item => item.type === 'function_call' && item.name === 'select_worktree')).toHaveLength(5);
+    runtime.bind('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-select-5' });
+    await expect(runtime.continue('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-select-5', callId: 'select-call-5', worktreeId: 'worktree-5' })).rejects.toThrow('davo_target_changed');
+    runtime.finish('owner', { ...voice, turnId: admitted.turnId, responseId: 'response-select-5' });
   });
 
   it('fences expired chat and hangs up without a browser heartbeat', async () => {

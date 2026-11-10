@@ -256,6 +256,8 @@ export class PromptOperationLedger {
       const ranks: Record<PromptOperationLifecycleState, number> = { queued: 0, delivered: 1, ended: 2 };
       // reject lifecycle regression after restart or duplicate observation
       if (operation.lifecycle !== undefined && ranks[lifecycle.state] < ranks[operation.lifecycle.state]) return structuredClone(operation);
+      // preserve the first durable terminal outcome
+      if (operation.lifecycle?.state === 'ended') return structuredClone(operation);
       operation.lifecycle = { ...lifecycle, updatedAt: this.clock().toISOString() };
       operation.updatedAt = operation.lifecycle.updatedAt;
       return structuredClone(operation);

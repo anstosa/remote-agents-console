@@ -1098,7 +1098,8 @@ const ServerContext = createContext<ServerInfo | undefined>(undefined);
 const ServerStatusContext = createContext<Readonly<Record<string, InstanceAttention>>>({});
 // dictation belongs only to a visible prompt input mode
 const PromptInputModeContext = createContext(true);
-const VoiceTriggerContext = createContext<{ open: () => void; active: boolean; visible: boolean; name: string } | undefined>(undefined);
+// keep panel visibility independent from live listening
+const VoiceTriggerContext = createContext<{ toggle: () => void; active: boolean; visible: boolean; name: string } | undefined>(undefined);
 // the dashboard's Projects and their Worktrees, which name a Worktree's stack "<Project> / <Worktree>"
 const ProjectsContext = createContext<readonly Project[]>([]);
 // whether the server configures an `editor`, which adds the toolbar's Editor button
@@ -2398,8 +2399,9 @@ function TabRowLead() {
     label: 'Davo options',
     items: [{ type: 'action', id: 'disable-davo', label: 'Disable Davo', disabled: disabling || settings === undefined, onSelect: disableDavo }]
   });
-  const voiceLabel = voice?.active ? voice.visible ? `${voice.name} listening` : `Show ${voice.name} listening` : `Open ${voice?.name ?? 'voice assistant'}`;
-  return <div className="tab-row-lead"><ServerSelector />{voice && <button type="button" className={`server-switcher-button server-switcher-voice${voice.active ? ' active' : ''}`} aria-label={voiceLabel} aria-pressed={voice.visible} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={voiceMenu} onClick={voice.open}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 11a7 7 0 0 0 14 0M12 18v4M8 22h8" /></svg><span>{voice.active ? 'Listening' : `Open ${voice.name}`}</span></button>}{disableError && <span role="alert">{disableError}</span>}<ConfiguredButtonList slot="tabLead" className="tab-lead-buttons" /></div>;
+  // name the panel action rather than the audio state
+  const voiceLabel = voice?.visible ? `Hide ${voice.name}` : voice?.active ? `Show ${voice.name}` : `Open ${voice?.name ?? 'voice assistant'}`;
+  return <div className="tab-row-lead"><ServerSelector />{voice && <button type="button" className={`server-switcher-button server-switcher-voice${voice.active ? ' active' : ''}`} aria-label={voiceLabel} aria-pressed={voice.visible} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={voiceMenu} onClick={voice.toggle}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 11a7 7 0 0 0 14 0M12 18v4M8 22h8" /></svg><span>{voice.active ? 'Listening' : `Open ${voice.name}`}</span></button>}{disableError && <span role="alert">{disableError}</span>}<ConfiguredButtonList slot="tabLead" className="tab-lead-buttons" /></div>;
 }
 
 // reveal credentials only after choosing login without replacing a workspace destination
@@ -9813,17 +9815,12 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const [voiceOpenRequest, setVoiceOpenRequest] = useState(0);
   // close only the voice surface
   const closeVoice = useCallback(() => setVoiceOpen(false), []);
-  // open or reveal the shared voice surface
-  const openVoice = useCallback(() => {
-    // toggle only active mobile listening
-    if (voiceActive) {
-      if (window.matchMedia('(max-width: 600px)').matches) setVoiceOpen(current => !current);
-      else setVoiceOpen(true);
-      return;
-    }
-    setVoiceOpen(true);
-    setVoiceOpenRequest(current => current + 1);
-  }, [voiceActive]);
+  // toggle the shared panel without restarting live listening
+  const toggleVoice = useCallback(() => {
+    setVoiceOpen(current => !current);
+    // start audio only when opening an inactive panel
+    if (!voiceOpen && !voiceActive) setVoiceOpenRequest(current => current + 1);
+  }, [voiceActive, voiceOpen]);
   // open retained davo chat from a generic done or choice notification
   useEffect(() => {
     // disabled installations never start microphone negotiation
@@ -9848,7 +9845,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     setVoiceActive(false);
   }, [davo.enabled]);
   // retain one stable voice trigger context
-  const voiceTrigger = useMemo(() => davo.enabled ? { open: openVoice, active: voiceActive, visible: voiceOpen, name: davo.name } : undefined, [davo.enabled, davo.name, openVoice, voiceActive, voiceOpen]);
+  const voiceTrigger = useMemo(() => davo.enabled ? { toggle: toggleVoice, active: voiceActive, visible: voiceOpen, name: davo.name } : undefined, [davo.enabled, davo.name, toggleVoice, voiceActive, voiceOpen]);
   // the guided reviews by Worktree id, each mounted above the tabs while it lives
   const [reviewSessions, setReviewSessions] = useState<Record<string, ReviewSession>>({});
   // counts tour starts, so each start mounts a fresh dialog

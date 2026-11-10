@@ -2,9 +2,10 @@ import { access, readFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
 
 const enabledDavo = { enabled: true, available: true, name: 'Davo', context: '' };
+type ActivityFixture = { working: boolean; rows: Array<{ id: string; sequence: number; kind: 'status'; text: string; createdAt: string; expiresAt: string }> };
 
 // provide the minimum authenticated dashboard surface
-async function mockDashboard(page: import('@playwright/test').Page): Promise<void> {
+async function mockDashboard(page: import('@playwright/test').Page, activity?: ActivityFixture): Promise<void> {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -18,11 +19,11 @@ async function mockDashboard(page: import('@playwright/test').Page): Promise<voi
     if (url.pathname === '/api/davo/conversation') {
       const older = url.searchParams.has('beforeSequence');
       return route.fulfill({ json: {
-        conversationId: 'davo-conversation', generation: 4, revision: '33333333-3333-4333-8333-333333333333', retainedFrom: '2026-11-03T08:00:00.000Z', serverNow: '2026-11-05T22:00:00.000Z', retentionCutoffAt: '2026-11-06T11:00:00.000Z', nextSequence: 4, hasMore: !older,
+        conversationId: 'davo-conversation', generation: 4, revision: '33333333-3333-4333-8333-333333333333', retainedFrom: '2026-11-03T08:00:00.000Z', serverNow: '2026-11-05T22:00:00.000Z', retentionCutoffAt: '2026-11-06T11:00:00.000Z', nextSequence: 4 + (activity?.rows.length ?? 0), hasMore: !older, ...(activity === undefined ? {} : { working: activity.working }),
         pendingChoices: older ? [] : [{ requestId: '44444444-4444-4444-8444-444444444444', choiceId: '55555555-5555-4555-8555-555555555555', kind: 'davo_continuation_choice', question: 'Should Davo resume after the current Agent chain?', options: ['Resume after the chain', 'Wait for another update'] }],
         messages: older
           ? [{ id: 'message-1', sequence: 1, kind: 'user', text: 'Earlier retained request', createdAt: '2026-11-03T18:00:00.000Z', expiresAt: '2026-11-06T11:00:00.000Z' }]
-          : [{ id: 'message-2', sequence: 2, kind: 'user', text: 'Check the current work', createdAt: '2026-11-05T20:00:00.000Z', expiresAt: '2026-11-08T11:00:00.000Z' }, { id: 'message-3', sequence: 3, kind: 'assistant', text: 'The work remains in progress.', createdAt: '2026-11-05T20:01:00.000Z', expiresAt: '2026-11-08T11:00:00.000Z' }]
+          : [{ id: 'message-2', sequence: 2, kind: 'user', text: 'Check the current work', createdAt: '2026-11-05T20:00:00.000Z', expiresAt: '2026-11-08T11:00:00.000Z' }, { id: 'message-3', sequence: 3, kind: 'assistant', text: 'The work remains in progress.', createdAt: '2026-11-05T20:01:00.000Z', expiresAt: '2026-11-08T11:00:00.000Z' }, ...(activity?.rows ?? [])]
       } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -40,13 +41,40 @@ test('renders server-owned Davo history without a typed composer or telephone me
   await expect(dialog.getByText('Should Davo resume after the current Agent chain?')).toBeVisible();
   await expect(dialog.getByText('Resume after the chain')).toBeVisible();
   await expect(dialog.getByText('Wait for another update')).toBeVisible();
-  await expect(dialog.getByText('Answer by voice while listening is open.')).toBeVisible();
+  await expect(dialog.getByText('Answer by voice and end with “over”.')).toBeVisible();
   await expect(dialog.getByRole('textbox')).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Resume after the chain' })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Load older' })).toBeVisible();
+  await expect(dialog.getByRole('status')).toHaveText('Waiting for instructions...');
   await dialog.getByRole('button', { name: 'Load older' }).click();
   await expect(dialog.getByText('Earlier retained request')).toBeVisible();
   await expect(page.getByText(/call|calling|hang up|ringing/iu)).toHaveCount(0);
+});
+
+test('keeps server work truthful and updates compact activity rows in place', async ({ page }) => {
+  const activity: ActivityFixture = { working: true, rows: [
+    { id: 'mcp-notes-1', sequence: 4, kind: 'status', text: 'Reading notes...', createdAt: '2026-11-05T20:02:00.000Z', expiresAt: '2026-11-08T11:00:00.000Z' },
+    { id: 'mcp-notes-2', sequence: 5, kind: 'status', text: 'Reading notes...', createdAt: '2026-11-05T20:02:01.000Z', expiresAt: '2026-11-08T11:00:00.000Z' },
+    { id: 'mcp-queue-1', sequence: 6, kind: 'status', text: 'Could not confirm queued prompt.', createdAt: '2026-11-05T20:02:02.000Z', expiresAt: '2026-11-08T11:00:00.000Z' }
+  ] };
+  await mockDashboard(page, activity);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open Davo' }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Davo' });
+  const notes = dialog.locator('.voice-status-line', { hasText: 'Reading notes...' });
+  await expect(dialog.getByRole('status')).toHaveText('Working...');
+  await expect(notes).toHaveCount(2);
+  await expect(dialog.locator('.voice-status-line', { hasText: 'Could not confirm queued prompt.' })).toBeVisible();
+  await expect(notes.first().locator('strong, time, span')).toHaveCount(0);
+  expect(await notes.first().evaluate(element => ({ whiteSpace: getComputedStyle(element).whiteSpace, overflow: getComputedStyle(element).overflow, background: getComputedStyle(element).backgroundImage }))).toEqual({ whiteSpace: 'nowrap', overflow: 'hidden', background: 'none' });
+  await notes.first().evaluate(element => { element.setAttribute('data-stable-row', 'true'); });
+
+  activity.rows[0] = { ...activity.rows[0]!, text: 'Read notes.' };
+  activity.working = false;
+  await expect(dialog.locator('.voice-status-line', { hasText: 'Read notes.' })).toHaveAttribute('data-stable-row', 'true', { timeout: 5_000 });
+  await expect(dialog.getByRole('status')).toHaveText('Waiting for instructions...');
+  await expect(dialog.locator('.voice-status-line', { hasText: 'Could not confirm queued prompt.' })).toBeVisible();
 });
 
 // open the persistent surface from generic notification links
