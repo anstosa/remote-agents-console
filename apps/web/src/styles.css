@@ -1806,7 +1806,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* retain static update attention when either motion preference is reduced */
 @media (prefers-reduced-motion: reduce) { :is(.launch-card-main, .server-menu, .server-update-dialog) .update-attention { animation: none; } }
 :root[data-motion="reduced"] :is(.launch-card-main, .server-menu, .server-update-dialog) .update-attention { animation: none; }
-/* advance working borders through two accelerating and decelerating half turns */
+/* ease working half turns without stopping at their shared boundaries */
 @property --update-orbit-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
 @keyframes update-border-orbit { 0% { --update-orbit-angle: 0deg; } 50% { --update-orbit-angle: 180deg; } 100% { --update-orbit-angle: 360deg; } }
 /* read-only data loads keep a constant clockwise speed */
@@ -1845,7 +1845,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .notes-toggle.unread-queued-prompts.progress-border { animation: none; filter: none; }
 /* apply the glow outside the masked child so it follows the same moving highlight */
 .updates-in-progress > .update-progress-ring, .progress-border > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; display: block; width: auto; height: auto; min-width: 0; max-width: none; margin: 0; padding: 0; overflow: visible; border-radius: inherit; pointer-events: none; filter: var(--progress-indicator-filter, drop-shadow(0 0 .3rem var(--progress-ring-color, var(--mauve)))); }
-.update-progress-ring::before { content: ''; display: var(--progress-border-display, block); position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: var(--progress-border-animation, var(--progress-orbit-animation, update-border-orbit 2s ease-in-out infinite)); }
+.update-progress-ring::before { content: ''; display: var(--progress-border-display, block); position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: var(--progress-border-animation, var(--progress-orbit-animation, update-border-orbit 2s cubic-bezier(.42, .2, .58, .8) infinite)); }
 /* isolate long-lived working indicators without promoting full-panel loaders */
 @media (prefers-reduced-motion: no-preference) {
   :root:not([data-motion="reduced"]) :is(.tabs button[role="tab"], .workspace-sheet-row, .agent-switcher-row, .agent-state-pill).progress-border > .update-progress-ring { contain: layout; will-change: transform; }

@@ -88,6 +88,38 @@ test('synchronizes nonlinear working borders across late tabs and motion restart
   const workingTabs = page.locator('.tabs [role="tab"][aria-busy="true"]');
   await expectSynchronizedProgressBorders(workingTabs, 2, 'working');
   await expectClockwiseProgressBorder(workingTabs.first(), 'working');
+  // sample the rendered orbit through both slow points and the loop seam
+  const motion = await workingTabs.first().evaluate(element => {
+    const ring = element.querySelector(':scope > .update-progress-ring')!;
+    const animation = ring.getAnimations({ subtree: true }).find(candidate => candidate instanceof CSSAnimation && candidate.animationName === 'update-border-orbit')!;
+    const duration = Number(animation.effect!.getComputedTiming().duration);
+    const startTime = animation.startTime;
+    const currentTime = animation.currentTime;
+    const playState = animation.playState;
+    animation.pause();
+    try {
+      // seek in equal steps including one complete wrap
+      const angles = Array.from({ length: 101 }, (_, index) => {
+        animation.currentTime = duration * index / 100;
+        return Number.parseFloat(getComputedStyle(ring, '::before').getPropertyValue('--update-orbit-angle'));
+      });
+      // unwrap clockwise advances into comparable angular speeds
+      const advances = angles.slice(1).map((angle, index) => (angle - angles[index] + 360) % 360);
+      // compare the slowest and fastest intervals with their shared mean
+      return { minimum: Math.min(...advances), maximum: Math.max(...advances), average: advances.reduce((sum, advance) => sum + advance, 0) / advances.length };
+    } finally {
+      // restore the shared clock even after a failed sample
+      if (playState === 'running') {
+        animation.play();
+        animation.startTime = startTime;
+      } else {
+        animation.currentTime = currentTime;
+      }
+    }
+  });
+  // slow visibly without stopping or flattening the motion to constant speed
+  expect(motion.minimum).toBeGreaterThan(motion.average * .25);
+  expect(motion.maximum).toBeGreaterThan(motion.average * 1.2);
   const requestsBeforeLateTab = dashboardRequests;
   includeLateTab = true;
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
