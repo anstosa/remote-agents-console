@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { askUser, askUserReply } from '../adapters/ask-user.js';
-import { claudeConversationName, claudeTranscriptRecords, validClaudeSessionId } from '../adapters/claude-conversations.js';
+import { claudeConversationName, claudeHookNonce, claudeTranscriptRecords, validClaudeSessionId } from '../adapters/claude-conversations.js';
 import type { QuestionField } from '../adapters/types.js';
 import { bounded, count, isObject, oneLine, outcome, strings, summary, text, thousands, waitingForAnswer, type Json, type ModelInfo, type ModelSetting, type ProtocolClient, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
 
@@ -46,17 +46,6 @@ const localOutput = (content: string): { text: string; tone: 'info' | 'warning' 
   return match === null ? undefined : { text: match[2]!.trim(), tone: match[1] === 'stderr' ? 'warning' : 'info' };
 };
 const interruption = (content: unknown): boolean => Array.isArray(content) && content.some(block => isObject(block) && block.type === 'text' && typeof block.text === 'string' && block.text.startsWith('[Request interrupted by user'));
-// the nonce a SessionStart hook prints as JSON `{ "rac": "<nonce>" }`, on any line of its stdout
-const hookNonce = (stdout: unknown): string | undefined => {
-  if (typeof stdout !== 'string') return undefined;
-  for (const line of stdout.split('\n')) {
-    try {
-      const parsed: unknown = JSON.parse(line);
-      if (isObject(parsed) && typeof parsed.rac === 'string') return parsed.rac;
-    } catch { /* another hook's output */ }
-  }
-  return undefined;
-};
 const contextTokens = (usage: unknown): number | undefined => {
   if (!isObject(usage)) return undefined;
   const parts = [usage.input_tokens, usage.cache_creation_input_tokens, usage.cache_read_input_tokens, usage.output_tokens];
@@ -517,11 +506,6 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     wake();
   };
 
-  channel.onLine(line => {
-    handle(line);
-    // any line from the CLI is activity: the wait for leftover steers starts again from it
-    awaitLeftovers();
-  });
   const handle = (line: string) => {
     let record: unknown;
     try { record = JSON.parse(line); } catch { return; }
@@ -565,7 +549,7 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
           case 'hook_response': {
             if (record.hook_event !== 'SessionStart') return;
             session(record.session_id);
-            const nonce = hookNonce(record.stdout);
+            const nonce = claudeHookNonce(record.stdout);
             if (nonce !== undefined) { nonces.add(nonce); reportIn(); }
             return;
           }
@@ -652,6 +636,12 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
         unknown(String(record.type));
     }
   };
+  // after `handle` exists: `onLine` replays the lines that arrived before it, synchronously
+  channel.onLine(line => {
+    handle(line);
+    // any line from the CLI is activity: the wait for leftover steers starts again from it
+    awaitLeftovers();
+  });
   channel.onClose(() => {
     clearTimeout(leftover);
     for (const resolve of pending.values()) resolve(undefined);

@@ -659,6 +659,49 @@ describe('claude adapter configuration', () => {
   });
 });
 
+describe('claude adapter Transport', () => {
+  const scratch = { publicOrigin: 'https://agents.example.com', projects: [] as unknown[] };
+  const program = async (): Promise<string> => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-claude-cfg-')));
+    dirs.push(root);
+    const path = join(root, 'claude');
+    await writeFile(path, '#!/bin/sh\n', { mode: 0o755 });
+    return path;
+  };
+
+  it('takes the Transport Claude launches over, and refuses one for a kind with a single Transport', async () => {
+    const claude = await program();
+    expect((await validateConfig({ ...scratch, adapters: { claude: { program: claude } } })).adapters.claude?.transport).toBeUndefined();
+    expect((await validateConfig({ ...scratch, adapters: { claude: { program: claude, transport: 'structured' } } })).adapters.claude?.transport).toBe('structured');
+    await expect(validateConfig({ ...scratch, adapters: { claude: { program: claude, transport: 'pane' } } })).rejects.toThrow(ZodError);
+    await expect(validateConfig({ ...scratch, adapters: { codex: { program: claude, transport: 'structured' } } })).rejects.toThrow(ZodError);
+    await expect(validateConfig({ ...scratch, adapters: { pi: { transport: 'tmux' } } })).rejects.toThrow(ZodError);
+  });
+
+  it('drops the arguments a pane launch composes at boot, and says which a structured launch will ignore', async () => {
+    const claude = await program();
+    const args = ['--verbose', '--permission-mode', 'auto', '--tools', 'Bash', '--resume', 'abc'];
+    const tmux: string[] = [];
+    expect((await validateConfig({ ...scratch, adapters: { claude: { program: claude, args } } }, { warn: m => tmux.push(m) })).adapters.claude?.args).toEqual(['--verbose', '--permission-mode', 'auto', '--tools', 'Bash']);
+    expect(tmux).toEqual(['adapters.claude: ignoring reserved argument --resume']);
+    // a structured launch drops the rest itself, so an Agent that outlives a change of Transport gets the same
+    const structured: string[] = [];
+    expect((await validateConfig({ ...scratch, adapters: { claude: { program: claude, args, transport: 'structured' } } }, { warn: m => structured.push(m) })).adapters.claude?.args).toEqual(['--verbose', '--permission-mode', 'auto', '--tools', 'Bash']);
+    expect(structured).toEqual(['adapters.claude: ignoring reserved argument --resume', 'adapters.claude: structured launches ignore the arguments --verbose, --tools']);
+  });
+
+  it('launches Claude over tmux under the host bridge, whose holder comes with Pi\'s host runtime', async () => {
+    const claude = await program();
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/tmux');
+    vi.stubEnv('RAC_HOST_REPOSITORY', '/srv/remoteagents');
+    const warnings: string[] = [];
+    const config = await validateConfig({ ...scratch, adapters: { claude: { program: claude, transport: 'structured' } } }, { warn: m => warnings.push(m), checkExecutables: false });
+    vi.unstubAllEnvs();
+    expect(config.adapters.claude?.transport).toBeUndefined();
+    expect(warnings).toContain('adapters.claude.transport: structured is not supported under the host bridge; claude launches over tmux');
+  });
+});
+
 describe('omx adapter configuration', () => {
   const scratch = { publicOrigin: 'https://agents.example.com', projects: [] as unknown[] };
   // two executable stand-ins named like the real programs, so only the name-based warnings fire

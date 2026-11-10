@@ -102,5 +102,8 @@ each, and `models` (14) to `default`, `sonnet` and `haiku`; the entries kept and
 every other field, `capabilities` included, are as recorded. The SessionStart hook output in `launch.jsonl` and
 `compact.jsonl` is the shape the console's hook prints, as `clear.jsonl` records it.
 `session-*.jsonl` are session transcripts as the CLI writes them;
-`session-edit.jsonl` is hand-written in the shape of real Edit and Write records.
+`session-edit.jsonl` is hand-written in the shape of real Edit and Write records;
+`session-unnamed.jsonl` is a probe-4 session cut to its queue, hook, prompt and
+message records (bookkeeping, request and account records dropped, paths and
+session id renamed, the nonce replaced).
 `../claude-client.test.ts` and `../claude-history.test.ts` read them.

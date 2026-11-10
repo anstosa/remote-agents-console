@@ -56,8 +56,7 @@ describe('adapterCapabilities', () => {
       const { transport, transports, ...flat } = capability!;
       expect(flat, kind).toEqual(transports[transport]);
     }
-    expect(published.claude).toMatchObject({ transport: 'tmux', transports: { tmux: { inlineQuestions: true, steer: false } } });
-    expect(published.claude?.transports.structured).toBeUndefined();
+    expect(published.claude).toMatchObject({ transport: 'tmux', transports: { tmux: { inlineQuestions: true, steer: false }, structured: { stateSource: 'reported', inlineQuestions: true, steer: true, sandbox: false } } });
     expect(published.pi).toMatchObject({ transport: 'structured', transports: { structured: { stateSource: 'reported', turnCapture: true, sandbox: true } } });
     expect(published.pi?.transports.tmux).toBeUndefined();
   });
@@ -70,5 +69,22 @@ describe('launchTransport', () => {
     expect(launchTransport('claude', {})).toBe('tmux');
     expect(launchTransport('pi', {})).toBe('structured');
     expect(launchTransport('opencode', {})).toBeUndefined();
+  });
+
+  it('launches Claude, which has both, over the Transport its config names, tmux by default', () => {
+    const claude = { program: process.execPath, args: [], env: {}, launchable: true };
+    expect(launchTransport('claude', { claude })).toBe('tmux');
+    expect(launchTransport('claude', { claude: { ...claude, transport: 'structured' } })).toBe('structured');
+    expect(launchTransport('claude', { claude: { ...claude, transport: 'tmux' } })).toBe('tmux');
+  });
+
+  it('publishes Claude flat over its configured Transport, keeping both entries for its Agents', () => {
+    const claude = { program: process.execPath, args: [], env: {}, launchable: true, transport: 'structured' as const };
+    const published = adapterCapabilities({ claude }).claude!;
+    const { transport, transports, ...flat } = published;
+    expect(transport).toBe('structured');
+    expect(flat).toEqual(transports.structured);
+    expect(transports.tmux).toMatchObject({ launchable: true, steer: false });
+    expect(flat).toMatchObject({ launchable: true, steer: true, turnCapture: true, naming: true, sandbox: false });
   });
 });

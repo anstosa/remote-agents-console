@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { Project, StackCommands, WorktreeOverride } from '../domain/models.js';
 import { declaredProcesses, dependencyCycle } from '../domain/stack-processes.js';
 import { gitCommonDir, listWorktrees } from '../git/worktrees.js';
-import { adapterFor } from '../adapters/registry.js';
+import { adapterFor, structuredAdapterFor } from '../adapters/registry.js';
 import { codexProgramName, omxProgramName } from '../adapters/program-names.js';
 import { hostVisibleRepoRoot } from '../adapters/files.js';
 import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKind, type SandboxSettings } from '../adapters/types.js';
@@ -127,8 +127,11 @@ const sandboxDomain = z.string().min(1).max(253).regex(/^[^\s/:@]+(?::\d{1,5})?$
 const sandboxLists = z.object({ allowedDomains: z.array(sandboxDomain).max(256).optional(), deniedDomains: z.array(sandboxDomain).max(256).optional(), allowWrite: z.array(sandboxPath).max(256).optional(), denyWrite: z.array(sandboxPath).max(256).optional(), denyRead: z.array(sandboxPath).max(256).optional(), env: z.array(adapterEnvName).max(256).optional() }).strict();
 // the console pins Pi and supplies its program (ADR 0017), so `adapters.pi` only enables the kind
 const piEntry = adapterEntry.omit({ program: true, updates: true, allowedModels: true }).extend({ allowedModels: piAllowedModels.optional(), sandbox: sandboxLists.optional() }).strict('adapters.pi takes only args, env, setup, teardown, allowedModels and sandbox: Pi is pinned by the console as its own dependency, so it has no program or update commands');
+// Claude launches over either Transport (ADR 0021): `transport` picks the one new launches use;
+// a kind with one Transport has no such key
+const claudeEntry = adapterEntry.extend({ transport: z.enum(['tmux', 'structured']).optional() }).strict();
 // keyed by kind, one strict entry each; an omitted block is observe-only (nothing launches)
-const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: adapterEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
+const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: claudeEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
 // constrain icons to supported aliases
 const instanceIcon = z.enum(instanceIconNames);
 const remoteServer = z.object({ url: z.string(), name: serverName.optional(), icon: instanceIcon.optional() }).strict();
@@ -415,9 +418,9 @@ async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean
   const configs: AdapterConfigs = {};
   if (parsed.pi !== undefined) configs.pi = await piConfig(parsed.pi, warn, sandbox, writeRoots, launchHome);
   for (const kind of agentKinds) {
-    const entry = kind === 'pi' ? undefined : parsed[kind] as z.output<typeof adapterEntry> | undefined;
+    const entry = kind === 'pi' ? undefined : parsed[kind] as z.output<typeof claudeEntry> | undefined;
     if (entry === undefined) continue;
-    const config: AdapterLaunchConfig = { program: entry.program, args: entry.args ?? [], env: inheritedHomeEnvironment(entry.env), launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.updates === undefined ? {} : { updates: entry.updates }), ...(entry.allowedModels === undefined ? {} : { allowedModels: entry.allowedModels }) };
+    const config: AdapterLaunchConfig = { program: entry.program, args: entry.args ?? [], env: inheritedHomeEnvironment(entry.env), launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.updates === undefined ? {} : { updates: entry.updates }), ...(entry.allowedModels === undefined ? {} : { allowedModels: entry.allowedModels }), ...(entry.transport === undefined ? {} : { transport: entry.transport }) };
     // a missing program, a directory, or a non-executable file never refuses boot;
     // it disables that kind with a reason (a directory is +x, so require a real file)
     if (checkExecutables) {
@@ -450,6 +453,16 @@ async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean
         config.args = kept;
         warn(`adapters.${kind}: ignoring reserved argument${dropped.length === 1 ? '' : 's'} ${dropped.join(', ')}`);
       }
+    }
+    // a structured launch drops what it composes itself every time it composes one (an Agent may
+    // outlive a change of Transport); said here once for the configured one
+    const structuredReserved = config.transport === 'structured' ? structuredAdapterFor(kind)?.conflictingArgs : undefined;
+    const ignored = structuredReserved === undefined ? [] : config.args.filter(argument => argument.startsWith('-') && structuredReserved.has(argument.includes('=') ? argument.slice(0, argument.indexOf('=')) : argument));
+    if (ignored.length > 0) warn(`adapters.${kind}: structured launches ignore the argument${ignored.length === 1 ? '' : 's'} ${ignored.join(', ')}`);
+    // the holder under the host bridge comes with Pi's host runtime, which a Claude launch cannot rely on
+    if (config.transport === 'structured' && process.env.RAC_HOST_TMUX_DIR !== undefined) {
+      delete config.transport;
+      warn(`adapters.${kind}.transport: structured is not supported under the host bridge; ${kind} launches over tmux`);
     }
     // an Adapter that renders host-path files (Claude's hooks) needs a host-visible
     // checkout root; under the bridge without RAC_HOST_REPOSITORY the injected paths

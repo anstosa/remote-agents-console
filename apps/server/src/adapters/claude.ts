@@ -1,11 +1,12 @@
 import { basename } from 'node:path';
-import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationName, claudeConversationSummaries, validClaudeSessionId } from './claude-conversations.js';
+import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationName, claudeConversationSummaries, claudeFolderTrusted, latestClaudeConversation, locateClaudeSession, validClaudeSessionId } from './claude-conversations.js';
 import { claudeSkillDirectories, claudeSlash } from './claude-commands.js';
-import { claudeFiles, claudeHooksFileName } from './claude-hooks.js';
+import { claudeFiles, claudeHooksFileName, claudeStructuredSettings } from './claude-hooks.js';
 import { claudeNewConversation } from './claude-new-conversation.js';
 import { claudeReviewRuns } from './claude-review-runs.js';
 import { claudeQuestionTextAnswer, claudeQuestionTextEntry, reportedClaudeQuestion } from './claude-questions.js';
-import type { Adapter, TmuxKey } from './types.js';
+import { claudeClient, claudeEfforts, claudeMcpServer } from '../transports/claude.js';
+import type { Adapter, ReplacedFlagValue, StructuredAdapter, TmuxKey } from './types.js';
 
 // The packaged CLI entry a `node …` invocation of Claude Code runs.
 const claudeCliEntry = '@anthropic-ai/claude-code/cli.js';
@@ -101,3 +102,56 @@ export const claudeAdapter = {
   files: claudeFiles,
   reviewRuns: claudeReviewRuns,
 } satisfies Adapter;
+
+// what a structured launch composes, with the values each takes (an optional value counts as one):
+// the tmux launch's reserved flags, the stream-json protocol, permission prompts asked of the
+// console, and the flags that would break the protocol client or the holder (`--tools` replaces
+// every built-in tool, `--include-partial-messages` changes the stream; the rest move, fork, mute
+// or detach the session, or end it with one structured answer). `--mcp-config` stays the
+// operator's too: it takes several, and the console adds its own. Short flags combined into one
+// (`-pc`) are not taken apart.
+const structuredConflictingArgs = new Map<string, ReplacedFlagValue>([
+  ['--settings', 'one'], ['--bare', 'none'], ['--safe-mode', 'none'], ['-c', 'none'], ['--continue', 'none'], ['-r', 'one'], ['--resume', 'one'], ['--session-id', 'one'], ['-p', 'none'], ['--print', 'none'],
+  ['--input-format', 'one'], ['--output-format', 'one'], ['--verbose', 'none'], ['--replay-user-messages', 'none'], ['--permission-prompts', 'one'], ['--permission-prompt-tool', 'one'], ['--tools', 'many'], ['--include-partial-messages', 'none'],
+  ['--bg', 'none'], ['--background', 'none'], ['--no-session-persistence', 'none'], ['--fork-session', 'none'], ['-w', 'one'], ['--worktree', 'one'], ['--json-schema', 'one'], ['--forward-subagent-text', 'none'], ['--cloud', 'one'], ['--teleport', 'one'], ['--from-pr', 'one']
+]);
+// what a launch in a folder Claude does not trust yet leaves out: its project and local settings
+// (hooks included) and every MCP server but the console's own, the operator's user-level and
+// `--mcp-config` ones too (a server's relative command would run the folder's own script), as a
+// Review run does; and the operator's own choice of setting sources
+const untrustedArgs = ['--setting-sources', 'user', '--strict-mcp-config'];
+const untrustedReserved = new Map<string, ReplacedFlagValue>([['--mcp-config', 'many'], ['--setting-sources', 'one'], ['--strict-mcp-config', 'none']]);
+const untrustedNotice = 'This folder isn\'t trusted by Claude yet, so its project settings, hooks and MCP servers are ignored, and only the console\'s own MCP server runs. Open Claude in Terminal mode here once and accept the trust prompt to use them.';
+
+/**
+ * Claude Code over the structured Transport (ADR 0021): `claude -p` speaking stream-json to the
+ * Claude client, under a holder. Claude is not pinned and not Sandboxed by the console: its own
+ * sandbox and permission mode come from the operator's settings and `adapters.claude.args`, as
+ * over tmux, and the Launch menu's model, Effort and permission mode are composed onto these
+ * arguments as for a pane (`compileNativeLaunch`), the model on a resume too, since one does not
+ * restore it. Print mode skips Claude's folder trust, so a folder Claude does not trust launches
+ * without its project settings and MCP servers. The inline settings add only the hook that echoes
+ * the launch's nonce. Its Conversations are the TUI's session files; continuing the latest resumes
+ * the newest one listed.
+ */
+export const claudeStructuredAdapter = {
+  kind: 'claude',
+  launch: ({ nonce = '', resume }) => ({
+    args: [
+      '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages', '--permission-prompts', 'host', '--permission-prompt-tool', 'stdio',
+      '--mcp-config', JSON.stringify({ mcpServers: { [claudeMcpServer]: { type: 'sdk', name: claudeMcpServer } } }),
+      '--settings', claudeStructuredSettings,
+      ...(resume === undefined ? [] : ['--resume', resume])
+    ],
+    env: { RAC_LAUNCH_NONCE: nonce }
+  }),
+  client: claudeClient,
+  efforts: claudeEfforts,
+  conversations: { validId: validClaudeSessionId, list: claudeConversationSummaries, readName: claudeConversationName, locate: locateClaudeSession, latest: latestClaudeConversation },
+  steers: true,
+  pinned: () => undefined,
+  conflictingArgs: structuredConflictingArgs,
+  untrusted: async (cwd, env) => await claudeFolderTrusted(cwd, env) ? undefined : { args: untrustedArgs, reserved: untrustedReserved, notice: untrustedNotice },
+  launchSetsModel: true,
+  modelsWithoutPolicy: true
+} satisfies StructuredAdapter;

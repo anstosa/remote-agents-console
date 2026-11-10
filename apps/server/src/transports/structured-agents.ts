@@ -2,12 +2,15 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { gte, valid } from 'semver';
-import { structuredAdapterFor } from '../adapters/registry.js';
+import { adapterFor, structuredAdapterFor } from '../adapters/registry.js';
 import type { AdapterConfigs, AgentKind, AllowedModel, StructuredAdapter } from '../adapters/types.js';
 import type { Agent, AgentLifecycle } from '../domain/models.js';
 import type { ShapedQuestion } from '../adapters/types.js';
 import { placeHostRoot, type Place } from '../places/places.js';
-import { expandCommand } from '../launch/service.js';
+import { inheritedHomeEnvironment } from '../places/launch-home.js';
+import { expandCommand, withoutFlags } from '../launch/service.js';
+import { compileNativeLaunch, nativeSecurityManifest } from '../launch/native-options.js';
+import type { NativeLaunchSecurity } from '../launch/options-types.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
 import { connectHolder, type AgentUsage, type CompactRequest, type ClientContext, type HolderHello, type LineChannel, type PromptDisposition, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
@@ -35,20 +38,22 @@ export type HolderLaunch = { program: string; args: string[]; env: Record<string
  * role (the Conductor's). `access` is the hash of the console MCP token its current process holds,
  * while it runs.
  */
-export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator' | { conductor: string } | { davo: string }; role?: 'conductor'; access?: string; launchedAt: number; version?: string; processGeneration?: number; turnRevision?: number; turnEventRevision?: number; turnState?: 'idle' | 'working' | 'unknown'; turnNativeId?: string; turnNativeRevision?: number; turnConversationId?: string; turnUncertain?: boolean; lifecycleCommand?: { commandId: string; expectedGeneration: number; effectGeneration?: number } };
+export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; security?: NativeLaunchSecurity; model?: ModelSetting; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator' | { conductor: string } | { davo: string }; role?: 'conductor'; access?: string; launchedAt: number; version?: string; processGeneration?: number; turnRevision?: number; turnEventRevision?: number; turnState?: 'idle' | 'working' | 'unknown'; turnNativeId?: string; turnNativeRevision?: number; turnConversationId?: string; turnUncertain?: boolean; lifecycleCommand?: { commandId: string; expectedGeneration: number; effectGeneration?: number } };
 /**
  * What a launch starts: one process of `kind` at `place`, for the Agent `id`, on a new
  * Conversation (on `model` when Allowed models are configured) or resuming the Conversation `resume`,
- * Sandboxed or not, and the nonce its launch report must echo.
+ * Sandboxed or not, with the Launch menu's native `security` choice (kept on the record, so a
+ * restart keeps it), and the nonce its launch report must echo.
  */
-export type StructuredLaunch = { id: string; kind: AgentKind; place: Place; resume?: string; continue?: true; model?: ModelSetting; sandboxed: boolean; nonce: string; role?: 'conductor' };
+export type StructuredLaunch = { id: string; kind: AgentKind; place: Place; resume?: string; continue?: true; model?: ModelSetting; sandboxed: boolean; security?: NativeLaunchSecurity; nonce: string; role?: 'conductor' };
 /** One line between the console and an Agent's process, as it went over the wire. */
 export type RawLine = { from: 'agent' | 'console'; line: string };
 /**
  * A running process the console is connected to, how many of its lines the console has read, the
  * latest lines either way (Raw events), and, reattached, how many lines it could not replay.
  */
-export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number; raw?: () => readonly RawLine[]; dropped?: number };
+// `notice` is what the Agent should show about how its process was launched
+export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number; raw?: () => readonly RawLine[]; dropped?: number; notice?: string };
 /** Starts, reads and stops structured Agent processes; the holder in tmux outside tests. */
 export interface StructuredProcesses {
   /** Start the process and connect its protocol client, which reports through `emit`. */
@@ -101,29 +106,45 @@ function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, he
 
 /**
  * The structured Agents' processes, each run under a holder in its Place's Workspace session.
- * `files` are the kind's console-rendered files. The operator's `env` cannot replace what the
- * Adapter composes from them and the launch (its sandbox policy, the nonce its report must echo).
+ * `files` are the kind's console-rendered files, and `home` the launch account's home where the
+ * operator's `env` names none. The operator's `env` cannot replace what the Adapter composes from
+ * them and the launch (its sandbox policy, the nonce its report must echo).
  */
-export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs, files: (kind: AgentKind) => Promise<Record<string, string> | undefined> = async () => undefined): StructuredProcesses {
+export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs, files: (kind: AgentKind) => Promise<Record<string, string> | undefined> = async () => undefined, home?: string): StructuredProcesses {
   return {
-    async start({ id, kind, place, resume, continue: latest, model, sandboxed, nonce, role }, emit) {
+    async start({ id, kind, place, resume, continue: latest, model, sandboxed, security, nonce, role }, emit) {
       const adapter = structuredAdapterFor(kind);
       const configured = configs[kind];
       if (adapter === undefined || configured?.launchable !== true) return undefined;
+      // under the host bridge the holder comes with Pi's host runtime, so a kind that also runs in a
+      // pane (Claude) runs there only (its config falls back at boot), an earlier structured Agent too
+      if (process.env.RAC_HOST_TMUX_DIR !== undefined && adapterFor(kind) !== undefined) { console.warn(`[structured] ${kind} cannot run over the structured Transport under the host bridge; launch it again to run it in a pane`); return undefined; }
       // one path namespace must drive session lookup, policy checks and the host process
       if (process.env.RAC_HOST_TMUX_DIR !== undefined && place.home !== placeHostRoot(place)) { console.warn(`[structured] ${place.home}: aliased host paths cannot launch ${kind}`); return undefined; }
       const located = resume === undefined ? undefined : await adapter.conversations.locate(resume, place.home);
       if (resume !== undefined && located === undefined) return undefined;
+      // a kind that names the latest Conversation itself resumes it, or starts a new one
+      const latestId = resume === undefined && latest === true && adapter.conversations.latest !== undefined ? await adapter.conversations.latest(place.home) : undefined;
+      const resumed = located ?? latestId;
+      const continues = latest === true && adapter.conversations.latest === undefined;
       const allowed = configured.allowedModels ?? (model === undefined ? [] : [{ model: model.model }]);
       const rendered = await files(kind);
-      const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(located === undefined ? {} : { resume: located }), ...(latest === true ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
-      const holder = await windows.openHolderWindow(place, id, { program: configured.program, args: [...spec.args, ...configured.args], env: { ...configured.env, ...spec.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
+      const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(resumed === undefined ? {} : { resume: resumed }), ...(continues ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
+      // the operator's arguments, less what the launch composes itself (whatever the boot dropped,
+      // for the Transport configured then), and the model and Launch menu choices, composed as for a pane
+      const choice = model === undefined && security === undefined ? undefined : { ...(model === undefined ? {} : { model }), ...(security === undefined ? {} : { security }) };
+      // in a folder the CLI does not trust yet, its restrictions replace the operator's and come last
+      const untrusted = await adapter.untrusted?.(place.home, inheritedHomeEnvironment(configured.env, home));
+      const operatorArgs = [adapter.conflictingArgs, untrusted?.reserved].reduce((args, reserved) => reserved === undefined ? args : withoutFlags(args, reserved), configured.args);
+      const compiled = compileNativeLaunch(kind, { mode: resumed !== undefined ? 'resume' : continues ? 'continue' : 'fresh', ...(resumed === undefined ? {} : { conversationId: resumed }) }, operatorArgs, choice, spec).args;
+      const args = untrusted === undefined ? compiled : [...compiled, ...untrusted.args];
+      const holder = await windows.openHolderWindow(place, id, { program: configured.program, args, env: { ...configured.env, ...spec.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
       if (holder === undefined) return undefined;
       // a holder that a slow login shell or setup holds up is waited for as long as its launch
       // report is (30 s), not given up on first
       const connected = await connectHolder(holder.socket, { attempts: 300 });
       if (connected === undefined) { await windows.closeHolder(holder); return undefined; }
-      return clientOver(adapter, holder, connected, emit, { cwd: place.home, ...(model === undefined ? {} : { model }) });
+      return { ...clientOver(adapter, holder, connected, emit, { cwd: place.home, ...(model === undefined ? {} : { model }) }), ...(untrusted === undefined ? {} : { notice: untrusted.notice }) };
     },
     async attach(holder, kind, emit, { cwd, conversation }) {
       const adapter = structuredAdapterFor(kind);
@@ -156,7 +177,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
 // by `offers` so the web takes each one once. `nonce` is what the latest process's launch report
 // must echo, and `refusal` why its report refused it. `access` is the console MCP token a
 // Conductor's process is given once it reports in, and `scripts` the deadlines of its scripts running
-type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; observedAt: Map<string, string>; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; modelGuard?: Promise<void>; desiredModel?: ModelSetting; desiredNativeDefault?: true; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; observedAt: Map<string, string>; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; modelGuard?: Promise<void>; desiredModel?: ModelSetting; desiredNativeDefault?: true; guarded?: boolean; noticeCount: number; notices: TranscriptItem[]; launchNotice?: string };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -200,6 +221,8 @@ const validNativeTurnId = (value: unknown): boolean => value === undefined || ty
 // distinguish structured native marks from pane completion signatures
 export const structuredTurnMarkPrefix = 'rac-structured-turn:';
 const sandboxGenerationPattern = /^[0-9a-f]{64}$/u;
+// a model the record may keep: one a launch may name as `--model`/`--effort` values
+const storableModel = (model: unknown): model is ModelSetting => typeof model === 'object' && model !== null && typeof (model as ModelSetting).model === 'string' && /^[^\s-][^\s]{0,239}$/u.test((model as ModelSetting).model) && ((model as ModelSetting).effort === undefined || typeof (model as ModelSetting).effort === 'string' && /^[A-Za-z0-9._-]{1,32}$/u.test((model as ModelSetting).effort!));
 const isStoredRecord = (value: unknown): value is StructuredRecord => {
   const record = value as Partial<StructuredRecord> | null;
   const holder = record?.holder;
@@ -216,6 +239,10 @@ const isStoredRecord = (value: unknown): value is StructuredRecord => {
   );
   const marker = record?.lifecycleCommand;
   const validMarker = marker === undefined || typeof marker.commandId === 'string' && marker.commandId.length > 0 && marker.commandId.length <= 240 && nonNegativeInt(marker.expectedGeneration) && nonNegativeInt(marker.effectGeneration);
+  // the Launch menu's security choice (checked against what it may be on reading) and the model last on
+  const security = record?.security;
+  const validSecurity = security === undefined || typeof security === 'object' && security !== null && !Array.isArray(security) && Object.values(security).every(option => typeof option === 'string');
+  const validModel = record?.model === undefined || storableModel(record.model);
   return typeof record === 'object' && record !== null && typeof record.id === 'string' && typeof record.kind === 'string' && typeof record.placeId === 'string' && typeof record.home === 'string'
     && validOrigin
     && nonNegativeInt(record.processGeneration)
@@ -227,8 +254,24 @@ const isStoredRecord = (value: unknown): value is StructuredRecord => {
     && validNativeTurnId(record.turnConversationId)
     && (record.turnUncertain === undefined || typeof record.turnUncertain === 'boolean')
     && validMarker
+    && validSecurity
+    && validModel
     && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && validTmuxSocket && validHost && validSandboxGeneration && (holder.host !== true || typeof tmuxSocket === 'string') && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
 };
+
+// the Launch menu's security options that loosen an Agent past the operator's own configuration
+const loosening = new Set(['permissions:bypassPermissions', 'bypass:dangerous', 'filesystem:danger-full-access', 'approvals:never', 'sandbox:off']);
+/**
+ * The part of a stored Launch menu security choice a restart may re-emit: the options the kind's
+ * native controls offer, never one that loosens it (a bypass is chosen again), so a record
+ * rewritten on disk cannot loosen an Agent's next launch; restrictive ones (`plan`, `dontAsk`)
+ * stay. The console keeps its records in memory, so a restart within one console run keeps the
+ * whole choice. (A Sandboxed Pi's `sandboxed` is the record's own, restored as it is.)
+ */
+function restorableSecurity(kind: AgentKind, security: NativeLaunchSecurity): NativeLaunchSecurity {
+  const { controls } = nativeSecurityManifest(kind, { filesystem: true, approvals: true, bypass: true, permissions: true });
+  return Object.fromEntries(Object.entries(security).filter(([control, option]) => !loosening.has(`${control}:${option}`) && controls.find(candidate => candidate.id === control)?.options.some(candidate => candidate.id === option) === true));
+}
 
 /**
  * The structured Agents (ADR 0015): each gets a console-minted id and a stored record, is
@@ -263,7 +306,7 @@ export class StructuredAgents {
    * the entry's default. Answers the new Agent's id once its process started (it may then have
    * failed to report in); undefined when it could not start, or `model` is not an Allowed model.
    */
-  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role, spawnedBy, workerOwner, nativeDefaultValidated }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor'; spawnedBy?: string; workerOwner?: { kind: 'davo'; id: string }; nativeDefaultValidated?: true } = {}): Promise<string | undefined> {
+  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, security, role, spawnedBy, workerOwner, nativeDefaultValidated }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; security?: NativeLaunchSecurity; role?: 'conductor'; spawnedBy?: string; workerOwner?: { kind: 'davo'; id: string }; nativeDefaultValidated?: true } = {}): Promise<string | undefined> {
     // the Conductor starts on its configured model
     if (role === 'conductor') model ??= this.conductor?.model;
     // one launch cannot claim two independent owners
@@ -278,13 +321,13 @@ export class StructuredAgents {
     if (model !== undefined && entry === undefined && !(configured === undefined && nativeDefaultValidated === true)) return undefined;
     const records = await this.load();
     const origin: StructuredRecord['origin'] = workerOwner !== undefined ? { davo: workerOwner.id } : spawnedBy !== undefined ? { conductor: spawnedBy } : 'operator';
-    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin, ...(role === undefined ? {} : { role }), launchedAt: Date.now(), processGeneration: 0, turnRevision: 0, turnEventRevision: 0, turnState: 'idle' };
+    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, ...(security === undefined ? {} : { security: { ...security } }), lifecycle: 'starting', origin, ...(role === undefined ? {} : { role }), launchedAt: Date.now(), processGeneration: 0, turnRevision: 0, turnEventRevision: 0, turnState: 'idle' };
     const live = this.idle();
     records.push(record);
     this.live.set(record.id, live);
     const effort = model?.effort ?? entry?.effort;
     // apply a selected resume model only after conversation restoration
-    if (model !== undefined && (resume !== undefined || latest === true)) {
+    if (model !== undefined && (resume !== undefined || latest === true) && structuredAdapterFor(kind)?.launchSetsModel !== true) {
       live.desiredModel = { model: model.model, ...(effort === undefined ? {} : { effort }) };
       // only server-validated implicit defaults bypass a missing explicit list
       if (configured === undefined && nativeDefaultValidated === true) live.desiredNativeDefault = true;
@@ -436,8 +479,9 @@ export class StructuredAgents {
       delete record.reason;
       Object.assign(live, { working: false, questions: [], steers: [], guarded: false, connection: undefined, stderr: undefined });
       live.status.clear();
-      // a Conductor's fresh Conversation starts on its configured model
-      const model = kept ?? (resume === undefined && record.role === 'conductor' ? this.conductor?.model : undefined);
+      // a Conductor's fresh Conversation starts on its configured model, and a kind whose resume
+      // does not restore its model goes on with the Agent's
+      const model = kept ?? (resume === undefined && record.role === 'conductor' ? this.conductor?.model : undefined) ?? (structuredAdapterFor(record.kind)?.launchSetsModel === true ? record.model : undefined);
       const started = await this.start(record, live, { id: record.id, kind: record.kind, place, ...(resume === undefined ? {} : { resume }), ...(model === undefined ? {} : { model }) }, commandId);
       // one that did not start, or did not report in, stays Exited, so it can be resumed again
       if (started === undefined || (record.lifecycle as AgentLifecycle) === 'failed') {
@@ -471,13 +515,15 @@ export class StructuredAgents {
       live.reported = resolve;
       setTimeout(() => resolve(false), this.options.reportTimeoutMs ?? 30_000).unref();
     });
-    const started = await this.processes.start({ ...launch, sandboxed: record.sandboxed, nonce: live.nonce, ...(record.role === undefined ? {} : { role: record.role }) }, event => this.observe(record, live, generation, event)).catch(() => undefined);
+    const started = await this.processes.start({ ...launch, sandboxed: record.sandboxed, ...(record.security === undefined ? {} : { security: record.security }), nonce: live.nonce, ...(record.role === undefined ? {} : { role: record.role }) }, event => this.observe(record, live, generation, event)).catch(() => undefined);
     // closed while it started: nothing may keep running for it
     if (this.live.get(record.id) !== live || live.generation !== generation) {
       if (started !== undefined) { started.connection.close(); await this.processes.stop(started.holder, record); }
       return false;
     }
     if (started === undefined) return undefined;
+    // shown once the process says which Conversation it is on, which clears earlier notices
+    if (started.notice !== undefined) live.launchNotice = started.notice;
     await this.adopt(record, live, started);
     // persist one durable effect generation only after a new process was adopted
     record.processGeneration = (record.processGeneration ?? 0) + 1;
@@ -864,22 +910,42 @@ export class StructuredAgents {
     // an empty list may be a failed read, so it is read again next time
     const reachable = live.models ?? await live.connection.models();
     if (reachable.length > 0) live.models = reachable;
-    return { models: this.allowed(record.kind).flatMap(entry => reachable.find(model => model.id === entry.model) ?? []), ...(live.model === undefined ? {} : { current: live.model }) };
+    return { models: this.anyListed(record.kind) ? reachable : this.allowed(record.kind).flatMap(entry => reachable.find(model => model.id === entry.model) ?? []), ...(live.model === undefined ? {} : { current: live.model }) };
+  }
+
+  // with no Allowed models configured, whether the kind's Agents may take any model their client lists
+  private anyListed(kind: AgentKind): boolean {
+    return this.options.allowedModels?.(kind) === undefined && structuredAdapterFor(kind)?.modelsWithoutPolicy === true;
   }
 
   /**
-   * Switch the Agent's model or Effort between Turns: only to an Allowed model, at the Effort asked
-   * for, else the entry's default, else the current one. The transcript marks the change.
+   * Switch the Agent's model or Effort between Turns: only to an Allowed model (or, for a kind that
+   * allows it with none configured, one its client lists), at the Effort asked for, else the
+   * entry's default, else the current one. A kind whose Effort is set at launch restarts on the
+   * Conversation to take a new one. The transcript marks the change.
    */
   async setModel(id: string, setting: ModelSetting): Promise<'ok' | 'not-allowed' | StructuredRefusal> {
     const record = (await this.load()).find(candidate => candidate.id === id);
-    const entry = record === undefined ? undefined : this.allowed(record.kind).find(candidate => candidate.model === setting.model);
+    const listed = record !== undefined && this.anyListed(record.kind) ? await this.models(id) : undefined;
+    const entry = record === undefined ? undefined : listed !== undefined ? listed.models.some(model => model.id === setting.model) ? { model: setting.model } : undefined : this.allowed(record.kind).find(candidate => candidate.model === setting.model);
     if (record !== undefined && entry === undefined) return 'not-allowed';
     // the Conductor runs on its configured model
     if (record?.role === 'conductor') return 'refused';
-    return await this.whileIdle(id, async ({ live, connection }) => {
+    return await this.whileIdle(id, async ({ record, live, connection }) => {
       const previous = live.model;
       const effort = setting.effort ?? entry?.effort ?? previous?.effort;
+      const adapter = structuredAdapterFor(record.kind);
+      if (adapter?.launchSetsModel === true && effort !== undefined && effort !== previous?.effort) {
+        // a steer the CLI still holds would be lost with its process
+        if (live.steers.length > 0) return false;
+        const offered = (live.models ?? await connection.models()).find(model => model.id === setting.model)?.efforts ?? [];
+        if (!offered.includes(effort)) { this.notice(live, `${this.modelName(live, setting.model)} offers no effort ${effort}.`, 'warning'); return false; }
+        // the Conversation goes on only once it has been saved, as after its first prompt
+        const resumed = record.conversationId !== undefined && await adapter.conversations.locate(record.conversationId, record.home) !== undefined;
+        const restarted = await this.relaunch(record, live, resumed ? record.conversationId : undefined, { located: resumed, model: { model: setting.model, effort } }) === true && record.lifecycle === 'live';
+        if (restarted) this.notice(live, `Model → ${this.modelName(live, setting.model)}, effort ${effort}: restarted ${resumed ? 'on the Conversation' : 'on a new Conversation, as the current one had not been saved yet'}`);
+        return restarted;
+      }
       if (!await connection.setModel({ model: setting.model, ...(effort === undefined ? {} : { effort }) })) return false;
       // the Effort the Agent reports it is on, which a kind that cannot change it live keeps
       const now = live.model?.effort;
@@ -926,7 +992,7 @@ export class StructuredAgents {
       // one resyncing after a reattach may be working: nothing takes it to have finished
       const attention = questions.length > 0 ? 'question' : live?.working === true || live?.resyncing === true ? 'working' : 'finished';
       const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' && 'conductor' in record.origin ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(live?.desiredModel !== undefined || live?.modelGuard !== undefined ? { preparing: true as const } : {}), ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }), ...(live?.compacting === true ? { compacting: true } : {}) } };
+      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' && 'conductor' in record.origin ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(live?.desiredModel !== undefined || live?.modelGuard !== undefined ? { preparing: true as const } : {}), ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && (this.allowed(record.kind).length > 0 || this.anyListed(record.kind)), ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }), ...(live?.compacting === true ? { compacting: true } : {}) } };
     });
   }
 
@@ -1095,6 +1161,7 @@ export class StructuredAgents {
         // the console's own notices belong to the Conversation they were made in
         if (record.conversationId !== undefined && record.conversationId !== event.id) live.notices = [];
         record.conversationId = event.id;
+        if (live.launchNotice !== undefined) { this.notice(live, live.launchNotice, 'warning'); delete live.launchNotice; }
         live.conversationName = event.name;
         live.resyncing = false;
         void this.save();
@@ -1102,6 +1169,12 @@ export class StructuredAgents {
         break;
       case 'model':
         live.model = event.current;
+        // kept for the next start of a kind whose resume does not restore it; one the record could
+        // not be read back with is not kept, and a model reported again unchanged is not saved again
+        if (storableModel(event.current) && (record.model?.model !== event.current.model || record.model.effort !== event.current.effort)) {
+          record.model = { model: event.current.model, ...(event.current.effort === undefined ? {} : { effort: event.current.effort }) };
+          void this.save();
+        }
         // the first model a launch reports is held to the Allowed models, as a resume may restore any
         if (live.guarded !== true) {
           live.guarded = true;
@@ -1306,7 +1379,7 @@ export class StructuredAgents {
       this.notice(live, `Model → ${this.modelName(live, fallback.model)}${live.model?.effort === undefined ? '' : `, effort ${live.model.effort}`}: ${current.model} is not an Allowed model`, 'warning');
       return;
     }
-    this.notice(live, `${current.model} is not an Allowed model, and no Allowed model could be applied. Check Settings → Agents → Pi and the logins.`, 'error');
+    this.notice(live, `${current.model} is not an Allowed model, and no Allowed model could be applied. Check its Allowed models in Settings → Agents, and its logins.`, 'error');
     // never release queued prompts onto a forbidden restored model
     await this.fail(record, live, 'No Allowed model could be applied.', true);
   }
@@ -1346,7 +1419,7 @@ export class StructuredAgents {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       parsed = undefined;
     }
-    if (Array.isArray(parsed) && parsed.every(isStoredRecord)) return parsed;
+    if (Array.isArray(parsed) && parsed.every(isStoredRecord)) return parsed.map(record => record.security === undefined ? record : { ...record, security: restorableSecurity(record.kind, record.security) });
     await setAside(this.file, 'structured');
     return [];
   }

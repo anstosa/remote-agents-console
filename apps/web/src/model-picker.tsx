@@ -54,7 +54,7 @@ export function ModelChip({ agentId, model, switchable, working, request, onErro
         <strong>{row.name}</strong><small>{row.provider}</small>
         <span>{price(row.inputPrice)} in · {price(row.outputPrice)} out per 1M{contextWindow(row.contextWindow)}</span>
       </button>)}
-      {current !== undefined && <>
+      {current !== undefined && current.efforts.length > 0 && <>
         <p className="model-picker-heading">Effort · {current.name}</p>
         <div className="model-efforts" role="group" aria-label="Effort">{current.efforts.map(effort => <button key={effort} type="button" aria-pressed={effort === model.effort} disabled={disabled} onClick={() => { if (effort !== model.effort) void choose({ model: model.id, effort }); }}>{effort}</button>)}</div>
       </>}

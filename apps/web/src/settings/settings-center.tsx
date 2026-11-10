@@ -107,6 +107,10 @@ const calendarMomentLabel = (path: string[], value: string): string | undefined 
   } as Record<string, string>)[value];
 };
 
+// name an Agent kind's Transport by what its Panel shows
+const transportLabel = (path: string[], value: string): string | undefined =>
+  path[0] === 'adapters' && path[2] === 'transport' ? ({ tmux: 'Terminal', structured: 'Transcript' } as Record<string, string>)[value] : undefined;
+
 // retain a stable identity for one protected field
 const disclosureKey = (sourceId: string, path: string[]): string => `${sourceId}\u0000${path.join('\u0000')}`;
 
@@ -1392,7 +1396,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   } else if (schema.type === 'enum') {
     const resettable = conductorEffort || reviewField && (schema.optional || defaulted);
     // present the adapter kind without changing its stored identity
-    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: conductorField && path[1] === 'kind' && option === 'pi' ? 'Pi' : calendarMomentLabel(path, option) ?? option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : path.at(-1) === 'icon' && isInstanceIconName(option) ? { icon: <InstanceIconPreview name={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
+    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: conductorField && path[1] === 'kind' && option === 'pi' ? 'Pi' : calendarMomentLabel(path, option) ?? transportLabel(path, option) ?? option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : path.at(-1) === 'icon' && isInstanceIconName(option) ? { icon: <InstanceIconPreview name={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
   // render booleans as accessible switches
   } else if (schema.type === 'boolean') {
     control = <label className="client-settings-toggle"><input id={controlId} aria-label={label} type="checkbox" role="switch" checked={effectiveValue === true} disabled={disabled} onChange={event => stagePatch(source, { op: 'set', path, value: event.target.checked })} /><span className="client-settings-switch-state">{effectiveValue === true ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label>;

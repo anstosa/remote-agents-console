@@ -158,6 +158,12 @@ function describeApplicationCommands(schema: SettingsSchema): void {
     }
     Object.assign(adapter.properties!.args!, { default: [] });
     Object.assign(adapter.properties!.env!, { label: 'Environment & keys' });
+    // only a kind with both Transports (Claude) has the choice
+    if (adapter.properties!.transport !== undefined) Object.assign(adapter.properties!.transport, {
+      label: 'Interface',
+      default: 'tmux',
+      description: 'Terminal runs Claude Code’s own screen in a tmux pane. Transcript drives it in print mode (-p) and shows its transcript, with steer, questions and the model picker, but no ! commands and no /model or /resume pickers. Applies to new launches; resume a Conversation to move it over.'
+    });
     // distinguish additional sandbox rules from launch security and variable values
     if (kind === 'pi') {
       const policy = adapter.properties!.sandbox!;

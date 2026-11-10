@@ -1,6 +1,6 @@
 import { codexAdapter } from './codex.js';
 import { omxAdapter } from './omx.js';
-import { claudeAdapter } from './claude.js';
+import { claudeAdapter, claudeStructuredAdapter } from './claude.js';
 import { piAdapter } from './pi.js';
 import type { Pane } from '../domain/models.js';
 import { agentKinds, type Adapter, type AdapterCapability, type AdapterConfigs, type AgentKind, type ReviewRuns, type StructuredAdapter, type TransportCapability } from './types.js';
@@ -42,21 +42,23 @@ export function adapterFor(kind: AgentKind): Adapter | undefined {
 
 /**
  * The kinds driven through a protocol client (ADR 0015). A kind here only is never recognised in
- * a pane; a kind also in `adapters` can launch over either Transport.
+ * a pane; a kind also in `adapters` (Claude, ADR 0021) can launch over either Transport.
  */
-export const structuredAdapters: readonly StructuredAdapter[] = [piAdapter];
+export const structuredAdapters: readonly StructuredAdapter[] = [claudeStructuredAdapter, piAdapter];
 export function structuredAdapterFor(kind: AgentKind): StructuredAdapter | undefined {
   return structuredAdapters.find(adapter => adapter.kind === kind);
 }
 
 /**
  * The Transport a launch of `kind` uses, undefined for an unregistered kind: the only one it has,
- * or for a kind with both, its configured default (tmux until `configs` can name one). Every
- * decision to launch over a structured Transport is made here.
+ * or for a kind with both, the one its config names (`adapters.<kind>.transport`, else tmux).
+ * Every decision to launch over a structured Transport is made here.
  */
 export function launchTransport(kind: AgentKind, configs: AdapterConfigs): Transport | undefined {
-  if (adapterFor(kind) !== undefined) return 'tmux';
-  return structuredAdapterFor(kind) === undefined ? undefined : 'structured';
+  const tmux = adapterFor(kind) !== undefined;
+  const structured = structuredAdapterFor(kind) !== undefined;
+  if (tmux && structured) return configs[kind]?.transport ?? 'tmux';
+  return tmux ? 'tmux' : structured ? 'structured' : undefined;
 }
 
 /** The first registered Adapter that recognises the process, by registry order. */

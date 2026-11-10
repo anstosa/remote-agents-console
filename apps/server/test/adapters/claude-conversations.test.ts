@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
-import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationName, claudeConversationSummaries, claudeLastAssistantMessage, latestClaudeMessageFromRecords, lastAssistantMessageFromRecords, validClaudeSessionId } from '../../src/adapters/claude-conversations.js';
+import { readFileSync } from 'node:fs';
+import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationName, claudeConversationSummaries, claudeLastAssistantMessage, latestClaudeMessageFromRecords, lastAssistantMessageFromRecords, locateClaudeSession, validClaudeSessionId } from '../../src/adapters/claude-conversations.js';
 
 const cwd = '/tachi/code/remoteagents';
 const encoded = '-tachi-code-remoteagents';
@@ -193,6 +194,46 @@ describe('claude conversation list', () => {
     );
     const listed = await list(configDir, [dirA]);
     expect(listed.map(row => row.name)).toEqual(['kept']);
+  });
+
+  it('lists a Conversation a structured Claude launch began, and one only resumed in print mode, but no other SDK run', async () => {
+    // what the console's structured launch writes first: its SessionStart hook echoing the nonce
+    const launched = (stdout: string) => ({ type: 'attachment', entrypoint: 'sdk-cli', attachment: { type: 'hook_success', hookEvent: 'SessionStart', hookName: 'SessionStart:startup', content: '', stdout } });
+    const sdkTurn = (content: string, iso: string) => ({ type: 'user', promptSource: 'sdk', entrypoint: 'sdk-cli', message: { content }, timestamp: iso });
+    const configDir = await configWith(
+      { dir: dirA, id: idFor(1), records: [{ type: 'queue-operation', operation: 'enqueue' }, launched('{"suppressOutput":true,"rac":"n0nce"}\n'), sdkTurn('fix it', '2026-09-05T12:00:00.000Z'), { type: 'custom-title', customTitle: 'structured' }] },
+      // a headless Review run (ADR 0010): print mode with no console launch hook, hidden even named
+      { dir: dirA, id: idFor(2), records: [{ type: 'queue-operation', operation: 'enqueue' }, sdkTurn('review', '2026-09-05T13:00:00.000Z'), { type: 'custom-title', customTitle: 'review run' }] },
+      // another SessionStart hook's output is no console launch
+      { dir: dirA, id: idFor(3), records: [launched('hello\n'), sdkTurn('x', '2026-09-05T13:30:00.000Z'), { type: 'custom-title', customTitle: 'other hook' }] },
+      // begun in the TUI, then resumed over the structured Transport
+      { dir: dirA, id: idFor(4), records: [{ type: 'ai-title', aiTitle: 'tui' }, turn('hi', '2026-09-05T11:00:00.000Z'), sdkTurn('more', '2026-09-05T11:30:00.000Z')] },
+    );
+    expect((await list(configDir, [dirA])).map(row => [row.name, row.automatic])).toEqual([['structured', false], ['tui', true]]);
+  });
+
+  it('names an unnamed Conversation a structured launch began by its first prompt, as the probe\'s transcript has it', async () => {
+    const records = readFileSync(new URL('../fixtures/claude/structured/session-unnamed.jsonl', import.meta.url), 'utf8').split('\n').filter(line => line !== '').map(line => JSON.parse(line) as object);
+    const configDir = await configWith({ dir: dirA, id: idFor(1), records });
+    expect(await list(configDir, [dirA])).toEqual([{ id: idFor(1), name: 'Use the Bash tool to run exactly `sleep 6; echo done`, then tell me what it printed.', automatic: true, lastActiveAt: expect.any(Number), directory: dirA }]);
+    // a headless Review run's first prompt never names it: it is not listed at all
+    const review = records.filter(record => (record as { type?: string }).type !== 'attachment');
+    expect(await list(await configWith({ dir: dirA, id: idFor(2), records: review }), [dirA])).toEqual([]);
+  });
+
+  it('takes the tail\'s word that a transcript is an SDK run when its first record is too long for the head', async () => {
+    const huge = { type: 'user', promptSource: 'sdk', entrypoint: 'sdk-cli', message: { content: 'x'.repeat(200 * 1024) }, timestamp: '2026-09-05T12:00:00.000Z' };
+    const configDir = await configWith({ dir: dirA, id: idFor(1), records: [huge, { type: 'custom-title', customTitle: 'review' }, { type: 'assistant', entrypoint: 'sdk-cli', message: { content: 'ok' } }] });
+    expect(await list(configDir, [dirA])).toEqual([]);
+  });
+
+  it('locates a session a structured launch resumes only where its transcript is', async () => {
+    const configDir = await configWith({ dir: dirA, id: idFor(1), records: [turn('hi', '2026-09-05T12:00:00.000Z')] });
+    const env = { RAC_CLAUDE_CONFIG_DIR: configDir } as NodeJS.ProcessEnv;
+    expect(await locateClaudeSession(idFor(1), dirA, env)).toBe(idFor(1));
+    expect(await locateClaudeSession(idFor(1), dirB, env)).toBeUndefined();
+    expect(await locateClaudeSession(idFor(2), dirA, env)).toBeUndefined();
+    expect(await locateClaudeSession('../escape', dirA, env)).toBeUndefined();
   });
 
   it('reads the bounded tail: a newer title and timestamp beyond the head window win', async () => {

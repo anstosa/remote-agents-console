@@ -89,9 +89,18 @@ describe('native launch option compilation', () => {
     ], { model: { model: 'opus', effort: 'high' }, security: { permissions: 'inherit' } }, { args: ['--continue', '--settings', '/tmp/hooks.json'] });
 
     expect(compiled.args).toEqual([
-      '--continue', '--model', 'opus', '--effort', 'high', '--settings', '/tmp/hooks.json',
+      '--continue', '--settings', '/tmp/hooks.json', '--model', 'opus', '--effort', 'high',
       '--permission-mode', 'acceptEdits', '--verbose'
     ]);
+  });
+
+  // a structured launch keeps its protocol arguments and takes the same choices
+  it('composes a chosen Claude permission mode onto the Adapter\'s own arguments, replacing the operator\'s', () => {
+    const structured = ['-p', '--input-format', 'stream-json', '--resume', 'abc'];
+    const compiled = compileNativeLaunch('claude', { mode: 'resume', conversationId: 'abc' }, ['--permission-mode', 'auto', '--dangerously-skip-permissions', '--add-dir', '/data'], { security: { permissions: 'plan' } }, { args: structured });
+    expect(compiled.args).toEqual([...structured, '--permission-mode', 'plan', '--add-dir', '/data']);
+    // inherited, the operator's own mode (auto, say) stays
+    expect(compileNativeLaunch('claude', fresh, ['--permission-mode', 'auto'], { security: { permissions: 'inherit' } }, { args: structured }).args).toEqual([...structured, '--permission-mode', 'auto']);
   });
 
   // advertise only controls proven by installed native help

@@ -67,6 +67,13 @@ const launched = async (context?: Partial<ClientContext>) => {
 };
 
 describe('the Claude client', () => {
+  it('reads the lines a channel replays as the client attaches', () => {
+    // a holder channel hands its early lines to the listener inside `onLine`
+    const early = JSON.stringify({ type: 'system', subtype: 'init', session_id: session, model: 'claude-haiku-4-5' });
+    const channel: LineChannel = { send: () => {}, onLine: listener => listener(early), onClose: () => {}, close: () => {} };
+    expect(() => claudeClient(channel, () => {}, { cwd: '/work/project' })).not.toThrow();
+  });
+
   it('initialises with its SDK MCP server, serves the handshake, and reports in with the hook\'s nonce once it knows the version', async () => {
     await sessionFrom('session-steer-compact.jsonl');
     const { sent, of } = await launched({ model: { model: 'haiku', effort: 'low' } });
@@ -496,8 +503,8 @@ describe('the Claude client', () => {
     expect(of('conversation')).toEqual([]);
     play(fixture('initialize-again.jsonl'));
     await vi.waitFor(() => expect(of('history')).toHaveLength(1));
-    // this Conversation has no name: neither a title nor a prompt typed in the TUI
-    expect(of('conversation')).toEqual([{ type: 'conversation', id: session }]);
+    // with no title, the Conversation is named by the first prompt it was sent
+    expect(of('conversation')).toEqual([{ type: 'conversation', id: session, name: expect.stringMatching(/^Use the Bash tool to run exactly: touch /u) }]);
     // the Turn in flight stays open in the history
     expect(of('history')[0]!.items.at(-1)).toMatchObject({ kind: 'message', role: 'assistant' });
     expect(of('report')).toEqual([]);

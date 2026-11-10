@@ -24,3 +24,5 @@ Every Agent has been a tmux pane. Every operation (submit, cancel, answer, close
 - **Launch returns the new Agent's id.** Waiting for a new pane to appear becomes the tmux Transport's internal concern.
 - **The first step changes no behaviour.** The seam is introduced with only the tmux Transport behind it, and afterwards nothing outside it calls tmux with an Agent's pane.
 - **A Workspace has a tmux session; it is not one.** Its session still holds its Terminals and tmux Agents, placed by the session mark (ADR 0009). Its structured Agents are recorded at its Place, and launching one creates the session if it is missing.
+
+*Amended by ADR 0021 (2026-11-10):* Claude now launches over either Transport, chosen for new launches by `adapters.claude.transport` (tmux by default). A kind registered for both publishes its capability per Transport, and an Agent's own capability is that of the Transport it runs over.

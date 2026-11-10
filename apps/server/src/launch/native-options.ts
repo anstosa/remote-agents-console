@@ -152,20 +152,8 @@ function claudeOptions(choice: NativeLaunchChoice): string[] {
   return flags;
 }
 
-// retain console-owned Claude settings arguments
-function claudeSettings(adapterArgs: readonly string[]): string[] {
-  const kept: string[] = [];
-  // copy only settings pairs
-  for (let index = 0; index < adapterArgs.length; index += 1) {
-    if (adapterArgs[index] !== '--settings' || adapterArgs[index + 1] === undefined) continue;
-    kept.push('--settings', adapterArgs[index + 1]!);
-    index += 1;
-  }
-  return kept;
-}
-
 /** compile one complete native argv, with operator conflicts removed before canonical flags. */
-export function compileNativeLaunch(kind: AgentKind, input: LaunchInput, operatorArgs: readonly string[], choice: NativeLaunchChoice | undefined, adapterSpec: LaunchSpec): LaunchSpec {
+export function compileNativeLaunch(kind: AgentKind, input: Pick<LaunchInput, 'mode' | 'conversationId'>, operatorArgs: readonly string[], choice: NativeLaunchChoice | undefined, adapterSpec: LaunchSpec): LaunchSpec {
   if (choice === undefined) return { ...adapterSpec, args: [...adapterSpec.args, ...operatorArgs] };
   if (kind === 'codex' || kind === 'omx') {
     const security = choice.security ?? {};
@@ -210,12 +198,9 @@ export function compileNativeLaunch(kind: AgentKind, input: LaunchInput, operato
     const permissionsOwned = choice.security?.permissions !== undefined && choice.security.permissions !== 'inherit';
     const owned = [...(choice.model === undefined ? [] : [claudeModel, claudeEffort]), ...(permissionsOwned ? claudePermissions : [])];
     const operatorTail = withoutOwned(operatorArgs, owned, new Set());
-    const options = claudeOptions(choice);
-    const settings = claudeSettings(adapterSpec.args);
-    // preserve mode grammar and injected settings
-    if (input.mode === 'continue') return { ...adapterSpec, args: ['--continue', ...options, ...settings, ...operatorTail] };
-    if (input.mode === 'resume' && input.conversationId !== undefined) return { ...adapterSpec, args: ['--resume', input.conversationId, ...options, ...settings, ...operatorTail] };
-    return { ...adapterSpec, args: [...options, ...settings, ...operatorTail] };
+    // Claude's flags take no positionals, so the Adapter's own arguments (its mode, settings and,
+    // over the structured Transport, protocol) stay as they are, over either Transport
+    return { ...adapterSpec, args: [...adapterSpec.args, ...claudeOptions(choice), ...operatorTail] };
   }
   return { ...adapterSpec, args: [...adapterSpec.args, ...operatorArgs] };
 }

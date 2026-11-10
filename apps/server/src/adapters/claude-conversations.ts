@@ -1,6 +1,6 @@
-import { readdir, stat } from 'node:fs/promises';
+import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { readFileHead, readFileTail } from './bounded-file.js';
 import { FileChangeCache } from './file-change-cache.js';
 import type { ConversationSummary } from './types.js';
@@ -33,8 +33,8 @@ const maxTitleLength = 120;
 const maxListedTranscripts = 200;
 const maxListHeadBytes = 128 * 1024;
 const maxListTailBytes = 256 * 1024;
-// a `-p`/SDK run is persisted but hidden from Claude's own picker and `--continue`; its
-// message records carry one of these entrypoints (read from the head or the tail).
+// a `-p`/SDK run is persisted but hidden from Claude's own picker; its records carry one of
+// these entrypoints
 const sdkEntrypoints = new Set(['sdk-cli', 'sdk-ts', 'sdk-py']);
 // bound the final-message read: the reply sits at the transcript's end, and a Review run's
 // JSON reply may run to hundreds of kilobytes once escaped
@@ -86,6 +86,7 @@ function encodeProject(cwd: string): string {
 
 type TranscriptRecord = {
   type?: string;
+  attachment?: { type?: unknown; hookEvent?: unknown; stdout?: unknown };
   customTitle?: unknown;
   aiTitle?: unknown;
   promptSource?: unknown;
@@ -94,6 +95,14 @@ type TranscriptRecord = {
 };
 
 type TranscriptTitle = { customTitle?: string; aiTitle?: string; firstPrompt?: string };
+
+// a record's prompt when it is one a person wrote: typed in the TUI, or sent over the structured
+// Transport (`sdk`), never a command, its output or the CLI's own meta records
+function writtenPrompt(record: TranscriptRecord & { isMeta?: unknown }): string | undefined {
+  if (record.type !== 'user' || record.isMeta === true || typeof record.message?.content !== 'string' || record.message.content.length === 0) return undefined;
+  const typed = record.promptSource === 'typed' && record.origin?.kind === 'human';
+  return typed || record.promptSource === 'sdk' && !/^[</]/u.test(record.message.content) ? record.message.content : undefined;
+}
 
 // parse the bounded title window without retaining raw transcript text
 function transcriptTitle(lines: Iterable<string>): TranscriptTitle {
@@ -110,8 +119,8 @@ function transcriptTitle(lines: Iterable<string>): TranscriptTitle {
     // several records of each kind per file; the last in the scanned window wins
     if (record.type === 'custom-title' && typeof record.customTitle === 'string' && record.customTitle.length > 0) customTitle = record.customTitle;
     else if (record.type === 'ai-title' && typeof record.aiTitle === 'string' && record.aiTitle.length > 0) aiTitle = record.aiTitle;
-    // retain the first typed human prompt as the fallback
-    else if (firstPrompt === undefined && record.type === 'user' && record.promptSource === 'typed' && record.origin?.kind === 'human' && typeof record.message?.content === 'string' && record.message.content.length > 0) firstPrompt = record.message.content;
+    // retain the first prompt a person wrote as the fallback
+    else firstPrompt ??= writtenPrompt(record);
   }
   return { customTitle, aiTitle, firstPrompt };
 }
@@ -163,8 +172,24 @@ export async function claudeConversationName(id: string, cwd: string | undefined
   return compactTitle((title.customTitle ?? await sidecarCustomTitle(path, id)) ?? title.aiTitle ?? title.firstPrompt ?? '');
 }
 
-// what one transcript's bounded head+tail scan yields for listing
-type TranscriptScan = { customTitle?: string; aiTitle?: string; lastActiveAt: number; sdk: boolean };
+/**
+ * The launch nonce a SessionStart hook printed, as JSON `{ "rac": "<nonce>" }` on any line of its
+ * stdout: what the console's structured Claude launches echo (`claude-hooks.ts`).
+ */
+export function claudeHookNonce(stdout: unknown): string | undefined {
+  if (typeof stdout !== 'string') return undefined;
+  for (const line of stdout.split('\n')) {
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (typeof parsed === 'object' && parsed !== null && typeof (parsed as { rac?: unknown }).rac === 'string') return (parsed as { rac: string }).rac;
+    } catch { /* another hook's output */ }
+  }
+  return undefined;
+}
+
+// what one transcript's bounded head+tail scan yields for listing: its window's first entrypoint
+// and written prompt, and whether a console launch's SessionStart hook ran in it (`launched`)
+type TranscriptScan = { customTitle?: string; aiTitle?: string; lastActiveAt: number; entrypoint?: string; firstPrompt?: string; launched: boolean };
 
 // accumulate a transcript's name, recency and provenance from raw JSONL lines. Called on
 // the head then the tail, so the last `custom-title`/`ai-title` seen (nearest the tail)
@@ -176,8 +201,9 @@ function scanTranscript(lines: Iterable<string>, scan: TranscriptScan): void {
     try { record = JSON.parse(line) as typeof record; } catch { continue; }
     if (record.type === 'custom-title' && typeof record.customTitle === 'string' && record.customTitle.length > 0) scan.customTitle = record.customTitle;
     else if (record.type === 'ai-title' && typeof record.aiTitle === 'string' && record.aiTitle.length > 0) scan.aiTitle = record.aiTitle;
-    // `--print`/SDK runs are hidden from the picker; their marker sits on message records
-    if (typeof record.entrypoint === 'string' && sdkEntrypoints.has(record.entrypoint)) scan.sdk = true;
+    if (scan.entrypoint === undefined && typeof record.entrypoint === 'string') scan.entrypoint = record.entrypoint;
+    scan.firstPrompt ??= writtenPrompt(record);
+    if (record.type === 'attachment' && record.attachment?.type === 'hook_success' && record.attachment.hookEvent === 'SessionStart' && claudeHookNonce(record.attachment.stdout) !== undefined) scan.launched = true;
     // last-active is the newest timestamped record, never the file mtime (bookkeeping
     // records without timestamps are appended at open/close and would move mtime)
     if (typeof record.timestamp === 'string') {
@@ -189,7 +215,7 @@ function scanTranscript(lines: Iterable<string>, scan: TranscriptScan): void {
 
 // parse one bounded listing window into compact fields
 function transcriptScan(lines: Iterable<string>): TranscriptScan {
-  const scan: TranscriptScan = { lastActiveAt: 0, sdk: false };
+  const scan: TranscriptScan = { lastActiveAt: 0, launched: false };
   scanTranscript(lines, scan);
   return scan;
 }
@@ -204,30 +230,31 @@ const summaryTailCache = new FileChangeCache(
   { maxEntries: 512 }
 );
 
-// summarize one transcript, or undefined when it is an SDK run or carries no name
+// summarize one transcript, or undefined when it began as an SDK run the console did not launch
+// as a structured Agent (a headless Review run, ADR 0010) or carries no name
 async function summarizeTranscript(path: string, size: number, id: string, directory: string): Promise<ConversationSummary | undefined> {
   const head = await summaryHeadCache.get(path).catch(() => undefined);
   // an unreadable head cannot identify a conversation
   if (head === undefined) return undefined;
   // read the tail too only when the file exceeds the head window; a smaller file was read whole
   const tail = size > maxListHeadBytes ? await summaryTailCache.get(path).catch(() => undefined) : undefined;
-  const scan: TranscriptScan = {
-    customTitle: tail?.customTitle ?? head.customTitle,
-    aiTitle: tail?.aiTitle ?? head.aiTitle,
-    lastActiveAt: Math.max(head.lastActiveAt, tail?.lastActiveAt ?? 0),
-    sdk: head.sdk || tail?.sdk === true
-  };
-  if (scan.sdk) return undefined;
+  // how a Conversation began says what it is, whichever Transport resumed it since: a structured
+  // Agent's starts with its launch's SessionStart hook. A head too long to parse (one huge first
+  // record) leaves the tail to say whether it is an SDK run.
+  const entrypoint = head.entrypoint ?? tail?.entrypoint;
+  if (entrypoint !== undefined && sdkEntrypoints.has(entrypoint) && !head.launched) return undefined;
   // the sidecar is an equal source for the human name (as in `claudeConversationName`):
   // it recovers a `custom-title` set long ago that fell outside the bounded window with no
   // re-emit, so a human-named row is neither mislabelled automatic nor dropped. Consulted
   // only when the window found no `custom-title`; a genuinely automatic row has no sidecar
   // directory, so the read fails fast.
-  const customTitle = scan.customTitle ?? await sidecarCustomTitle(path, id);
-  const name = compactTitle((customTitle ?? scan.aiTitle) ?? '');
-  // list only Named conversations — a transcript with neither title is unnamed
+  const customTitle = tail?.customTitle ?? head.customTitle ?? await sidecarCustomTitle(path, id);
+  // print mode writes no `ai-title`, so a Conversation the console launched is named by its first
+  // prompt until it is renamed
+  const name = compactTitle((customTitle ?? tail?.aiTitle ?? head.aiTitle ?? (head.launched ? head.firstPrompt : undefined)) ?? '');
+  // list only Named conversations — a transcript with no title (and no such prompt) is unnamed
   if (name === undefined) return undefined;
-  return { id, name, automatic: customTitle === undefined, lastActiveAt: scan.lastActiveAt, directory };
+  return { id, name, automatic: customTitle === undefined, lastActiveAt: Math.max(head.lastActiveAt, tail?.lastActiveAt ?? 0), directory };
 }
 
 /**
@@ -235,7 +262,8 @@ async function summarizeTranscript(path: string, size: number, id: string, direc
  * (most recently active) first across all of them. For each directory the reader lists
  * the top-level `<uuid>.jsonl` transcripts under `projects/<encoded cwd>/`, skips 0-byte
  * files, opens only the newest 200 by mtime (mtime only ever runs ahead of activity, so
- * it is a safe pre-filter), and skips SDK/`--print` runs and any transcript with no name.
+ * it is a safe pre-filter), and skips a transcript that began as an SDK/`--print` run, unless the
+ * console launched it as a structured Agent, and any transcript with no name.
  * A missing or unreadable project directory contributes nothing. `directory` on each row
  * is the scanned cwd, matched exactly as Claude's own picker does.
  */
@@ -396,4 +424,63 @@ export async function claudeConversationLatestMessage(pane: { pid: number; cwd?:
 export async function claudeTranscriptRecords(id: string, cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<string[] | undefined> {
   if (!validClaudeSessionId(id)) return undefined;
   return readFileTail(transcriptPath(id, cwd, env), maxHistoryScanBytes).catch(() => undefined);
+}
+
+/** The reference a structured Claude launch resumes: the session id, once its transcript exists under `cwd`'s project directory. */
+export async function locateClaudeSession(id: string, cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+  if (!validClaudeSessionId(id)) return undefined;
+  return (await stat(transcriptPath(id, cwd, env)).catch(() => undefined))?.isFile() === true ? id : undefined;
+}
+
+/**
+ * The newest Conversation listed for `cwd`, which a structured launch that continues the latest
+ * one resumes (`claude -p --continue` would take a headless Review run, which is not listed).
+ */
+export async function latestClaudeConversation(cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+  return (await claudeConversationSummaries([cwd], env))[0]?.id;
+}
+
+// the folders Claude trusts, from the `projects` of its global config; read whole, since a
+// cut file is no record at all, and kept until the file changes
+const maxGlobalConfigBytes = 64 * 1024 * 1024;
+const trustedFolders = new FileChangeCache<readonly string[]>(async path => {
+  if ((await stat(path)).size > maxGlobalConfigBytes) throw new Error('Claude\'s global config is too large to read');
+  const { projects } = JSON.parse(await readFile(path, 'utf8')) as { projects?: unknown };
+  if (typeof projects !== 'object' || projects === null) return [];
+  return Object.entries(projects).flatMap(([folder, project]) => (project as { hasTrustDialogAccepted?: unknown } | null)?.hasTrustDialogAccepted === true ? [folder] : []);
+}, { maxEntries: 4 });
+
+// The folder Claude keys a project's trust by: inside git, the main worktree's top level (so a
+// linked worktree shares its main one's), found from `.git` as git finds it; elsewhere the folder.
+// Real paths throughout, as Claude resolves them.
+async function trustKey(cwd: string): Promise<string> {
+  const folder = await realpath(cwd);
+  for (let dir = folder; ; dir = dirname(dir)) {
+    const dotGit = join(dir, '.git');
+    const info = await lstat(dotGit).catch(() => undefined);
+    if (info?.isDirectory() === true) return dir;
+    if (info?.isFile() === true) {
+      // a linked worktree's (or submodule's) `.git` file names its git directory, whose `commondir`
+      // is the main repository's `.git`
+      const gitdir = /^gitdir:\s*(.+)$/mu.exec(await readFile(dotGit, 'utf8'))?.[1]?.trim();
+      if (gitdir === undefined) return dir;
+      const own = resolve(dir, gitdir);
+      const common = await readFile(join(own, 'commondir'), 'utf8').then(text => resolve(own, text.trim()), () => undefined);
+      return common !== undefined && basename(common) === '.git' ? await realpath(dirname(common)).catch(() => dir) : dir;
+    }
+    if (dirname(dir) === dir) return folder;
+  }
+}
+
+/**
+ * Whether Claude trusts `cwd` as its TUI's trust dialog records it, by Claude's own rule: the
+ * exact key of the folder (`trustKey`) in `projects` with `hasTrustDialogAccepted`, never a folder
+ * above it. Print mode skips that dialog and takes every folder as trusted, so the console asks
+ * first. The record is the launch's own: `$CLAUDE_CONFIG_DIR/.claude.json` when its environment
+ * names a config directory, else `.claude.json` in its home. False when it cannot be read.
+ */
+export async function claudeFolderTrusted(cwd: string, env: { HOME?: string; CLAUDE_CONFIG_DIR?: string }): Promise<boolean> {
+  const path = env.CLAUDE_CONFIG_DIR === undefined ? join(env.HOME ?? homedir(), '.claude.json') : join(env.CLAUDE_CONFIG_DIR, '.claude.json');
+  const [folders, key] = await Promise.all([trustedFolders.get(path).catch(() => undefined), trustKey(cwd).catch(() => undefined)]);
+  return folders !== undefined && key !== undefined && folders.includes(key);
 }

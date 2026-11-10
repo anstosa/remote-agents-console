@@ -27,10 +27,10 @@ import { serverCheckout } from '../workspaces/server-checkout.js';
 import { inheritedHomeEnvironment, resolveLaunchUserHome } from '../places/launch-home.js';
 import { compileNativeLaunch } from './native-options.js';
 import { resolveAllowedLaunchModel } from './options.js';
-import type { PreparedLaunchChoice } from './options-types.js';
+import type { NativeLaunchSecurity, PreparedLaunchChoice } from './options-types.js';
 
 /** How a structured Agent launches: resuming one Conversation, continuing the latest, or a new one on a chosen model; Sandboxed or not. */
-export type StructuredLaunchOptions = { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; nativeDefaultValidated?: true };
+export type StructuredLaunchOptions = { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; security?: NativeLaunchSecurity; nativeDefaultValidated?: true };
 
 export function expandCommand(command: string, worktree: Pick<Worktree, 'identity'>): string {
   const directory = `'${worktree.identity.replaceAll("'", "'\\''")}'`;
@@ -587,7 +587,7 @@ export class LaunchService implements HolderWindows {
       const validatedModel = resolveAllowedLaunchModel(kind, this.config.adapters[kind], model, { nativeDefaultValidated: prepared !== undefined });
       model = prepared === undefined ? validatedModel : model === undefined ? undefined : { ...model };
       // a structured Agent runs under a holder rather than in a pane (ADR 0015)
-      if (launchTransport(kind, this.config.adapters) === 'structured') return await this.launchStructured(place, kind, { ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, sandboxed), ...(prepared === undefined ? {} : { nativeDefaultValidated: true as const }) });
+      if (launchTransport(kind, this.config.adapters) === 'structured') return await this.launchStructured(place, kind, { ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, sandboxed), ...(prepared === undefined ? {} : { security: prepared.security, nativeDefaultValidated: true as const }) });
       // under the Docker bridge the host-visible path is what the host tmux can cd into; HOME is
       // the default account home for every directory-Project and Scratch launch
       const site: LaunchSite = { cwd: placeHostRoot(place), home: this.agentHome() };
@@ -706,18 +706,19 @@ export class LaunchService implements HolderWindows {
   }
 
   // resume the previous conversation (Codex: `codex resume --last`), no shell alias
-  async resume(worktreeId: string, kind?: AgentKind, prepared?: PreparedLaunchChoice): Promise<boolean> {
-    return await this.launchWorktree(worktreeId, { mode: 'continue', ...(kind === undefined ? {} : { kind }), ...(prepared === undefined ? {} : { prepared, model: prepared.model }) });
+  // (`kept` is the model a restart keeps, which a kind whose resume does not restore it is named)
+  async resume(worktreeId: string, kind?: AgentKind, prepared?: PreparedLaunchChoice, kept?: ModelSetting): Promise<boolean> {
+    return await this.launchWorktree(worktreeId, { mode: 'continue', ...(kind === undefined ? {} : { kind }), ...(prepared === undefined ? {} : { prepared, model: prepared.model }), ...(kept === undefined ? {} : { kept }) });
   }
 
   // resume one exact listed conversation by its id, through its Adapter kind
-  async resumeConversation(worktreeId: string, threadId: string, kind?: AgentKind, prepared?: PreparedLaunchChoice): Promise<boolean> {
+  async resumeConversation(worktreeId: string, threadId: string, kind?: AgentKind, prepared?: PreparedLaunchChoice, kept?: ModelSetting): Promise<boolean> {
     // validate the id through the resuming Adapter rather than a hard-coded UUID pattern, so a
     // kind whose ids are not UUIDs still resumes; a validated id also keeps the host command
     // free of shell input, whether the id is quoted or substituted
     const resumeKind = kind ?? await this.resolveLaunchKind(worktreeId);
     if (resumeKind === undefined || (adapterFor(resumeKind) ?? structuredAdapterFor(resumeKind))?.conversations?.validId(threadId) !== true) return false;
-    return await this.launchWorktree(worktreeId, { mode: 'resume', conversationId: threadId, kind: resumeKind, ...(prepared === undefined ? {} : { prepared, model: prepared.model }) });
+    return await this.launchWorktree(worktreeId, { mode: 'resume', conversationId: threadId, kind: resumeKind, ...(prepared === undefined ? {} : { prepared, model: prepared.model }), ...(kept === undefined ? {} : { kept }) });
   }
 
   // expose exact-resume support before destructive lifecycle work: a known Worktree
@@ -727,7 +728,7 @@ export class LaunchService implements HolderWindows {
   }
 
   // start one worktree in the requested mode, composing its command from the Adapter
-  private async launchWorktree(worktreeId: string, input: { mode: LaunchMode; conversationId?: string; sandboxed?: boolean; kind?: AgentKind; model?: ModelSetting; spawnedBy?: string; prepared?: PreparedLaunchChoice }): Promise<boolean> {
+  private async launchWorktree(worktreeId: string, input: { mode: LaunchMode; conversationId?: string; sandboxed?: boolean; kind?: AgentKind; model?: ModelSetting; kept?: ModelSetting; spawnedBy?: string; prepared?: PreparedLaunchChoice }): Promise<boolean> {
     const worktree = this.worktreeById(worktreeId);
     // Every refusal below logs its reason. The web only ever sees a bare "couldn't
     // start", so without this the operator has nothing to diagnose from — the cause
@@ -744,10 +745,11 @@ export class LaunchService implements HolderWindows {
       const structured = launchTransport(kind, this.config.adapters) === 'structured';
       const keepRestored = input.prepared?.keepCurrent === true || (structured && input.mode !== 'fresh' && input.model === undefined && input.prepared === undefined);
       const validatedModel = keepRestored ? undefined : resolveAllowedLaunchModel(kind, this.config.adapters[kind], input.model, { nativeDefaultValidated: input.prepared !== undefined });
-      const model = input.prepared === undefined ? validatedModel : input.model === undefined ? undefined : { ...input.model };
+      // a restart keeping its model names it to a kind whose resume does not restore it
+      const model = input.prepared === undefined ? validatedModel : input.model === undefined ? keepRestored && structured && structuredAdapterFor(kind)?.launchSetsModel === true ? input.kept : undefined : { ...input.model };
       let launched: boolean;
       if (structured) {
-        launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.mode === 'continue' ? { continue: true as const } : {}), ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, input.prepared?.security.sandbox === 'off' ? false : input.prepared?.security.sandbox === 'on' ? true : input.sandboxed), ...(input.prepared === undefined ? {} : { nativeDefaultValidated: true as const }) });
+        launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.mode === 'continue' ? { continue: true as const } : {}), ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, input.prepared?.security.sandbox === 'off' ? false : input.prepared?.security.sandbox === 'on' ? true : input.sandboxed), ...(input.prepared === undefined ? {} : { security: input.prepared.security, nativeDefaultValidated: true as const }) });
       } else {
         const id = randomBytes(18).toString('base64url');
         // a tmux launch is never Sandboxed by the console here

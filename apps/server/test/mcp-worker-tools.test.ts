@@ -9,6 +9,7 @@ const worktree = { id: 'worktree-1', kind: 'worktree', projectId: 'project-1', h
 type WorkerFixtureOptions = {
   allowed?: Partial<Record<'pi' | 'claude' | 'codex', Array<{ model: string }> | undefined>>;
   maxWorkers?: number;
+  claudeTransport?: 'tmux' | 'structured';
   launch?: DeveloperWorkerDependencies['structured']['launch'];
 };
 
@@ -33,7 +34,7 @@ function fixture(options: WorkerFixtureOptions = {}) {
       conductor: { spawnKinds: ['pi', 'claude', 'codex'], maxWorkers: options.maxWorkers ?? 4 },
       adapters: {
         pi: { allowedModels: allowed.pi },
-        claude: { allowedModels: allowed.claude },
+        claude: { allowedModels: allowed.claude, transport: options.claudeTransport ?? 'structured' },
         codex: { allowedModels: allowed.codex }
       },
       projects: [{ id: 'project-1', mode: 'repository' }]
@@ -70,16 +71,18 @@ describe('Davo worker tools', () => {
     expect(fx.close).toHaveBeenCalledWith('worker-1');
   });
 
-  it('sandboxes only Pi while launching configured Claude and Codex natively', async () => {
+  it('sandboxes only Pi, launches a structured Claude unsandboxed, and refuses a kind its config launches in a pane', async () => {
     const fx = fixture();
     await call(fx, 'spawn_agent', { worktree_id: worktree.id, kind: 'pi', model: 'pi-model', request_id: 'request-1001' });
     await call(fx, 'spawn_agent', { worktree_id: worktree.id, kind: 'claude', model: 'claude-model', request_id: 'request-1002' });
-    await call(fx, 'spawn_agent', { worktree_id: worktree.id, kind: 'codex', model: 'codex-model', request_id: 'request-1003' });
+    await expect(call(fx, 'spawn_agent', { worktree_id: worktree.id, kind: 'codex', model: 'codex-model', request_id: 'request-1003' })).resolves.toMatchObject({ ok: false, error: { code: 'capability_not_supported' } });
     expect(fx.launch.mock.calls.map(call => [call[1], call[2]?.sandboxed, call[2]?.model])).toEqual([
       ['pi', true, { model: 'pi-model' }],
-      ['claude', false, { model: 'claude-model' }],
-      ['codex', false, { model: 'codex-model' }]
+      ['claude', false, { model: 'claude-model' }]
     ]);
+    const tmux = fixture({ claudeTransport: 'tmux' });
+    await expect(call(tmux, 'spawn_agent', { worktree_id: worktree.id, kind: 'claude', request_id: 'request-1004' })).resolves.toMatchObject({ ok: false, error: { code: 'capability_not_supported' } });
+    expect(tmux.launch).not.toHaveBeenCalled();
   });
 
   it('distinguishes native-default omission, explicit model policy, and an explicit empty policy', async () => {

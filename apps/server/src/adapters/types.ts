@@ -484,13 +484,16 @@ export interface StructuredAdapter {
   /**
    * The kind's Conversation store: the Named conversations under directories (`list`), a
    * Conversation's name (`readName`), and the reference a launch resumes and a switch takes
-   * (`locate`), each for a Conversation started in `cwd`.
+   * (`locate`), each for a Conversation started in `cwd`. With `latest`, a launch that continues
+   * the latest Conversation resumes the one it names (a new one when none) rather than leaving
+   * the choice to the CLI.
    */
   readonly conversations: {
     validId(id: string): boolean;
     list(directories: readonly string[]): Promise<ConversationSummary[]>;
     readName(id: string, cwd?: string): Promise<string | undefined>;
     locate(id: string, cwd: string): Promise<string | undefined>;
+    latest?(cwd: string): Promise<string | undefined>;
   };
   /** whether its protocol client can steer a working Agent */
   readonly steers: boolean;
@@ -500,6 +503,24 @@ export interface StructuredAdapter {
   readonly files?: (context: AdapterFileContext) => Record<string, string>;
   /** The kind confines its own tool calls when launched Sandboxed, failing its launch if it cannot. */
   readonly sandbox?: true;
+  /**
+   * The operator arguments its launch composes itself, or that would break its protocol client,
+   * each with the values it takes: dropped from every launch of it, whatever the boot dropped.
+   */
+  readonly conflictingArgs?: ReadonlyMap<string, ReplacedFlagValue>;
+  /**
+   * What a launch in a folder the CLI itself does not trust yet adds (`args`) and drops from the
+   * operator's arguments (`reserved`), and the notice the Agent shows for it; undefined where the
+   * CLI trusts the folder. `env` is the launch's home and the operator's configured environment.
+   */
+  untrusted?(cwd: string, env: Record<string, string>): Promise<{ args: string[]; reserved: ReadonlyMap<string, ReplacedFlagValue>; notice: string } | undefined>;
+  /**
+   * Its process runs on the model and Effort its launch names: a resume does not restore the
+   * Conversation's, so the console names the Agent's, and a new Effort takes a new process.
+   */
+  readonly launchSetsModel?: true;
+  /** With no Allowed models configured, its Agents may switch to any model their client lists. */
+  readonly modelsWithoutPolicy?: true;
 }
 /**
  * What a structured launch starts: a new Conversation, the one at `resume` (located by the
@@ -523,7 +544,8 @@ export type AllowedModel = { model: string; effort?: string };
  */
 /** Trusted shell commands used to inspect and update one configured agent CLI. */
 export type AdapterUpdateCommands = { current: string; latest: string; run: string };
-export type AdapterLaunchConfig = { program: string; args: string[]; env: Record<string, string>; launchable: boolean; unavailableReason?: string; setup?: string; teardown?: string; updates?: AdapterUpdateCommands; allowedModels?: AllowedModel[]; sandbox?: SandboxSettings };
+// `transport` is the one a kind registered for both launches over (default tmux, ADR 0021)
+export type AdapterLaunchConfig = { program: string; args: string[]; env: Record<string, string>; launchable: boolean; unavailableReason?: string; setup?: string; teardown?: string; updates?: AdapterUpdateCommands; allowedModels?: AllowedModel[]; sandbox?: SandboxSettings; transport?: Transport };
 /** The configured adapters, keyed by kind; empty for an observe-only console. */
 export type AdapterConfigs = Partial<Record<AgentKind, AdapterLaunchConfig>>;
 

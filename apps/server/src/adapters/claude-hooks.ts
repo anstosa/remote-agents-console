@@ -69,3 +69,11 @@ export function claudeHooksJson(context: AdapterFileContext): string {
 export function claudeFiles(context: AdapterFileContext): Record<string, string> {
   return { [claudeHooksFileName]: claudeHooksJson(context) };
 }
+
+// The structured Claude's settings, passed inline (`--settings <json>`) rather than rendered: a
+// file beside `hooks.json` would be one more console-owned file a sandboxed model could rewrite,
+// and Claude's sandbox protects only the session's own settings. Unlike `hooks.json` they report
+// nothing into tmux (the holder's `$TMUX_PANE` is not an Agent's pane) and arm no Calendar
+// lifecycle, which follows prompts over tmux only. The one hook echoes the launch's nonce as JSON,
+// which the CLI keeps out of the model's context and the Claude client reads from `hook_response`.
+export const claudeStructuredSettings = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', timeout: 5, command: `printf '{"suppressOutput":true,"rac":"%s"}\\n' "$RAC_LAUNCH_NONCE"` } satisfies CommandHandler] }] } });

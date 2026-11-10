@@ -51,7 +51,7 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
 // reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
-function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], initialModel = undefined as ModelSetting | undefined, synchronousInitialModel = false, switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], synchronousAttached = false, gone = false, sandboxFails = false, nonce = undefined as string | undefined, sandboxGeneration = undefined as string | undefined, sandboxGenerationFails = false, stopFails = false, bridged = false, compacting = Promise.resolve(), switchesInPlace = true } = {}) {
+function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], initialModel = undefined as ModelSetting | undefined, synchronousInitialModel = false, switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], synchronousAttached = false, gone = false, sandboxFails = false, nonce = undefined as string | undefined, sandboxGeneration = undefined as string | undefined, sandboxGenerationFails = false, stopFails = false, bridged = false, compacting = Promise.resolve(), switchesInPlace = true, notice = undefined as string | undefined } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -123,7 +123,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
         else setTimeout(() => events({ type: 'model', current: initialModel }), 0);
       }
       if (exits) setTimeout(() => emit({ type: 'exited' }), 10);
-      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9', ...(bridged ? { host: true as const, tmuxSocket: '/host-tmux/default' } : {}), ...(sandboxGeneration === undefined ? {} : { sandboxGeneration }) }, connection: connection(), cursor: () => lines, raw: () => raw?.(grants.at(-1)?.token ?? '') ?? [{ from: 'agent' as const, line: '{"type":"agent_start"}' }] };
+      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9', ...(bridged ? { host: true as const, tmuxSocket: '/host-tmux/default' } : {}), ...(sandboxGeneration === undefined ? {} : { sandboxGeneration }) }, connection: connection(), cursor: () => lines, raw: () => raw?.(grants.at(-1)?.token ?? '') ?? [{ from: 'agent' as const, line: '{"type":"agent_start"}' }], ...(notice === undefined ? {} : { notice }) };
     },
     attach: async (holder, _kind, events) => {
       attaches.push(holder);
@@ -239,6 +239,104 @@ describe('a structured Agent over HTTP', () => {
     await app.close();
   });
 
+  it('keeps a structured Claude\'s permission choice and model when it resumes, and shows how its folder was launched', async () => {
+    const fake = fakeAgent({ notice: 'This folder isn\'t trusted by Claude yet.' });
+    const claude = { program: '/usr/local/bin/claude', args: [], env: {}, launchable: true, transport: 'structured' as const };
+    const launchOptions = new LaunchOptionsService({ claude }, { capabilities: async () => ({ model: true, effort: true, permissions: true }) });
+    const { app, headers, dashboardAgent, root } = await consoleWith(fake, { config: { adapters: { claude } }, deps: { launchOptions } });
+    vi.stubEnv('RAC_CLAUDE_CONFIG_DIR', join(root, 'claude'));
+    await claudeSession(join(root, 'claude'), root, '0199a4e1-c0b7-4a90-bf22-abcdef012345');
+    const launched = await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'claude', security: { permissions: 'plan' } } });
+    expect(launched.statusCode).toBe(201);
+    const id: string = launched.json().agentId;
+    expect(fake.launches.at(-1)).toMatchObject({ kind: 'claude', security: { permissions: 'plan' } });
+    fake.emit({ type: 'conversation', id: '0199a4e1-c0b7-4a90-bf22-abcdef012345' });
+    fake.emit({ type: 'model', current: { model: 'opus', effort: 'high' } });
+    const transcript = async () => (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json().items;
+    expect(await transcript()).toContainEqual(expect.objectContaining({ kind: 'notice', text: 'This folder isn\'t trusted by Claude yet.' }));
+    // its process exits; resumed, it keeps the choice and names its model, which its resume would not restore
+    fake.emit({ type: 'exited' });
+    await vi.waitFor(async () => expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'exited' } }));
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/resume`, headers })).statusCode).toBe(204);
+    await vi.waitFor(() => expect(fake.launches).toHaveLength(2));
+    expect(fake.launches.at(-1)).toMatchObject({ kind: 'claude', resume: '0199a4e1-c0b7-4a90-bf22-abcdef012345', security: { permissions: 'plan' }, model: { model: 'opus', effort: 'high' } });
+    await app.close();
+  });
+
+  it('does not restore a dangerous permission choice from disk after the console restarts', async () => {
+    const fake = fakeAgent();
+    const claude = { program: '/usr/local/bin/claude', args: [], env: {}, launchable: true, transport: 'structured' as const };
+    const capabilities = async () => ({ model: true as const, effort: true as const, permissions: true as const });
+    const { app, headers, restart } = await consoleWith(fake, { config: { adapters: { claude } }, deps: { launchOptions: new LaunchOptionsService({ claude }, { capabilities }) } });
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'claude', security: { permissions: 'bypassPermissions' } } })).json().agentId;
+    expect(fake.launches.at(-1)).toMatchObject({ security: { permissions: 'bypassPermissions' } });
+    const strict: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'claude', security: { permissions: 'dontAsk' } } })).json().agentId;
+    const next = fakeAgent({ gone: true });
+    const restarted = await restart(next);
+    expect(await restarted.dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'exited' } });
+    expect((await restarted.app.inject({ method: 'POST', url: `/api/agents/${id}/resume`, headers: restarted.headers })).statusCode).toBe(204);
+    await vi.waitFor(() => expect(next.launches).toHaveLength(1));
+    expect(next.launches[0]!.security).toEqual({});
+    // a restrictive choice comes back: dropping it would loosen the Agent to the operator's default
+    expect((await restarted.app.inject({ method: 'POST', url: `/api/agents/${strict}/resume`, headers: restarted.headers })).statusCode).toBe(204);
+    await vi.waitFor(() => expect(next.launches).toHaveLength(2));
+    expect(next.launches[1]!.security).toEqual({ permissions: 'dontAsk' });
+    await restarted.app.close();
+  });
+
+  it('lets a structured Claude with no Allowed models switch to any model its client lists, and restarts it to take a new Effort', async () => {
+    const claudeModels = [{ id: 'opus', name: 'Opus', provider: 'anthropic', efforts: ['low', 'high'] }, { id: 'sonnet', name: 'Sonnet', provider: 'anthropic', efforts: ['low', 'high'] }];
+    const fake = fakeAgent({ models: claudeModels });
+    const claude = { program: '/usr/local/bin/claude', args: [], env: {}, launchable: true, transport: 'structured' as const };
+    const { app, headers, dashboardAgent, root } = await consoleWith(fake, { config: { adapters: { claude } } });
+    vi.stubEnv('RAC_CLAUDE_CONFIG_DIR', join(root, 'claude'));
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'claude' } })).json().agentId;
+    await claudeSession(join(root, 'claude'), root, '0199a4e1-c0b7-4a90-bf22-abcdef012345');
+    fake.emit({ type: 'conversation', id: '0199a4e1-c0b7-4a90-bf22-abcdef012345' });
+    fake.emit({ type: 'model', current: { model: 'opus', effort: 'high' } });
+    await vi.waitFor(async () => expect((await dashboardAgent(id)).structured.preparing).toBeUndefined());
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { switchable: true } });
+    expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/models`, headers })).json()).toEqual({ models: claudeModels, current: { model: 'opus', effort: 'high' } });
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: 'sonnet' } })).statusCode).toBe(204);
+    expect(fake.operations).toEqual(['model sonnet high']);
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: 'haiku' } })).statusCode).toBe(409);
+    // an Effort the model does not offer is refused
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: 'sonnet', effort: 'max' } })).statusCode).toBe(409);
+    // an Effort is a launch argument: the Agent restarts on its Conversation to take it
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: 'sonnet', effort: 'low' } })).statusCode).toBe(204);
+    expect(fake.launches.at(-1)).toMatchObject({ id, kind: 'claude', resume: '0199a4e1-c0b7-4a90-bf22-abcdef012345', model: { model: 'sonnet', effort: 'low' } });
+    expect(fake.operations).toEqual(['model sonnet high']);
+    // not while a steer waits for the CLI, which a restart would lose
+    fake.emit({ type: 'model', current: { model: 'sonnet', effort: 'low' } });
+    fake.emit({ type: 'steers', pending: ['Also the lexer'] });
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: 'sonnet', effort: 'high' } })).statusCode).toBe(409);
+    await app.close();
+  });
+
+  it('launches Claude over the structured Transport when its config names it, unsandboxed, and steers it', async () => {
+    const fake = fakeAgent();
+    const claude = { program: '/usr/local/bin/claude', args: [], env: {}, launchable: true, transport: 'structured' as const };
+    const { app, headers, dashboardAgent } = await consoleWith(fake, { config: { adapters: { claude } } });
+    expect((await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().adapters.claude).toMatchObject({ transport: 'structured', steer: true, sandbox: false, transports: { tmux: { steer: false } } });
+
+    const launched = await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'claude' } });
+    expect(launched.statusCode).toBe(201);
+    const id: string = launched.json().agentId;
+    expect(fake.launches).toMatchObject([{ kind: 'claude', sandboxed: false }]);
+    expect(await dashboardAgent(id)).toMatchObject({ kind: 'claude', transport: 'structured', panel: 'transcript', structured: { lifecycle: 'live' } });
+    expect((await dashboardAgent(id)).sandboxed).toBeUndefined();
+
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'Fix the parser', attachments: [] } })).statusCode).toBe(204);
+    expect(fake.delivered).toEqual(['Fix the parser']);
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    expect(await dashboardAgent(id)).toMatchObject({ attention: 'working' });
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/steer`, headers, payload: { prompt: 'Also the lexer' } })).statusCode).toBeLessThan(300);
+    expect(fake.steers()).toEqual(['Also the lexer']);
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'Done.' } });
+    expect(await dashboardAgent(id)).toMatchObject({ attention: 'finished' });
+    await app.close();
+  });
+
   it('shows its latest answer and recent lines to the console\'s MCP readers', async () => {
     const secret = Buffer.alloc(32, 7).toString('base64url');
     vi.stubEnv('RAC_SESSION_SECRET', secret);
@@ -324,6 +422,41 @@ describe('a structured Agent over HTTP', () => {
     expect(restarted.statusCode).toBe(201);
     expect(fake.launches.at(-1)).toMatchObject({ kind: 'pi', continue: true });
     expect(fake.launches.at(-1)!.model).toBeUndefined();
+    await app.close();
+  });
+
+  it('restarts a Pi on its own Conversation, or on a new one when that was never written, closing nothing first that it cannot relaunch', async () => {
+    const fake = fakeAgent();
+    const { app, headers, root } = await consoleWith(fake);
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0];
+    const id: string = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers, payload: { kind: 'pi' } })).json().agentId;
+    // reported, but with no prompt yet Pi has written no session file
+    fake.emit({ type: 'conversation', id: '01a188d1-e7d9-711a-aba8-381b96066aa5' });
+    const restarted = await app.inject({ method: 'POST', url: `/api/agents/${id}/restart`, headers });
+    expect(restarted.statusCode).toBe(201);
+    expect(fake.launches.at(-1)).toMatchObject({ kind: 'pi' });
+    expect(fake.launches.at(-1)!.resume).toBeUndefined();
+    expect(fake.launches.at(-1)!.continue).toBeUndefined();
+    // once written, a restart resumes it
+    const next: string = restarted.json().agentId;
+    await piSession(join(root, 'pi'), join(root, 'repo'), '01a188d1-e7d9-711a-aba8-381b96066aa5', 'Fix the parser');
+    fake.emitTo(next, { type: 'conversation', id: '01a188d1-e7d9-711a-aba8-381b96066aa5' });
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${next}/restart`, headers })).statusCode).toBe(201);
+    expect(fake.launches.at(-1)!.resume).toBe('01a188d1-e7d9-711a-aba8-381b96066aa5');
+    await app.close();
+  });
+
+  it('keeps no model on the record that could not be read back, and saves one reported again unchanged only once', async () => {
+    const fake = fakeAgent();
+    const { app, headers, root } = await consoleWith(fake);
+    await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } });
+    const stored = async () => JSON.parse(await readFile(join(root, 'structured-agents.json'), 'utf8')) as Array<{ model?: unknown }>;
+    fake.emit({ type: 'model', current: { model: '-bad model' } });
+    await vi.waitFor(async () => expect((await stored())[0]).toBeDefined());
+    expect((await stored())[0]!.model).toBeUndefined();
+    fake.emit({ type: 'model', current: { model: 'openai/gpt-5.6', effort: 'high' } });
+    await vi.waitFor(async () => expect((await stored())[0]!.model).toEqual({ model: 'openai/gpt-5.6', effort: 'high' }));
     await app.close();
   });
 
@@ -491,6 +624,13 @@ describe('a structured Agent over HTTP', () => {
 });
 
 // a Pi session file as Pi writes it, in the session directory of the folder it was started in
+// a Claude session transcript for `cwd`, so a resume finds it
+async function claudeSession(configDir: string, cwd: string, id: string): Promise<void> {
+  const project = join(configDir, 'projects', cwd.replace(/[^a-zA-Z0-9]/gu, '-'));
+  await mkdir(project, { recursive: true });
+  await writeFile(join(project, `${id}.jsonl`), `${JSON.stringify({ type: 'user', promptSource: 'sdk', entrypoint: 'sdk-cli', message: { content: 'hi' } })}\n`);
+}
+
 async function piSession(agentDir: string, cwd: string, id: string, name?: string): Promise<string> {
   const directory = join(agentDir, 'sessions', `--${cwd.slice(1).replaceAll('/', '-')}--`);
   await mkdir(directory, { recursive: true });
@@ -1943,9 +2083,9 @@ describe('the Conductor\'s dispatches', () => {
   const writable = { integrations: { enabled: false, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false }, realtime: { enabled: false, name: 'Davo', context: '', writeToolsEnabled: false }, multiInstance: { enabled: false } } };
   // a console whose Conductor is live, with MCP write tools enabled; `call` runs one of its tools
   // and answers the result's structured content
-  async function conducting(fake: ReturnType<typeof fakeAgent>, options: { conductor?: Partial<ConductorConfig>; deps?: Record<string, unknown>; panes?: Partial<Pane>[] } = {}) {
+  async function conducting(fake: ReturnType<typeof fakeAgent>, options: { conductor?: Partial<ConductorConfig>; deps?: Record<string, unknown>; panes?: Partial<Pane>[]; adapters?: ValidatedConfig['adapters'] } = {}) {
     await integrationFiles();
-    const console = await consoleWith(fake, { conductor: options.conductor ?? {}, config: writable, ...(options.deps === undefined ? {} : { deps: options.deps }), ...(options.panes === undefined ? {} : { panes: options.panes }) });
+    const console = await consoleWith(fake, { conductor: options.conductor ?? {}, config: { ...writable, ...(options.adapters === undefined ? {} : { adapters: options.adapters }) }, ...(options.deps === undefined ? {} : { deps: options.deps }), ...(options.panes === undefined ? {} : { panes: options.panes }) });
     await console.app.conductor.start();
     const conductor: string = (await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers })).json().agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor').id;
     let requests = 0;
@@ -2485,6 +2625,20 @@ describe('the Conductor\'s dispatches', () => {
     expect(await call('spawn_agent', { worktree_id: worktree.id })).toMatchObject({ ok: true });
     expect(fake.launches.at(-1)).toMatchObject({ kind: 'pi', sandboxed: true });
     expect(await call('spawn_agent', { worktree_id: worktree.id })).toMatchObject({ ok: false, error: { code: 'conflict' } });
+    await app.close();
+  });
+  it('spawns a structured Claude worker, where Claude is configured so, unsandboxed by the console', async () => {
+    const fake = fakeAgent();
+    const pi = { program: '/pinned/pi', args: [], env: {}, launchable: true, allowedModels: [{ model: 'openai/gpt-5.6' }] };
+    const claude = { program: '/usr/local/bin/claude', args: [], env: {}, launchable: true, transport: 'structured' as const };
+    const { app, headers, call, conductor, dashboardAgent } = await conducting(fake, { conductor: { spawnKinds: ['pi', 'claude'] }, adapters: { pi, claude } });
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects.find((project: { id: string }) => project.id !== 'home').worktrees[0];
+    const spawned = await call('spawn_agent', { worktree_id: worktree.id, kind: 'claude' });
+    expect(spawned).toMatchObject({ ok: true, data: { agent_id: expect.any(String) } });
+    expect(fake.launches.at(-1)).toMatchObject({ kind: 'claude', sandboxed: false });
+    const worker = await dashboardAgent(spawned.data.agent_id as string);
+    expect(worker).toMatchObject({ kind: 'claude', transport: 'structured', spawnedBy: conductor });
+    expect(worker.sandboxed).toBeUndefined();
     await app.close();
   });
   it('spawns no more workers than its cap when it asks for several at once', async () => {
