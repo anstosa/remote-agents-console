@@ -63,7 +63,7 @@ import { useFileOpenAction } from './file-open-action.js';
 import { saveFilesOpen, useFilesController, type FilesController } from './files-panel/controller.js';
 import type { FileEntry } from './files-panel/contracts.js';
 import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './settings/settings-center.js';
-import { SettingsHeaderActionsContext } from './settings/header-actions.js';
+import { SettingsHeaderActionsContext, SettingsHeaderSearchContext } from './settings/header-actions.js';
 import { isSettingsSnapshot, settingsResponseError } from './settings/contracts.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
 import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
@@ -1766,6 +1766,8 @@ const syncSettingsToastClearance = () => {
 function ClientSettingsPage({ panelRef, busy, hidden, onKeyDown, onClose, children }: { panelRef: React.RefObject<HTMLDivElement | null>; busy: boolean; hidden: boolean; onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void; onClose: () => void; children: ReactNode }) {
   const expanded = usePanelExpand('settings')?.expanded === true;
   const [actionsTarget, setActionsTarget] = useState<HTMLSpanElement | null>(null);
+  // retain one search mount through header and split layout changes
+  const [searchTarget, setSearchTarget] = useState<HTMLSpanElement | null>(null);
   // keep scrollable content below header actions when a narrow split wraps
   useLayoutEffect(() => {
     const panel = panelRef.current;
@@ -1793,7 +1795,7 @@ function ClientSettingsPage({ panelRef, busy, hidden, onKeyDown, onClose, childr
     if (event.key === 'Escape' && expanded) return;
     onKeyDown(event);
   };
-  return <SettingsHeaderActionsContext.Provider value={actionsTarget}><div ref={panelRef} id="global-settings-page" className={`client-settings-page settings-center-page${expanded ? ' expanded' : ''}${progressBorder(busy, 'blue')}`} role="dialog" aria-hidden={hidden || undefined} inert={hidden} aria-labelledby="global-settings-title" aria-busy={busy || undefined} tabIndex={-1} onKeyDown={panelKey}><ProgressRing busy={busy} /><PanelHeader panelKey="settings" label="settings" title={<h1 id="global-settings-title">Settings</h1>} actions={<span ref={setActionsTarget} className="settings-header-actions" />} close={{ key: 'close', label: 'Close settings', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} /><div className="client-settings-page-content">{children}</div></div></SettingsHeaderActionsContext.Provider>;
+  return <SettingsHeaderActionsContext.Provider value={actionsTarget}><SettingsHeaderSearchContext.Provider value={searchTarget}><div ref={panelRef} id="global-settings-page" className={`client-settings-page settings-center-page${expanded ? ' expanded' : ''}${progressBorder(busy, 'blue')}`} role="dialog" aria-hidden={hidden || undefined} inert={hidden} aria-labelledby="global-settings-title" aria-busy={busy || undefined} tabIndex={-1} onKeyDown={panelKey}><ProgressRing busy={busy} /><PanelHeader panelKey="settings" label="settings" titleControl={<><h1 id="global-settings-title" className="sr-only">Settings</h1><span ref={setSearchTarget} className="settings-header-search" /></>} actions={<span ref={setActionsTarget} className="settings-header-actions" />} close={{ key: 'close', label: 'Close settings', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} /><div className="client-settings-page-content">{children}</div></div></SettingsHeaderSearchContext.Provider></SettingsHeaderActionsContext.Provider>;
 }
 
 // scope split visibility while retaining one shared settings transaction

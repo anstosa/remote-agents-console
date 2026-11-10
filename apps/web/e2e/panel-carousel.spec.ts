@@ -56,6 +56,15 @@ const expectBottomBorder = async (target: Locator, label: string) => {
   expect(border.color, label).toBe(border.expectedColor);
 };
 
+// mobile panels stay borderless without suppressing their focus pseudo-elements
+const expectNoSplitBorder = async (target: Locator, label: string) => {
+  const edges = await target.evaluate(element => {
+    const style = getComputedStyle(element);
+    return [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth, style.boxShadow];
+  });
+  expect(edges, label).toEqual(['0px', '0px', '0px', '0px', 'none']);
+};
+
 // the carousel sits on a panel boundary: one panel fills the screen
 const expectSnapped = (page: Page) => expect.poll(() => carousel(page).evaluate(element => element.scrollLeft % element.clientWidth)).toBe(0);
 // the panel whose dot is current
@@ -308,7 +317,7 @@ test('the split indicator swipes in both directions without opening its menu', a
 });
 
 // preserve note navigation and the mobile editor's unsaved draft
-test('swiping a note in preview or edit mode changes splits', async ({ page }) => {
+test('swiping a note in preview or edit mode changes splits', async ({ page }, testInfo) => {
   await toolbar(page).getByRole('button', { name: 'Notes (1)' }).click();
   await page.getByRole('button', { name: 'Phone checklist…', exact: true }).click();
   const note = page.getByRole('dialog', { name: 'Note' });
@@ -322,11 +331,13 @@ test('swiping a note in preview or edit mode changes splits', async ({ page }) =
   await note.locator('.note-markdown').click({ position: { x: 20, y: 55 } });
   const editor = note.getByRole('textbox', { name: 'Note content' });
   await expect(editor).toBeVisible();
-  // a short edit viewport keeps the note accent on top, not beside the split
+  // short editing viewports remain borderless even when the wide-container rule applies
   await page.setViewportSize({ width: 428, height: 420 });
-  await expect(note).toHaveCSS('border-top-width', '1px');
-  await expect(note).toHaveCSS('border-left-width', '0px');
+  await page.screenshot({ path: testInfo.outputPath('editing-note-short.png') });
+  await expectNoSplitBorder(note, 'short phone editing Note');
   await page.setViewportSize({ width: 428, height: 880 });
+  await expectNoSplitBorder(note, 'portrait phone editing Note');
+  await page.screenshot({ path: testInfo.outputPath('editing-note-portrait.png') });
   await editor.fill('Phone checklist\nSwipe draft');
 
   // an editing note yields the same horizontal gesture without losing its draft
@@ -485,7 +496,7 @@ test.describe('desktop split focus', () => {
 });
 
 // keep each split edge visible while input footers sit below terminal content
-test('every split keeps its bottom border above any input footer', async ({ page }, testInfo) => {
+test('shows split borders only on desktop while keeping input footers flush', async ({ page }, testInfo) => {
   await openTerminal(page);
   await chooseSplit(page, 'Agent output');
   await toolbar(page).getByRole('button', { name: 'Notes (1)' }).click();
@@ -500,9 +511,11 @@ test('every split keeps its bottom border above any input footer', async ({ page
   const note = page.getByRole('dialog', { name: 'Note' });
   const browser = page.getByRole('dialog', { name: 'Browser' });
   const code = page.getByRole('region', { name: 'Code changes' });
-  // keep the content border directly above, never below, an input footer
-  const expectBorderAbove = async (panel: Locator, content: Locator, footer: Locator, label: string) => {
-    await expectBottomBorder(content, label);
+  // retain footer placement while limiting content separators to desktop
+  const expectBorderAbove = async (panel: Locator, content: Locator, footer: Locator, label: string, bordered = false) => {
+    // mobile content stays flush without a decorative separator
+    if (bordered) await expectBottomBorder(content, label);
+    else await expectNoSplitBorder(content, label);
     const placement = await Promise.all([panel, content, footer].map(locator => locator.evaluate(element => {
       const rect = element.getBoundingClientRect();
       return { top: rect.top, bottom: rect.bottom, borderBottom: getComputedStyle(element).borderBottomWidth };
@@ -517,15 +530,18 @@ test('every split keeps its bottom border above any input footer', async ({ page
   await page.screenshot({ path: testInfo.outputPath('split-bottom-borders-desktop.png'), fullPage: true });
   const prompt = agent.locator('.agent-composer');
   await expect(prompt).toBeVisible();
-  await expectBorderAbove(agent, agent.locator('.agent-output'), prompt, 'desktop Agent prompt');
+  await expectBorderAbove(agent, agent.locator('.agent-output'), prompt, 'desktop Agent prompt', true);
   await expect(terminal.getByLabel('Terminal keys')).toBeHidden();
   await expectBottomBorder(terminal.locator('.terminal-canvas'), 'desktop Terminal');
   await expectBottomBorder(note, 'desktop Note');
   await expectBottomBorder(browser, 'desktop Browser');
   await expectBottomBorder(code, 'desktop Code');
 
-  // phone agent prompt and input modes keep the separator above their alternate footers
+  // phone panels omit outer and content-edge borders in every input mode
   await page.setViewportSize({ width: 428, height: 880 });
+  await expectNoSplitBorder(note, 'phone Note');
+  await expectNoSplitBorder(browser, 'phone Browser');
+  await expectNoSplitBorder(code, 'phone Code');
   await chooseSplit(page, 'Agent output');
   await expectBorderAbove(agent, agent.locator('.agent-output'), prompt, 'phone Agent prompt');
   await agent.locator('.terminal-selection-surface').tap();
@@ -571,7 +587,7 @@ test('expand hides the tab row and toolbar for every panel kind, and restore bri
       await expect(toolbar(page).getByRole('button', { name: 'Open a terminal' })).toBeHidden();
       await expect(dots(page)).toBeHidden();
     } else await expect(toolbar(page)).toBeHidden();
-    await expectBottomBorder(content, `expanded ${label}`);
+    await expectNoSplitBorder(content, `expanded ${label}`);
     // the panel grows into the freed space
     await expect.poll(() => panel.evaluate(element => element.getBoundingClientRect().bottom)).toBeGreaterThan(bottom + 40);
     await panel.getByRole('button', { name: `Restore ${label}` }).click();

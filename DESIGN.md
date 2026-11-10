@@ -104,6 +104,9 @@ Keep category colors even for unread queued notes, using the button's existing r
 attention treatment instead. Describe the categories accessibly alongside the total.
 
 Settings stay in one form column. Support desktop navigation and the mobile selector.
+Mobile carousel splits omit decorative borders, inset edges and content-footer
+separators. Keep desktop dividers, inner card and control borders, and focus or
+selection feedback unchanged.
 Keep action labels and copyable URLs usable at 390px and in narrow splits.
 Settings code editors use natural content height: a one-line file occupies one code
 line plus field padding. Include every source line and leave vertical scrolling to
@@ -292,8 +295,12 @@ installation configuration before reporting completion.
 None blocking this scope. Native tunnel provisioning remains explicitly unsupported.
 
 ## Settings search
-Search is an attached typeahead, not a filter for the settings navigation. Keep
-all pages visible while loading and identify unavailable results without opening
+Search is the Settings split's complete left header pill, matching the Browser
+URL control rather than sitting below a separate Settings title. The main card
+fills the split with matching header insets, without a centered page-width cap
+or a second top gap below the header clearance. Retain Settings
+as the dialog's accessible name. Its attached typeahead is not a navigation filter.
+Keep all pages visible while loading and identify unavailable results without opening
 a placeholder editor. Use the placeholder “Search all settings” with no visible
 label or dirty-summary pill. Distinguish Page and Field results; show field
 breadcrumbs using group, page, section and list-item metadata. Search names and

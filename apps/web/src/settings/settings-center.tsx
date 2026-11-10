@@ -1,6 +1,6 @@
 import { createContext, Fragment, type MouseEventHandler, type ReactNode, type Ref, useCallback, useContext, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { SettingsHeaderActionsContext } from './header-actions.js';
+import { SettingsHeaderActionsContext, SettingsHeaderSearchContext } from './header-actions.js';
 import { appendSettingsPatch, effectiveSettingsPatches, hasSettingsDraftChanges, type SettingsDraft } from './draft-changes.js';
 import { settingsDefaultPatches } from './schema-defaults.js';
 import { applyAuthoredProjectPatch } from '../../../server/src/settings/project-normalization.js';
@@ -1835,6 +1835,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   const runtime = useSettingsRuntime();
   const workspaceEditor = useSettingsTerminalEditor();
   const headerActionsTarget = useContext(SettingsHeaderActionsContext);
+  const headerSearchTarget = useContext(SettingsHeaderSearchContext);
   const { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft: browserDraftState, cloudflare, googleCalendar, operationPending, saveCancelled, loading, setLoading, saving: fileSaving, setSaving, savePending, setSavePending, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds } = session;
   // keep unrelated settings mutations locked during host-side tunnel work
   const cloudflareApplying = runtime.status?.operation?.kind === 'cloudflare' && (runtime.status.operation.state === 'queued' || runtime.status.operation.state === 'running');
@@ -2709,7 +2710,8 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // retain transaction status without a redundant page introduction
   return <section className="settings-center" aria-label="Settings center" aria-busy={saving}>
     {!loading && snapshot === undefined && <div className="settings-catalog-state" role="alert"><span>Installation files are unavailable. Browser preferences remain available in This browser, Interface, and Projects; file settings are unavailable.</span><button type="button" onClick={() => { /* retry without discarding browser preferences */ void reloadFiles(); }}>Retry files</button></div>}
-    <SettingsSearch index={searchIndex} onSelect={selectSearchResult} active={active} />
+    {/* keep query and navigation ownership while moving the control into the header */}
+    {headerSearchTarget !== null && createPortal(<SettingsSearch index={searchIndex} onSelect={selectSearchResult} active={active} />, headerSearchTarget)}
     <div className="settings-center-layout">
       <div className="settings-source-select" aria-busy={loading || undefined}><span>Settings section</span><SettingsSelect label="Settings section" value={selectedId} options={navigationOptions} disabled={loading} onChange={selectSection} /></div>
       {/* share skeleton loading states without changing navigation identity */}

@@ -681,7 +681,15 @@ for (const width of [320, 390, 1440]) {
         bounds.bottom <= title.top ||
         bounds.top >= title.bottom
       );
+      // retain matching card insets below a wrapped dirty toolbar
+      const header = element.parentElement!.getBoundingClientRect();
+      const panel = element.closest(".client-settings-page")!;
+      const panelBounds = panel.getBoundingClientRect();
+      const card = panel.querySelector(".settings-center-layout")!.getBoundingClientRect();
       return {
+        cardInlineMisalignment: Math.max(Math.abs(card.left - header.left), Math.abs(card.right - header.right)),
+        cardGap: card.top - header.bottom,
+        headerInset: header.top - panelBounds.top,
         overflow: element.scrollWidth - element.clientWidth,
         overlapsTitle,
         discard: getComputedStyle(discard).color,
@@ -691,6 +699,9 @@ for (const width of [320, 390, 1440]) {
     });
     expect(geometry.overflow).toBeLessThanOrEqual(0);
     expect(geometry.overlapsTitle).toBe(false);
+    expect(geometry.cardInlineMisalignment).toBeLessThanOrEqual(1);
+    expect(geometry.cardGap).toBeGreaterThanOrEqual(0);
+    expect(geometry.cardGap).toBeLessThanOrEqual(geometry.headerInset + 1);
     expect(geometry.discard).toBe(geometry.red);
     const scroller = settings.locator(".settings-source-panel");
     await scroller.evaluate((element) => {

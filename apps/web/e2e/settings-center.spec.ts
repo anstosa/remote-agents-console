@@ -7827,7 +7827,7 @@ test("cancels a paused source handover when Settings unmounts", async ({
 });
 
 // present page and field matches in a popup attached to the search input
-for (const width of [390, 1440]) {
+for (const width of [320, 390, 1440]) {
   test(`searches every settings page and field with typed result context at ${width}px`, async ({
     page,
   }) => {
@@ -7837,6 +7837,32 @@ for (const width of [390, 1440]) {
       name: "Search settings",
       exact: true,
     });
+    // use the searchbox itself as the left header pill
+    const header = settings.locator(":scope > .panel-header");
+    await expect(header.getByRole("searchbox", { name: "Search settings" })).toHaveCount(1);
+    await expect(settings.locator(".client-settings-page-content").getByRole("searchbox")).toHaveCount(0);
+    await expect(search).toHaveClass(/panel-header-pill/u);
+    const toolbar = header.getByRole("toolbar", { name: "Settings actions" });
+    const [inputBounds, toolbarBounds] = await Promise.all([search.boundingBox(), toolbar.boundingBox()]);
+    expect(inputBounds).not.toBeNull();
+    expect(toolbarBounds).not.toBeNull();
+    expect(inputBounds!.width).toBeGreaterThan(100);
+    expect(Math.abs(inputBounds!.height - toolbarBounds!.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs(inputBounds!.y - toolbarBounds!.y)).toBeLessThanOrEqual(1);
+    expect(inputBounds!.x + inputBounds!.width).toBeLessThanOrEqual(toolbarBounds!.x);
+    // align the main card with the header rather than a centered page container
+    const [panelBounds, headerBounds, cardBounds] = await Promise.all([
+      settings.boundingBox(), header.boundingBox(), settings.locator(".settings-center-layout").boundingBox(),
+    ]);
+    expect(panelBounds).not.toBeNull();
+    expect(headerBounds).not.toBeNull();
+    expect(cardBounds).not.toBeNull();
+    const headerInset = headerBounds!.y - panelBounds!.y;
+    expect(Math.abs(cardBounds!.x - headerBounds!.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(cardBounds!.x + cardBounds!.width - headerBounds!.x - headerBounds!.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(panelBounds!.y + panelBounds!.height - cardBounds!.y - cardBounds!.height - headerInset)).toBeLessThanOrEqual(1);
+    expect(cardBounds!.y - headerBounds!.y - headerBounds!.height).toBeGreaterThanOrEqual(0);
+    expect(cardBounds!.y - headerBounds!.y - headerBounds!.height).toBeLessThanOrEqual(headerInset + 1);
     await expect(search).toHaveAttribute("placeholder", "Search all settings");
     await expect(
       settings.getByText("Search settings", { exact: true }),
@@ -7860,7 +7886,8 @@ for (const width of [390, 1440]) {
     ]);
     expect(searchBox).not.toBeNull();
     expect(resultsBox).not.toBeNull();
-    expect(Math.abs(resultsBox!.x - searchBox!.x)).toBeLessThanOrEqual(1);
+    // retain the shared viewport gutter when borderless panels place the anchor nearer the edge
+    expect(Math.abs(resultsBox!.x - Math.max(8, searchBox!.x))).toBeLessThanOrEqual(1);
     expect(Math.abs(resultsBox!.width - searchBox!.width)).toBeLessThanOrEqual(
       1,
     );
@@ -7895,6 +7922,15 @@ for (const width of [390, 1440]) {
     await expect(
       settings.locator('[data-settings-path="identity.name"]'),
     ).toHaveAttribute("data-settings-search-highlight", "true");
+    // keep the same query mounted through split expansion and restoration
+    await search.fill("projects");
+    await search.press("Escape");
+    await settings.getByRole("button", { name: "Expand settings", exact: true }).click();
+    await expect(search).toHaveValue("projects");
+    await settings.getByRole("button", { name: "Restore settings", exact: true }).click();
+    await expect(search).toHaveValue("projects");
+    await search.focus();
+    await expect(results).toBeVisible();
   });
 }
 

@@ -1,5 +1,6 @@
 /* reserve the remaining split height for the active tab rather than the whole page */
-.settings-center-page > .client-settings-page-content { grid-template-rows: minmax(0, 1fr); align-content: stretch; overflow: hidden; }
+/* match header insets without adding a second gap below its reserved clearance */
+.settings-center-page > .client-settings-page-content { width: 100%; grid-template-rows: minmax(0, 1fr); align-content: stretch; overflow: hidden; padding: 0 .4rem .4rem; }
 .settings-center { --settings-control-height: calc(1.98rem + 2px); display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 1rem; }
 /* keep shared headings, search and transaction feedback outside the tab scroller */
 .settings-center > :not(.settings-center-layout) { flex: none; }
@@ -7,10 +8,11 @@
 .settings-center input:is([type='text'], [type='number'], [type='password'], [type='search'], :not([type])) { box-sizing: border-box; height: var(--settings-control-height); min-height: var(--settings-control-height); }
 /* adapt the editor to its resizable split rather than the viewport */
 .settings-center-page { container-type: inline-size; container-name: settings-panel; }
-/* anchor typeahead without a visible field label or status pill */
-.settings-search { display: grid; min-width: 0; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
-.settings-search input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .52rem .62rem; background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); color: var(--text); font: 600 .7rem var(--font-mono); }
-.settings-search input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* make search the complete left pill just like the browser address control */
+.settings-header-search { display: contents; }
+.settings-search { display: flex; flex: 1 1 10rem; min-width: 0; align-self: stretch; pointer-events: auto; }
+.panel-header .settings-search input { flex: 1 1 0; width: 0; min-width: 0; align-self: stretch; padding: .2rem .65rem; outline: 0; font-family: inherit; }
+.panel-header .settings-search input:focus { border-color: var(--blue); color: var(--text); }
 /* share the flyout layer above notices without moving split content */
 .settings-search-results { z-index: var(--layer-popover); box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .3rem; background: var(--mantle); box-shadow: 0 .5rem 1.5rem #0005; color: var(--text); font: 500 .68rem/1.5 var(--font-mono); }
 .settings-search-result { display: grid; min-width: 0; gap: .16rem; border: 1px solid transparent; border-radius: .3rem; padding: .48rem .6rem; cursor: pointer; }
