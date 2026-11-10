@@ -3,8 +3,8 @@ import type { QuestionField } from '../adapters/types.js';
 import type { LaunchReport, ModelInfo, ModelSetting, ProtocolClient, TranscriptItem, TranscriptTool } from './structured.js';
 
 /**
- * The Pi protocol client (ADR 0017): a thin client over `pi --mode rpc` JSON lines. It speaks
- * only the pinned version and ignores records and fields it does not know.
+ * the Pi protocol client (ADR 0017): a thin client over `pi --mode rpc` JSON lines
+ * accepts the bundled minimum and newer releases, ignoring unknown records and fields
  */
 
 /** The status key the RAC Pi extension sends its launch report under. */

@@ -6,6 +6,7 @@ import { hostPiRuntime, verifyHostPiNode } from '../src/adapters/pi-runtime.js';
 import { run } from '../src/tmux/command.js';
 
 const roots: string[] = [];
+const dependencies = ['@earendil-works/pi-coding-agent', '@earendil-works/pi-codemode', '@anthropic-ai/sandbox-runtime'] as const;
 // remove only fixtures this suite created
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 
@@ -19,14 +20,18 @@ async function runtime() {
   for (const name of ['adapters/pi-extension.js', 'adapters/pi-sandbox.js', 'git/overrides.js', 'transports/holder.js', 'watches/sandboxed-command.js']) {
     for (const base of [modules, host]) { await mkdir(dirname(join(base, name)), { recursive: true }); await writeFile(join(base, name), `// ${name}\n`); }
   }
-  const packageRoot = (name: string) => join(root, 'apps/server/node_modules', name);
+  const packageRoot = (name: string) => join(root, 'console-node_modules', name);
+  const hostPackageRoot = (name: string) => join(root, 'apps/server/node_modules', name);
   // use real package metadata but no executable package code
-  for (const name of ['@earendil-works/pi-coding-agent', '@earendil-works/pi-codemode', '@anthropic-ai/sandbox-runtime']) {
-    await mkdir(packageRoot(name), { recursive: true });
-    await writeFile(join(packageRoot(name), 'package.json'), JSON.stringify({ version: '1.2.3' }));
+  for (const name of dependencies) {
+    // create both sides of the compatibility boundary
+    for (const root of [packageRoot(name), hostPackageRoot(name)]) {
+      await mkdir(root, { recursive: true });
+      await writeFile(join(root, 'package.json'), JSON.stringify({ version: '1.2.3' }));
+    }
   }
   const env = { RAC_HOST_TMUX_DIR: '/mounted-tmux', RAC_HOST_NODE_BIN: '/host/bin/node', RAC_HOST_REPOSITORY: root, PI_CODING_AGENT_DIR: join(root, '.data/pi-agent') };
-  return { root, env, sources: { modules, packageRoot } };
+  return { root, env, sources: { modules, packageRoot }, hostPackageRoot };
 }
 
 describe('the pinned Pi host runtime', () => {
@@ -118,6 +123,39 @@ describe('the pinned Pi host runtime', () => {
     const { root, env, sources } = await runtime();
     expect(hostPiRuntime(env, sources)).toEqual({ node: '/host/bin/node', cli: join(root, 'apps/server/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), extension: join(root, 'apps/server/dist/adapters/pi-extension.js'), holder: join(root, 'apps/server/dist/transports/holder.js'), command: join(root, 'apps/server/dist/watches/sandboxed-command.js'), fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u) });
   });
+  // every bridged dependency uses the bundled version as its minimum
+  it.each(dependencies.flatMap(name => [
+    [name, 'equal', '1.2.3', true],
+    [name, 'newer patch', '1.2.4', true],
+    [name, 'newer minor', '1.3.0', true],
+    [name, 'newer major', '2.0.0', true],
+    [name, 'newer prerelease', '1.3.0-rc.1', true],
+    [name, 'build metadata', '1.2.3+host.1', true],
+    [name, 'older', '1.2.2', false],
+    [name, 'malformed', 'not-semver', false]
+  ] as const))('%s accepts the %s host version only when it meets the minimum', async (name, _case, version, accepted) => {
+    const { env, sources, hostPackageRoot } = await runtime();
+    await writeFile(join(hostPackageRoot(name), 'package.json'), JSON.stringify({ version }));
+
+    // exercise both compatibility outcomes
+    if (accepted) expect(() => hostPiRuntime(env, sources)).not.toThrow();
+    else expect(() => hostPiRuntime(env, sources)).toThrow(/dependency mismatch/u);
+  });
+  // malformed minima fail closed
+  it.each(dependencies)('rejects a malformed local minimum for %s', async name => {
+    const { env, sources } = await runtime();
+    await writeFile(join(sources.packageRoot(name), 'package.json'), JSON.stringify({ version: 'not-semver' }));
+
+    expect(() => hostPiRuntime(env, sources)).toThrow(/dependency mismatch/u);
+  });
+  // newer installed versions remain part of the runtime identity
+  it('fingerprints the actual newer host dependency version', async () => {
+    const { env, sources, hostPackageRoot } = await runtime();
+    const original = hostPiRuntime(env, sources)!.fingerprint;
+    await writeFile(join(hostPackageRoot('@earendil-works/pi-coding-agent'), 'package.json'), JSON.stringify({ version: '1.2.4' }));
+
+    expect(hostPiRuntime(env, sources)!.fingerprint).not.toBe(original);
+  });
   it('rejects a stale helper even when package versions still match', async () => {
     const { root, env, sources } = await runtime();
     await writeFile(join(root, 'apps/server/dist/adapters/pi-sandbox.js'), '// stale\n');
@@ -128,7 +166,7 @@ describe('the pinned Pi host runtime', () => {
     await rm(join(root, 'apps/server/dist/transports/holder.js'));
     expect(() => hostPiRuntime(env, sources)).toThrow(/build mismatch/u);
   });
-  it('rejects differing dependency pins without accepting a matching helper', async () => {
+  it('rejects a host dependency below its local minimum without accepting a matching helper', async () => {
     const { root, env, sources } = await runtime();
     const local = join(root, 'local-package');
     await mkdir(local);

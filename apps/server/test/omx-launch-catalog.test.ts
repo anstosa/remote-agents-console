@@ -151,6 +151,32 @@ describe('OMX launch catalog projection', () => {
     expect(probe).toHaveBeenCalledOnce();
   });
 
+  // preserve the configured model and saved effort for an untouched launch choice
+  it('prepares and revalidates the default OMX model with its configured effort', async () => {
+    // expose grammar and metadata from the same successful wrapper probe
+    const probe = vi.fn(async () => validProbe({
+      pages: [{ data: [
+        nativeModel('openai/default', ['high', 'xhigh'], 'high', true),
+        nativeModel('openai/next', ['high'], 'high')
+      ], nextCursor: null }]
+    }));
+    const service = new LaunchOptionsService({ omx: omxConfig({
+      args: ['--madmax', '-c', 'check_for_update_on_startup=false'],
+      allowedModels: [{ model: 'openai/default', effort: 'xhigh' }, { model: 'openai/next', effort: 'high' }]
+    }) }, { omxProbe: probe });
+    const context = { cwd: '/repo', hostCwd: '/host/repo', home: '/accounts/host' };
+    const manifest = omxManifest(await service.list(context));
+    const prepared = await service.prepare('omx', {
+      kind: 'omx', model: manifest.modelPolicy.defaultSelection, optionsRevision: manifest.optionsRevision
+    }, context);
+
+    expect(manifest.modelPolicy.catalogStatus).toBe('ready');
+    expect(prepared.model).toEqual({ model: 'openai/default', effort: 'xhigh' });
+    expect(prepared.security).toEqual({});
+    await expect(service.revalidate(prepared, context)).resolves.toBeUndefined();
+    expect(probe).toHaveBeenCalledOnce();
+  });
+
   // fail closed on incomplete, duplicate, or malformed native pagination
   it.each([
     ['duplicate models', validProbe({ pages: [

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
+import { gte, valid } from 'semver';
 import { structuredAdapterFor } from '../adapters/registry.js';
 import type { AdapterConfigs, AgentKind, AllowedModel, StructuredAdapter } from '../adapters/types.js';
 import type { Agent, AgentLifecycle } from '../domain/models.js';
@@ -146,8 +147,8 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
 
 // What this console knows of one structured Agent's process while it drives it. `generation`
 // counts the processes it started for the Agent, `cursor` the lines read from the current one,
-// `prompt` is the latest Turn's prompt, and `offPin` is set while the process runs another
-// version than the pinned one. `resyncing` from a reattach until the process has reported its
+// `prompt` is the latest Turn's prompt, and `offPin` is set while the process runs below the
+// bundled minimum version. `resyncing` from a reattach until the process has reported its
 // Conversation (after the replay) or ended a Turn: until then it may be working. `busy` while an operation (a delivery, a Conversation or model
 // change, a relaunch or reattach) is in flight. `turn` is how the latest
 // Turn ended; `draft` the text offered for the composer until the next prompt or steer, numbered
@@ -191,6 +192,8 @@ const transcriptText = (item: TranscriptItem): string | undefined => {
   }
 };
 const nonNegativeInt = (value: unknown): boolean => value === undefined || Number.isSafeInteger(value) && (value as number) >= 0;
+// compare a reported version with its bundled minimum
+const meetsMinimumVersion = (installed: unknown, minimum: unknown): installed is string => typeof installed === 'string' && typeof minimum === 'string' && valid(installed) !== null && valid(minimum) !== null && gte(installed, minimum);
 // bound one persisted content-free native item id
 const validNativeTurnId = (value: unknown): boolean => value === undefined || typeof value === 'string' && value.length > 0 && value.length <= 4_096 && !value.includes('\0');
 // distinguish structured native marks from pane completion signatures
@@ -511,9 +514,9 @@ export class StructuredAgents {
       // rotate a bridged Pi before attach when this console cannot prove its sandbox is current
       if (await this.rotateStaleSandbox(record, live)) return;
       const generation = live.generation += 1;
-      // a deploy may have moved the pin on under it: it restarts on the pinned version once idle
-      const pinned = structuredAdapterFor(record.kind)?.pinned()?.version;
-      live.offPin = record.version !== undefined && pinned !== undefined && record.version !== pinned;
+      // a deploy may have raised the minimum: an older process restarts once idle
+      const minimum = structuredAdapterFor(record.kind)?.pinned()?.version;
+      live.offPin = record.version !== undefined && minimum !== undefined && !meetsMinimumVersion(record.version, minimum);
       const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event)).catch(() => undefined);
       if (this.live.get(record.id) !== live || live.generation !== generation) { attached?.connection.close(); return; }
       if (attached === undefined) {
@@ -624,11 +627,11 @@ export class StructuredAgents {
     return true;
   }
 
-  // restart an Agent whose process runs another version than the pin, once it is idle, on its Conversation
+  // restart an Agent below its bundled minimum once it is idle on its Conversation
   private restartOffPin(record: StructuredRecord, live: Live): void {
     if (live.offPin !== true || live.connection === undefined || live.resyncing === true || live.working || live.busy || live.questions.length > 0) return;
     live.offPin = false;
-    void this.relaunch(record, live, record.conversationId).catch(error => { console.error(`[structured] ${record.id} could not restart on the pinned version:`, error); });
+    void this.relaunch(record, live, record.conversationId).catch(error => { console.error(`[structured] ${record.id} could not restart on the bundled minimum version:`, error); });
   }
 
   // where a restarted console would reconnect from: the lines read through this idle point

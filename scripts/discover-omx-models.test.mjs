@@ -73,9 +73,9 @@ test("normalizes Codex context without accepting wrapper or context-changing fla
   for (const args of [["--madmax"], ["--high"], ["--cd", "/other"], ["--oss"], ["--worktree"], ["--unknown"]]) assert.throws(() => normalizeCodexContextArgs(args), error => error.code === "omx_unproven");
 });
 
-test("proves the exact supported OMX package identity and version", async () => {
+test("proves OMX package identity and its minimum supported version", async () => {
   const supported = await fixture();
-  const wrongVersion = await fixture({ version: "0.21.47" });
+  const wrongVersion = await fixture({ version: "0.21.45" });
   const wrongName = await fixture({ name: "other" });
   try {
     assert.equal((await proveOmxPackage(supported.program)).root, supported.packageRoot);
@@ -83,6 +83,57 @@ test("proves the exact supported OMX package identity and version", async () => 
     await assert.rejects(proveOmxPackage(wrongName.program), error => error.code === "omx_unproven");
   } finally { await Promise.all([supported.cleanup(), wrongVersion.cleanup(), wrongName.cleanup()]); }
 });
+
+// retain model discovery after the audited wrapper update
+test("discovers models and effort with OMX 0.21.48", async () => {
+  const fx = await fixture({ version: "0.21.48" });
+  try {
+    assert.equal((await proveOmxPackage(fx.program)).root, fx.packageRoot);
+    const result = await discoverOmxModels(request(fx, { args: ["--madmax", "--xhigh"] }), {});
+    assert.deepEqual(result.capabilities, { model: true, effort: true });
+    assert.deepEqual(result.args, ["-c", "model_reasoning_effort=\"xhigh\""]);
+    assert.equal(result.pages[0].data[0].model, "model-0");
+    assert.equal(result.config.config.observedHome, join(fx.root, "home"));
+  } finally { await fx.cleanup(); }
+});
+
+// prove model discovery for the currently installed audited wrapper
+test("discovers models and effort with OMX 0.22.6", async () => {
+  const fx = await fixture({ version: "0.22.6" });
+  try {
+    assert.equal((await proveOmxPackage(fx.program)).root, fx.packageRoot);
+    const result = await discoverOmxModels(request(fx, { args: ["--madmax", "-c", "check_for_update_on_startup=false"] }), {});
+    assert.deepEqual(result.capabilities, { model: true, effort: true });
+    assert.deepEqual(result.args, ["-c", "check_for_update_on_startup=false"]);
+    assert.equal(result.pages[0].data[0].model, "model-0");
+    assert.equal(result.config.config.observedHome, join(fx.root, "home"));
+    assert.equal(result.config.config.observedCwd, await realpath(fx.cwd));
+  } finally { await fx.cleanup(); }
+});
+
+// accept newer patch, minor, major, and prerelease versions without an allowlist
+for (const version of ["0.21.47", "0.21.100", "0.22.7", "0.22.10", "0.30.0", "1.0.0", "20.0.0", "0.22.0-rc.1", "0.21.46+build.2", "v0.22.6"]) {
+  // prove version acceptance without repeating native discovery
+  test(`proves OMX ${version} at or above the minimum`, async () => {
+    const fx = await fixture({ version });
+    try {
+      assert.equal((await proveOmxPackage(fx.program)).root, fx.packageRoot);
+    } finally { await fx.cleanup(); }
+  });
+}
+
+// reject only releases below the stable minimum or malformed version labels
+for (const version of ["0.21.45", "0.20.99", "0.21.46-rc.1", "0.21.46\n", "unknown", "0.22", "0.22.7.1", "01.22.6", "0.22.7-01", "0.22.7+", ""]) {
+  // stop invalid version proof before any native executable runs
+  test(`rejects unsupported OMX version ${JSON.stringify(version)} before discovery`, async () => {
+    const fx = await fixture({ version });
+    const sentinel = join(fx.root, "spawned");
+    try {
+      await assert.rejects(discoverOmxModels(request(fx, { env: { PATH: fx.bin, SPAWN_SENTINEL: sentinel } }), {}), error => error.code === "omx_version_unsupported");
+      await assert.rejects(access(sentinel), error => error.code === "ENOENT");
+    } finally { await fx.cleanup(); }
+  });
+}
 
 test("resolves the first literal executable on the effective PATH", async () => {
   const fx = await fixture();
@@ -192,7 +243,7 @@ test("accepts explicit CODEX_HOME and refuses project-scoped ephemeral state", a
 });
 
 test("bounds private requests and emits only fixed CLI failures", async () => {
-  const fx = await fixture({ version: "0.21.47" });
+  const fx = await fixture({ version: "0.21.45" });
   try {
     const path = join(fx.root, "request.json");
     await writeFile(path, JSON.stringify(request(fx, { env: { PATH: fx.bin, TOKEN: "do-not-print-this" } })), { mode: 0o600 });

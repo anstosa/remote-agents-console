@@ -5,7 +5,8 @@ import { spawn } from "node:child_process";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const supportedOmxVersion = "0.21.46";
+// retain the oldest supported stable release without an upper version bound
+const minimumOmxVersion = [0n, 21n, 46n];
 const maxRequestBytes = 64 * 1024;
 const maxProtocolLineBytes = 1024 * 1024;
 const maxOutputBytes = 900 * 1024;
@@ -104,7 +105,26 @@ export function normalizeCodexContextArgs(args) {
   return normalizeContextArgs(args, "codex");
 }
 
-// prove the configured program is the one supported OMX package
+// compare semantic release numbers against the stable compatibility floor
+function meetsMinimumOmxVersion(version) {
+  // reject malformed metadata without capping the supported release number
+  if (typeof version !== "string" || version.length > 256) return false;
+  const parts = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(version);
+  // require a complete semantic version
+  if (parts === null) return false;
+  // numeric prerelease identifiers cannot contain leading zeroes
+  if (parts[4]?.split(".").some(part => /^\d+$/u.test(part) && part.length > 1 && part.startsWith("0"))) return false;
+  // compare numeric components rather than lexicographic version strings
+  for (let index = 0; index < minimumOmxVersion.length; index += 1) {
+    const observed = BigInt(parts[index + 1]);
+    // a higher core release remains newer even when it is a prerelease
+    if (observed !== minimumOmxVersion[index]) return observed > minimumOmxVersion[index];
+  }
+  // an equal-core prerelease precedes the stable minimum; build metadata is irrelevant
+  return parts[4] === undefined;
+}
+
+// prove the configured program is a supported OMX package
 export async function proveOmxPackage(program) {
   const entry = await realpath(program).catch(() => undefined);
   // require the canonical entry suffix
@@ -114,8 +134,8 @@ export async function proveOmxPackage(program) {
   try { metadata = JSON.parse(await readFile(join(root, "package.json"), "utf8")); } catch { throw failure("omx_unproven"); }
   // require the exact package identity
   if (metadata?.name !== "oh-my-codex" || metadata?.type !== "module" || metadata?.bin?.omx !== "dist/cli/omx.js") throw failure("omx_unproven");
-  // require the audited package version
-  if (metadata.version !== supportedOmxVersion) throw failure("omx_version_unsupported");
+  // require the known minimum while accepting every newer release
+  if (!meetsMinimumOmxVersion(metadata.version)) throw failure("omx_version_unsupported");
   const declared = await realpath(join(root, metadata.bin.omx)).catch(() => undefined);
   // require one canonical bin target
   if (declared !== entry) throw failure("omx_unproven");

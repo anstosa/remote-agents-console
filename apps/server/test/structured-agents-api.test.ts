@@ -1194,8 +1194,9 @@ describe('a structured Agent across a console restart', () => {
     await restarted.app.close();
   });
 
-  it('restarts an Agent found idle on another Pi than the pin once it reattaches', async () => {
-    const fake = fakeAgent({ version: '0.0.1' });
+  // only older or malformed Pi versions restart
+  it.each([['outdated', '0.0.1'], ['invalid', 'not-semver']] as const)('restarts an Agent found idle with an %s Pi version once it reattaches', async (_case, version) => {
+    const fake = fakeAgent({ version });
     const { app, headers, root, restart } = await consoleWith(fake);
     const conversation = '01a188d1-e7d9-711a-aba8-381b96066aa5';
     vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
@@ -1203,11 +1204,31 @@ describe('a structured Agent across a console restart', () => {
     const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
     fake.emit({ type: 'conversation', id: conversation });
 
-    // idle on an old Pi: the state it reads afresh on reattach finds it idle, so it restarts on the pin
+    // idle below the minimum restarts after reattachment finds it idle
     const idle = fakeAgent({ attached: [{ type: 'conversation', id: conversation }] });
     const restarted = await restart(idle);
     await vi.waitFor(() => expect(idle.launches).toEqual([expect.objectContaining({ id, resume: conversation })]));
     await vi.waitFor(async () => expect(await restarted.dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'live' } }));
+    await restarted.app.close();
+  });
+
+  // newer idle Pi processes keep their holder and identity
+  it('keeps an idle Agent on a newer Pi when it reattaches', async () => {
+    const fake = fakeAgent({ version: '99.0.0' });
+    const { app, headers, restart, structuredAgents } = await consoleWith(fake);
+    const conversation = '01a188d1-e7d9-711a-aba8-381b96066aa5';
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: conversation });
+    await structuredAgents.saved();
+
+    const idle = fakeAgent({ attached: [{ type: 'conversation', id: conversation }] });
+    const restarted = await restart(idle);
+    await restarted.reattached;
+    expect(await restarted.dashboardAgent(id)).toMatchObject({ id, conversationId: conversation });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(idle.launches).toEqual([]);
+    expect(idle.closed()).toBe(false);
+    expect(await restarted.dashboardAgent(id)).toMatchObject({ id, structured: { lifecycle: 'live' } });
     await restarted.app.close();
   });
 
@@ -1262,7 +1283,7 @@ describe('a structured Agent across a console restart', () => {
     await restarted.app.close();
   });
 
-  it('restarts an Agent on a Pi other than the pinned one at its next idle point, on its Conversation, keeping its id and queue', async () => {
+  it('restarts an Agent below the bundled Pi minimum at its next idle point, on its Conversation, keeping its id and queue', async () => {
     const conversation = '01a188d1-e7d9-711a-aba8-381b96066aa5';
     const fake = fakeAgent({ version: '1.3.9' });
     const { app, headers, root, restart } = await consoleWith(fake);
@@ -1274,7 +1295,7 @@ describe('a structured Agent across a console restart', () => {
     fake.emit({ type: 'turn', turn: { type: 'started' } });
     await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'Second', attachments: [] } });
 
-    // a deploy moves the pin on while the old Pi works
+    // a deploy raises the bundled minimum while the old Pi works
     const next = fakeAgent();
     const restarted = await restart(next);
     next.emit({ type: 'turn', turn: { type: 'started' } });
@@ -1289,6 +1310,37 @@ describe('a structured Agent across a console restart', () => {
     await restarted.dashboardAgent(id);
     expect(next.delivered).toEqual(['Second']);
     // the old process's exit after its restart is not the Agent's: the Turn it finished keeps its answer
+    const history = (await restarted.app.inject({ method: 'GET', url: `/api/agents/${id}/prompt-history`, headers: restarted.headers })).json().prompts;
+    expect(history).toMatchObject([{ text: 'Second' }, { text: 'First', answer: 'First answered' }]);
+    await restarted.app.close();
+  });
+
+  // newer working Pi processes finish in place and keep their queue
+  it('keeps a working Agent on a newer Pi through reattachment, preserving its id and queue', async () => {
+    const conversation = '01a188d1-e7d9-711a-aba8-381b96066aa5';
+    const fake = fakeAgent({ version: '99.0.0' });
+    const { app, headers, restart, structuredAgents } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: conversation });
+    await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'First', attachments: [] } });
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'Second', attachments: [] } });
+    await structuredAgents.saved();
+
+    const next = fakeAgent();
+    const restarted = await restart(next);
+    await restarted.reattached;
+    expect(await restarted.dashboardAgent(id)).toMatchObject({ id, conversationId: conversation });
+    next.emit({ type: 'turn', turn: { type: 'started' } });
+    next.emit({ type: 'transcript', item: { id: 'm1', kind: 'message', role: 'user', text: 'First' } });
+    next.emit({ type: 'conversation', id: conversation });
+    next.emit({ type: 'turn', turn: { type: 'settled', message: 'First answered' } });
+    await restarted.dashboardAgent(id);
+    await restarted.dashboardAgent(id);
+    await vi.waitFor(() => expect(next.delivered).toEqual(['Second']));
+    expect(next.launches).toEqual([]);
+    expect(next.closed()).toBe(false);
+    expect(await restarted.dashboardAgent(id)).toMatchObject({ id, structured: { lifecycle: 'live' } });
     const history = (await restarted.app.inject({ method: 'GET', url: `/api/agents/${id}/prompt-history`, headers: restarted.headers })).json().prompts;
     expect(history).toMatchObject([{ text: 'Second' }, { text: 'First', answer: 'First answered' }]);
     await restarted.app.close();

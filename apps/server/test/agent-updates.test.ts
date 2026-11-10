@@ -78,23 +78,41 @@ describe('agent updates', () => {
     { scenario: 'timeout', status: undefined, reason: 'timed_out' }
   ] as const)('saves a safe diagnostic for a bridge $scenario failure', async ({ scenario, status, reason }) => {
     const checkout = await mkdtemp(join(tmpdir(), 'rac-agent-update-bridge-'));
+    let installerStarted = false;
     vi.stubEnv('RAC_HOST_TMUX_DIR', '/host-tmux');
     vi.stubEnv('RAC_TMUX_BIN', '/host-tools/tmux');
     vi.stubEnv('RAC_HOST_REPOSITORY', '/host/console');
     vi.spyOn(command, 'run').mockImplementation(async (_binary, args) => {
       // leave cleanup requests harmless
       if (!args.includes('new-session')) return { code: 0, stdout: '', stderr: '' };
-      expect(args.at(-1)).toContain('umask 077;');
+      const script = args.at(-1)!;
+      expect(script).toContain('umask 077;');
+      const token = args[args.indexOf('-s') + 1]!.replace('rac-agent-update-', '');
+      // complete version probes before exercising installer failures
+      if (!script.includes('{ update; }')) {
+        await writeFile(join(checkout, '.data', 'agent-updates', `${token}.out`), script.includes('{ current; }') ? '1.0.0' : '1.1.0');
+        await writeFile(join(checkout, '.data', 'agent-updates', `${token}.status`), '0');
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      installerStarted = true;
       // model a rejected tmux launch without publishing a completion file
       if (scenario === 'launch') return { code: 1, stdout: '', stderr: 'private bridge launch error' };
-      const token = args[args.indexOf('-s') + 1]!.replace('rac-agent-update-', '');
       await writeFile(join(checkout, '.data', 'agent-updates', `${token}.out`), 'private installer output');
       // publish only completed synthetic commands
       if (status !== undefined) await writeFile(join(checkout, '.data', 'agent-updates', `${token}.status`), status);
       return { code: 0, stdout: '', stderr: '' };
     });
     // cross the deadline without waiting for a real installer
-    if (scenario === 'timeout') vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(15 * 60_000 + 1);
+    if (scenario === 'timeout') {
+      let installerClock = 0;
+      vi.spyOn(Date, 'now').mockImplementation(() => {
+        // keep version probe clocks stable
+        if (!installerStarted) return 0;
+        const current = installerClock;
+        installerClock = 15 * 60_000 + 1;
+        return current;
+      });
+    }
     try {
       const service = new AgentUpdateService(configured(), '/home/test', undefined, checkout);
       const result = await service.update('codex');
@@ -205,7 +223,52 @@ describe('agent updates', () => {
     const service = new AgentUpdateService(configured(), '/home/test', runner);
     await service.statuses();
     expect(await service.update('codex')).toEqual({ outcome: 'updated', status: { kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.153.2', updateAvailable: false } });
-    expect(runner.mock.calls.map(call => call[0])).toEqual(['current', 'latest', 'update', 'current', 'latest']);
+    expect(runner.mock.calls.map(call => call[0])).toEqual(['current', 'latest', 'current', 'latest', 'update', 'current', 'latest']);
+  });
+
+  // never replace an equal or newer installation
+  it.each([
+    { current: '1.1.0', latest: '1.1.0' },
+    { current: '1.2.0', latest: '1.1.0' }
+  ])('completes without an installer when $current is at least $latest', async ({ current, latest }) => {
+    const runner = vi.fn<AgentUpdateRunner>(async command => ({ code: 0, output: command === 'current' ? current : latest }));
+    const service = new AgentUpdateService(configured(), '/home/test', runner);
+
+    await expect(service.update('codex')).resolves.toEqual({
+      outcome: 'updated',
+      status: { kind: 'codex', currentVersion: current, latestVersion: latest, updateAvailable: false }
+    });
+    expect(runner.mock.calls.map(call => call[0])).toEqual(['current', 'latest']);
+  });
+
+  // settle an already-newer background request successfully
+  it('completes a background update without downgrading a newer installation', async () => {
+    const runner = vi.fn<AgentUpdateRunner>(async command => ({ code: 0, output: command === 'current' ? '2.0.0' : '1.9.0' }));
+    const service = new AgentUpdateService(configured(), '/home/test', runner);
+    const started = service.startUpdate('codex');
+    expect(started.outcome).toBe('started');
+    // narrow the asserted start result
+    if (started.outcome !== 'started') throw new Error('expected a started update');
+
+    await vi.waitFor(() => expect(service.updateStatus('codex', started.job.id)).toEqual({
+      id: started.job.id,
+      kind: 'codex',
+      state: 'complete',
+      agent: { kind: 'codex', currentVersion: '2.0.0', latestVersion: '1.9.0', updateAvailable: false }
+    }));
+    expect(runner.mock.calls.map(call => call[0])).toEqual(['current', 'latest']);
+  });
+
+  // fail closed when versions cannot prove a safe update
+  it.each([
+    { failure: 'invalid output', current: { code: 0, output: 'development' } },
+    { failure: 'failed command', current: { code: 1, output: 'private command error' } }
+  ])('does not install after a $failure', async ({ current }) => {
+    const runner = vi.fn<AgentUpdateRunner>(async command => command === 'current' ? current : { code: 0, output: '1.1.0' });
+    const service = new AgentUpdateService(configured(), '/home/test', runner);
+
+    await expect(service.update('codex')).resolves.toMatchObject({ outcome: 'failed', error: expect.stringContaining('version') });
+    expect(runner.mock.calls.map(call => call[0])).toEqual(['current', 'latest']);
   });
 
   // allow slow downloads without leaving hung installers unbounded
@@ -250,7 +313,7 @@ describe('agent updates', () => {
     const runner = vi.fn<AgentUpdateRunner>(async command => {
       // hold the first update so a concurrent request sees the busy state
       if (command === 'update') { await gate; return { code: 1, output: 'secret failure details' }; }
-      return { code: 0, output: '1.0.0' };
+      return { code: 0, output: command === 'current' ? '1.0.0' : '1.1.0' };
     });
     const service = new AgentUpdateService(configured(), '/home/test', runner);
     const pending = service.update('codex');
@@ -267,7 +330,9 @@ describe('agent updates', () => {
     const checkout = await mkdtemp(join(tmpdir(), 'rac-agent-update-error-'));
     try {
       vi.mocked(diagnostics.saveAgentUpdateFailure).mockRestore();
-      const runner: AgentUpdateRunner = async () => ({ code: 17, output: 'private installer error' });
+      const runner: AgentUpdateRunner = async command => command === 'update'
+        ? { code: 17, output: 'private installer error' }
+        : { code: 0, output: command === 'current' ? '1.0.0' : '1.1.0' };
       const service = new AgentUpdateService(configured(), '/home/test', runner, checkout);
       const result = await service.update('codex');
       expect(result).toMatchObject({ outcome: 'failed', error: expect.stringContaining('exit code 17') });
@@ -332,7 +397,7 @@ describe('agent updates', () => {
         if (failure === 'reject') throw new Error('secret rejected output');
         return { code: 1, output: 'secret command output' };
       }
-      return { code: 0, output: '1.0.0' };
+      return { code: 0, output: command === 'current' ? '1.0.0' : '1.1.0' };
     });
     const service = new AgentUpdateService(configured(), '/home/test', runner);
     const started = service.startUpdate('codex');
@@ -356,7 +421,9 @@ describe('agent updates', () => {
   // preserve the original update failure when private storage itself is unavailable
   it('reports a diagnostic write failure without exposing exception details', async () => {
     vi.mocked(diagnostics.saveAgentUpdateFailure).mockRejectedValue(new Error('secret private storage path'));
-    const service = new AgentUpdateService(configured(), '/home/test', async () => ({ code: 1, output: 'secret installer output' }));
+    const service = new AgentUpdateService(configured(), '/home/test', async command => command === 'update'
+      ? { code: 1, output: 'secret installer output' }
+      : { code: 0, output: command === 'current' ? '1.0.0' : '1.1.0' });
     const result = await service.update('codex');
     expect(result).toMatchObject({ outcome: 'failed', error: 'Codex update failed with exit code 1. Private diagnostics could not be saved.' });
     expect(JSON.stringify(result)).not.toContain('secret');
@@ -365,7 +432,12 @@ describe('agent updates', () => {
   // carry exact direct-process deadline evidence into both stored and public errors
   it('persists a direct installer timeout as timed out rather than interrupted', async () => {
     vi.stubEnv('RAC_HOST_TMUX_DIR', undefined);
-    vi.spyOn(command, 'run').mockResolvedValue({ code: -1, stdout: 'private timeout output', stderr: '', timedOut: true });
+    vi.spyOn(command, 'run').mockImplementation(async (_binary, args) => {
+      const script = args.at(-1)!;
+      // complete version probes before timing out the installer
+      if (!script.includes('{ update; }')) return { code: 0, stdout: script.includes('{ current; }') ? '1.0.0' : '1.1.0', stderr: '' };
+      return { code: -1, stdout: 'private timeout output', stderr: '', timedOut: true };
+    });
     const result = await new AgentUpdateService(configured(), '/home/test').update('codex');
     expect(result).toMatchObject({ outcome: 'failed', error: expect.stringContaining('timed out') });
     expect(JSON.stringify(result)).not.toContain('private timeout output');

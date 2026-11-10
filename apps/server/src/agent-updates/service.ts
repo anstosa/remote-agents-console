@@ -132,7 +132,7 @@ export class AgentUpdateService {
     return job;
   }
 
-  // execute one configured update and refresh its versions
+  // verify, execute, and refresh one configured update
   async update(kind: AgentKind): Promise<AgentUpdateResult> {
     const commands = this.config.adapters?.[kind]?.updates;
     // refuse kinds without a complete update contract
@@ -144,6 +144,14 @@ export class AgentUpdateService {
       const activeRefresh = this.refreshes.get(kind);
       // finish an older version read before mutating the installation
       if (activeRefresh !== undefined) await activeRefresh.catch(() => undefined);
+      const status = await this.status(kind, true);
+      // fail closed without trusted version evidence
+      if (status.error !== undefined) {
+        const name = kind === 'omx' ? 'OMX' : kind === 'codex' ? 'Codex' : kind;
+        return { outcome: 'failed', error: `${name} update failed because versions could not be verified.` };
+      }
+      // keep equal and newer installations unchanged
+      if (!status.updateAvailable) return { outcome: 'updated', status };
       const result = await this.runner(commands.run, updateTimeoutMs).catch((error): AgentUpdateCommandResult => ({ code: -1, output: exceptionOutput(error), failure: 'launch_failed' }));
       // do not claim an update when the command failed
       if (result.code !== 0) return await this.failedUpdate(kind, result);

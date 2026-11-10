@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gte, valid } from 'semver';
 import { run, tmuxFormatLiteral } from '../tmux/command.js';
 
 const piPackage = '@earendil-works/pi-coding-agent';
@@ -22,6 +23,9 @@ export function piPackageRoot(from: string = import.meta.url, name = piPackage):
 
 type HostPiRuntime = { node: string; cli: string; extension: string; holder: string; command: string; fingerprint: string };
 type RuntimeSources = { modules: string; packageRoot: (name: string) => string };
+
+// compare an installed dependency with its bundled minimum
+const meetsMinimumVersion = (installed: unknown, minimum: unknown): installed is string => typeof installed === 'string' && typeof minimum === 'string' && valid(installed) !== null && valid(minimum) !== null && gte(installed, minimum);
 
 // execute the configured Node on the host, never inside the container namespace
 export async function verifyHostPiNode(node: string, env: NodeJS.ProcessEnv = process.env, command: typeof run = run, writeRoots: readonly string[] = []): Promise<string> {
@@ -66,13 +70,15 @@ export function hostPiRuntime(env: NodeJS.ProcessEnv = process.env, sources?: Ru
   const hostModules = join(repo, 'apps/server/dist');
   const hostPackage = (name: string) => piPackageRoot(join(repo, 'apps/server/package.json'), name);
   const fingerprint = createHash('sha256').update(JSON.stringify([node, repo, state]));
-  // the host copy must match every pinned dependency the sandbox extension uses
+  // the host copy must meet every dependency minimum the sandbox extension uses
   for (const name of dependencies) {
-    // read only package metadata when proving the installed pin
-    const version = (root: string) => (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version;
-    // never silently switch a bridged Pi to a different installed dependency
-    if (version(local.packageRoot(name)) !== version(hostPackage(name))) throw new Error(`Pi host bridge dependency mismatch: ${name}; run pnpm install --frozen-lockfile on the host`);
-    fingerprint.update(name).update(version(hostPackage(name)));
+    // read only package metadata when proving the installed version
+    const version = (root: string): unknown => (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version?: unknown }).version;
+    const minimum = version(local.packageRoot(name));
+    const installed = version(hostPackage(name));
+    // never run a bridged Pi below the console's dependency minimum
+    if (!meetsMinimumVersion(installed, minimum)) throw new Error(`Pi host bridge dependency mismatch: ${name}; the host must install at least the bundled version`);
+    fingerprint.update(name).update(installed);
   }
   // compare the complete helper import closure with this console's compiled build
   for (const name of runtimeFiles) {
