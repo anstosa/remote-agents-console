@@ -1873,6 +1873,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .question-heading { display: flex; align-items: flex-start; gap: .65rem; }
 .question-copy { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; gap: .25rem; color: var(--text); }
 .question-copy strong { color: var(--mauve); font: 700 .7rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.question-detail { max-height: 14rem; margin: 0; overflow: auto; padding: .4rem .5rem; border-radius: 4px; background: var(--surface-0); color: var(--text); font: .75rem/1.4 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .question-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .35rem; }
 .question-tools button, .prompt-actions .question-mode-toggle { min-height: var(--standard-control-size); border-color: var(--surface-2); padding: .4rem .6rem; background: transparent; color: var(--subtext-0); box-shadow: none; font: 700 .7rem var(--font-mono); }
 .question-tools button:not(:disabled):hover, .prompt-actions .question-mode-toggle:not(:disabled):hover { border-color: var(--lavender); background: color-mix(in srgb, var(--lavender) 13%, var(--mantle)); color: var(--text); filter: none; }

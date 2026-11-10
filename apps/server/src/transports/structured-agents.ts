@@ -10,7 +10,7 @@ import { placeHostRoot, type Place } from '../places/places.js';
 import { expandCommand } from '../launch/service.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
-import { connectHolder, type AgentUsage, type CompactRequest, type HolderHello, type LineChannel, type PromptDisposition, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
+import { connectHolder, type AgentUsage, type CompactRequest, type ClientContext, type HolderHello, type LineChannel, type PromptDisposition, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
 import { agentPanel, type InterruptOutcome, type QuestionAnswer, type TurnEvent } from './transport.js';
 import { validPrompt } from '../prompts/validation.js';
 import type { StructuredTurnTransport } from '../prompts/service.js';
@@ -55,9 +55,10 @@ export interface StructuredProcesses {
   start(launch: StructuredLaunch, emit: (event: StructuredEvent) => void): Promise<StructuredProcess | undefined>;
   /**
    * Connect again to a process this console started before it restarted, from the lines it had
-   * read (`holder.read`); undefined when the process is gone.
+   * read (`holder.read`), running in `cwd` on the Conversation the console last knew; undefined
+   * when the process is gone.
    */
-  attach(holder: HolderRef, kind: AgentKind, emit: (event: StructuredEvent) => void): Promise<StructuredProcess | undefined>;
+  attach(holder: HolderRef, kind: AgentKind, emit: (event: StructuredEvent) => void, at: { cwd: string; conversation?: string }): Promise<StructuredProcess | undefined>;
   /** The current bridged sandbox/runtime generation, or undefined when it cannot be proven. */
   sandboxGeneration?(kind: AgentKind): Promise<string | undefined>;
   /** The process's recent stderr, shown when it fails: what its holder window shows, its last `lines` (40). */
@@ -88,14 +89,14 @@ const maxRawLines = 500;
 const maxRawLine = 4_096;
 // a protocol client over a holder connection, counting the child's lines it reads from the
 // holder's cursor and keeping the latest lines either way
-function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, hello }: { channel: LineChannel; hello: HolderHello }, emit: (event: StructuredEvent) => void, attached?: { dropped: number }): StructuredProcess {
+function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, hello }: { channel: LineChannel; hello: HolderHello }, emit: (event: StructuredEvent) => void, context: ClientContext): StructuredProcess {
   let read = hello.from;
   const raw: RawLine[] = [];
   const keep = (from: RawLine['from'], line: string) => { raw.push({ from, line: line.slice(0, maxRawLine) }); raw.splice(0, raw.length - maxRawLines); };
   const counted: LineChannel = { ...channel, send: line => { keep('console', line); channel.send(line); }, onLine: listener => channel.onLine(line => { read += 1; keep('agent', line); listener(line); }) };
   // the pid is signalled on Close, so only a real one is kept
   const pid = Number.isSafeInteger(hello.pid) && hello.pid > 1 ? { pid: hello.pid } : {};
-  return { holder: { ...holder, ...pid }, connection: adapter.client(counted, emit, attached), cursor: () => read, raw: () => raw, ...(attached === undefined ? {} : { dropped: attached.dropped }) };
+  return { holder: { ...holder, ...pid }, connection: adapter.client(counted, emit, context), cursor: () => read, raw: () => raw, ...(context.attached === undefined ? {} : { dropped: context.attached.dropped }) };
 }
 
 /**
@@ -122,14 +123,14 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       // report is (30 s), not given up on first
       const connected = await connectHolder(holder.socket, { attempts: 300 });
       if (connected === undefined) { await windows.closeHolder(holder); return undefined; }
-      return clientOver(adapter, holder, connected, emit);
+      return clientOver(adapter, holder, connected, emit, { cwd: place.home, ...(model === undefined ? {} : { model }) });
     },
-    async attach(holder, kind, emit) {
+    async attach(holder, kind, emit, { cwd, conversation }) {
       const adapter = structuredAdapterFor(kind);
       // a holder that is gone, or not this Agent's any more, is never reached
       if (adapter === undefined || !await windows.holderRunning(holder)) return undefined;
       const connected = await connectHolder(holder.socket, { from: holder.read ?? 0, attempts: 3 });
-      return connected === undefined ? undefined : clientOver(adapter, holder, connected, emit, { dropped: connected.hello.dropped });
+      return connected === undefined ? undefined : clientOver(adapter, holder, connected, emit, { cwd, attached: { dropped: connected.hello.dropped, ...(conversation === undefined ? {} : { conversation }) } });
     },
     sandboxGeneration: async kind => await windows.holderGeneration?.(kind),
     stderr: (holder, lines) => windows.captureHolder(holder, lines),
@@ -166,7 +167,7 @@ const tokenHash = (token: string): string => createHash('sha256').update(token).
 /** What the console gives the Conductor: its MCP endpoint, the model a fresh Conversation starts on, and how long a script may run. */
 export type ConductorOptions = { endpoint: string; model: ModelSetting; scriptDeadlineMs: number };
 // a question as every Inline question reaches the web: its choices, if any, are also its own
-const shaped = ({ id, text, field, expiresAt }: StructuredQuestion): ShapedQuestion => ({ id, text, choices: field.kind === 'choice' ? field.choices : [], source: 'structured', field, ...(expiresAt === undefined ? {} : { expiresAt }) });
+const shaped = ({ id, text, detail, permission, field, expiresAt }: StructuredQuestion): ShapedQuestion => ({ id, text, ...(detail === undefined ? {} : { detail }), ...(permission === undefined ? {} : { permission }), choices: field.kind === 'choice' ? field.choices : [], source: 'structured', field, ...(expiresAt === undefined ? {} : { expiresAt }) });
 
 /** The status line above an Agent's composer: its extension's statuses, its cost so far and how full its context is. */
 export type AgentStatusLine = { extension: string[] } & Partial<AgentUsage>;
@@ -355,7 +356,7 @@ export class StructuredAgents {
         // a concurrent Close or target change invalidates the saved claim before any effect
         if (current !== record || (record.processGeneration ?? 0) !== expectedGeneration || record.lifecycleCommand?.commandId !== commandId || record.lifecycleCommand.expectedGeneration !== expectedGeneration || record.lifecycleCommand.effectGeneration !== undefined) return 'target_changed';
       }
-      return await this.relaunch(record, live, record.conversationId, commandId) === true ? 'ok' : 'invalid_state';
+      return await this.relaunch(record, live, record.conversationId, { commandId }) === true ? 'ok' : 'invalid_state';
     } finally {
       live.busy = false;
     }
@@ -385,7 +386,7 @@ export class StructuredAgents {
         // a concurrent Close or target change invalidates the saved claim before any effect
         if (current !== record || (record.processGeneration ?? 0) !== expectedGeneration || record.lifecycleCommand?.commandId !== commandId || record.lifecycleCommand.expectedGeneration !== expectedGeneration || record.lifecycleCommand.effectGeneration !== undefined) return 'target_changed';
       }
-      return await this.relaunch(record, live, conversationId ?? record.conversationId, commandId) === true ? 'ok' : 'invalid_state';
+      return await this.relaunch(record, live, conversationId ?? record.conversationId, { commandId }) === true ? 'ok' : 'invalid_state';
     } finally {
       live.busy = false;
     }
@@ -417,13 +418,14 @@ export class StructuredAgents {
   }
 
   // start the Agent's process again under a new holder, on `conversationId` when its kind's store
-  // still has it (a Conversation never saved starts afresh); the old holder window goes first
-  private async relaunch(record: StructuredRecord, live: Live, conversationId: string | undefined, commandId?: string): Promise<boolean | undefined> {
+  // still has it (a Conversation never saved starts afresh; one the caller `located` is taken as
+  // found), on `model` when given; the old holder window goes first
+  private async relaunch(record: StructuredRecord, live: Live, conversationId: string | undefined, { commandId, model: kept, located = false }: { commandId?: string; model?: ModelSetting; located?: boolean } = {}): Promise<boolean | undefined> {
     live.busy = true;
     try {
       const place = await this.place(record.placeId);
       if (place === undefined) return false;
-      const resume = conversationId === undefined || await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home) === undefined ? undefined : conversationId;
+      const resume = conversationId === undefined || !located && await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home) === undefined ? undefined : conversationId;
       // the old process's last events (its exit) are not this Agent's any more
       live.generation += 1;
       live.connection?.close();
@@ -435,7 +437,7 @@ export class StructuredAgents {
       Object.assign(live, { working: false, questions: [], steers: [], guarded: false, connection: undefined, stderr: undefined });
       live.status.clear();
       // a Conductor's fresh Conversation starts on its configured model
-      const model = resume === undefined && record.role === 'conductor' ? this.conductor?.model : undefined;
+      const model = kept ?? (resume === undefined && record.role === 'conductor' ? this.conductor?.model : undefined);
       const started = await this.start(record, live, { id: record.id, kind: record.kind, place, ...(resume === undefined ? {} : { resume }), ...(model === undefined ? {} : { model }) }, commandId);
       // one that did not start, or did not report in, stays Exited, so it can be resumed again
       if (started === undefined || (record.lifecycle as AgentLifecycle) === 'failed') {
@@ -517,7 +519,7 @@ export class StructuredAgents {
       // a deploy may have raised the minimum: an older process restarts once idle
       const minimum = structuredAdapterFor(record.kind)?.pinned()?.version;
       live.offPin = record.version !== undefined && minimum !== undefined && !meetsMinimumVersion(record.version, minimum);
-      const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event)).catch(() => undefined);
+      const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event), { cwd: record.home, ...(record.conversationId === undefined ? {} : { conversation: record.conversationId }) }).catch(() => undefined);
       if (this.live.get(record.id) !== live || live.generation !== generation) { attached?.connection.close(); return; }
       if (attached === undefined) {
         record.lifecycle = 'exited';
@@ -685,8 +687,9 @@ export class StructuredAgents {
   }
 
   /**
-   * Cancel a working Agent's Turn: its pending steers are dropped, then the Turn is aborted. The
-   * dropped steers go to `returned`, or are offered for the composer when nobody asked for them.
+   * Cancel a working Agent's Turn: the Turn is aborted, with the pending steers its protocol
+   * drops (Claude keeps the ones it still runs as a Turn of their own). The dropped steers go to
+   * `returned`, or are offered for the composer when nobody asked for them.
    */
   async interrupt(id: string, returned?: (steers: string[]) => void, mayDispatch?: () => boolean): Promise<InterruptOutcome> {
     const live = await this.connected(id);
@@ -706,11 +709,14 @@ export class StructuredAgents {
     this.changed(live);
   }
 
-  /** Answer one of a live Agent's open questions, or dismiss it. */
-  async answer(id: string, questionId: string, answer: QuestionAnswer): Promise<boolean> {
+  /**
+   * Answer one of a live Agent's open questions, or dismiss it. Only the `operator` answering in
+   * the console itself grants a permission question; any answer may refuse one.
+   */
+  async answer(id: string, questionId: string, answer: QuestionAnswer, operator = false): Promise<boolean> {
     const live = await this.connected(id);
     const question = live?.questions.find(candidate => candidate.id === questionId);
-    if (live === undefined || question === undefined || !answerFits(question, answer) || !await live.connection.answer(questionId, answer)) return false;
+    if (live === undefined || question === undefined || !answerFits(question, answer) || question.permission === true && answer === 0 && !operator || !await live.connection.answer(questionId, answer, operator)) return false;
     this.closeQuestion(live, questionId);
     return true;
   }
@@ -779,7 +785,7 @@ export class StructuredAgents {
       return entry === undefined || live?.turn?.type !== 'settled' ? 'settled' : { entryId: entry.id, text: live.turn.message };
     },
     clearDraft: async () => true,
-    answer: async (id, questionId, answer) => await this.answer(id, questionId, answer),
+    answer: async (id, questionId, answer, operator) => await this.answer(id, questionId, answer, operator),
     // a working Agent's latest answer may be partial, so none is given until its Turn ends
     latestAnswer: async id => this.live.get(id)?.working === true ? undefined : this.live.get(id)?.transcript.filter((item): item is Extract<TranscriptItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'assistant').at(-1)?.text,
     recentLines: async (id, rows) => {
@@ -801,11 +807,17 @@ export class StructuredAgents {
     });
   }
 
-  /** Switch to one of the kind's Conversations in place while idle, restoring its model if allowed. */
+  /**
+   * Switch to one of the kind's Conversations while idle, restoring its model if allowed: in place,
+   * or for a kind that cannot, by restarting its process on it on the model it was on, keeping the
+   * Agent's id and queue. A restart that fails leaves the Agent Exited, and the switch refused.
+   */
   async switchConversation(id: string, conversationId: string): Promise<'ok' | StructuredRefusal> {
     return await this.whileIdle(id, async ({ record, live, connection }) => {
       const reference = await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home);
-      if (reference === undefined || !await connection.switchConversation(reference)) return false;
+      if (reference === undefined) return false;
+      if (connection.switchConversation === undefined) return await this.relaunch(record, live, conversationId, { located: true, ...(live.model === undefined ? {} : { model: live.model }) }) === true && record.lifecycle === 'live';
+      if (!await connection.switchConversation(reference)) return false;
       await this.holdToAllowedModels(record, live);
       return record.lifecycle === 'live';
     });
@@ -869,8 +881,9 @@ export class StructuredAgents {
       const previous = live.model;
       const effort = setting.effort ?? entry?.effort ?? previous?.effort;
       if (!await connection.setModel({ model: setting.model, ...(effort === undefined ? {} : { effort }) })) return false;
-      const now = live.model?.effort ?? effort;
-      this.notice(live, previous?.model === setting.model ? `Effort → ${now}` : `Model → ${this.modelName(live, setting.model)}, effort ${now}`);
+      // the Effort the Agent reports it is on, which a kind that cannot change it live keeps
+      const now = live.model?.effort;
+      this.notice(live, previous?.model === setting.model ? `Effort → ${now ?? 'default'}` : `Model → ${this.modelName(live, setting.model)}${now === undefined ? '' : `, effort ${now}`}`);
       return true;
     });
   }
@@ -1096,6 +1109,9 @@ export class StructuredAgents {
           live.busy = true;
           // a replay before adoption waits for adopt to supply the connection
           if (live.connection !== undefined) void this.guardAllowedModels(record, live);
+        } else if (!live.busy && live.connection !== undefined && this.allowed(record.kind).length > 0 && !this.allowed(record.kind).some(entry => entry.model === event.current.model)) {
+          // a model the Agent moved to by itself (a `/model` prompt, a fallback) is held to them too
+          void this.guardAllowedModels(record, live);
         }
         break;
       case 'turn':
@@ -1287,7 +1303,7 @@ export class StructuredAgents {
       const supported = live.models?.find(model => model.id === fallback.model)?.efforts;
       const effort = fallback.effort ?? (current.effort !== undefined && supported?.includes(current.effort) === true ? current.effort : undefined);
       if (live.connection === undefined || !await live.connection.setModel({ model: fallback.model, ...(effort === undefined ? {} : { effort }) })) continue;
-      this.notice(live, `Model → ${this.modelName(live, fallback.model)}, effort ${live.model?.effort ?? effort}: ${current.model} is not an Allowed model`, 'warning');
+      this.notice(live, `Model → ${this.modelName(live, fallback.model)}${live.model?.effort === undefined ? '' : `, effort ${live.model.effort}`}: ${current.model} is not an Allowed model`, 'warning');
       return;
     }
     this.notice(live, `${current.model} is not an Allowed model, and no Allowed model could be applied. Check Settings → Agents → Pi and the logins.`, 'error');

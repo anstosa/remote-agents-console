@@ -9,7 +9,7 @@ function piOverChannel(attached?: { dropped: number }) {
   const events: StructuredEvent[] = [];
   let listener: (line: string) => void = () => {};
   const channel: LineChannel = { send: line => sent.push(JSON.parse(line) as Record<string, unknown>), onLine: next => { listener = next; }, onClose: () => {}, close: () => {} };
-  const connection = piClient(channel, event => events.push(event), attached);
+  const connection = piClient(channel, event => events.push(event), { cwd: "/work", ...(attached === undefined ? {} : { attached }) });
   const pi = (record: object) => listener(JSON.stringify(record));
   const questions = () => events.flatMap(event => event.type === 'question' ? [event.question] : []);
   const closed = () => events.flatMap(event => event.type === 'question-closed' ? [event.id] : []);

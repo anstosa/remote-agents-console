@@ -1336,13 +1336,14 @@ export class PromptService {
     return await this.transport.openQueuedQuestion(agentId, observedCapture, mayOpen);
   }
 
-  // answer the current question directly without queueing a new agent turn
-  async answerQuestion(agentId: string, questionId: string, answer: QuestionAnswer, mayAnswer: () => boolean = () => true, preserveDavo = false): Promise<boolean> {
+  // answer the current question directly without queueing a new agent turn; only the operator
+  // answering in the console itself (`operator`) may grant a tool permission
+  async answerQuestion(agentId: string, questionId: string, answer: QuestionAnswer, { mayAnswer = () => true, preserveDavo = false, operator = false }: { mayAnswer?: () => boolean; preserveDavo?: boolean; operator?: boolean } = {}): Promise<boolean> {
     return await this.runPromptSource(agentId, async () => {
       const transport = await this.transportFor(agentId);
       // revalidate actual live consent after durable activity stamping
       if (!mayAnswer()) return false;
-      return await transport.answer(agentId, questionId, answer);
+      return await transport.answer(agentId, questionId, answer, operator);
     }, accepted => accepted, preserveDavo);
   }
 

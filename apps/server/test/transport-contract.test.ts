@@ -134,7 +134,7 @@ async function launched(client: ContractClient, { sandboxed = false, replies, to
 // reconnect to a launched process as a console that restarted would, from the lines read through its last idle point
 async function reattached(launch: Awaited<ReturnType<typeof launched>>, client: ContractClient, read: number) {
   const { events, emit, next } = collector(async () => await launch.processes.stderr(launch.started.holder));
-  const attached = await launch.processes.attach({ ...launch.started.holder, read }, client.adapter.kind, emit);
+  const attached = await launch.processes.attach({ ...launch.started.holder, read }, client.adapter.kind, emit, { cwd: launch.home });
   expect(attached).toBeDefined();
   return { connection: attached!.connection, events, next, dropped: attached!.dropped };
 }

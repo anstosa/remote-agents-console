@@ -7,7 +7,7 @@ import { gte, valid } from 'semver';
 import { run, tmuxFormatLiteral } from '../tmux/command.js';
 
 const piPackage = '@earendil-works/pi-coding-agent';
-const runtimeFiles = ['adapters/pi-extension.js', 'adapters/pi-sandbox.js', 'git/overrides.js', 'transports/holder.js', 'watches/sandboxed-command.js'];
+const runtimeFiles = ['adapters/pi-extension.js', 'adapters/ask-user.js', 'adapters/pi-sandbox.js', 'git/overrides.js', 'transports/holder.js', 'watches/sandboxed-command.js'];
 const dependencies = [piPackage, '@earendil-works/pi-codemode', '@anthropic-ai/sandbox-runtime'];
 
 // locate a package without relying on its public exports

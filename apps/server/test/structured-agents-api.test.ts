@@ -40,7 +40,8 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // scripts. It reports in as soon as it starts unless told to stay silent, with the launch's nonce
 // (or `nonce`) and its sandbox engaged exactly when the launch is Sandboxed, unless the sandbox
 // `fails`. Its Conversation and model operations succeed (unless it `refuses` them) and report
-// what changed, as a client does. A switch lands on `switchedTo` (the Conversation's own model),
+// what changed, as a client does. A switch lands on `switchedTo` (the Conversation's own model);
+// a client that cannot switch in place (`switchesInPlace: false`) has no switch at all,
 // and `unavailable` models are refused.
 // Each delivery answers with the next of `dispositions`, then `started` (`gone`: its process exits
 // with the delivery unanswered, which the client answers as refused); a steer waits as pending
@@ -50,7 +51,7 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
 // reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
-function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], initialModel = undefined as ModelSetting | undefined, synchronousInitialModel = false, switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], synchronousAttached = false, gone = false, sandboxFails = false, nonce = undefined as string | undefined, sandboxGeneration = undefined as string | undefined, sandboxGenerationFails = false, stopFails = false, bridged = false, compacting = Promise.resolve() } = {}) {
+function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], initialModel = undefined as ModelSetting | undefined, synchronousInitialModel = false, switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], synchronousAttached = false, gone = false, sandboxFails = false, nonce = undefined as string | undefined, sandboxGeneration = undefined as string | undefined, sandboxGenerationFails = false, stopFails = false, bridged = false, compacting = Promise.resolve(), switchesInPlace = true } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -78,7 +79,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       return 'refused';
     },
     newConversation: async () => { operations.push('new'); if (refuses) return false; emit({ type: 'conversation', id: `new-${conversations += 1}` }); return true; },
-    switchConversation: async reference => { operations.push(`switch ${reference}`); if (refuses) return false; emit({ type: 'conversation', id: 'switched' }); if (switchedTo !== undefined) emit({ type: 'model', current: switchedTo }); return true; },
+    ...(switchesInPlace ? { switchConversation: async (reference: string) => { operations.push(`switch ${reference}`); if (refuses) return false; emit({ type: 'conversation', id: 'switched' }); if (switchedTo !== undefined) emit({ type: 'model', current: switchedTo }); return true; } } : {}),
     renameConversation: async name => { operations.push(`rename ${name}`); if (refuses) return false; emit({ type: 'conversation', id: 'named', name }); return true; },
     compact: async request => {
       compactions.push(request);
@@ -114,6 +115,8 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       lastReport = { ...report, sandbox: { engaged, ...(engaged ? {} : { reason: launch.sandboxed ? 'bwrap: not found' : 'not sandboxed' }) }, version, nonce: nonce ?? launch.nonce };
       const sent = lastReport;
       if (reporting) queueMicrotask(() => emit({ type: 'report', report: sent }));
+      // a client that cannot switch in place says which Conversation its process resumed
+      if (!switchesInPlace && launch.resume !== undefined) queueMicrotask(() => events({ type: 'conversation', id: launch.resume! }));
       // model a holder replay before adoption as well as the normal live report
       if (initialModel !== undefined) {
         if (synchronousInitialModel) events({ type: 'model', current: initialModel });
@@ -532,6 +535,39 @@ describe('a structured Agent\'s Named conversations', () => {
     await app.close();
   });
 
+  it('switches an Agent whose client cannot switch in place by restarting its process on the Conversation, keeping its id', async () => {
+    const fake = fakeAgent({ switchesInPlace: false });
+    const { app, headers, dashboardAgent, root } = await consoleWith(fake);
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0];
+    await piSession(join(root, 'pi'), join(root, 'repo'), '01a188d1-e7d9-711a-aba8-381b96066aa5', 'Fix the parser');
+    const id: string = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: 'first' });
+    fake.emit({ type: 'model', current: { model: 'openai/gpt-5.6', effort: 'high' } });
+    const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/conversations/switch`, headers, payload: { kind: 'pi', id: '01a188d1-e7d9-711a-aba8-381b96066aa5' } });
+    expect(switched.statusCode).toBe(201);
+    expect(switched.json()).toEqual({ agentId: id });
+    // the same Agent, on the model it was on
+    expect(fake.launches.map(launch => [launch.id, launch.resume, launch.model])).toEqual([[id, undefined, undefined], [id, '01a188d1-e7d9-711a-aba8-381b96066aa5', { model: 'openai/gpt-5.6', effort: 'high' }]]);
+    expect(fake.closed()).toBe(true);
+    expect(await dashboardAgent(id)).toMatchObject({ conversationId: '01a188d1-e7d9-711a-aba8-381b96066aa5', structured: { lifecycle: 'live' } });
+    await app.close();
+  });
+
+  it('leaves an Agent whose restart on another Conversation fails Exited, and the switch refused', async () => {
+    const fake = fakeAgent({ switchesInPlace: false });
+    const { app, headers, dashboardAgent, root } = await consoleWith(fake, { reportTimeoutMs: 50 });
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0];
+    await piSession(join(root, 'pi'), join(root, 'repo'), '01a188d1-e7d9-711a-aba8-381b96066aa5', 'Fix the parser');
+    const id: string = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.quiet();
+    const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/conversations/switch`, headers, payload: { kind: 'pi', id: '01a188d1-e7d9-711a-aba8-381b96066aa5' } });
+    expect(switched.statusCode).toBe(409);
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'exited' } });
+    await app.close();
+  });
+
   it('takes the Agent\'s refusal of a Conversation change as a refusal', async () => {
     const fake = fakeAgent({ refuses: true });
     const { app, headers, dashboardAgent } = await consoleWith(fake);
@@ -811,6 +847,19 @@ describe('a structured Agent\'s Allowed models', () => {
     await app.close();
   });
 
+  it('holds a model the Agent moves to by itself later to the Allowed models too', async () => {
+    const fake = fakeAgent({ models: [gpt] });
+    const { app, headers, dashboardAgent } = await consoleWith(fake, { allowedModels });
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'model', current: { model: gpt.id, effort: 'medium' } });
+    await vi.waitFor(async () => expect((await dashboardAgent(id)).structured.preparing).toBeUndefined());
+    expect(fake.operations).toEqual([]);
+    // a `/model` prompt, say
+    fake.emit({ type: 'model', current: { model: 'openai/o1' } });
+    await vi.waitFor(() => expect(fake.operations).toEqual([`model ${gpt.id} medium`]));
+    await app.close();
+  });
+
   it('runs on the kind\'s own default with no Allowed models, and offers no model to choose', async () => {
     const fake = fakeAgent({ models: [gpt] });
     const { app, headers, dashboardAgent } = await consoleWith(fake);
@@ -1014,6 +1063,21 @@ describe('a structured Agent\'s queued prompts', () => {
     expect(answered.attention).toBe('working');
     expect(answered.question).toBeUndefined();
     expect((await answer({ questionId: 'q2', text: 'late' })).statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('lets only the operator, answering in the console, grant a permission question, and shows what it grants', async () => {
+    const fake = fakeAgent();
+    const { app, headers, dashboardAgent, id, structuredAgents } = await working(fake);
+    const ask = (questionId: string) => fake.emit({ type: 'question', question: { id: questionId, text: 'Allow Bash make deploy?', detail: 'make deploy\nmake check', permission: true, field: { kind: 'choice', choices: ['Allow', 'Deny'] } } });
+    ask('p1');
+    expect(await dashboardAgent(id)).toMatchObject({ question: { id: 'p1', detail: 'make deploy\nmake check', permission: true } });
+    // an answer from elsewhere (an integration, the voice assistant) may refuse it, never grant it
+    expect(await structuredAgents.answer(id, 'p1', 0)).toBe(false);
+    expect(await structuredAgents.answer(id, 'p1', 1)).toBe(true);
+    ask('p2');
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/question`, headers, payload: { questionId: 'p2', index: 0 } })).statusCode).toBe(204);
+    expect(fake.answers).toEqual([['p1', 1], ['p2', 0]]);
     await app.close();
   });
 

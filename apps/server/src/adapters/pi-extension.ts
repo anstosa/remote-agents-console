@@ -4,11 +4,12 @@ import { join } from 'node:path';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { access, constants } from 'node:fs/promises';
 import { compact, createBashToolDefinition, createCodemodeExtension, createEditToolDefinition, createLocalBashOperations, createMcpExtension, createReadToolDefinition, createWriteToolDefinition, detectSupportedImageMimeTypeFromFile, getAgentDir, VERSION, type BashOperations, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { askUser, askUserReply } from './ask-user.js';
 import { commandEnv, fileOperations, pathRefusal, sessionPolicyFrom, type SandboxPolicy } from './pi-sandbox.js';
 
 /**
  * The RAC Pi extension, loaded into every Pi the console launches (ADR 0017). Pi loads it
- * itself (`-e`), so it imports nothing from the console but the Pi-free sandbox policy: the status
+ * itself (`-e`), so it imports nothing from the console but the Pi-free sandbox policy and `ask_user`: the status
  * key is the Pi client's `piReportStatusKey`, and a dialog's title has the shape the Pi client's
  * `dialogTitle` reads.
  *
@@ -144,30 +145,19 @@ export default function rac(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: 'ask_user',
+    name: askUser.name,
     label: 'Ask the operator',
-    description: 'Ask the operator a question and wait for the answer. Offer choices when the answer is one of a few options; otherwise the operator types an answer. Ask instead of guessing when a decision is theirs.',
+    description: askUser.description,
     promptSnippet: 'Ask the operator a question and wait for the answer',
     // plain JSON Schema: TypeBox is Pi's own dependency, not the console's
-    parameters: {
-      type: 'object',
-      properties: {
-        question: { type: 'string', description: 'The question, on its own' },
-        choices: { type: 'array', items: { type: 'string' }, description: 'The answers to choose from, when there are a few' }
-      },
-      required: ['question'],
-      additionalProperties: false
-    } as never,
+    parameters: askUser.parameters as never,
     executionMode: 'sequential',
     async execute(toolCallId, params: { question: string; choices?: string[] }, signal, _onUpdate, ctx) {
       const title = JSON.stringify({ rac: 'dialog', toolCallId, text: params.question });
       const answer = params.choices !== undefined && params.choices.length > 0
         ? await ctx.ui.select(title, params.choices, { signal })
         : await ctx.ui.input(title, undefined, { signal });
-      const text = answer === undefined ? 'The operator dismissed the question without answering.'
-        : params.choices !== undefined && params.choices.length > 0 && !params.choices.includes(answer) ? `The operator answered in their own words instead of choosing:\n\n${answer}`
-        : answer;
-      return { content: [{ type: 'text', text }], details: { answered: answer !== undefined } };
+      return { content: [{ type: 'text', text: askUserReply(params.choices, answer) }], details: { answered: answer !== undefined } };
     }
   });
 }

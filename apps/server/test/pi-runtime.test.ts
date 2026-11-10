@@ -17,7 +17,7 @@ async function runtime() {
   const modules = join(root, 'console');
   const host = join(root, 'apps/server/dist');
   // mirror the helper import closure as compiled bytes
-  for (const name of ['adapters/pi-extension.js', 'adapters/pi-sandbox.js', 'git/overrides.js', 'transports/holder.js', 'watches/sandboxed-command.js']) {
+  for (const name of ['adapters/pi-extension.js', 'adapters/ask-user.js', 'adapters/pi-sandbox.js', 'git/overrides.js', 'transports/holder.js', 'watches/sandboxed-command.js']) {
     for (const base of [modules, host]) { await mkdir(dirname(join(base, name)), { recursive: true }); await writeFile(join(base, name), `// ${name}\n`); }
   }
   const packageRoot = (name: string) => join(root, 'console-node_modules', name);

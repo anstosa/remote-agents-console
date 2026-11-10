@@ -853,7 +853,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         // only this installation's configured project or opened worktree is eligible
         if (!config.projects.some(project => project.id === projectId) && !discovery.worktreesNow().some(worktree => worktree.id === agent.worktreeId)) return undefined;
         return { agentId: agent.id, worktreeId: agent.worktreeId, projectId, placeId: agent.placeId ?? agent.worktreeId, ...(agent.conversationId === undefined ? {} : { conversationId: agent.conversationId }), processGeneration: await structuredAgents.processGeneration(id) ?? 0, ...(agent.structured?.model?.id === undefined ? {} : { modelId: agent.structured.model.id }) };
-      }, question: async id => { const result = await orchestration.agentStatus(id); return result.ok ? result.value.question : undefined; }, answerQuestion: async (id, questionId, answer, mayAnswer, preserveDavo) => await prompts.answerQuestion(id, questionId, 'index' in answer ? answer.index : 'text' in answer ? answer.text : answer, mayAnswer, preserveDavo) });
+      }, question: async id => { const result = await orchestration.agentStatus(id); return result.ok ? result.value.question : undefined; }, answerQuestion: async (id, questionId, answer, mayAnswer, preserveDavo) => await prompts.answerQuestion(id, questionId, 'index' in answer ? answer.index : 'text' in answer ? answer.text : answer, { ...(mayAnswer === undefined ? {} : { mayAnswer }), ...(preserveDavo === undefined ? {} : { preserveDavo }) }) });
       davoToolDefinitions = davoBridge.tools;
       app.post('/api/davo/continuation', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (request, reply) => {
         browser(request);
@@ -3058,7 +3058,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       : Number.isInteger(data.index) && data.text === undefined ? data.index as number : undefined;
     // reject ambiguous payloads and stale or unsupported question answers
     if (typeof data.questionId !== 'string' || answer === undefined
-      || !await prompts.answerQuestion((request.params as { id: string }).id, data.questionId, answer)) return reply.code(404).send({ error: 'question unavailable' });
+      || !await prompts.answerQuestion((request.params as { id: string }).id, data.questionId, answer, { operator: true })) return reply.code(404).send({ error: 'question unavailable' });
     return reply.code(204).send();
   });
   // delay between launch checks

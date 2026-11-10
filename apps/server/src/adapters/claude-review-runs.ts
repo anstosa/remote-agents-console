@@ -1,4 +1,5 @@
 import { claudeLastAssistantMessage, type ClaudeAssistantMessage } from './claude-conversations.js';
+import { claudeEfforts } from '../transports/claude.js';
 import type { HeadlessRunResult, HeadlessRunConversation, ReplyPane, ReviewRuns, ReviewRunSettings } from './types.js';
 
 // the only built-in tools a Claude Review run gets, headless or interactive: reading the
@@ -35,7 +36,7 @@ async function lastAssistantMessage(pane: ReplyPane): Promise<ClaudeAssistantMes
 }
 
 export const claudeReviewRuns: ReviewRuns = {
-  efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  efforts: claudeEfforts,
   headless: {
     probe: { help: ['--help'], flags: ['--json-schema', '--tools', '--output-format', '--effort', '--session-id', '--resume', '--strict-mcp-config', '--setting-sources'] },
     // print mode and read-only: only the read tools, no MCP servers and only the operator's settings,

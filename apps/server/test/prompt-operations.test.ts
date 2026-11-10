@@ -517,7 +517,7 @@ describe('PromptService operation publication', () => {
     await fixture.service.watchActivity(agentId, input.expiresAt);
     await fixture.service.publishOperation(input, async () => true);
 
-    await expect(fixture.service.answerQuestion(agentId, 'question-1', 0, () => true, true)).resolves.toBe(true);
+    await expect(fixture.service.answerQuestion(agentId, 'question-1', 0, { preserveDavo: true })).resolves.toBe(true);
     expect(fixture.service.davoOwned(agentId)).toBe(true);
     await expect(fixture.service.answerQuestion(agentId, 'question-2', 0)).resolves.toBe(true);
     expect(fixture.service.davoOwned(agentId)).toBe(false);

@@ -39,6 +39,8 @@ const sdkEntrypoints = new Set(['sdk-cli', 'sdk-ts', 'sdk-py']);
 // bound the final-message read: the reply sits at the transcript's end, and a Review run's
 // JSON reply may run to hundreds of kilobytes once escaped
 const maxFinalMessageScanBytes = 8 * 1024 * 1024;
+// bound the transcript a structured Agent's history is read from: its latest records
+const maxHistoryScanBytes = 8 * 1024 * 1024;
 // discovery polls this reader, so keep each pane read small and fail safe on an oversized record
 const maxLatestMessageScanBytes = 512 * 1024;
 // a top-level transcript filename is exactly `<session-uuid>.jsonl`
@@ -331,7 +333,7 @@ export type ClaudeAssistantMessage = { id?: string; text?: string };
 
 /**
  * The last assistant message among these transcript records. The transcript format is Claude
- * Code's internal one, so this is the single place that reads it: each content block of one model
+ * Code's internal one (read here and, for a structured Agent's history, by the Claude client): each content block of one model
  * message (thinking, text, tool use) is its own `type: "assistant"` record carrying the same
  * `message.id`, so the last message is the text blocks of the records sharing the last assistant
  * record's id, joined in order. Subagent (sidechain) records are skipped. `undefined` when there is
@@ -384,4 +386,14 @@ export async function claudeConversationLatestMessage(pane: { pid: number; cwd?:
   // require the reported id and raw pane cwd that key Claude's transcript
   if (pane.conversationId === undefined || !validClaudeSessionId(pane.conversationId) || pane.cwd === undefined) return undefined;
   return latestMessageCache.get(transcriptPath(pane.conversationId, pane.cwd, env)).catch(() => undefined);
+}
+
+/**
+ * The latest records of a known Claude Conversation's transcript, as raw JSONL lines from a
+ * bounded tail, for a structured Agent's history. `undefined` on an invalid id or an unreadable
+ * (or not yet written) transcript.
+ */
+export async function claudeTranscriptRecords(id: string, cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<string[] | undefined> {
+  if (!validClaudeSessionId(id)) return undefined;
+  return readFileTail(transcriptPath(id, cwd, env), maxHistoryScanBytes).catch(() => undefined);
 }

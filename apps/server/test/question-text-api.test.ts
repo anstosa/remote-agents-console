@@ -31,10 +31,11 @@ describe('text question API', () => {
       expect(answerQuestion).not.toHaveBeenCalled();
       const text = await app.inject({ method: 'POST', url, headers, payload });
       expect(text.statusCode).toBe(204);
-      expect(answerQuestion).toHaveBeenLastCalledWith('agent-1', payload.questionId, payload.text);
+      expect(answerQuestion).toHaveBeenLastCalledWith('agent-1', payload.questionId, payload.text, { operator: true });
       const choice = await app.inject({ method: 'POST', url, headers, payload: { questionId: payload.questionId, index: 1 } });
       expect(choice.statusCode).toBe(204);
-      expect(answerQuestion).toHaveBeenLastCalledWith('agent-1', payload.questionId, 1);
+      expect(answerQuestion).toHaveBeenLastCalledWith('agent-1', payload.questionId, 1, { operator: true });
+      // the browser is the operator, whose answer alone may grant a tool permission
       // refuse callers that mix text and numeric selection or omit the answer
       for (const body of [{ ...payload, index: 0 }, { questionId: payload.questionId }, { ...payload, text: 7 }, { ...payload, questionId: null }]) {
         const invalid = await app.inject({ method: 'POST', url, headers, payload: body });

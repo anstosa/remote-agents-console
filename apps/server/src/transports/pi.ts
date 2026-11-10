@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { QuestionField } from '../adapters/types.js';
-import type { LaunchReport, ModelInfo, ModelSetting, ProtocolClient, TranscriptItem, TranscriptTool } from './structured.js';
+import { bounded, count, isObject, oneLine, outcome, strings, summary, text, thousands, waitingForAnswer, type Json, type LaunchReport, type ModelInfo, type ModelSetting, type ProtocolClient, type TranscriptItem, type TranscriptTool } from './structured.js';
 
 /**
  * the Pi protocol client (ADR 0017): a thin client over `pi --mode rpc` JSON lines
@@ -11,20 +11,6 @@ import type { LaunchReport, ModelInfo, ModelSetting, ProtocolClient, TranscriptI
 export const piReportStatusKey = 'rac-launch';
 /** The RAC Pi extension's command that takes the console's MCP access (the Conductor's only), and the status key it confirms under. */
 export const piConsoleCommand = 'rac-console';
-// what a tool call's line reads while its question waits in the Inline-question box
-const waitingForAnswer = 'waiting for your answer below';
-
-type Json = { [key: string]: unknown };
-const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
-const text = (content: unknown): string => typeof content === 'string' ? content
-  : Array.isArray(content) ? content.flatMap(block => isObject(block) && block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('') : '';
-const oneLine = (line: string): string => {
-  const flat = line.replace(/\s+/gu, ' ').trim();
-  return flat.length > 120 ? `${flat.slice(0, 119)}…` : flat;
-};
-// a tool call's one-line target: its first string argument
-const summary = (args: unknown): string => oneLine((isObject(args) ? Object.values(args).find((value): value is string => typeof value === 'string') : undefined) ?? '');
-const count = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 const scriptSummary = (calls: number): string => count(calls, 'tool call', 'tool calls');
 const parseReport = (statusText: unknown): LaunchReport | undefined => {
   if (typeof statusText !== 'string') return undefined;
@@ -45,7 +31,6 @@ const dialogTitle = (title: unknown): { text: string; toolCallId?: string } => {
   } catch { /* a plain title */ }
   return { text: title };
 };
-const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 // at most this many dialogs stay open (more are dismissed at once) and this many choices show
 const maxDialogs = 20;
 const maxChoices = 50;
@@ -69,11 +54,6 @@ const answerText = (message: Json): string => {
   const said = text(message.content);
   return said !== '' ? said : message.stopReason === 'error' && typeof message.errorMessage === 'string' ? `Error: ${message.errorMessage}` : '';
 };
-const outcome = (aborted: boolean, failed: boolean): 'done' | 'cancelled' | 'failed' => aborted ? 'cancelled' : failed ? 'failed' : 'done';
-// Pi bounds a tool's output (about 50 KiB); this guards every kept text against a tool or model that does not
-const maxText = 64 * 1024;
-const bounded = (value: string): string => value.length > maxText ? value.slice(-maxText) : value;
-const thousands = (tokens: number): string => `${Math.round(tokens / 1000)}k`;
 // the notice for a compaction, live (`compaction_end`) or found in the history; a history's says
 // neither why nor what it freed
 const compactionNotice = (id: string, summary: unknown, tokensBefore: unknown, tokensAfter?: unknown, reason?: unknown): TranscriptItem => {
@@ -208,7 +188,7 @@ const sessionModel = (entries: unknown): ModelSetting | undefined => {
 // a session command Pi accepted and no extension cancelled
 const accepted = (response: Json): boolean => response.success === true && !(isObject(response.data) && response.data.cancelled === true);
 
-export const piClient: ProtocolClient = (channel, emit, attached) => {
+export const piClient: ProtocolClient = (channel, emit, { attached }) => {
   const pending = new Map<string, (response: Json) => void>();
   // request ids no earlier client used, so a response replayed from before a reattach answers nothing
   const prefix = `rac-${randomUUID().slice(0, 8)}`;

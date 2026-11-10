@@ -46,7 +46,8 @@ export type SwitchOutcome = { status: 'switched'; agentId: string } | { status: 
  * `newConversation` do not, and prompt delivery runs under the reservation its caller holds.
  */
 export interface AgentTransport {
-  answer(agentId: string, questionId: string, answer: QuestionAnswer): Promise<boolean>;
+  /** `operator` says the operator answers in the console itself, the only answer that may grant a tool permission. */
+  answer(agentId: string, questionId: string, answer: QuestionAnswer, operator?: boolean): Promise<boolean>;
   /** `returned` hears the steers a cancel dropped, which go back to the operator. */
   interrupt(agentId: string, returned?: (steers: string[]) => void, mayDispatch?: () => boolean): Promise<InterruptOutcome>;
   close(agentId: string): Promise<boolean>;

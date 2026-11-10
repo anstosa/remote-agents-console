@@ -85,3 +85,22 @@ untrusted-directory safety-check block. `final-message.jsonl` is a trimmed sessi
 transcript (one record per content block, records of one message sharing
 `message.id`, a sidechain reply) that `../adapters/claude-conversations.test.ts`
 reads the final assistant message from, as an interactive Review run does.
+
+`structured/` holds Claude Code 2.1.319 driven headless over stream-json (`claude
+-p --input-format stream-json --output-format stream-json --verbose
+--permission-prompts host`), recorded by probes and sanitized: the operator's
+account, skills and paths removed, the probe sessions renamed to one (the session
+`/clear` starts keeps its own id). Each `<scenario>.jsonl` is the CLI's stdout for
+one exchange; a `control_response` to the client's own request names that
+request's subtype in place of its id. `turn-steer-replay.jsonl`, `clear.jsonl` and
+`initialize-again.jsonl` were recorded with `--replay-user-messages`, as the
+console launches Claude: prompts echoed and their `command_lifecycle`, under the
+ids the probe sent them with, which the tests swap for the client's. The others
+predate that flag. `initialize-again.jsonl` is the answer to a second `initialize`
+with its lists trimmed: `commands` (106 recorded) and `agents` (13) cut to one
+each, and `models` (14) to `default`, `sonnet` and `haiku`; the entries kept and
+every other field, `capabilities` included, are as recorded. The SessionStart hook output in `launch.jsonl` and
+`compact.jsonl` is the shape the console's hook prints, as `clear.jsonl` records it.
+`session-*.jsonl` are session transcripts as the CLI writes them;
+`session-edit.jsonl` is hand-written in the shape of real Edit and Write records.
+`../claude-client.test.ts` and `../claude-history.test.ts` read them.
