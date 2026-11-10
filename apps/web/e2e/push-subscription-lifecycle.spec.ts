@@ -307,6 +307,36 @@ test('does not retry denied permission or take control for an inactive session',
   expect(server.counters()).toMatchObject({ publicKeyRequests: 0, subscriptionRequests: 0, controlRequests: 0 });
 });
 
+// keep automatic enrollment invisible at both responsive sizes
+for (const phone of [false, true]) {
+  // verify background work and recovery without a progress surface
+  test(`keeps alert checks and retries invisible on ${phone ? 'phone' : 'desktop'}`, async ({ page }) => {
+    await page.setViewportSize(phone ? { width: 390, height: 844 } : { width: 1280, height: 800 });
+    await page.clock.install({ time: new Date('2026-11-08T12:00:00Z') });
+    await installPushBrowser(page, { existingKey: currentKey, stall: 'public-key' });
+    const server = await serveLifecycle(page);
+    await page.goto('/');
+    await expect.poll(() => pushStats(page)).toMatchObject({ stalledRequests: 1 });
+    // include semantic announcements independent of styling or copy
+    const announcements = page.getByRole('tablist', { name: 'Agents and worktrees' }).locator('[role="status"], [aria-live]');
+    // a pending check must leave no visible or accessible progress node
+    await expect(page.locator('.notification-status, .notification-control')).toHaveCount(0);
+    await expect(page.getByText('Restoring alerts…')).toHaveCount(0);
+    await expect(announcements).toHaveCount(0);
+    await page.clock.runFor(8_000);
+    await expect.poll(() => pushStats(page)).toMatchObject({ aborts: 1 });
+    // retry backoff must remain just as quiet
+    await expect(page.locator('.notification-status, .notification-control')).toHaveCount(0);
+    await expect(announcements).toHaveCount(0);
+    await trigger(page, 'recover');
+    await page.clock.runFor(1_100);
+    await expect.poll(() => server.counters().subscriptionRequests).toBe(1);
+    await expect.poll(() => pushStats(page)).toMatchObject({ subscribe: 0, unsubscribe: 0 });
+    await expect(page.locator('.notification-status, .notification-control')).toHaveCount(0);
+    await expect(announcements).toHaveCount(0);
+  });
+}
+
 test('waits offline and checks the retained subscription on the next online edge', async ({ page }) => {
   await installPushBrowser(page, { existingKey: currentKey, online: false });
   const server = await serveLifecycle(page);
@@ -337,15 +367,17 @@ test('settles a never-ready registration and recovers on a later controller edge
   // release the coordinator's bounded registration probe before lifecycle timing begins
   await expect.poll(() => server.counters().sessionRequests).toBeGreaterThanOrEqual(1);
   await page.clock.fastForward(1_500);
-  await expect(page.getByText('Restoring alerts…')).toBeVisible({ timeout: 15_000 });
+  // wait for the authenticated console rather than a transient status message
+  await expect(page.getByRole('tablist', { name: 'Agents and worktrees' }).getByRole('button', { name: 'Launch agent', exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.notification-status, .notification-control')).toHaveCount(0);
   // exhaust three finite registration lookups and two retry delays
-  await page.clock.fastForward(1_500);
-  await expect(page.getByText('Restoring alerts…')).toBeVisible();
-  await page.clock.fastForward(1_000);
-  await page.clock.fastForward(1_500);
-  await expect(page.getByText('Restoring alerts…')).toBeVisible();
-  await page.clock.fastForward(5_000);
-  await page.clock.fastForward(1_500);
+  await page.clock.runFor(1_500);
+  await expect(page.locator('.notification-status, .notification-control')).toHaveCount(0);
+  await page.clock.runFor(1_000);
+  await page.clock.runFor(1_500);
+  await expect(page.locator('.notification-status, .notification-control')).toHaveCount(0);
+  await page.clock.runFor(5_000);
+  await page.clock.runFor(1_500);
   await expect(page.getByText('Alerts need attention')).toBeVisible();
   expect(server.counters().publicKeyRequests).toBe(0);
   await trigger(page, 'register');
@@ -358,11 +390,13 @@ test('releases a rejected registration run and recovers without duplicate subscr
   await installPushBrowser(page, { existingKey: currentKey, registration: 'reject' });
   const server = await serveLifecycle(page);
   await page.goto('/');
-  await expect(page.getByText('Restoring alerts…')).toBeVisible({ timeout: 15_000 });
+  // wait for the authenticated console while recovery stays invisible
+  await expect(page.getByRole('tablist', { name: 'Agents and worktrees' }).getByRole('button', { name: 'Launch agent', exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.notification-status, .notification-control')).toHaveCount(0);
   // exhaust the immediate missing-registration attempts
-  await page.clock.fastForward(1_000);
-  await expect(page.getByText('Restoring alerts…')).toBeVisible();
-  await page.clock.fastForward(5_000);
+  await page.clock.runFor(1_000);
+  await expect(page.locator('.notification-status, .notification-control')).toHaveCount(0);
+  await page.clock.runFor(5_000);
   await expect(page.getByText('Alerts need attention')).toBeVisible();
   await trigger(page, 'register');
   await expect.poll(() => server.counters().subscriptionRequests).toBe(1);

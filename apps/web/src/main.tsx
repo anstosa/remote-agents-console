@@ -9205,8 +9205,8 @@ function NotificationControl() {
   // hide unsupported and checked healthy enrollment
   if (!supported || health === 'unsupported' || permission === 'granted' && health === 'healthy') return null;
   if (permission === 'denied' || health === 'blocked') return <span className="notification-status" title="Enable notifications for this site in your browser settings">Alerts blocked</span>;
-  // show bounded recovery without adding another surface
-  if (permission === 'granted' && (health === 'idle' || health === 'syncing' || health === 'retrying')) return <span className="notification-status" role="status">Restoring alerts…</span>;
+  // keep automatic checks and retries in the background
+  if (permission === 'granted' && (health === 'idle' || health === 'syncing' || health === 'retrying')) return null;
   // keep permanent and provider health visible for later lifecycle recovery
   if (permission === 'granted' && health === 'attention') return <span className="notification-status" role="status">Alerts need attention</span>;
   return <button className="notification-control" type="button" onClick={() => void enable()}>Enable alerts</button>;
