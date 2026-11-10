@@ -12,6 +12,7 @@ type VoiceWindow = typeof window & {
 };
 
 type VoiceOptions = {
+  withRecognition?: boolean;
   rejectAudio?: boolean;
   startFailure?: boolean;
   secondAgent?: boolean;
@@ -29,8 +30,8 @@ type VoiceQuestion = {
 test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
 
 // install controllable speech, audio and websocket boundaries
-async function installVoiceMocks(page: Page, options: Pick<VoiceOptions, 'rejectAudio' | 'startFailure'> = {}) {
-  await page.addInitScript(({ rejectAudio, startFailure }) => {
+async function installVoiceMocks(page: Page, options: Pick<VoiceOptions, 'withRecognition' | 'rejectAudio' | 'startFailure'> = {}) {
+  await page.addInitScript(({ withRecognition, rejectAudio, startFailure }) => {
     const speech = { starts: 0, aborts: 0 };
     const audio: Array<{ path: string; volume: number }> = [];
     let active: MockSpeechRecognition | undefined;
@@ -102,7 +103,9 @@ async function installVoiceMocks(page: Page, options: Pick<VoiceOptions, 'reject
       // deliver a fatal recognition error without a later end event
       fail: (error: string) => active?.onerror?.({ error })
     };
-    Object.defineProperty(window, 'SpeechRecognition', { configurable: true, value: MockSpeechRecognition });
+    Object.defineProperty(window, 'SpeechRecognition', { configurable: true, value: withRecognition === false ? undefined : MockSpeechRecognition });
+    // test keyboard dismissal independently from microphone support
+    if (withRecognition === false) Object.defineProperty(window, 'webkitSpeechRecognition', { configurable: true, value: undefined });
     Object.defineProperty(window, 'Audio', { configurable: true, value: MockAudio });
     Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockWebSocket });
     Object.defineProperty(window, '__voiceTest', { configurable: true, value: fixture });
@@ -239,7 +242,7 @@ test('swipe toggles dictation with one cue, bounce and active indicator per tran
   const requests = await mountVoicePage(page);
   const prompt = page.getByRole('textbox', { name: 'Prompt' });
   const composer = page.locator('.prompt-composer');
-  await expect(prompt).toHaveAttribute('aria-description', 'Swipe up to toggle dictation.');
+  await expect(prompt).toHaveAttribute('aria-description', 'Swipe up to toggle dictation. Swipe down to unfocus.');
   await expect(page.getByRole('button', { name: /voice input/iu })).toHaveCount(0);
   await expect(page.getByRole('status', { name: 'Dictation recording' })).toHaveCount(0);
   await observeBounces(page, composer);
@@ -295,6 +298,91 @@ test('swipe toggles dictation with one cue, bounce and active indicator per tran
   await expect.poll(() => page.evaluate(() => (window as unknown as VoiceWindow).__voiceBounce?.count)).toBe(4);
 });
 
+// keyboard dismissal does not depend on browser speech support
+for (const withRecognition of [true, false]) {
+  // retain the draft and leave voice state untouched after a deliberate dismissal
+  test(`swiping down unfocuses the prompt ${withRecognition ? 'with' : 'without'} speech support`, async ({ page }) => {
+    const requests = await mountVoicePage(page, { withRecognition });
+    const prompt = page.getByRole('textbox', { name: 'Prompt' });
+    await prompt.fill('keep this unsent draft');
+    await expect(prompt).toBeFocused();
+    await swipePrompt(page, prompt, 0, 64);
+    await expect(prompt).not.toBeFocused();
+    // a compatibility click must not reopen the keyboard
+    await page.waitForTimeout(100);
+    await expect(prompt).not.toBeFocused();
+    await expect(prompt).toHaveValue('keep this unsent draft');
+    await expect(prompt).toHaveAttribute('aria-description', withRecognition ? 'Swipe up to toggle dictation. Swipe down to unfocus.' : 'Swipe down to unfocus.');
+    await expect(page.locator('.log-output')).not.toHaveClass(/input-active/u);
+    expect(await voiceState(page)).toEqual({ speech: { starts: 0, aborts: 0 }, audio: [] });
+    expect(requests.queued()).toBe(0);
+    expect(requests.steered()).toBe(0);
+  });
+}
+
+// dismissal must not change an intentionally latched recording session
+test('swiping down hides the keyboard without toggling dictation', async ({ page }) => {
+  await mountVoicePage(page);
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await prompt.fill('recording draft');
+  await swipePrompt(page, prompt, 0, -64);
+  await expect(prompt).toHaveClass(/voice-listening/u);
+  await swipePrompt(page, prompt, 0, 64);
+  await expect(prompt).not.toBeFocused();
+  await expect(prompt).toHaveClass(/voice-listening/u);
+  expect(await voiceState(page)).toEqual({ speech: { starts: 1, aborts: 0 }, audio: ['/dictation-start.wav'] });
+});
+
+// sending a previous prompt must not trap keyboard focus on the next draft
+test('swiping down unfocuses the prompt while a submission is pending', async ({ page }) => {
+  await mountVoicePage(page);
+  let release!: () => void;
+  const response = new Promise<void>(resolve => { release = resolve; });
+  let submissions = 0;
+  // hold the existing submission without sending anything to a real agent
+  await page.route('**/api/agents/agent-1/prompt', async route => {
+    submissions += 1;
+    await response;
+    await route.fulfill({ status: 204 });
+  });
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  try {
+    await prompt.fill('send first');
+    await page.getByRole('button', { name: 'Queue', exact: true }).tap();
+    await expect(page.getByRole('button', { name: 'Queueing', exact: true })).toBeDisabled();
+    await prompt.fill('keep the next draft');
+    await swipePrompt(page, prompt, 0, 64);
+    await expect(prompt).not.toBeFocused();
+    await expect(prompt).toHaveValue('keep the next draft');
+    expect(submissions).toBe(1);
+    expect(await voiceState(page)).toEqual({ speech: { starts: 0, aborts: 0 }, audio: [] });
+  } finally { release(); }
+  await expect(page.getByRole('button', { name: 'Queue', exact: true })).toBeEnabled();
+  await expect(prompt).not.toBeFocused();
+});
+
+// only a completed predominantly vertical downward swipe dismisses focus
+test('short, sideways, diagonal, cancelled and multi-touch swipes keep prompt focus', async ({ page }) => {
+  await mountVoicePage(page);
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await prompt.fill('keep editing');
+  await swipePrompt(page, prompt, 0, 39);
+  await expect(prompt).toBeFocused();
+  await swipePrompt(page, prompt, 64, 0);
+  await expect(prompt).toBeFocused();
+  await swipePrompt(page, prompt, 64, 64);
+  await expect(prompt).toBeFocused();
+  await swipePrompt(page, prompt, 0, 64, { cancel: true });
+  await expect(prompt).toBeFocused();
+  await swipePrompt(page, prompt, 0, 64, { multiTouch: true });
+  await expect(prompt).toBeFocused();
+  await expect(prompt).toHaveValue('keep editing');
+  expect(await voiceState(page)).toEqual({ speech: { starts: 0, aborts: 0 }, audio: [] });
+  // the threshold itself is a complete dismissal gesture
+  await swipePrompt(page, prompt, 0, 40);
+  await expect(prompt).not.toBeFocused();
+});
+
 test('short, downward, sideways, diagonal, cancelled, multi-touch and held gestures stay idle', async ({ page }) => {
   await mountVoicePage(page);
   const prompt = page.getByRole('textbox', { name: 'Prompt' });
@@ -328,31 +416,37 @@ test('unhurried upward swipes still toggle dictation', async ({ page }) => {
 
 // native draft scrolling must preserve both idle and active microphone intent
 for (const active of [false, true]) {
-  test(`scrolling an overflowing prompt preserves ${active ? 'active' : 'idle'} dictation`, async ({ page }) => {
-    await mountVoicePage(page);
-    const prompt = page.getByRole('textbox', { name: 'Prompt' });
-    const composer = page.locator('.prompt-composer');
-    await observeBounces(page, composer);
-    // start the logical session before the draft grows scrollable
-    if (active) {
-      await swipePrompt(page, prompt, 0, -64);
-      await expect.poll(() => page.evaluate(() => (window as unknown as VoiceWindow).__voiceBounce?.count)).toBe(1);
-      await expect(composer).not.toHaveClass(/voice-toggle-bounce/u);
-    }
-    const draft = Array.from({ length: 80 }, (_, index) => `line ${index + 1} — scrollable prompt content`).join('\n');
-    await prompt.fill(draft);
-    const initialTop = await prompt.evaluate((element: HTMLTextAreaElement) => {
-      element.scrollTop = Math.round((element.scrollHeight - element.clientHeight) / 4);
-      return element.scrollTop;
+  // retain native editing in either direction rather than interpreting a scroll as a gesture
+  for (const dy of [-72, 72]) {
+    test(`scrolling ${dy < 0 ? 'up' : 'down'} an overflowing prompt preserves ${active ? 'active' : 'idle'} dictation`, async ({ page }) => {
+      await mountVoicePage(page);
+      const prompt = page.getByRole('textbox', { name: 'Prompt' });
+      const composer = page.locator('.prompt-composer');
+      await observeBounces(page, composer);
+      // start the logical session before the draft grows scrollable
+      if (active) {
+        await swipePrompt(page, prompt, 0, -64);
+        await expect.poll(() => page.evaluate(() => (window as unknown as VoiceWindow).__voiceBounce?.count)).toBe(1);
+        await expect(composer).not.toHaveClass(/voice-toggle-bounce/u);
+      }
+      const draft = Array.from({ length: 80 }, (_, index) => `line ${index + 1} — scrollable prompt content`).join('\n');
+      await prompt.fill(draft);
+      const initialTop = await prompt.evaluate((element: HTMLTextAreaElement) => {
+        element.scrollTop = Math.round((element.scrollHeight - element.clientHeight) / 4);
+        return element.scrollTop;
+      });
+      expect(initialTop).toBeGreaterThan(100);
+      await swipePrompt(page, prompt, 0, dy);
+      // compare actual native scroll movement in the requested direction
+      if (dy < 0) await expect.poll(() => prompt.evaluate(element => element.scrollTop)).toBeGreaterThan(initialTop);
+      else await expect.poll(() => prompt.evaluate(element => element.scrollTop)).toBeLessThan(initialTop);
+      await expect(prompt).toBeFocused();
+      await expect(prompt).toHaveValue(draft);
+      await expect(page.getByRole('status', { name: 'Dictation recording' })).toHaveCount(active ? 1 : 0);
+      expect(await voiceState(page)).toEqual({ speech: { starts: active ? 1 : 0, aborts: 0 }, audio: active ? ['/dictation-start.wav'] : [] });
+      expect(await page.evaluate(() => (window as unknown as VoiceWindow).__voiceBounce?.count)).toBe(active ? 1 : 0);
     });
-    expect(initialTop).toBeGreaterThan(100);
-    await swipePrompt(page, prompt, 0, -72);
-    await expect.poll(() => prompt.evaluate(element => element.scrollTop)).toBeGreaterThan(initialTop);
-    await expect(prompt).toHaveValue(draft);
-    await expect(page.getByRole('status', { name: 'Dictation recording' })).toHaveCount(active ? 1 : 0);
-    expect(await voiceState(page)).toEqual({ speech: { starts: active ? 1 : 0, aborts: 0 }, audio: active ? ['/dictation-start.wav'] : [] });
-    expect(await page.evaluate(() => (window as unknown as VoiceWindow).__voiceBounce?.count)).toBe(active ? 1 : 0);
-  });
+  }
 }
 
 // physical-keyboard output mode leaves a visible composer that still acknowledges a stop

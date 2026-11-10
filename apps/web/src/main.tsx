@@ -2871,13 +2871,13 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   }, [id, value, question?.id, answerMode]);
   const recognition = useRef<SpeechRecognitionInstance | undefined>(undefined);
   const voiceSessionActive = useRef(false);
-  const voiceSwipeStart = useRef<{ identifier: number; x: number; y: number; scrollTop: number } | undefined>(undefined);
-  const voiceSwipeCleanup = useRef<(() => void) | undefined>(undefined);
+  const promptSwipeStart = useRef<{ identifier: number; x: number; y: number; scrollTop: number } | undefined>(undefined);
+  const promptSwipeCleanup = useRef<(() => void) | undefined>(undefined);
   // release only the current prompt gesture's document observer
-  const cancelVoiceSwipe = () => {
-    voiceSwipeStart.current = undefined;
-    voiceSwipeCleanup.current?.();
-    voiceSwipeCleanup.current = undefined;
+  const cancelPromptSwipe = () => {
+    promptSwipeStart.current = undefined;
+    promptSwipeCleanup.current?.();
+    promptSwipeCleanup.current = undefined;
   };
   // one cue and bounce belong to each logical recording transition, not service restarts
   const updateListening = (active: boolean) => {
@@ -2916,7 +2916,7 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     setListening(false);
     // detach stale callbacks before abort can synchronously emit an end event
     return () => {
-      cancelVoiceSwipe();
+      cancelPromptSwipe();
       // discard any pending silent recognition restart
       if (voiceRestartTimer.current !== undefined) window.clearTimeout(voiceRestartTimer.current);
       voiceRestartTimer.current = undefined;
@@ -3003,7 +3003,7 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   };
   // stop the logical session before abort callbacks or delayed restarts can resume it
   const stopVoice = () => {
-    cancelVoiceSwipe();
+    cancelPromptSwipe();
     voiceEnabled.current = false;
     // explicit stops retire any pending silent service restart
     if (voiceRestartTimer.current !== undefined) window.clearTimeout(voiceRestartTimer.current);
@@ -3228,26 +3228,26 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     updateListening(true);
     return true;
   };
-  // leave taps and native text selection alone while tracking a possible upward swipe
-  const beginVoiceSwipe = (event: React.TouchEvent<HTMLTextAreaElement>) => {
-    cancelVoiceSwipe();
-    // unavailable recognition and multi-touch must never request microphone access
-    if (!dictationAvailableRef.current || !supportsSpeechRecognition || event.touches.length !== 1 || pending && !voiceEnabled.current) return;
+  // track prompt gestures without intercepting taps or native text selection
+  const beginPromptSwipe = (event: React.TouchEvent<HTMLTextAreaElement>) => {
+    cancelPromptSwipe();
+    // keyboard dismissal stays available without speech support or while submitting
+    if (event.touches.length !== 1) return;
     const touch = event.touches[0];
-    voiceSwipeStart.current = { identifier: touch.identifier, x: touch.clientX, y: touch.clientY, scrollTop: event.currentTarget.scrollTop };
-    // a second finger outside this textarea still invalidates microphone intent
+    promptSwipeStart.current = { identifier: touch.identifier, x: touch.clientX, y: touch.clientY, scrollTop: event.currentTarget.scrollTop };
+    // a second finger outside this textarea still invalidates gesture intent
     const invalidateMultiTouch = (next: TouchEvent) => {
       // lifting the extra finger cannot restore a previously invalid gesture
-      if (next.touches.length > 1) cancelVoiceSwipe();
+      if (next.touches.length > 1) cancelPromptSwipe();
     };
     document.addEventListener('touchstart', invalidateMultiTouch, { capture: true, passive: true });
     // release exactly this prompt gesture's capture listener
-    voiceSwipeCleanup.current = () => document.removeEventListener('touchstart', invalidateMultiTouch, true);
+    promptSwipeCleanup.current = () => document.removeEventListener('touchstart', invalidateMultiTouch, true);
   };
-  // toggle once after a deliberate single-finger upward gesture completes
-  const endVoiceSwipe = (event: React.TouchEvent<HTMLTextAreaElement>) => {
-    const start = voiceSwipeStart.current;
-    cancelVoiceSwipe();
+  // dismiss focus downward or toggle dictation upward after one completed swipe
+  const endPromptSwipe = (event: React.TouchEvent<HTMLTextAreaElement>) => {
+    const start = promptSwipeStart.current;
+    cancelPromptSwipe();
     // native scrolling wins even when its scroll event has not yet flushed
     if (start === undefined || event.touches.length !== 0 || event.currentTarget.scrollTop !== start.scrollTop) return;
     const touch = Array.from(event.changedTouches).find(candidate => candidate.identifier === start.identifier);
@@ -3255,7 +3255,16 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     if (touch === undefined) return;
     const dx = touch.clientX - start.x;
     const dy = touch.clientY - start.y;
-    // preserve short, downward, sideways and diagonal editing gestures
+    // dismiss only this field without activating agent output or changing dictation
+    if (dy >= 40 && dy > Math.abs(dx) * 1.25) {
+      // suppress compatibility taps only while native cancellation is available
+      if (event.cancelable) event.preventDefault();
+      event.currentTarget.blur();
+      return;
+    }
+    // microphone eligibility must not block downward keyboard dismissal
+    if (!dictationAvailableRef.current || !supportsSpeechRecognition || pending && !voiceEnabled.current) return;
+    // preserve short, sideways and diagonal editing gestures
     if (dy > -40 || -dy <= Math.abs(dx) * 1.25) return;
     // a latched session can always be stopped, even between silent restarts
     if (voiceEnabled.current || voiceSessionActive.current) stopVoice();
@@ -3375,7 +3384,7 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
       input.setSelectionRange(input.value.length, input.value.length);
     });
   };
-  const composer = <div className="prompt-composer" ref={commandAnchorRef} onAnimationEnd={finishVoiceBounce}><textarea ref={promptInput} data-prompt-id={id} className={listening ? 'voice-listening' : undefined} aria-label="Prompt" aria-description={supportsSpeechRecognition ? 'Swipe up to toggle dictation.' : undefined} aria-autocomplete="list" data-context-flyout aria-expanded={commandToken !== undefined} aria-controls={commandToken === undefined ? undefined : `prompt-commands-${id}`} aria-activedescendant={commandOptions[activeCommand] === undefined ? undefined : `prompt-command-${id}-${activeCommand}`} value={value} onFocus={() => { exitTerminalInput.get(id)?.(); onPromptFocus(); }} onBlur={() => setCommandToken(undefined)} onCopy={flashCopiedPromptSelection} onPaste={pasteAttachments} onPointerDownCapture={phone ? undefined : preserveContextMenuPress} onMouseDownCapture={phone ? undefined : preserveContextMenuPress} onTouchStart={beginVoiceSwipe} onTouchEnd={endVoiceSwipe} onTouchCancel={cancelVoiceSwipe} onScroll={cancelVoiceSwipe} onContextMenu={event => { /* native text editing cancels pending microphone gestures */ cancelVoiceSwipe(); openPromptContextMenu(event); }} onKeyDown={event => { const plainArrow = !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey; if (commandOptions.length > 0 && plainArrow && event.key === 'ArrowDown') { event.preventDefault(); setActiveCommand(current => (current + 1) % commandOptions.length); } else if (commandOptions.length > 0 && plainArrow && event.key === 'ArrowUp') { event.preventDefault(); setActiveCommand(current => (current + commandOptions.length - 1) % commandOptions.length); } else if (commandOptions.length > 0 && plainArrow && event.key === 'Enter') { event.preventDefault(); selectCommand(commandOptions[activeCommand] ?? commandOptions[0]!); } else if (plainArrow && event.key === 'ArrowUp' && (historyIndex.current !== undefined || event.currentTarget.selectionStart === event.currentTarget.selectionEnd && !value.slice(0, event.currentTarget.selectionStart).includes('\n'))) { event.preventDefault(); recallPrompt(-1); } else if (plainArrow && event.key === 'ArrowDown' && historyIndex.current !== undefined) { event.preventDefault(); recallPrompt(1); } else if (event.key === 'Escape' && commandToken !== undefined) { event.preventDefault(); setCommandToken(undefined); } else if (event.key === 'Tab') { event.preventDefault(); setValue(current => current + '\t'); } else if (event.key === 'Enter') { event.preventDefault(); /* disabled or remapped modified enter must never submit a prompt */ if (event.altKey && !event.ctrlKey && !event.shiftKey && !event.metaKey && steering !== undefined) { void steerPrompt(); return; } if (event.ctrlKey || event.shiftKey || event.metaKey || event.altKey) return; /* forward plain blank Enter to output */ else if (!event.metaKey && !event.altKey && !value && attachments.length === 0) terminalInputs.get(id)?.('\r'); /* preserve mobile multiline entry */ else if (window.matchMedia('(max-width: 600px)').matches) insertPromptText(event.currentTarget, '\n'); else void submit(); } }} onChange={updatePrompt} />{listening && <span className="prompt-recording-indicator" role="status" aria-label="Dictation recording"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" /></svg><span className="sr-only">Dictation recording</span></span>}{commandToken !== undefined && <FlyoutPortal onDismiss={() => setCommandToken(undefined)}><div ref={commandFlyoutRef} className="command-menu" style={commandFlyoutStyle} id={`prompt-commands-${id}`} role="listbox" aria-label={`${commandToken.prefix} commands`}>{commandOptions.length > 0 ? commandOptions.map((command, index) => <button key={command.value} id={`prompt-command-${id}-${index}`} type="button" role="option" aria-selected={index === activeCommand} className={index === activeCommand ? 'active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => selectCommand(command)}><code>{command.value}</code><span>{command.description}</span></button>) : <span className="command-menu-empty">No matching commands</span>}</div></FlyoutPortal>}</div>;
+  const composer = <div className="prompt-composer" ref={commandAnchorRef} onAnimationEnd={finishVoiceBounce}><textarea ref={promptInput} data-prompt-id={id} className={listening ? 'voice-listening' : undefined} aria-label="Prompt" aria-description={supportsSpeechRecognition ? 'Swipe up to toggle dictation. Swipe down to unfocus.' : 'Swipe down to unfocus.'} aria-autocomplete="list" data-context-flyout aria-expanded={commandToken !== undefined} aria-controls={commandToken === undefined ? undefined : `prompt-commands-${id}`} aria-activedescendant={commandOptions[activeCommand] === undefined ? undefined : `prompt-command-${id}-${activeCommand}`} value={value} onFocus={() => { exitTerminalInput.get(id)?.(); onPromptFocus(); }} onBlur={() => setCommandToken(undefined)} onCopy={flashCopiedPromptSelection} onPaste={pasteAttachments} onPointerDownCapture={phone ? undefined : preserveContextMenuPress} onMouseDownCapture={phone ? undefined : preserveContextMenuPress} onTouchStart={beginPromptSwipe} onTouchEnd={endPromptSwipe} onTouchCancel={cancelPromptSwipe} onScroll={cancelPromptSwipe} onContextMenu={event => { /* native text editing cancels pending prompt gestures */ cancelPromptSwipe(); openPromptContextMenu(event); }} onKeyDown={event => { const plainArrow = !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey; if (commandOptions.length > 0 && plainArrow && event.key === 'ArrowDown') { event.preventDefault(); setActiveCommand(current => (current + 1) % commandOptions.length); } else if (commandOptions.length > 0 && plainArrow && event.key === 'ArrowUp') { event.preventDefault(); setActiveCommand(current => (current + commandOptions.length - 1) % commandOptions.length); } else if (commandOptions.length > 0 && plainArrow && event.key === 'Enter') { event.preventDefault(); selectCommand(commandOptions[activeCommand] ?? commandOptions[0]!); } else if (plainArrow && event.key === 'ArrowUp' && (historyIndex.current !== undefined || event.currentTarget.selectionStart === event.currentTarget.selectionEnd && !value.slice(0, event.currentTarget.selectionStart).includes('\n'))) { event.preventDefault(); recallPrompt(-1); } else if (plainArrow && event.key === 'ArrowDown' && historyIndex.current !== undefined) { event.preventDefault(); recallPrompt(1); } else if (event.key === 'Escape' && commandToken !== undefined) { event.preventDefault(); setCommandToken(undefined); } else if (event.key === 'Tab') { event.preventDefault(); setValue(current => current + '\t'); } else if (event.key === 'Enter') { event.preventDefault(); /* disabled or remapped modified enter must never submit a prompt */ if (event.altKey && !event.ctrlKey && !event.shiftKey && !event.metaKey && steering !== undefined) { void steerPrompt(); return; } if (event.ctrlKey || event.shiftKey || event.metaKey || event.altKey) return; /* forward plain blank Enter to output */ else if (!event.metaKey && !event.altKey && !value && attachments.length === 0) terminalInputs.get(id)?.('\r'); /* preserve mobile multiline entry */ else if (window.matchMedia('(max-width: 600px)').matches) insertPromptText(event.currentTarget, '\n'); else void submit(); } }} onChange={updatePrompt} />{listening && <span className="prompt-recording-indicator" role="status" aria-label="Dictation recording"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" /></svg><span className="sr-only">Dictation recording</span></span>}{commandToken !== undefined && <FlyoutPortal onDismiss={() => setCommandToken(undefined)}><div ref={commandFlyoutRef} className="command-menu" style={commandFlyoutStyle} id={`prompt-commands-${id}`} role="listbox" aria-label={`${commandToken.prefix} commands`}>{commandOptions.length > 0 ? commandOptions.map((command, index) => <button key={command.value} id={`prompt-command-${id}-${index}`} type="button" role="option" aria-selected={index === activeCommand} className={index === activeCommand ? 'active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => selectCommand(command)}><code>{command.value}</code><span>{command.description}</span></button>) : <span className="command-menu-empty">No matching commands</span>}</div></FlyoutPortal>}</div>;
   const questionModeToggle = question === undefined || turnBlocked ? null : <button type="button" className="question-mode-toggle" aria-label={`Switch to ${answerMode ? 'normal prompt' : 'answer'} mode`} onClick={() => { /* toggle detected question mode */ setNormalPromptQuestionId(answerMode ? question.id : undefined); }}>{answerMode ? 'Normal prompt' : 'Answer mode'}</button>;
   const questionNotesId = `question-notes-${id}`;
   const questionNotes = questionNotesOpen ? <div className="question-notes" id={questionNotesId}><textarea aria-label="Reply" maxLength={32_000} placeholder="Answer in your own words…" value={value} onFocus={() => { /* leave terminal input */ exitTerminalInput.get(id)?.(); onPromptFocus(); }} onChange={event => { /* update note draft */ setValue(event.target.value); }} /><div className="question-notes-actions"><button type="button" className={pending ? 'progress-border progress-blue' : undefined} aria-busy={pending || undefined} disabled={pending || !value.trim()} aria-label="Send reply" onClick={() => { /* answer the active question directly */ void answer(value); }}><ProgressRing busy={pending} />{pending ? 'Sending' : 'Send reply'}</button></div></div> : null;
