@@ -565,6 +565,19 @@ describe('PushService', () => {
     await expect(service.notify(eventMessage('diagnostic-failure'))).resolves.toBeUndefined();
     expect(webpush.sendNotification).toHaveBeenCalledOnce();
   });
+
+  // keep Davo on its dedicated content-free certainty path
+  it('does not send Davo through ordinary retries or push diagnostics', async () => {
+    const { service } = await enabledService();
+    const record = vi.spyOn(service.diagnostics, 'record');
+    const message = davoNotification('davo-separated', 'done');
+
+    await expect(service.notify(message)).rejects.toMatchObject({ code: 'davo_push_invalid' });
+    await expect(service.notifyDavo('davo-separated', message, '2030-01-04T11:00:00.000Z')).resolves.toEqual({ definitelyNotSent: 0, acceptedAtLeastOnce: 0, ambiguous: 0 });
+    expect(record).not.toHaveBeenCalled();
+    expect(webpush.sendNotification).not.toHaveBeenCalled();
+  });
+
   it('records one durable certainty attempt per Davo subscription without retrying or persisting payload secrets', async () => {
     const { attemptsFile, service } = await enabledService();
     const accepted = subscription('davo-accepted-secret');

@@ -47,6 +47,8 @@ export type DavoNotification = { kind: 'davo'; title: 'Davo update'; body: 'Your
 export type PushMessage = AgentNotification | CleanupNotification | ReviewNotification | ScheduleNotification | ConductorNotification | DavoNotification;
 
 type NotificationDelivery = (notification: AgentNotification) => void | Promise<void>;
+// retain current ordinary-delivery authority per agent
+type NotificationDeliveryPolicy = { davoOwned: boolean; suppressed: boolean };
 
 // Attention is resolved once, server-side, in DiscoveryService (ADR 0001/0002);
 // every consumer, including this coordinator, reads that resolved state.
@@ -146,6 +148,7 @@ export class AgentNotificationCoordinator {
   private readonly unread = new Map<string, string>();
   private readonly events = new Map<string, NotificationEvent>();
   private readonly revisions = new Map<string, NotificationState>();
+  private readonly deliveryPolicies = new Map<string, NotificationDeliveryPolicy>();
   private readonly eventEpoch = randomUUID();
   private eventSequence = 0;
 
@@ -159,8 +162,16 @@ export class AgentNotificationCoordinator {
     const previous = this.states.get(key);
     const semantic = current === 'question' ? `question:${agent.question?.id ?? 'message'}` : current;
     const previousSemantic = this.semanticStates.get(key);
+    const previousPolicy = this.deliveryPolicies.get(key);
+    const requestedSuppression = davoOwned || current === 'finished' && (quiet || hasQueuedPrompt);
+    // never unsuppress an already identified event on an unchanged snapshot
+    const retainedSuppression = previousSemantic === semantic && this.events.has(key) && previousPolicy?.suppressed === true;
+    const suppressed = requestedSuppression || retainedSuppression;
+    const policy = { davoOwned, suppressed };
+    const policyChanged = previousPolicy?.davoOwned !== policy.davoOwned || previousPolicy?.suppressed !== policy.suppressed;
     this.states.set(key, current);
     this.semanticStates.set(key, semantic);
+    this.deliveryPolicies.set(key, policy);
 
     // seed process-local state without replaying a startup snapshot
     if (previousSemantic === undefined) {
@@ -174,11 +185,15 @@ export class AgentNotificationCoordinator {
       this.unread.delete(key);
       this.events.delete(key);
       // publish the queue-driven relevance change exactly once
-      if (previousSemantic !== semantic || hadCompletion) this.advanceRevision(key);
+      if (previousSemantic !== semantic || hadCompletion || policyChanged) this.advanceRevision(key);
       return;
     }
     // ignore unchanged polling snapshots
-    if (previousSemantic === semantic) return;
+    if (previousSemantic === semantic) {
+      // publish a policy-only ownership change to dashboard subscribers
+      if (policyChanged) this.advanceRevision(key);
+      return;
+    }
     const revision = this.advanceRevision(key);
     this.events.delete(key);
 
@@ -208,8 +223,9 @@ export class AgentNotificationCoordinator {
       // discard a completion superseded during its grace period
       if (this.states.get(key) !== 'finished') return;
       this.unread.set(key, id);
-      // preserve quiet completion read state without sending an alert
-      if (!quiet) this.deliverSafely({ ...notification, ...event });
+      const currentPolicy = this.deliveryPolicies.get(key);
+      // suppress current Davo ownership explicitly, including when policy changed during grace
+      if (currentPolicy?.davoOwned !== true && currentPolicy?.suppressed !== true) this.deliverSafely({ ...notification, ...event });
     }, this.completionDelayMs);
     this.pendingCompletions.set(key, { id, timer });
   }
@@ -234,6 +250,11 @@ export class AgentNotificationCoordinator {
     return this.revisions.get(agent.id);
   }
 
+  // expose the exact ordinary-delivery policy for the current snapshot
+  notificationSuppressed(agent: Pick<Agent, 'id'>): boolean {
+    return this.deliveryPolicies.get(agent.id)?.suppressed ?? false;
+  }
+
   // dismiss only the completed turn the browser actually viewed
   view(agent: Pick<Agent, 'id'>, completionId?: string): void {
     // a stale dismissal must not clear or cancel a newer completed turn
@@ -256,6 +277,7 @@ export class AgentNotificationCoordinator {
       this.unread.delete(key);
       this.events.delete(key);
       this.revisions.delete(key);
+      this.deliveryPolicies.delete(key);
     }
   }
 
@@ -266,6 +288,7 @@ export class AgentNotificationCoordinator {
     this.pendingCompletions.clear();
     this.unread.clear();
     this.events.clear();
+    this.deliveryPolicies.clear();
   }
 
   // cancel only the identified pending turn for this agent

@@ -35,6 +35,87 @@ describe('agent notifications', () => {
     coordinator.observe(agent({ attention: 'question', question: { ...question, id: 'question-conductor' } }), false, context, true, false);
     expect(delivered).toHaveLength(1);
     expect(delivered[0].kind).toBe('question');
+    expect(coordinator.notificationSuppressed(agent())).toBe(false);
+  });
+
+  // retain exact Davo identities without ordinary question or completion delivery
+  it('marks Davo question and completion events suppressed for dashboard reconciliation', async () => {
+    vi.useFakeTimers();
+    const delivered: AgentNotification[] = [];
+    const coordinator = new AgentNotificationCoordinator(notification => delivered.push(notification), 2_000);
+    const question = { id: 'question-davo', text: 'Choose the release target', choices: ['Stage', 'Production'], source: 'structured' as const, pane: { targetPaneId: '%2' } };
+
+    coordinator.observe(agent({ attention: 'working' }), false, context, false, true);
+    expect(coordinator.notificationSuppressed(agent())).toBe(true);
+    coordinator.observe(agent({ attention: 'question', question }), false, context, false, true);
+    const questionEvent = coordinator.notificationEvent(agent());
+    expect(questionEvent).toMatchObject({ eventId: question.id, kind: 'question' });
+    expect(coordinator.notificationSuppressed(agent())).toBe(true);
+    expect(delivered).toEqual([]);
+
+    coordinator.observe(agent({ attention: 'working' }), false, context, false, true);
+    coordinator.observe(agent({ attention: 'finished' }), false, context, false, true);
+    const completionEvent = coordinator.notificationEvent(agent());
+    expect(completionEvent).toMatchObject({ eventId: expect.any(String), kind: 'finished' });
+    expect(coordinator.notificationSuppressed(agent())).toBe(true);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(delivered).toEqual([]);
+    expect(coordinator.notificationEvent(agent())).toEqual(completionEvent);
+    expect(coordinator.isUnread(agent())).toBe(true);
+    coordinator.stop();
+  });
+
+  // publish suppression-only ownership transitions and clear retired policy
+  it('advances notification state when Davo ownership changes without an attention change', () => {
+    const delivered: AgentNotification[] = [];
+    const coordinator = new AgentNotificationCoordinator(notification => delivered.push(notification));
+    const working = agent({ attention: 'working' });
+
+    coordinator.observe(working, false, context, false, false);
+    const ordinary = coordinator.notificationState(working);
+    expect(coordinator.notificationSuppressed(working)).toBe(false);
+    coordinator.observe(working, false, context, false, true);
+    const davo = coordinator.notificationState(working);
+    expect(coordinator.notificationSuppressed(working)).toBe(true);
+    expect(davo!.eventSequence).toBeGreaterThan(ordinary!.eventSequence);
+    coordinator.observe(working, false, context, false, false);
+    expect(coordinator.notificationSuppressed(working)).toBe(false);
+    expect(coordinator.notificationState(working)!.eventSequence).toBeGreaterThan(davo!.eventSequence);
+    coordinator.retain([]);
+    expect(coordinator.notificationSuppressed(working)).toBe(false);
+    expect(delivered).toEqual([]);
+    coordinator.observe(working, false, context, false, true);
+    expect(coordinator.notificationSuppressed(working)).toBe(true);
+    coordinator.stop();
+    expect(coordinator.notificationSuppressed(working)).toBe(false);
+  });
+
+  // keep one retained completion's suppression decision through ownership cleanup
+  it('does not unsuppress an old completion before a new ordinary turn', async () => {
+    vi.useFakeTimers();
+    const delivered: AgentNotification[] = [];
+    const coordinator = new AgentNotificationCoordinator(notification => delivered.push(notification), 2_000);
+    const working = agent({ attention: 'working' });
+    const finished = agent({ attention: 'finished' });
+
+    coordinator.observe(working, false, context, false, false);
+    coordinator.observe(finished, false, context, true, true);
+    const suppressedEvent = coordinator.notificationEvent(finished);
+    expect(coordinator.notificationSuppressed(finished)).toBe(true);
+    coordinator.observe(finished, false, context, false, false);
+    expect(coordinator.notificationEvent(finished)).toEqual(suppressedEvent);
+    expect(coordinator.notificationSuppressed(finished)).toBe(true);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(delivered).toEqual([]);
+
+    coordinator.observe(working, false, context, false, false);
+    expect(coordinator.notificationSuppressed(working)).toBe(false);
+    coordinator.observe(finished, false, context, false, false);
+    const ordinaryEvent = coordinator.notificationEvent(finished);
+    expect(ordinaryEvent?.eventId).not.toBe(suppressedEvent?.eventId);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(delivered).toEqual([{ title: 'Done working in Remote Agents', body: 'Eric is ready for a new prompt', ...ordinaryEvent }]);
+    coordinator.stop();
   });
 
   it('distinguishes questions from completed work', () => {

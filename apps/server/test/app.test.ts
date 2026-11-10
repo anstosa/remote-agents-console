@@ -580,6 +580,10 @@ describe('client control', () => {
       eventEpoch: unreadDashboard.json().agents[0].notificationEvent.eventEpoch,
       eventSequence: unreadDashboard.json().agents[0].notificationEvent.eventSequence
     });
+    expect(unreadDashboard.json().agents[0].notificationSuppressed).toBe(false);
+    vi.spyOn(notifications, 'notificationSuppressed').mockReturnValue(true);
+    const suppressedDashboard = await pushApp.inject({ method: 'GET', url: '/api/dashboard', headers: { host: 'agents.example.com', cookie: active.cookie } });
+    expect(suppressedDashboard.json().agents[0].notificationSuppressed).toBe(true);
     expect(dismissal.statusCode).toBe(204);
     expect(viewedDashboard.json().agents[0].unread).toBe(false);
     expect(viewedDashboard.json().agents[0].notificationEvent).toBeUndefined();

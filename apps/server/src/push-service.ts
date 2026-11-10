@@ -16,6 +16,8 @@ type DeliveryOptions = RequestOptions & { topic: string };
 type DeliveryOutcome = 'accepted' | 'auth_rejected' | 'expired' | 'failed' | 'superseded';
 // retain the exact registration and settled provider outcome
 type DeliveryResult = { outcome: DeliveryOutcome; subscription: PushSubscription };
+// keep Davo outside the retrying diagnostic pipeline
+type RetryingPushMessage = Exclude<PushMessage, DavoNotification>;
 // distinguish storage failure stages
 type StoreOperation = 'parse' | 'read' | 'write';
 type RepairAdvice = 'push_subscription_expired' | 'push_provider_auth_rejected';
@@ -417,7 +419,7 @@ export class PushService {
   }
 
   // serialize provider requests that can coalesce each other
-  private async queuedDelivery(subscription: PushSubscription, payload: string, options: DeliveryOptions, kind: PushMessage['kind'], event: AbortController): Promise<DeliveryResult> {
+  private async queuedDelivery(subscription: PushSubscription, payload: string, options: DeliveryOptions, kind: RetryingPushMessage['kind'], event: AbortController): Promise<DeliveryResult> {
     const key = `${options.topic}\0${subscription.endpoint}`;
     const previous = this.deliveryQueues.get(key) ?? Promise.resolve();
     let release!: () => void;
@@ -437,8 +439,8 @@ export class PushService {
   }
 
   // send with bounded transient retries while this event remains newest
-  private async deliver(subscription: PushSubscription, payload: string, options: DeliveryOptions, kind: PushMessage['kind'], event: AbortController): Promise<DeliveryResult> {
-    const message = JSON.parse(payload) as PushMessage;
+  private async deliver(subscription: PushSubscription, payload: string, options: DeliveryOptions, kind: RetryingPushMessage['kind'], event: AbortController): Promise<DeliveryResult> {
+    const message = JSON.parse(payload) as RetryingPushMessage;
     // cap provider attempts for one endpoint
     for (let attempt = 1; attempt <= deliveryAttempts; attempt += 1) {
       // suppress an older event before any later attempt
@@ -498,7 +500,7 @@ export class PushService {
   }
 
   // emit only bounded delivery metadata
-  private logFailure(subscription: PushSubscription, status: number | undefined, attempt: number, kind: PushMessage['kind'], retry: boolean): void {
+  private logFailure(subscription: PushSubscription, status: number | undefined, attempt: number, kind: RetryingPushMessage['kind'], retry: boolean): void {
     console.warn('[push] provider request failed', {
       attempt,
       endpointFingerprint: endpointFingerprint(subscription.endpoint),
@@ -538,7 +540,7 @@ export class PushService {
   }
 
   // record bounded content-free delivery metadata without gating delivery
-  private recordDiagnostic(stage: PushDiagnosticStage, message: PushMessage, subscription?: PushSubscription, attempt?: number, status?: string): void {
+  private recordDiagnostic(stage: PushDiagnosticStage, message: RetryingPushMessage, subscription?: PushSubscription, attempt?: number, status?: string): void {
     const event = 'eventId' in message ? message as NotificationEvent : undefined;
     const fields: Omit<PushDiagnosticRecord, 'id' | 'stage' | 'at'> = {
       kind: message.kind,

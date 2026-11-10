@@ -619,10 +619,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const cleanupVersion = cleanup.version;
     // tolerate focused dependency doubles that predate notification metadata
     const notificationMetadata = (agent: Agent) => {
-      const source = notifications as Partial<Pick<AgentNotificationCoordinator, 'notificationEvent' | 'notificationState'>>;
+      const source = notifications as Partial<Pick<AgentNotificationCoordinator, 'notificationEvent' | 'notificationState' | 'notificationSuppressed'>>;
       const notificationEvent = source.notificationEvent?.(agent);
       const notificationState = source.notificationState?.(agent);
-      return { ...(notificationEvent === undefined ? {} : { notificationEvent }), ...(notificationState === undefined ? {} : { notificationState }) };
+      const notificationSuppressed = source.notificationSuppressed?.(agent) ?? false;
+      return { notificationSuppressed, ...(notificationEvent === undefined ? {} : { notificationEvent }), ...(notificationState === undefined ? {} : { notificationState }) };
     };
     return { ...discovered, agents: discovered.agents.map(agent => ({ ...agent, unread: notifications.isUnread(agent), completionId: notifications.completionId(agent), ...notificationMetadata(agent), queuedPromptCount: queuedCounts.get(agent.id) ?? 0, ...(watched.get(agent.id) === undefined ? {} : { watches: watched.get(agent.id) }), ...(controlFor(agent.worktreeId) === undefined ? {} : { stack: controlFor(agent.worktreeId) }), ...(agentLaunch(agent) === undefined ? {} : { launch: agentLaunch(agent) }) })), places: discovered.places.map(place => ({ ...place, ...(launchResolutions.get(placeLaunchScope(place)) === undefined ? {} : { launch: launchResolutions.get(placeLaunchScope(place)) }) })), projects: discovered.projects.map(project => ({ ...project, ...(project.mode === 'directory' && launchResolutions.get(project.id) !== undefined ? { launch: launchResolutions.get(project.id) } : {}), worktrees: project.worktrees.map(worktree => ({ ...worktree, ...(controlFor(worktree.id) === undefined ? {} : { stack: controlFor(worktree.id) }), ...(launchFor(worktree.id) === undefined ? {} : { launch: launchFor(worktree.id) }) })) })), cleanupPending: cleanupTargets.length, cleanupTargets, ...(cleanupVersion === undefined ? {} : { cleanupVersion }), buttons: buttonCatalog.value, notesRevision, githubRevision: github.revision, githubBadge: github.badge, scratchLaunch: launchResolutions.get(scratchLaunchKey), reviewTour: reviewTourCapability, codeReview: codeReviewCapability, reviews, ...(config.editor === undefined ? {} : { editor: true as const }), ...(config.keys === undefined ? {} : { keys: browserKeysConfig(config.keys) }) };
   };

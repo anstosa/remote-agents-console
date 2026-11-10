@@ -22,6 +22,7 @@ type Event = {
 };
 type Ack = { protocolVersion: number; outcome: string; audibleClaim: boolean; eventId?: string };
 type Notice = { tag: string; data: Record<string, unknown> };
+type NoticePresentation = { title: string; body: string; tag: string };
 
 // use chromium's actual notification and service-worker implementation
 test.use({ channel: 'chromium' });
@@ -79,6 +80,16 @@ const push = (session: CDPSession, registrationId: string, value: Event) => sess
 
 // inspect the notifications actually retained by the browser
 const notices = (page: Page): Promise<Notice[]> => page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map(notification => ({ tag: notification.tag, data: notification.data as Record<string, unknown> })));
+
+// inspect user-visible copy without coupling existing identity assertions to presentation fields
+const noticePresentations = (page: Page): Promise<NoticePresentation[]> => page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map(notification => ({ title: notification.title, body: notification.body, tag: notification.tag })));
+
+// deliver one server-shaped generic Davo alert through the real worker
+const pushDavo = (session: CDPSession, registrationId: string, eventId: string, body: 'Your request is complete' | 'Your input is needed') => session.send('ServiceWorker.deliverPushMessage', {
+  origin,
+  registrationId,
+  data: JSON.stringify({ kind: 'davo', title: 'Davo update', body, tag: `davo-${eventId}`, url: '/#davo', sentAt: Date.now() })
+});
 
 // all delivery orderings must converge without collapsing distinct turns
 for (const order of ['page-first', 'push-first', 'concurrent'] as const) {
@@ -232,6 +243,92 @@ async function mountConsole(page: Page, rejectAudio = false, receipts?: (route: 
     await emitDashboard(page, dashboard);
   };
 }
+
+// davo-owned questions retain strict reconciliation identity but display only generic davo copy
+test('suppresses ordinary question alerts for Davo-owned work while retaining the generic push', async ({ context, page }) => {
+  test.setTimeout(45_000);
+  await context.grantPermissions(['notifications'], { origin });
+  const session = await context.newCDPSession(page);
+  let registrationId: string | undefined;
+  // capture the application worker used by the generic push
+  session.on('ServiceWorker.workerRegistrationUpdated', update => {
+    registrationId = update.registrations.find(entry => entry.scopeURL === `${origin}/` && !entry.isDeleted)?.registrationId ?? registrationId;
+  });
+  await session.send('ServiceWorker.enable');
+  await mountConsole(page);
+  await expect.poll(() => registrationId).toBeTruthy();
+  // keep the active Agent from suppressing the ordinary path for an unrelated focus reason
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); });
+  const privateQuestion = 'Deploy the private customer database now?';
+  const questionEvent = { ...event(2), kind: 'question' as const, eventId: 'davo-choice-2', title: 'Question in Remote Agents', body: privateQuestion };
+  const questionAgent = {
+    id: 'agent-1', sessionId: 'socket:$1', panel: 'terminal', kind: 'codex', home: '/fixtures/worktree', title: 'Ready', attention: 'question', worktreeId: 'shared-worktree', queuedPromptCount: 0,
+    question: { id: questionEvent.eventId, text: privateQuestion, field: { kind: 'text', multiline: false }, source: 'structured' }, unread: true,
+    notificationEvent: questionEvent, notificationState: { eventEpoch: epoch, eventSequence: questionEvent.eventSequence }, notificationSuppressed: true
+  };
+  await emitDashboard(page, { generation: 2, serverStartedAt: 100, agents: [questionAgent], projects: [] });
+  await expect(page.getByRole('tab', { name: / — Action required$/u })).toBeVisible();
+  // fence page effects ahead of the later generic worker push
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await rpc(page, 'inventory', {});
+  await pushDavo(session, registrationId!, questionEvent.eventId, 'Your input is needed');
+  await expect.poll(() => noticePresentations(page)).toEqual([{ title: 'Davo update', body: 'Your input is needed', tag: `davo-${questionEvent.eventId}` }]);
+  // retain only page-display attempts for this exact question
+  const pageDisplays = await page.evaluate(eventId => {
+    const records = (window as typeof window & { __coordinationOperations: Array<{ direction: string; value: { operation?: string; event?: { eventId?: string } } }> }).__coordinationOperations;
+    return records.filter(record => record.direction === 'request' && record.value.operation === 'display' && record.value.event?.eventId === eventId);
+  }, questionEvent.eventId);
+  expect(pageDisplays).toEqual([]);
+  expect((await noticePresentations(page)).some(notice => notice.body.includes(privateQuestion))).toBe(false);
+  expect(await page.evaluate(() => (window as typeof window & { __coordinationSounds: string[] }).__coordinationSounds)).toEqual([]);
+  await session.detach();
+});
+
+// davo-owned completions survive the grace refresh without an ordinary alert or chime
+test('suppresses ordinary completion alerts for Davo-owned work while retaining the generic push', async ({ context, page }) => {
+  test.setTimeout(45_000);
+  await context.grantPermissions(['notifications'], { origin });
+  const session = await context.newCDPSession(page);
+  let registrationId: string | undefined;
+  // capture the application worker used by the generic push
+  session.on('ServiceWorker.workerRegistrationUpdated', update => {
+    registrationId = update.registrations.find(entry => entry.scopeURL === `${origin}/` && !entry.isDeleted)?.registrationId ?? registrationId;
+  });
+  await session.send('ServiceWorker.enable');
+  await mountConsole(page);
+  await expect.poll(() => registrationId).toBeTruthy();
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); });
+  const completed = { ...event(2), eventId: 'davo-done-2' };
+  const completedAgent = {
+    id: 'agent-1', sessionId: 'socket:$1', panel: 'terminal', kind: 'codex', home: '/fixtures/worktree', title: 'Ready', attention: 'finished', worktreeId: 'shared-worktree', queuedPromptCount: 0, unread: true,
+    completionId: completed.eventId, notificationEvent: completed, notificationState: { eventEpoch: epoch, eventSequence: completed.eventSequence }, notificationSuppressed: true
+  };
+  let dashboard = { generation: 2, serverStartedAt: 100, agents: [completedAgent], projects: [] };
+  // serve the suppressed state when the completion grace timer refreshes
+  await page.route('**/api/dashboard', route => route.fulfill({ json: dashboard }));
+  const readsBeforeCompletion = await page.evaluate(() => (window as typeof window & { __coordinationDashboardReads: number[] }).__coordinationDashboardReads.length);
+  await emitDashboard(page, dashboard);
+  await expect(page.getByRole('tab', { name: / — Prompt done — Unread$/u })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __coordinationDashboardReads: number[] }).__coordinationDashboardReads.length), { timeout: 10_000 }).toBeGreaterThan(readsBeforeCompletion);
+  // fence the grace refresh's page effects before checking the worker
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await rpc(page, 'inventory', {});
+  await pushDavo(session, registrationId!, completed.eventId, 'Your request is complete');
+  await expect.poll(() => noticePresentations(page)).toEqual([{ title: 'Davo update', body: 'Your request is complete', tag: `davo-${completed.eventId}` }]);
+  // repeat the exact current snapshot without multiplying either notification path
+  dashboard = { ...dashboard, generation: 3 };
+  await emitDashboard(page, dashboard);
+  await rpc(page, 'inventory', {});
+  await expect.poll(() => noticePresentations(page)).toEqual([{ title: 'Davo update', body: 'Your request is complete', tag: `davo-${completed.eventId}` }]);
+  // retain only page-display attempts for this exact completion
+  const pageDisplays = await page.evaluate(eventId => {
+    const records = (window as typeof window & { __coordinationOperations: Array<{ direction: string; value: { operation?: string; event?: { eventId?: string } } }> }).__coordinationOperations;
+    return records.filter(record => record.direction === 'request' && record.value.operation === 'display' && record.value.event?.eventId === eventId);
+  }, completed.eventId);
+  expect(pageDisplays).toEqual([]);
+  expect(await page.evaluate(() => (window as typeof window & { __coordinationSounds: string[] }).__coordinationSounds)).toEqual([]);
+  await session.detach();
+});
 
 // a rejected custom chime must retain one native audible attempt on the exact event
 test('application audio rejection invokes the real worker native fallback', async ({ context, page }) => {

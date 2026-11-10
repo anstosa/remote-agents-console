@@ -191,7 +191,7 @@ function CleanupSkeletons() {
 // `worktreeLabel`/`worktreeOrder` are no longer on the wire (the server carries them on the
 // Worktree); they remain as optional read-only fallbacks the tab bar consults when an Agent's
 // Worktree is not present in the payload, absent from the real server.
-type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
+type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; notificationSuppressed?: boolean; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
 type Worktree = { id: string; projectId: string; label: string; customLabel?: boolean; path: string; main: boolean; detached: boolean; locked: boolean; branch?: string; sha?: string; consoleShells?: number; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; available: boolean; pinned: boolean; order: number; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; stack?: Stack; launch?: LaunchResolution };
 // `mode: 'directory'` marks a non-git Project the console launches in place (like Scratch);
 // `launch` is its resolved Launch profile for the Project-level Launch button. A git
@@ -10432,7 +10432,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
           ? `${names.worktreeName}: has a question`
           : `${names.multipleWorktrees ? `${names.worktreeName}: ` : ''}${agent.question.text}`;
         if (focused) dismissAgentNotifications(agent);
-        else void showNotification('question', `Question in ${names.projectName}`, body, tag, `/#agent=${encodeURIComponent(agent.id)}`, agent.worktreeId, notificationEvent);
+        // leave server-suppressed questions to their exact Davo outbox
+        else if (agent.notificationSuppressed !== true) void showNotification('question', `Question in ${names.projectName}`, body, tag, `/#agent=${encodeURIComponent(agent.id)}`, agent.worktreeId, notificationEvent);
       }
       if (previous === 'working' && state === 'prompt-done' && !hasQueuedPrompt) {
         const delay = 2_000;
@@ -10441,7 +10442,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       } else if (state === 'prompt-done' && !hasQueuedPrompt && pendingCompletion !== undefined && Date.now() >= pendingCompletion.due) {
         window.clearTimeout(pendingCompletion.timer);
         pendingCompletions.current.delete(agent.id);
-        void showNotification('finished', `Done working in ${names.projectName}`, `${names.worktreeName} is ready for a new prompt`, tag, `/#agent=${encodeURIComponent(agent.id)}`, agent.worktreeId, notificationEvent);
+        // retain grace reconciliation without replaying a server-suppressed alert
+        if (agent.notificationSuppressed !== true) void showNotification('finished', `Done working in ${names.projectName}`, `${names.worktreeName} is ready for a new prompt`, tag, `/#agent=${encodeURIComponent(agent.id)}`, agent.worktreeId, notificationEvent);
       }
       // clear question notifications on every resolved presentation transition
       if (previous === 'action-required' && state !== 'action-required') void dismissNotification(tag);
