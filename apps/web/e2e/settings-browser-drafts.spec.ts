@@ -353,30 +353,30 @@ test("saves notification sounds from Interface without changing files", async ({
   await expect(sounds).not.toBeChecked();
 });
 
-// keep the usage pace display off until this browser opts in
+// keep the usage pace display on until this browser opts out
 test("saves usage pace from Interface without changing files", async ({ page }) => {
   const { settings, state } = await setupBrowserDrafts(page, true);
   const pace = settings.getByRole("switch", { name: "Usage pace", exact: true });
-  await expect(pace).not.toBeChecked();
-  await pace.check();
-  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.usage-pace"))).toBe("enabled");
-  expect(state.fileSaves).toHaveLength(0);
+  await expect(pace).toBeChecked();
   await pace.uncheck();
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.usage-pace"))).toBe("disabled");
+  expect(state.fileSaves).toHaveLength(0);
+  await pace.check();
   await settings.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.usage-pace"))).toBeNull();
 });
 
-// keep terminals on the DOM renderer until this browser opts in to WebGL
+// keep terminals on the WebGL renderer until this browser opts out
 test("saves WebGL terminals from Interface without changing files", async ({ page }) => {
   const { settings, state } = await setupBrowserDrafts(page, true);
   const webgl = settings.getByRole("switch", { name: "WebGL terminals", exact: true });
-  await expect(webgl).not.toBeChecked();
-  await webgl.check();
-  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.terminal-webgl"))).toBe("enabled");
-  expect(state.fileSaves).toHaveLength(0);
+  await expect(webgl).toBeChecked();
   await webgl.uncheck();
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.terminal-webgl"))).toBe("disabled");
+  expect(state.fileSaves).toHaveLength(0);
+  await webgl.check();
   await settings.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.terminal-webgl"))).toBeNull();
 });

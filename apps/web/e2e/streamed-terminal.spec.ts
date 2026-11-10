@@ -28,7 +28,9 @@ const afterInPage = (page: Page, ...calls: unknown[][]): Promise<number> =>
     return module.connectCalls!() as number;
   }, calls);
 
-const setup = async (page: Page, options: Record<string, unknown> = {}) => {
+const setup = async (page: Page, options: Record<string, unknown> = {}, defaultWebgl = false) => {
+  // preserve legacy DOM-renderer assertions unless a case covers the product default
+  if (!defaultWebgl) await page.addInitScript(() => localStorage.setItem('rac.terminal-webgl', 'disabled'));
   await page.goto('/');
   // Clear the app's DOM but keep the <head> the app injected: the Catppuccin palette
   // <style> lives there, and the component reads its theme from those `:root` tokens
@@ -1163,11 +1165,8 @@ test('a real touch swipe over agent output keeps scrolling after the first row r
   }
 });
 
-const optInToWebgl = (page: Page) => page.addInitScript(() => localStorage.setItem('rac.terminal-webgl', 'enabled'));
-
-test('renders with WebGL on a desktop browser that opted in', async ({ page }) => {
-  await optInToWebgl(page);
-  await setup(page);
+test('renders with WebGL on a desktop browser by default', async ({ page }) => {
+  await setup(page, {}, true);
   await drive(page, 'pushSize', 40, 10);
   await drive(page, 'pushBytes', 'GPU-LINE\r\n');
   await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
@@ -1179,8 +1178,7 @@ test('renders with WebGL on a desktop browser that opted in', async ({ page }) =
 });
 
 test('redraws font-size and theme changes under WebGL', async ({ page }) => {
-  await optInToWebgl(page);
-  await setup(page);
+  await setup(page, {}, true);
   await drive(page, 'pushSize', 40, 10);
   await drive(page, 'pushBytes', 'REDRAW-LINE\r\n');
   await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
@@ -1197,20 +1195,19 @@ test('redraws font-size and theme changes under WebGL', async ({ page }) => {
   expect(await drive(page, 'rendererKind')).toBe('webgl');
 });
 
-// WebGL only where it was asked for and is known to work
-for (const [name, optIn, contextOptions] of [
-  ['a desktop browser that has not opted in', false, {}],
-  ['a coarse-pointer phone that opted in', true, MOBILE],
-  ['Safari that opted in', true, { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' }]
+// use WebGL only where it remains enabled and is known to work
+for (const [name, defaultWebgl, contextOptions] of [
+  ['a desktop browser that opted out', false, {}],
+  ['a coarse-pointer phone with the default enabled', true, MOBILE],
+  ['Safari with the default enabled', true, { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' }]
 ] as const) {
   test(`keeps ${name} on the DOM renderer`, async ({ browser, baseURL }) => {
     const context = await browser.newContext({ baseURL: baseURL ?? undefined, ...contextOptions });
     const page = await context.newPage();
     try {
-      if (optIn) await optInToWebgl(page);
       const addonRequests: string[] = [];
       page.on('request', request => { if (request.url().includes('addon-webgl')) addonRequests.push(request.url()); });
-      await setup(page);
+      await setup(page, {}, defaultWebgl);
       await drive(page, 'pushSize', 40, 10);
       await drive(page, 'pushBytes', 'DOM-LINE\r\n');
       await expect(page.locator('#term .xterm-rows')).toContainText('DOM-LINE');
@@ -1224,7 +1221,6 @@ for (const [name, optIn, contextOptions] of [
 }
 
 test('falls back to DOM for the page session when the WebGL renderer throws', async ({ page }) => {
-  await optInToWebgl(page);
   await page.addInitScript(() => {
     const probe = globalThis as unknown as { webglAttempts: number };
     probe.webglAttempts = 0;
@@ -1234,7 +1230,7 @@ test('falls back to DOM for the page session when the WebGL renderer throws', as
       return (original as (...args: unknown[]) => RenderingContext | null).call(this, type, ...rest);
     } as typeof original;
   });
-  await setup(page);
+  await setup(page, {}, true);
   const attempts = () => page.evaluate(() => (globalThis as unknown as { webglAttempts: number }).webglAttempts);
   await expect.poll(attempts).toBe(1);
   await drive(page, 'pushSize', 40, 10);
@@ -1253,8 +1249,7 @@ test('falls back to DOM for the page session when the WebGL renderer throws', as
 });
 
 test('returns to DOM without reconnecting when the WebGL context is lost', async ({ page }) => {
-  await optInToWebgl(page);
-  await setup(page);
+  await setup(page, {}, true);
   await drive(page, 'pushSize', 40, 10);
   await drive(page, 'pushBytes', 'BEFORE-LOSS\r\n');
   await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');

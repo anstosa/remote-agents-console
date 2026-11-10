@@ -630,34 +630,42 @@ test('shows the Claude account and usage in launch menus', async ({ page }) => {
   await expect(accounts.getByRole('progressbar', { name: '5h limit consumed' })).toHaveAttribute('value', '37');
   await expect(accounts.getByRole('progressbar', { name: '7d limit consumed' })).toHaveAttribute('value', '82');
   await expect(accounts.getByText(/^Resets in 0d 0[23]h/u)).toBeVisible();
-  await expect(accounts.locator('.chatgpt-limit-pace')).toHaveCount(0);
+  await expect(accounts.locator('.chatgpt-limit-pace')).toHaveCount(1);
   await expect(accounts.getByRole('radio')).toHaveCount(0);
   await accounts.getByRole('button', { name: /Back to agents/u }).click();
   await expect(menu.getByRole('group', { name: 'Codex agent' }).getByRole('menuitem', { name: 'Codex accounts', exact: true })).toBeVisible();
 });
 
-// compare consumption with the elapsed share of each window once this browser opts in
-test('shows usage pace beside each limit reset when enabled', async ({ page }) => {
-  await setupAccountSettings(page, []);
-  await page.addInitScript(() => localStorage.setItem('rac.usage-pace', 'enabled'));
-  const now = Math.floor(Date.now() / 1000);
-  await page.route('**/api/dashboard', route => route.fulfill({ json: { generation: 1, adapters: { claude: { program: '/usr/local/bin/claude', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false } }, agents: [], projects: [], scratchLaunch: { kind: 'claude', origin: 'default' }, cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } }));
-  // 40% through the 5h window with 37% used, half way through the 7d window with 82% used
-  await page.route('**/api/claude/accounts', route => route.fulfill({ json: { accounts: [{ id: 'claude', label: 'tony@example.com', active: true, primary: { usedPercent: 37, windowDurationMins: 300, resetsAt: now + 3 * 3600 }, secondary: { usedPercent: 82, windowDurationMins: 10_080, resetsAt: now + 84 * 3600 } }] } }));
+// compare the default pace display with its explicit browser opt-out
+for (const disabled of [false, true]) {
+  test(`${disabled ? 'hides' : 'shows'} usage pace ${disabled ? 'when disabled' : 'by default'}`, async ({ page }) => {
+    await setupAccountSettings(page, []);
+    // retain an explicit choice against the default
+    if (disabled) await page.addInitScript(() => localStorage.setItem('rac.usage-pace', 'disabled'));
+    const now = Math.floor(Date.now() / 1000);
+    await page.route('**/api/dashboard', route => route.fulfill({ json: { generation: 1, adapters: { claude: { program: '/usr/local/bin/claude', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false } }, agents: [], projects: [], scratchLaunch: { kind: 'claude', origin: 'default' }, cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } }));
+    // 40% through the 5h window with 37% used, half way through the 7d window with 82% used
+    await page.route('**/api/claude/accounts', route => route.fulfill({ json: { accounts: [{ id: 'claude', label: 'tony@example.com', active: true, primary: { usedPercent: 37, windowDurationMins: 300, resetsAt: now + 3 * 3600 }, secondary: { usedPercent: 82, windowDurationMins: 10_080, resetsAt: now + 84 * 3600 } }] } }));
 
-  await page.goto('/');
-  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^(Choose agent|Launch agent)(?: — update available)?$/u }).click();
-  const menu = page.getByRole('menu', { name: 'Choose agent', exact: true });
-  await menu.getByRole('group', { name: 'Claude agent' }).getByRole('menuitem', { name: 'Claude accounts', exact: true }).click();
-  const pace = menu.getByRole('group', { name: 'Claude accounts', exact: true }).locator('.chatgpt-limit-pace');
-  await expect(pace).toHaveCount(2);
-  await expect(pace.nth(0).locator('[aria-hidden="true"]')).toHaveText('-3%');
-  await expect(pace.nth(0)).toHaveAttribute('title', '3% under an even pace to reset');
-  await expect(pace.nth(0)).not.toHaveClass(/\bover\b/u);
-  await expect(pace.nth(1).locator('[aria-hidden="true"]')).toHaveText('+32%');
-  await expect(pace.nth(1)).toHaveAttribute('title', '32% over an even pace to reset');
-  await expect(pace.nth(1)).toHaveClass(/\bover\b/u);
-});
+    await page.goto('/');
+    await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^(Choose agent|Launch agent)(?: — update available)?$/u }).click();
+    const menu = page.getByRole('menu', { name: 'Choose agent', exact: true });
+    await menu.getByRole('group', { name: 'Claude agent' }).getByRole('menuitem', { name: 'Claude accounts', exact: true }).click();
+    const pace = menu.getByRole('group', { name: 'Claude accounts', exact: true }).locator('.chatgpt-limit-pace');
+    // hide every pace annotation only for the explicit opt-out
+    if (disabled) {
+      await expect(pace).toHaveCount(0);
+      return;
+    }
+    await expect(pace).toHaveCount(2);
+    await expect(pace.nth(0).locator('[aria-hidden="true"]')).toHaveText('-3%');
+    await expect(pace.nth(0)).toHaveAttribute('title', '3% under an even pace to reset');
+    await expect(pace.nth(0)).not.toHaveClass(/\bover\b/u);
+    await expect(pace.nth(1).locator('[aria-hidden="true"]')).toHaveText('+32%');
+    await expect(pace.nth(1)).toHaveAttribute('title', '32% over an even pace to reset');
+    await expect(pace.nth(1)).toHaveClass(/\bover\b/u);
+  });
+}
 
 // keep restart choices independent from toolbar-only account state
 test('keeps Restart as choice-only and defers account loading to the toolbar', async ({ page }) => {

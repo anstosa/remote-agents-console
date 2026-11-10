@@ -185,8 +185,17 @@ interface PaneApi {
 // rather than through a Node-side helper (a free variable would not serialise).
 type PaneWindow = { __pane: PaneApi };
 
-// Install the mock before the app loads. Call once per test, before `page.goto`.
-export const installPaneMock = (page: Page) => page.addInitScript(installPaneStreamMock);
+// call once before navigation; keep legacy DOM unless testing product defaults
+export const installPaneMock = async (page: Page, { preserveWebglDefault = false }: { preserveWebglDefault?: boolean } = {}) => {
+  // leave product defaults untouched for GPU cases
+  if (!preserveWebglDefault) await page.addInitScript(() => {
+    try {
+      // preserve explicit seeds regardless of init-script order
+      if (localStorage.getItem('rac.terminal-webgl') === null) localStorage.setItem('rac.terminal-webgl', 'disabled');
+    } catch { /* denied storage must not block the socket mock */ }
+  });
+  await page.addInitScript(installPaneStreamMock);
+};
 
 // Wait until the panel has opened a pane stream for `id`, then push the first size so the
 // seed can be applied at the browser's grid.

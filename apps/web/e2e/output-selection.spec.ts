@@ -98,6 +98,33 @@ const selectNativeRows = (page: Page, firstText: string, lastText: string) => pa
   document.dispatchEvent(new Event('selectionchange'));
 }, { first: firstText, last: lastText });
 
+test('default WebGL output selection adds the selected text to the prompt', async ({ page }) => {
+  await installPaneMock(page, { preserveWebglDefault: true });
+  await routeSelectionApi(page);
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  const output = page.locator('.log-canvas');
+  const screen = output.locator('.xterm-screen');
+  await expect(screen.locator('canvas')).not.toHaveCount(0);
+  await expect(output.locator('.xterm-rows > div')).toHaveCount(0);
+  await pushBytes(page, 'agent-1', 'GPU selection text\r\n');
+  await expect.poll(() => paneAckTotal(page, 'agent-1')).toBeGreaterThan(0);
+  const screenBounds = await screen.boundingBox();
+  // require the seeded grid before dragging across its first row
+  if (screenBounds === null) throw new Error('WebGL output has no rendered bounds');
+  const cell = { width: screenBounds.width / 80, height: screenBounds.height / 24 };
+  const y = screenBounds.y + cell.height / 2;
+  await page.mouse.move(screenBounds.x + cell.width * .25, y);
+  await page.mouse.down();
+  await page.mouse.move(screenBounds.x + cell.width * 17.75, y, { steps: 6 });
+  await page.mouse.up();
+  const toolbar = page.getByRole('toolbar', { name: 'Output selection actions' });
+  await expect(toolbar).toBeVisible();
+  await toolbar.getByRole('button', { name: 'Add to prompt' }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveValue('GPU selection text');
+  await expect(page.locator('.log-output')).not.toHaveClass(/selection-active/u);
+});
+
 test('shows selection actions for a terminal drag selection and adds to the prompt', async ({ page }) => {
   await installPaneMock(page);
   await routeSelectionApi(page);

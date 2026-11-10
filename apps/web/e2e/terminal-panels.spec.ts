@@ -22,7 +22,7 @@ const agentPanes: Pane[] = [
   { paneId: '%7', session: '$1', window: '@2', command: 'less', path: '/worktrees/cora/src', title: '', agent: false }
 ];
 
-// A live-mutable pane set + prompt capture, so a spec can change what the panes API returns
+// a live-mutable pane set + prompt capture, so a spec can change what the panes API returns
 // (a reload dropping a gone pane, a New shell appearing) between navigations. A DELETE prunes
 // the ended pane and records its query, a PATCH renames one, mirroring the real panes API.
 const routeApi = (page: Page, options: { panes: () => Pane[]; onShell?: () => string; prompts?: string[]; deleted?: string[]; deleteStatus?: (paneId: string, confirmed: boolean) => number | { status: number; busy?: boolean }; renamed?: { paneId: string; name: string }[]; notes?: Note[]; savedNotes?: string[]; noteCreateStatus?: () => number; noteCreateGate?: Promise<void> } = { panes: () => agentPanes }) =>
@@ -124,6 +124,33 @@ const expectFullSplitHeight = async (panel: Locator) => {
     return { top: Math.round(panelBox.y - splitBox.y), height: Math.round(panelBox.height - splitBox.height) };
   })).toEqual({ top: 0, height: 0 });
 };
+
+test('default WebGL renders agent and Console terminal lifecycles', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await installPaneMock(page, { preserveWebglDefault: true });
+  await routeApi(page, { panes: () => agentPanes });
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  const agentOutput = page.locator('.log-output');
+  await expect(agentOutput.locator('.xterm-screen canvas')).not.toHaveCount(0);
+  await expect(agentOutput.locator('.xterm-rows > div')).toHaveCount(0);
+  await pushBytes(page, 'agent-1', 'GPU agent output\r\n');
+  await expect.poll(() => paneAckTotal(page, 'agent-1')).toBeGreaterThan(0);
+
+  await openPicker(page);
+  await page.getByRole('menuitem', { name: /build/u }).click();
+  const terminal = page.locator('.terminal-pane[data-panel-key="%5"]');
+  await seedPaneSize(page, '%5', 80, 24);
+  await expect(terminal.locator('.xterm-screen canvas')).not.toHaveCount(0);
+  await expect(terminal.locator('.xterm-rows > div')).toHaveCount(0);
+  await pushBytes(page, '%5', 'GPU Console output\r\n');
+  await expect.poll(() => paneAckTotal(page, '%5')).toBeGreaterThan(0);
+  await terminal.locator('.xterm-helper-textarea').focus();
+  await page.keyboard.type('gpu input');
+  await expect.poll(() => paneInputText(page, '%5')).toContain('gpu input');
+  await pushExit(page, '%5', 'pane closed');
+  await expect(terminal).toHaveCount(0);
+});
 
 // the toolbar's Terminal button: labelled on desktop, a square icon button on the phone
 test('terminal picker is the toolbar’s Terminal button on desktop and phone', async ({ page }) => {

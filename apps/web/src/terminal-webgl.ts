@@ -2,9 +2,9 @@ import type { Terminal } from '@xterm/xterm';
 import type { WebglAddon } from '@xterm/addon-webgl';
 import { booleanPreference } from './browser-preference.js';
 
-// Per-browser opt-in to draw streamed terminals with WebGL instead of the DOM renderer.
+// per-browser opt-out from drawing streamed terminals with WebGL instead of the DOM renderer
 // It is read at mount, so a change applies to terminals opened afterwards.
-const webglTerminals = booleanPreference('rac.terminal-webgl', false);
+const webglTerminals = booleanPreference('rac.terminal-webgl', true);
 
 export const setWebglTerminals = webglTerminals.set;
 export const useWebglTerminals = webglTerminals.use;
@@ -17,7 +17,7 @@ const isSafari = () => /^((?!chrome|chromium|android).)*safari/iu.test(navigator
 // rest of the page session, as VS Code does.
 let unavailable = false;
 
-// Phones keep the DOM renderer for its screenReaderMode text, even when opted in.
+// phones keep the DOM renderer for its screenReaderMode text, even when enabled
 export const wantsWebglRenderer = (coarsePointer: boolean): boolean =>
   webglTerminals.get() && !coarsePointer && !isSafari() && !unavailable;
 
