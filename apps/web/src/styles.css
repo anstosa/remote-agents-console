@@ -476,7 +476,7 @@ button.model-chip:hover, button.model-chip.active, .watches-chip:hover, .watches
 .transcript-exited-actions button { min-height: 2.25rem; }
 .agent-debug-dialog pre { padding: .8rem 1rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .log-output.agent-panel::after { content: none; }
-.agent-panel .agent-panel-title { flex: 0 1 auto; min-width: 0; overflow: hidden; padding: 0 .2rem; color: var(--text); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.agent-panel .agent-panel-title { flex: 0 1 auto; min-width: 0; max-width: 28ch; overflow: hidden; padding: 0 .2rem; color: var(--text); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 /* the Agent switcher: the title as a button, with the Place's Agent count and an "another Agent
    needs you" dot */
 .agent-switcher-wrap, .code-pane-picker-wrap { display: inline-flex; min-width: 0; }

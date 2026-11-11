@@ -8367,7 +8367,7 @@ function AgentSwitcher({ agent, agents, title, placeLabel, onSelect, onClose }: 
     if (agentId !== agent.id) onSelect(agentId);
   };
   return <><span className="agent-switcher-wrap" ref={anchorRef}><button type="button" className="agent-switcher" aria-label={label} aria-haspopup="menu" data-context-flyout aria-expanded={open} title={label} onClick={() => setOpen(value => !value)}>
-    <span className="agent-panel-title">{title}</span>
+    <span className="agent-panel-title" title={title}>{title}</span>
     {agents.length > 1 && <span className="agent-switcher-count" aria-hidden="true">{agents.length}</span>}
     {othersNeedYou && <i className="agent-switcher-attention" aria-hidden="true" />}
     <svg className="agent-switcher-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>

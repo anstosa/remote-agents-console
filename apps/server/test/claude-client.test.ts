@@ -143,12 +143,31 @@ describe('the Claude client', () => {
     await vi.waitFor(() => expect(of('model').at(-1)).toEqual({ type: 'model', current: { model: 'haiku', effort: 'medium' } }));
   });
 
-  it('names a new Conversation by its first prompt once a Turn ends, as print mode writes no title', async () => {
-    const { connection, claude, of } = await launched();
+  it('has the CLI title a new Conversation from its first prompt once a Turn ends, as print mode writes no title', async () => {
+    const { connection, sent, claude, of } = await launched();
     expect(await connection.deliver('Go')).toBe('started');
     claude(fixture('turn-steer.jsonl')[0]!);
     await sessionFrom('session-interrupt.jsonl');
     claude(result());
+    await vi.waitFor(() => expect(sent.at(-1)).toMatchObject({ type: 'control_request', request: { subtype: 'generate_session_title', description: expect.stringMatching(/^Use the Bash tool to run exactly: touch /u), persist: true } }));
+    claude({ type: 'control_response', response: { subtype: 'success', request_id: 'generate_session_title', response: { title: 'Sandbox write probe' } } });
+    await vi.waitFor(() => expect(of('conversation').at(-1)).toEqual({ type: 'conversation', id: session, name: 'Sandbox write probe' }));
+    // asked once: a later Turn reads the name from the store
+    expect(await connection.deliver('Again')).toBe('started');
+    claude(fixture('turn-steer.jsonl')[0]!);
+    claude(result());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(sent.filter(line => line.type === 'control_request' && line.request.subtype === 'generate_session_title')).toHaveLength(1);
+  });
+
+  it('names a new Conversation by its first prompt when the CLI cannot title it', async () => {
+    const { connection, sent, claude, of } = await launched();
+    expect(await connection.deliver('Go')).toBe('started');
+    claude(fixture('turn-steer.jsonl')[0]!);
+    await sessionFrom('session-interrupt.jsonl');
+    claude(result());
+    await vi.waitFor(() => expect(sent.at(-1)).toMatchObject({ request: { subtype: 'generate_session_title' } }));
+    claude({ type: 'control_response', response: { subtype: 'error', request_id: 'generate_session_title', error: 'no credentials' } });
     await vi.waitFor(() => expect(of('conversation').at(-1)).toEqual({ type: 'conversation', id: session, name: expect.stringMatching(/^Use the Bash tool to run exactly: touch /u) }));
   });
 
