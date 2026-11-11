@@ -20,9 +20,10 @@ import { bounded, count, isObject, oneLine, outcome, strings, summary, text, tho
 export const claudeEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 /** The SDK MCP server the client serves; a launch names it in `--mcp-config` as `{ type: 'sdk', name }`. */
 export const claudeMcpServer = 'rac';
-const askUserTool = `mcp__${claudeMcpServer}__${askUser.name}`;
+/** `ask_user` as the model calls it. */
+export const claudeAskUserTool = `mcp__${claudeMcpServer}__${askUser.name}`;
 // Claude's tool names as the transcript's verbs; any other tool keeps its own name
-const verbs: Record<string, string> = { Bash: 'Run', Grep: 'Search', Glob: 'Find', LS: 'List', MultiEdit: 'Edit', WebFetch: 'Fetch', [askUserTool]: 'Ask' };
+const verbs: Record<string, string> = { Bash: 'Run', Grep: 'Search', Glob: 'Find', LS: 'List', MultiEdit: 'Edit', WebFetch: 'Fetch', [claudeAskUserTool]: 'Ask' };
 const editTools = new Set(['Edit', 'MultiEdit', 'Write']);
 const controlTimeoutMs = 30_000;
 const compactTimeoutMs = 10 * 60_000;
@@ -179,7 +180,7 @@ function transcriptReader() {
             if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking !== '') return [{ id: `${id}:${index}`, kind: 'thinking', text: bounded(block.thinking) }];
             if (block.type !== 'tool_use' || typeof block.id !== 'string' || typeof block.name !== 'string') return [];
             // an `ask_user` question shows once, in the Inline-question box, never as the call's target
-            const item: TranscriptTool = { id: block.id, kind: 'tool', name: verbs[block.name] ?? block.name, summary: block.name === askUserTool ? '' : summary(block.input), state: 'running' };
+            const item: TranscriptTool = { id: block.id, kind: 'tool', name: verbs[block.name] ?? block.name, summary: block.name === claudeAskUserTool ? '' : summary(block.input), state: 'running' };
             calls.set(block.id, { name: block.name, ...(isObject(block.input) && typeof block.input.file_path === 'string' ? { file: block.input.file_path } : {}), at, item });
             return [item];
           });
@@ -295,6 +296,8 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
   const transcript = (item: TranscriptItem) => emit({ type: 'transcript', item });
   let sessionId = attached?.conversation;
   let conversationName: string | undefined;
+  // the Conversations this client has asked the CLI to title
+  const titled = new Set<string>();
   let version: string | undefined;
   // every nonce a SessionStart hook printed, and those reported
   const nonces = new Set<string>();
@@ -365,13 +368,19 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     const items = lines === undefined ? [] : claudeHistory(lines, { running: working === true });
     if (always || items.length > 0) emit({ type: 'history', items });
   };
-  // print mode writes no `ai-title`, so a new Conversation is named by its first prompt only once
-  // the session JSONL holds it: read the name again after each Turn, unless a rename overtook the read
+  // print mode writes no `ai-title` of its own: once the session JSONL holds a Conversation's first
+  // prompt, the CLI titles it as interactive Claude does (persisted as its `ai-title`, a title it
+  // already has kept), else the prompt names it. Read after each Turn, unless a rename overtook it.
   const observeName = async () => {
     const id = sessionId;
     const before = conversationName;
     if (id === undefined) return;
-    const name = await claudeConversationName(id, cwd);
+    let name = await claudeConversationName(id, cwd);
+    if (name !== undefined && !titled.has(id)) {
+      titled.add(id);
+      const response = await control({ subtype: 'generate_session_title', description: name, persist: true });
+      if (typeof response?.title === 'string' && response.title.trim() !== '') name = response.title.trim();
+    }
     if (id !== sessionId || conversationName !== before || name === undefined || name === before) return;
     conversationName = name;
     emit({ type: 'conversation', id, name });

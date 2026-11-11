@@ -67,4 +67,8 @@ describe('structured Claude settings', () => {
     expect(JSON.parse(stdout)).toEqual({ suppressOutput: true, rac: 'n0nce_-AZ' });
     expect(claudeHookNonce(stdout)).toBe('n0nce_-AZ');
   });
+
+  it('lets the structured Claude ask through ask_user without a permission prompt, and never through AskUserQuestion', () => {
+    expect(JSON.parse(claudeStructuredSettings).permissions).toEqual({ allow: ['mcp__rac__ask_user'], deny: ['AskUserQuestion'] });
+  });
 });

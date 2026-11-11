@@ -1,3 +1,4 @@
+import { claudeAskUserTool } from '../transports/claude.js';
 import type { AdapterFileContext, AttentionState } from './types.js';
 
 /**
@@ -76,4 +77,10 @@ export function claudeFiles(context: AdapterFileContext): Record<string, string>
 // nothing into tmux (the holder's `$TMUX_PANE` is not an Agent's pane) and arm no Calendar
 // lifecycle, which follows prompts over tmux only. The one hook echoes the launch's nonce as JSON,
 // which the CLI keeps out of the model's context and the Claude client reads from `hook_response`.
-export const claudeStructuredSettings = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', timeout: 5, command: `printf '{"suppressOutput":true,"rac":"%s"}\\n' "$RAC_LAUNCH_NONCE"` } satisfies CommandHandler] }] } });
+// The model asks through the console's `ask_user`, which needs no permission. Claude's own
+// `AskUserQuestion` is denied: under `--permission-prompt-tool stdio` it arrives as a permission
+// request, and allowing that answers none of its questions.
+export const claudeStructuredSettings = JSON.stringify({
+  hooks: { SessionStart: [{ hooks: [{ type: 'command', timeout: 5, command: `printf '{"suppressOutput":true,"rac":"%s"}\\n' "$RAC_LAUNCH_NONCE"` } satisfies CommandHandler] }] },
+  permissions: { allow: [claudeAskUserTool], deny: ['AskUserQuestion'] }
+});
