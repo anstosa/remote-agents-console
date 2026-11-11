@@ -165,9 +165,12 @@ must not look successful. Activity rows are silent, excluded from model context,
 and share the existing three-day retention window.
 Agent and terminal connections use output-line skeletons for initial
 attachment and automatic reconnects, retaining the mounted terminal underneath.
-Their skeletons fill the entire available output height, adapting to split and font
-resizing. Agent placeholders alternate prompts, paragraphs and indented tool output;
-terminal placeholders use denser shell-command and column-shaped output rows.
+When available, agent skeletons replay the last visible text geometry for that pane,
+preserving widths, indentation and blank rows without storing transcript text.
+The geometry is cached in the current tab, scales with the terminal font size and is
+clipped to the split. Cold agent placeholders alternate prompts, paragraphs and indented
+tool output; terminal placeholders use denser shell-command and column-shaped output
+rows. Both generic placeholders fill the available output height.
 Fresh stream seeds clear the skeleton; explicit failure reasons remain readable.
 Startup/auth and fullscreen connection loaders retain a constant-speed turn.
 Each border type shares the document timeline, including late mounts and portals.

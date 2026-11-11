@@ -7487,6 +7487,8 @@ function Log({ id, workspaceKey, onTurnOff, embedded = false, codexScrollControl
     const handle = mountKeptTerminal(keep, canvas.current!, {
       connect: createAgentPaneConnector(id, request),
       loadingKind: 'agent',
+      // restore geometry only for this agent pane
+      outputShapeKey: id,
       // mirror shared stream status without owning a second connection loader
       onStatus: connection => { /* ignore a disposed viewer */ if (!disposed) setStatus(connection ?? 'Live'); },
       preferNativeMouseSelection: true,

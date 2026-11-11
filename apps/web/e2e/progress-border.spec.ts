@@ -234,16 +234,55 @@ test('keeps branch and agent connection skeletons free of loading borders', asyn
   await seedPaneSize(page, 'agent-1');
   await pushBytes(page, 'agent-1', 'Cached agent output\r\n');
   await expect(connection).toBeHidden();
+  // measure cached bars against the actual xterm grid rather than the generic transcript
+  const measureGrid = () => canvas.evaluate(element => {
+    const screen = element.querySelector('.xterm-screen')!.getBoundingClientRect();
+    return { x: screen.x, y: screen.y, width: screen.width / Number((element as HTMLElement).dataset.cols), height: screen.height / Number((element as HTMLElement).dataset.rows) };
+  });
+  // check that loading preserves positions and widths without copying output text
+  const expectCachedShape = async (grid: Awaited<ReturnType<typeof measureGrid>>, runs: number[][]) => {
+    await expect(agentSkeleton).toHaveClass(/\boutput-skeleton-cached\b/u);
+    await expect(agentSkeleton).toHaveText('');
+    const bars = agentSkeleton.locator('.skeleton');
+    await expect(bars).toHaveCount(runs.length);
+    // compare each run in terminal cell coordinates
+    for (const [index, [row, column, width]] of runs.entries()) {
+      const bar = (await bars.nth(index).boundingBox())!;
+      expect(bar.x - grid.x).toBeCloseTo(column! * grid.width, 0);
+      expect(bar.width).toBeCloseTo(width! * grid.width, 0);
+      expect(bar.y + bar.height / 2 - grid.y).toBeCloseTo((row! + 0.5) * grid.height, 0);
+    }
+  };
+  // cache the live viewport, including indentation, a blank row and wide glyphs
+  await pushBytes(page, 'agent-1', '\x1b[H\x1b[2J  lead\r\n\r\n    界界  abc\r\n');
+  await expect(canvas.locator('.terminal-selection-surface')).toContainText('界界');
+  const liveGrid = await measureGrid();
   const connects = await paneConnectCount(page, 'agent-1');
   await dropPane(page, 'agent-1');
   await expect.poll(() => paneConnectCount(page, 'agent-1')).toBeGreaterThan(connects);
   await expect(connection).toBeVisible();
   await expect(connection).toContainText('Reconnecting…');
-  await expect(connection.locator('.output-skeleton-agent')).toBeVisible();
+  await expectCachedShape(liveGrid, [[0, 2, 4], [2, 4, 4], [2, 10, 3]]);
   await expect(connection.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
   await seedPaneSize(page, 'agent-1');
-  await pushBytes(page, 'agent-1', 'Fresh agent output\r\n');
+  await pushBytes(page, 'agent-1', '   Fresh agent output\r\n');
   await expect(connection).toBeHidden();
+  await expect(canvas.locator('.terminal-selection-surface')).toContainText('Fresh agent output');
+  const freshGrid = await measureGrid();
+  // a reload reuses the latest geometry before the replacement pane sends bytes
+  await page.reload();
+  await expect(connection).toBeVisible();
+  await expect(connection).toContainText('Connecting');
+  await expectCachedShape(freshGrid, [[0, 3, 18]]);
+  // enforce anonymous numeric storage as well as anonymous rendered bars
+  const savedShape = await page.evaluate(() => {
+    const entries: Array<[string, [number, number, number[][]]]> = JSON.parse(sessionStorage.getItem('rac.agent-output-shapes.v1') ?? '[]');
+    // inspect only this agent's persisted geometry
+    return entries.find(([key]) => key === 'agent-1')?.[1];
+  });
+  expect(savedShape).toEqual([expect.any(Number), expect.any(Number), [[0, 3, 18]]]);
+  // bound the cell dimensions while the exact run assertion bounds every coordinate
+  expect(savedShape?.slice(0, 2).every(value => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 4)).toBe(true);
 });
 
 // distinguish cleanup skeletons from the user-confirmed cleanup mutation

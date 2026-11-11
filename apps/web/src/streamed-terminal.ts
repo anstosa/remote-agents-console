@@ -13,6 +13,7 @@ import { subscribeColorTheme } from './color-theme.js';
 import { createOutputLinkOverlays } from './output-links.js';
 import { safeHttpTarget } from './terminal-link-metadata.js';
 import { preserveOutputLongPressSelection } from './output-touch.js';
+import { measureOutputShape, readOutputShape, renderOutputShape, saveOutputShape, type OutputShape } from './output-skeleton-shape.js';
 import { encodeInputBytes, maxInputFrameBytes, type PaneConnection, type PaneConnector, type PaneMetadata, type PaneServerFrame } from './pane-stream.js';
 
 export interface StreamedTerminalOptions {
@@ -25,6 +26,8 @@ export interface StreamedTerminalOptions {
   preferNativeMouseSelection?: boolean;
   // mirror transcript or shell geometry while the connection is pending
   loadingKind?: 'agent' | 'terminal';
+  // retain the agent's text geometry across reloads and remounts
+  outputShapeKey?: string;
   // route codex/omx's app-owned transcript scrolling and return control
   codexScrollControls?: boolean;
   // Route a same-stack URL into the in-app browser; return true when it was handled.
@@ -145,12 +148,17 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   const skeletonGroup = createOutputSkeletonGroup(loadingKind);
   outputSkeleton.append(skeletonGroup);
   status.append(statusMessage, outputSkeleton);
+  const shapeKey = loadingKind === 'agent' ? options.outputShapeKey : undefined;
+  let cachedShape = shapeKey === undefined ? undefined : readOutputShape(shapeKey);
+  let displayedShape: OutputShape | undefined;
 
   // repeat measured content groups through the entire available output height
   const syncOutputSkeleton = () => {
     // live output and explicit errors have no pending artwork to resize
     if (status.hidden || outputSkeleton.hidden) return;
     outputSkeleton.style.fontSize = `${readTerminalFontSize()}px`;
+    // cached bars scale with the font and clip to the pane without repeating
+    if (displayedShape !== undefined) return;
     const groupHeight = skeletonGroup.getBoundingClientRect().height;
     // defer measurement while a minimized or unmounted split has no geometry
     if (groupHeight <= 0) return;
@@ -278,6 +286,17 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   // retained placeholder output must never authorize a shortcut on a replacement stream
   let outputGeneration = 0;
   let parsedSeedGeneration = -1;
+  // capture at stream and panel boundaries instead of scanning on every render
+  const cacheOutputShape = () => {
+    // only the last seeded agent viewport can replace its cached shape
+    if (loadingKind !== 'agent' || disposed || parked || parsedSeedGeneration !== outputGeneration) return;
+    const shape = measureOutputShape(terminal);
+    // preserve the prior shape while there is no measurable renderer
+    if (shape === undefined) return;
+    cachedShape = shape[2].length === 0 ? undefined : shape;
+    // retain the shape for the same pane on the next page load
+    if (shapeKey !== undefined) saveOutputShape(shapeKey, shape);
+  };
   // Re-proposes the viewport on each render until one carries, then drops itself (wired to
   // onRender below); see there for why the open and initial-resize sends aren't enough.
   let firstViewportSub: IDisposable | undefined;
@@ -355,6 +374,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     if (!(output instanceof Uint8Array) && output.type === 'size') queuedSize = output;
     // a new snapshot supersedes older bytes and resets server acknowledgement accounting
     if (!(output instanceof Uint8Array) && output.type === 'reseed') {
+      cacheOutputShape();
       invalidateCodexFollowState();
       queuedOutput.length = 0;
       queuedByteCount = 0;
@@ -462,6 +482,14 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     const pending = text === 'Connecting' || text === 'Reconnecting…' || text === 'Refreshing output…';
     status.classList.toggle('loading', pending);
     status.setAttribute('aria-busy', String(pending));
+    // switch between the last real viewport and the cold-load template
+    if (pending && displayedShape !== cachedShape) {
+      displayedShape = cachedShape;
+      outputSkeleton.classList.toggle('output-skeleton-cached', displayedShape !== undefined);
+      // use the generic transcript only when there is no text geometry
+      if (displayedShape === undefined) outputSkeleton.replaceChildren(skeletonGroup);
+      else renderOutputShape(outputSkeleton, displayedShape);
+    }
     statusMessage.classList.toggle('sr-only', pending);
     outputSkeleton.hidden = !pending;
     statusMessage.textContent = text;
@@ -485,6 +513,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   };
   const handleDisconnect = (reason: string) => {
     if (disposed || parked) return;
+    // snapshot the live screen before invalidating the stream
+    cacheOutputShape();
     closeConnection();
     invalidateCodexFollowState();
     // Keep the terminal mounted as its own placeholder with a status, then re-subscribe.
@@ -772,6 +802,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     scheduleOverlayRender();
   });
   resizeObserver.observe(container);
+  // save the current agent viewport before a reload replaces the renderer
+  if (shapeKey !== undefined) window.addEventListener('pagehide', cacheOutputShape);
 
   // cover initial connection with the same skeleton used by automatic retries
   showStatus('Connecting');
@@ -806,6 +838,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     setOutputPaused,
     park: () => {
       if (disposed || parked) return;
+      // retain the latest shape even if this parked terminal is later evicted
+      cacheOutputShape();
       parked = true;
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
@@ -834,11 +868,14 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     },
     dispose: () => {
       if (disposed) return;
+      // keep the geometry for a later mount of this pane
+      cacheOutputShape();
       disposed = true;
       clearQueuedOutput();
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       document.removeEventListener('visibilitychange', reconnectPending);
       window.removeEventListener('online', reconnectPending);
+      window.removeEventListener('pagehide', cacheOutputShape);
       if (overlayFrame !== undefined) window.cancelAnimationFrame(overlayFrame);
       if (viewportFrame !== undefined) window.cancelAnimationFrame(viewportFrame);
       firstViewportSub?.dispose();
