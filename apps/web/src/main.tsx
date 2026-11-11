@@ -8456,10 +8456,11 @@ type TranscriptItem =
   | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number; toolCalls?: number }
   | TranscriptTool;
 // the latest `limit` lines of an Agent's transcript, how many come before them, and its status line
-type TranscriptPage = { agentId: string; limit: number; items: TranscriptItem[]; earlier: number; status?: { extension: string[]; cost?: number; contextPercent?: number }; stderr?: string };
+type TranscriptPage = { agentId: string; limit: number; items: TranscriptItem[]; earlier: number; status?: { extension: string[]; cost?: number; contextPercent?: number; contextTokens?: number }; stderr?: string };
 const transcriptPageSize = 200;
 const transcriptDuration = (ms: number | undefined): string => ms === undefined ? '' : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 const transcriptCost = (cost: number): string => `$${cost.toFixed(3)}`;
+const contextTokens = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
 // One prompt's group: its prompt (none for lines before the first prompt shown, or after a Turn
 // that started without one), the lines that followed, and its end once its Turn settled. A call
@@ -8556,7 +8557,7 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
     setLimit(limit + transcriptPageSize);
   };
   const status = current?.status;
-  const showStatus = status !== undefined && (status.extension.length > 0 || status.cost !== undefined || status.contextPercent !== undefined);
+  const showStatus = status !== undefined && (status.extension.length > 0 || status.cost !== undefined || status.contextPercent !== undefined || status.contextTokens !== undefined);
   return <div className="structured-transcript">
     <div ref={log} className="transcript-log" role="log" aria-label="Transcript" style={{ fontSize }} onScroll={event => { const list = event.currentTarget; following.current = list.scrollHeight - list.scrollTop - list.clientHeight < 8; }}>
       {current !== undefined && current.earlier > 0 && <button type="button" className="transcript-earlier" onClick={loadEarlier}>Load earlier</button>}
@@ -8586,7 +8587,7 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
     </div>
     {showStatus && <div className="transcript-statusline" role="status" aria-label="Status line">
       {status.extension.map((text, index) => <span key={index} className="transcript-extension-status">{text}</span>)}
-      {status.contextPercent !== undefined && <span>ctx {Math.round(status.contextPercent)}%</span>}
+      {(status.contextPercent !== undefined || status.contextTokens !== undefined) && <span>ctx {[status.contextTokens === undefined ? undefined : contextTokens.format(status.contextTokens), status.contextPercent === undefined ? undefined : `${Math.round(status.contextPercent)}%`].filter(part => part !== undefined).join(' · ')}</span>}
       {status.cost !== undefined && <span>{transcriptCost(status.cost)}</span>}
     </div>}
   </div>;

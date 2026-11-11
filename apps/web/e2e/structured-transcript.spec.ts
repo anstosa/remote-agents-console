@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 // A structured (Pi) Agent's transcript Panel, variant D: one group per prompt, one line per tool call.
 
-type Transcript = { items: unknown[]; earlier?: number; status?: { extension: string[]; cost?: number; contextPercent?: number }; stderr?: string };
+type Transcript = { items: unknown[]; earlier?: number; status?: { extension: string[]; cost?: number; contextPercent?: number; contextTokens?: number }; stderr?: string };
 
 // stub a console whose one Worktree runs a Pi Agent, serving `transcript` and each item in `full`
 // (`lifecycle` the Agent's process state; `resumed` hears each Resume)
@@ -181,12 +181,12 @@ test('a status line above the composer shows the extension status, context and c
     { id: 'm1', kind: 'message', role: 'user', text: 'Run the tests' },
     { id: 'n1', kind: 'notice', text: 'Tests passed', tone: 'info' },
     { id: 'e1', kind: 'settled', outcome: 'done', cost: 0.02, toolCalls: 0 }
-  ], status: { extension: ['sandbox: on'], cost: 0.0812, contextPercent: 31.4 } });
+  ], status: { extension: ['sandbox: on'], cost: 0.0812, contextPercent: 31.4, contextTokens: 62_840 } });
   await page.goto('/');
   await expect(log(page).locator('.transcript-notice')).toHaveText('※Tests passed');
   const panel = page.locator('.log-split > .log-output');
   const status = panel.getByRole('status', { name: 'Status line' });
-  await expect(status).toHaveText('sandbox: onctx 31%$0.081');
+  await expect(status).toHaveText('sandbox: onctx 62.8K · 31%$0.081');
   const statusBox = (await status.boundingBox())!;
   const promptBox = (await panel.getByRole('region', { name: 'Prompt composer' }).boundingBox())!;
   expect(statusBox.y + statusBox.height).toBeLessThanOrEqual(promptBox.y + 1);
