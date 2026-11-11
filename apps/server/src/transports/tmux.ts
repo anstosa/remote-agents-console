@@ -1,18 +1,17 @@
 import { randomBytes } from 'node:crypto';
-import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { TmuxAdapter } from '../tmux/adapter.js';
 import { codexCollapsedPasteLabel, failedTurnFromCapture, lastPromptFromHistory, latestCompletedAssistantTurn, queueReadyPrompt } from '../adapters/codex-turns.js';
 import { adapterFor } from '../adapters/registry.js';
 import { codexFamily, type Adapter, type AgentKind, type CompletionBaseline, type CompletionEvent, type PaneSnapshot, type Submission, type SubmissionDraftState, type SubmissionMode, type TmuxKey } from '../adapters/types.js';
 import type { Agent } from '../domain/models.js';
-import { run } from '../tmux/command.js';
 import type { PromptHistoryEntry } from '../prompt-history/service.js';
 import { agentAttentionState } from '../notifications.js';
+import { removeStagedAttachments, stagePromptAttachments, withAttachedFiles } from '../prompts/attachments.js';
 import { promptScope } from '../prompts/queue.js';
 import type { ResetBoundary, ResetBoundaryStore } from '../prompts/reset-boundaries.js';
-import { maxPromptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, type PromptAttachment } from '../prompts/validation.js';
+import { validPrompt, type PromptAttachment } from '../prompts/validation.js';
 import { expandCommand } from '../launch/service.js';
 import type { AgentWaiter } from '../launch/wait.js';
 import { configuredWorktreeForWorkspace } from '../workspaces/resolver.js';
@@ -32,7 +31,6 @@ const composerRenderStableMs = 100;
 const submissionAcceptGraceMs = 4_000;
 // space retries within the acceptance deadline
 const submissionRetryAttempts: ReadonlySet<number> = new Set([6, 14, 30, 50, 70]);
-const attachmentIgnoreRule = '/node_modules/.remote-agent-console/';
 const updateAdvisorComposerAttempts = 100;
 const updateAdvisorReadyStableMs = 500;
 const updateAdvisorStartAttempts = 50;
@@ -281,11 +279,11 @@ export class TmuxTransport implements AgentTransport {
     // never paste a container-only path when the host mapping is unavailable
     if (sharedStaging !== undefined && (hostWorkspace === undefined || !isAbsolute(hostWorkspace))) return { status: 'refused' };
     const workspace = sharedStaging?.workspace ?? this.workspaceFor(first.agent.home);
-    const staged = await this.stageAttachments(workspace, attachments);
+    const staged = await stagePromptAttachments(workspace, attachments);
     if (staged === undefined) return { status: 'refused' };
     // name shared files in the agent's namespace while retaining local cleanup paths
     const references = staged.map(path => `@${hostWorkspace === undefined ? path : join(hostWorkspace, path)}`);
-    const attachmentPrompt = staged.length === 0 ? prompt : `${prompt}${prompt ? '\n\n' : ''}Attached files:\n${references.join('\n')}`;
+    const attachmentPrompt = withAttachedFiles(prompt, references);
     const shellMode = attachments.length === 0 && prompt.startsWith('!');
     const mode: SubmissionMode = shellMode ? 'shell' : 'prompt';
     const composed = adapter.submission.prepare(attachmentPrompt, mode);
@@ -297,30 +295,30 @@ export class TmuxTransport implements AgentTransport {
     const buffer = `rac-${randomBytes(18).toString('base64url')}`;
     // keep the server-owned prompt out of the startup shell
     if (submission === 'confirmed-enter' && !await this.waitForUpdateAdvisorReady(agentId, first)) {
-      await this.removeStaged(workspace, staged);
+      await removeStagedAttachments(workspace, staged);
       return { status: 'refused' };
     }
     const pasteTarget = await this.submissionTarget(agentId, first).catch(() => undefined);
     // attachment staging and startup waits must not paste into a replacement process
     if (pasteTarget === undefined || agentAttentionState(pasteTarget.agent) === 'question') {
-      await this.removeStaged(workspace, staged);
+      await removeStagedAttachments(workspace, staged);
       return { status: 'refused' };
     }
     // a rejected paste does not establish ownership of pre-existing native text
     if (!await this.tmux.pastePrompt(pasteTarget.socket, pasteTarget.agent.pane.paneId, buffer, composed.text)) {
-      await this.removeStaged(workspace, staged);
+      await removeStagedAttachments(workspace, staged);
       return { status: 'refused' };
     }
     const second = await this.submissionTarget(agentId, first).catch(() => undefined);
     // never adopt a new process after the paste
     if (!second) {
-      await this.removeStaged(workspace, staged);
+      await removeStagedAttachments(workspace, staged);
       // hold durable ownership through a failed post-paste discovery scan
       return settle ? { status: 'held', failedDraft } : { status: 'refused' };
     }
     // wait until the fresh advisor composer rendered the complete paste
     if (submission === 'confirmed-enter' && !await this.waitForUpdateAdvisorComposer(agentId, second, attachmentPrompt)) {
-      await this.removeStaged(workspace, staged);
+      await removeStagedAttachments(workspace, staged);
       return { status: 'refused' };
     }
     // hold the scope so a quick second submit queues behind this one, then let the
@@ -832,69 +830,6 @@ export class TmuxTransport implements AgentTransport {
 
   private workspaceFor(workspace: string): string {
     return configuredWorktreeForWorkspace(this.discovery.worktreesNow(), workspace)?.identity ?? workspace;
-  }
-
-  // keep staged attachments outside Git status
-  private async ensureAttachmentRootIgnored(workspace: string, relativeRoot: string): Promise<boolean> {
-    const ignored = await run('/usr/bin/git', ['-C', workspace, 'check-ignore', '--quiet', '--', relativeRoot]);
-    // retain repository ignore rules
-    if (ignored.code === 0) return true;
-    // allow workspaces without Git metadata
-    if (/not a git repository/u.test(ignored.stderr)) return true;
-    const resolved = await run('/usr/bin/git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude']);
-    // require a repository-local exclude file
-    if (resolved.code !== 0 || resolved.stdout.trim() === '') return false;
-    const excludePath = resolved.stdout.trim();
-    const absoluteExcludePath = isAbsolute(excludePath) ? excludePath : join(workspace, excludePath);
-    const existing = await readFile(absoluteExcludePath, 'utf8').catch(() => '');
-    // add the narrow staging rule once
-    if (!existing.split(/\r?\n/u).includes(attachmentIgnoreRule)) {
-      await mkdir(dirname(absoluteExcludePath), { recursive: true });
-      await appendFile(absoluteExcludePath, `${existing && !existing.endsWith('\n') ? '\n' : ''}${attachmentIgnoreRule}\n`, { mode: 0o600 });
-    }
-    return (await run('/usr/bin/git', ['-C', workspace, 'check-ignore', '--quiet', '--', relativeRoot])).code === 0;
-  }
-
-  // validate and stage batches without unbounded filesystem concurrency
-  private async stageAttachments(workspace: string, attachments: PromptAttachment[]): Promise<string[] | undefined> {
-    // skip empty attachment sets
-    if (attachments.length === 0) return [];
-    const files: Array<{ name: string; data: Buffer }> = [];
-    const names = new Set<string>();
-    let total = 0;
-    // validate attachment payloads
-    for (const attachment of attachments) {
-      const name = promptAttachmentName(attachment.name);
-      const data = promptAttachmentData(attachment.data);
-      // reject unsafe or duplicate files
-      if (!name || !data || names.has(name)) return undefined;
-      names.add(name);
-      total += data.length;
-      // enforce the request limit
-      if (total > maxPromptAttachmentBytes) return undefined;
-      files.push({ name, data });
-    }
-    // stage beneath a dependency path
-    const relativeRoot = `node_modules/.remote-agent-console/attachments/${randomBytes(12).toString('base64url')}`;
-    // configure a local fallback for repositories without dependency ignores
-    if (!await this.ensureAttachmentRootIgnored(workspace, relativeRoot)) return undefined;
-    const root = join(workspace, relativeRoot);
-    try {
-      await mkdir(root, { recursive: true, mode: 0o700 });
-      // bound file-descriptor use independently of batch size
-      for (const file of files) await writeFile(join(root, file.name), file.data, { mode: 0o600 });
-      // retain the original attachment order
-      return files.map(file => `${relativeRoot}/${file.name}`);
-    } catch {
-      // remove every partial file before retaining the queued batch
-      await rm(root, { recursive: true, force: true });
-      return undefined;
-    }
-  }
-
-  private async removeStaged(workspace: string, paths: string[]): Promise<void> {
-    const relativeRoot = paths[0]?.split('/').slice(0, -1).join('/');
-    if (relativeRoot) await rm(join(workspace, relativeRoot), { recursive: true, force: true });
   }
 
   // reveal a collapsed native question without choosing or submitting an answer
