@@ -3157,6 +3157,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // launching Adapter's `ready` rule over the pane's snapshot and capture (Scheduled
   // prompts). A kind without a new-conversation capability takes its first prompt at once.
   const waitForReadiness = async (agent: Agent, attempts = launchPollAttempts): Promise<ReadinessOutcome> => {
+    // a structured Agent has no pane to read, and its Transport holds a prompt until it is live
+    if (agent.transport === 'structured') return { state: 'ready' };
     const ready = adapterFor(agent.kind)?.newConversation?.ready;
     // no readiness rule: the fresh launch may take its first prompt immediately
     if (ready === undefined) return { state: 'ready' };

@@ -194,6 +194,23 @@ describe('opening a folder', () => {
     } finally { await app.close(); }
   });
 
+  // a structured Agent (ADR 0015) runs under a holder, not in a pane discovery can target
+  it('opens a structured Claude without mistaking its missing pane for a closed launch', async () => {
+    const structured = (folder: string) => ({ ...stated({ id: 'structured-1', title: '', placeId: `scratch:${folder}` }), kind: 'claude', transport: 'structured', structured: { lifecycle: 'starting', revision: 0, switchable: false } });
+    const adhoc = (folder: string): Place => ({ id: `scratch:${folder}`, kind: 'scratch', projectId: 'scratch', label: 'repo', home: folder, adhoc: true });
+    const { app, folder } = await start({
+      place: adhoc,
+      launch: { launchAt: async () => true },
+      dashboard: (call, folder) => call === 0 ? idleDashboard : { ...idleDashboard, agents: [structured(folder)] },
+      target: () => undefined,
+    });
+    try {
+      const response = await app.inject(open({ path: folder, action: 'agent', kind: 'claude' }));
+      expect(response.json()).toEqual({ placeId: `scratch:${folder}`, agentId: 'structured-1' });
+      expect(response.statusCode).toBe(201);
+    } finally { await app.close(); }
+  });
+
   it('refuses a launch whose agent closes as it starts', async () => {
     const { app, folder } = await start({
       launch: { launchAt: async () => true },
