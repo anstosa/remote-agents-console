@@ -2761,15 +2761,17 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.delete('/api/agents/:id/queued-prompts/:promptId', async (request, reply) => { controlled(request, true); const { id, promptId } = request.params as { id: string; promptId: string }; return await prompts.removeQueued(id, promptId) ? reply.code(204).send() : reply.code(404).send({ error: 'queued prompt unavailable' }); });
   app.get('/api/agents/:id/commands', async (request, reply) => {
     controlled(request);
-    const target = await discovery.target((request.params as { id: string }).id);
-    if (!target) return reply.code(404).send({ error: 'target unavailable' });
-    const adapter = adapterFor(target.agent.kind);
+    const id = (request.params as { id: string }).id;
+    const agent = (await discovery.target(id))?.agent ?? await structuredAgents.agent(id);
+    if (!agent) return reply.code(404).send({ error: 'target unavailable' });
+    // a kind's catalog is the same over either Transport
+    const adapter = adapterFor(agent.kind);
     // an Adapter without a command catalog serves an empty one
     if (adapter === undefined) return { commands: [] };
-    const worktree = configuredWorktreeForWorkspace(discovery.worktreesNow(), target.agent.home);
+    const worktree = configuredWorktreeForWorkspace(discovery.worktreesNow(), agent.home);
     // the Adapter resolves its own state directory (its skills root) from the environment
     const stateDirectory = adapter.commands?.stateDirectory() ?? '';
-    return { commands: await commandCatalog.catalog(adapter, worktree?.path ?? target.agent.home, stateDirectory) };
+    return { commands: await commandCatalog.catalog(adapter, worktree?.path ?? agent.home, stateDirectory) };
   });
   // list workspace files referenced by one completed response
   app.post('/api/agents/:id/message-files', async (request, reply) => {

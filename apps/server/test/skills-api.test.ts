@@ -3,10 +3,13 @@
 // `/skills` route.)
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
+import { StructuredAgents } from '../src/transports/structured-agents.js';
 import { testConfig, testWorktree } from './helpers/config.js';
 
 const config = testConfig({ publicOrigin: new URL('https://agents.example.com') });
 // a discovered Worktree whose console path differs from the host path an Agent reports
+// structured Agents kept in a file that does not exist, so none are listed
+const noStructuredAgents = () => new StructuredAgents({} as never, { file: '/nonexistent/structured-agents.json' });
 const ferry = testWorktree({ id: 'ferry-fyi', projectId: 'ferry', label: 'Ferry FYI', path: '/worktrees/ferry.fyi', hostPath: '/home/ubuntu/ferry.fyi', pinned: true });
 
 describe('agent command catalog API', () => {
@@ -33,11 +36,32 @@ describe('agent command catalog API', () => {
     expect(seen).toEqual([{ kind: 'codex', workspace: '/worktrees/ferry.fyi', stateDirectory: '/service-codex' }]);
   });
 
+  it('serves the catalog for a structured agent, which discovery does not list', async () => {
+    const seen: Array<{ kind: string; workspace: string }> = [];
+    const agent = { id: 'structured-1', home: '/home/ubuntu/ferry.fyi', title: 'Ready', kind: 'claude', transport: 'structured' } as const;
+    const structuredAgents = noStructuredAgents();
+    vi.spyOn(structuredAgents, 'agent').mockImplementation(async id => id === agent.id ? agent : undefined);
+    app = await buildApp(config, {
+      auth: { unsign: () => 'session', get: () => ({ id: 'session', csrf: 'csrf' }) } as never,
+      control: { connect: () => true } as never,
+      discovery: { target: async () => undefined, worktreesNow: () => [ferry] } as never,
+      structuredAgents,
+      commandCatalog: { catalog: async (adapter: { kind: string }, workspace: string) => { seen.push({ kind: adapter.kind, workspace }); return [{ value: '/brainstorming', description: 'Explore a design.' }]; } } as never
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/api/agents/structured-1/commands', headers: { host: 'agents.example.com' } });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ commands: [{ value: '/brainstorming', description: 'Explore a design.' }] });
+    expect(seen).toEqual([{ kind: 'claude', workspace: '/worktrees/ferry.fyi' }]);
+  });
+
   it('reports 404 for an unknown agent', async () => {
     app = await buildApp(config, {
       auth: { unsign: () => 'session', get: () => ({ id: 'session', csrf: 'csrf' }) } as never,
       control: { connect: () => true } as never,
-      discovery: { target: async () => undefined, worktreesNow: () => [ferry] } as never
+      discovery: { target: async () => undefined, worktreesNow: () => [ferry] } as never,
+      structuredAgents: noStructuredAgents()
     });
 
     const response = await app.inject({ method: 'GET', url: '/api/agents/missing/commands', headers: { host: 'agents.example.com' } });
