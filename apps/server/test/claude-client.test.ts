@@ -133,6 +133,16 @@ describe('the Claude client', () => {
     expect(await connection.deliver('Next')).toBe('started');
   });
 
+  it('reports the Effort a Turn ran at from the session JSONL, which the stream never names', async () => {
+    await sessionFrom('session-interrupt.jsonl');
+    const { connection, claude, of } = await launched();
+    expect(await connection.deliver('Go')).toBe('started');
+    claude({ ...fixture('turn-steer.jsonl')[0]!, model: 'claude-haiku-5-5' });
+    expect(of('model').at(-1)).toEqual({ type: 'model', current: { model: 'haiku' } });
+    claude(result());
+    await vi.waitFor(() => expect(of('model').at(-1)).toEqual({ type: 'model', current: { model: 'haiku', effort: 'medium' } }));
+  });
+
   it('keeps a steer pending until the CLI starts it, and drops one it completed without starting', async () => {
     const { connection, sent, claude, of } = await launched();
     const records = fixture('turn-steer-replay.jsonl');

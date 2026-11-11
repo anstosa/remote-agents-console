@@ -409,6 +409,22 @@ export async function claudeLastAssistantMessage(id: string, cwd: string | undef
   return lastAssistantMessageCache.get(transcriptPath(id, cwd, env)).catch(() => undefined);
 }
 
+/**
+ * The Effort the last main-thread reply of a Claude Conversation ran at, from the `effort` its
+ * transcript records carry (Claude's stream never names it, and with no `--effort` it is Claude's
+ * own default). `undefined` when no reply in the bounded tail names one.
+ */
+export async function claudeConversationEffort(id: string, cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+  if (!validClaudeSessionId(id)) return undefined;
+  const lines = await readFileTail(transcriptPath(id, cwd, env), maxLatestMessageScanBytes).catch(() => []);
+  for (let at = lines.length - 1; at >= 0; at -= 1) {
+    let record: AssistantRecord & { effort?: unknown };
+    try { record = JSON.parse(lines[at]!) as typeof record; } catch { continue; }
+    if (record.type === 'assistant' && record.isSidechain !== true && typeof record.effort === 'string') return record.effort;
+  }
+  return undefined;
+}
+
 /** read the latest unanswered message from claude's reported conversation */
 export async function claudeConversationLatestMessage(pane: { pid: number; cwd?: string; conversationId?: string }, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
   // require the reported id and raw pane cwd that key Claude's transcript

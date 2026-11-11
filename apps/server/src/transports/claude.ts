@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { askUser, askUserReply } from '../adapters/ask-user.js';
-import { claudeConversationName, claudeHookNonce, claudeTranscriptRecords, validClaudeSessionId } from '../adapters/claude-conversations.js';
+import { claudeConversationEffort, claudeConversationName, claudeHookNonce, claudeTranscriptRecords, validClaudeSessionId } from '../adapters/claude-conversations.js';
 import type { QuestionField } from '../adapters/types.js';
 import { bounded, count, isObject, oneLine, outcome, strings, summary, text, thousands, waitingForAnswer, type Json, type ModelInfo, type ModelSetting, type ProtocolClient, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
 
@@ -398,6 +398,15 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     current = { model: alias(model), ...(current?.effort === undefined ? {} : { effort: current.effort }) };
     emit({ type: 'model', current });
   };
+  // the Effort a Turn ran at, which only the session JSONL names: with no `--effort`, Claude's default
+  const observeEffort = async () => {
+    const id = sessionId;
+    if (id === undefined) return;
+    const effort = await claudeConversationEffort(id, cwd);
+    if (id !== sessionId || current === undefined || effort === undefined || effort === current.effort || !(claudeEfforts as readonly string[]).includes(effort)) return;
+    current = { ...current, effort };
+    emit({ type: 'model', current });
+  };
   const turnStarted = () => {
     working = true;
     toolCalls = 0;
@@ -503,6 +512,7 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     transcript({ id: turnPrompt !== undefined ? `${turnPrompt}:end` : typeof record.uuid === 'string' ? record.uuid : randomUUID(), kind: 'settled', outcome: outcome(aborted, failed), ...(cost === undefined ? {} : { cost }), toolCalls });
     usage();
     emit({ type: 'turn', turn: aborted ? { type: 'aborted' } : failed ? { type: 'failed' } : { type: 'settled', message: typeof record.result === 'string' ? record.result : answer } });
+    void observeEffort();
     wake();
   };
 
