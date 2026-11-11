@@ -462,7 +462,7 @@ button.model-chip:hover, button.model-chip.active, .watches-chip:hover, .watches
 .model-row small { color: var(--overlay-1); font-size: .64rem; text-align: right; }
 .model-row span { grid-column: 1 / -1; color: var(--subtext-0); font-size: .64rem; }
 .model-efforts { display: flex; flex-wrap: wrap; gap: 2px; padding: 2px; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--crust); }
-.model-efforts button { flex: 1; min-height: 2.25rem; padding: .3rem .4rem; border: 0; border-radius: .2rem; background: transparent; color: var(--subtext-0); font-size: .66rem; }
+.model-efforts button { flex: 1; justify-content: center; min-height: 2.25rem; padding: .3rem .4rem; border: 0; border-radius: .2rem; background: transparent; color: var(--subtext-0); font-size: .66rem; }
 .model-efforts button[aria-pressed="true"] { background: var(--lavender); color: var(--crust); font-weight: 800; }
 .model-efforts button:disabled { cursor: default; opacity: .5; }
 .launch-effort, .schedule-effort { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .2rem .5rem; color: var(--subtext-0); font-size: .7rem; }
