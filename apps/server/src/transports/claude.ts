@@ -294,6 +294,7 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
   const reader = transcriptReader();
   const transcript = (item: TranscriptItem) => emit({ type: 'transcript', item });
   let sessionId = attached?.conversation;
+  let conversationName: string | undefined;
   let version: string | undefined;
   // every nonce a SessionStart hook printed, and those reported
   const nonces = new Set<string>();
@@ -359,9 +360,21 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     if (id === undefined) return;
     const [name, lines] = await Promise.all([claudeConversationName(id, cwd), claudeTranscriptRecords(id, cwd)]);
     if (id !== sessionId) return;
+    conversationName = name;
     emit({ type: 'conversation', id, ...(name === undefined ? {} : { name }) });
     const items = lines === undefined ? [] : claudeHistory(lines, { running: working === true });
     if (always || items.length > 0) emit({ type: 'history', items });
+  };
+  // print mode writes no `ai-title`, so a new Conversation is named by its first prompt only once
+  // the session JSONL holds it: read the name again after each Turn, unless a rename overtook the read
+  const observeName = async () => {
+    const id = sessionId;
+    const before = conversationName;
+    if (id === undefined) return;
+    const name = await claudeConversationName(id, cwd);
+    if (id !== sessionId || conversationName !== before || name === undefined || name === before) return;
+    conversationName = name;
+    emit({ type: 'conversation', id, name });
   };
   const session = (id: unknown) => {
     if (typeof id !== 'string' || !validClaudeSessionId(id) || id === sessionId) return;
@@ -513,6 +526,7 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     usage();
     emit({ type: 'turn', turn: aborted ? { type: 'aborted' } : failed ? { type: 'failed' } : { type: 'settled', message: typeof record.result === 'string' ? record.result : answer } });
     void observeEffort();
+    void observeName();
     wake();
   };
 
@@ -566,6 +580,7 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
           case 'session_title_changed':
             if (typeof record.title !== 'string' || sessionId === undefined) return;
             if (operation?.kind === 'rename') operation.seen = true;
+            conversationName = record.title;
             emit({ type: 'conversation', id: sessionId, name: record.title });
             return;
           case 'compact_boundary':

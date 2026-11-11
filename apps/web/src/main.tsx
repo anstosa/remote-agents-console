@@ -8294,7 +8294,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const adapters = useContext(AdaptersContext);
   const steers = agentCapability(adapters, agent)?.steer === true;
   const steering = steers && agent.attention === 'working' ? { pending: agent.structured?.steers ?? [] } : undefined;
-  const conversationName = useCurrentConversationName(agent.id, [agent.conversationId, workspace.conversations.currentName]);
+  const conversationName = useCurrentConversationName(agent.id, [agent.conversationId, agent.structured?.conversationName, workspace.conversations.currentName]);
   const panelState = agentPanelState(agent, startingNewTask);
   // Stop interrupts work in progress beside the hidden, disabled power control
   const cancelButton = active && <button type="button" className={`panel-header-action agent-cancel${progressBorder(cancelling, 'red')}`} disabled={cancelling} aria-busy={cancelling || undefined} aria-label="Cancel agent" title="Cancel agent" onClick={() => void cancel()}><ProgressRing busy={cancelling} /><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1" /></svg></button>;
@@ -8380,7 +8380,7 @@ function AgentSwitcher({ agent, agents, title, placeLabel, onSelect, onClose }: 
 // select or close one agent without affecting its siblings
 function AgentSwitcherRow({ agent, current, onChoose, onClose }: { agent: Agent; current: boolean; onChoose: () => void; onClose: () => void }) {
   // an untitled conversation says so; its kind stays on the line beneath, beside its state
-  const conversation = useCurrentConversationName(agent.id, [agent.conversationId]);
+  const conversation = useCurrentConversationName(agent.id, [agent.conversationId, agent.structured?.conversationName]);
   const name = conversation === null ? 'Untitled conversation' : conversation ?? (agent.kind === undefined ? agentLabel(agent) : agentKindLabel[agent.kind]);
   const state = agentPanelState(agent, false);
   const progress = agentStateProgress(state);
@@ -8445,7 +8445,7 @@ function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection =
 // A structured Agent's process state (`revision` changes with its transcript). `questions` are
 // every open question (the first is the Agent's `question`), `steers` the steers its process holds
 // not yet taken, and `draft` text it offers for an empty composer
-type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; role?: 'conductor'; reason?: string; revision: number; model?: AgentModel; switchable?: boolean; questions?: InlineQuestion[]; steers?: string[]; draft?: { id: number; text: string }; compacting?: true };
+type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; role?: 'conductor'; reason?: string; revision: number; conversationName?: string; model?: AgentModel; switchable?: boolean; questions?: InlineQuestion[]; steers?: string[]; draft?: { id: number; text: string }; compacting?: true };
 // A tool call as the transcript lists it: one result (a short line, an edit's diff, or a command's
 // last lines with their count). Its full output and a script's source are read when it is opened.
 type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; result?: string; diff?: { path: string; patch: string }; tail?: string; outputLines?: number; output?: string; source?: string; kept?: false };

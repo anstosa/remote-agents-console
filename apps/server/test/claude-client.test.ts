@@ -143,6 +143,15 @@ describe('the Claude client', () => {
     await vi.waitFor(() => expect(of('model').at(-1)).toEqual({ type: 'model', current: { model: 'haiku', effort: 'medium' } }));
   });
 
+  it('names a new Conversation by its first prompt once a Turn ends, as print mode writes no title', async () => {
+    const { connection, claude, of } = await launched();
+    expect(await connection.deliver('Go')).toBe('started');
+    claude(fixture('turn-steer.jsonl')[0]!);
+    await sessionFrom('session-interrupt.jsonl');
+    claude(result());
+    await vi.waitFor(() => expect(of('conversation').at(-1)).toEqual({ type: 'conversation', id: session, name: expect.stringMatching(/^Use the Bash tool to run exactly: touch /u) }));
+  });
+
   it('keeps a steer pending until the CLI starts it, and drops one it completed without starting', async () => {
     const { connection, sent, claude, of } = await launched();
     const records = fixture('turn-steer-replay.jsonl');
