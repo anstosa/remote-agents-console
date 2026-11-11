@@ -16,6 +16,7 @@ import { serverCheckout } from '../workspaces/server-checkout.js';
 import { connectHolder, type AgentUsage, type CompactRequest, type ClientContext, type HolderHello, type LineChannel, type PromptDisposition, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
 import { agentPanel, type InterruptOutcome, type QuestionAnswer, type TurnEvent } from './transport.js';
 import { validPrompt } from '../prompts/validation.js';
+import { removeStagedAttachments, stagePromptAttachments, withAttachedFiles } from '../prompts/attachments.js';
 import type { StructuredTurnTransport } from '../prompts/service.js';
 import type { PromptLabel } from '../prompts/queue.js';
 import { setAside } from '../set-aside.js';
@@ -811,11 +812,17 @@ export class StructuredAgents {
     gate: async () => 'none',
     held: () => false,
     mark: async agent => await this.turnMark(agent.id),
-    deliver: async (id, prompt, _attachments, options) => {
-      const delivery = await this.deliver(id, prompt, { queued: options.waited === true, ...(options.sender?.label === undefined ? {} : { label: options.sender.label }) });
+    deliver: async (id, prompt, attachments, options) => {
+      // a kind that reads `@path` takes the files staged in its home, named under the prompt
+      const home = attachments.length === 0 ? undefined : await this.agent(id).then(agent => agent !== undefined && structuredAdapterFor(agent.kind)?.attachments === true ? agent.home : undefined);
+      const staged = home === undefined ? [] : await stagePromptAttachments(home, attachments);
+      if (staged === undefined) return { status: 'refused' };
+      const sent = withAttachedFiles(prompt, staged.map(path => `@${path}`));
+      const delivery = await this.deliver(id, sent, { queued: options.waited === true, ...(options.sender?.label === undefined ? {} : { label: options.sender.label }) });
+      if (home !== undefined && (delivery === undefined || delivery === 'busy' || delivery === 'refused')) await removeStagedAttachments(home, staged);
       if (delivery === undefined) return { status: 'refused' };
       if (delivery === 'busy') return { status: 'busy' };
-      return delivery === 'refused' ? { status: 'held' } : { status: 'submitted', instant: delivery === 'handled', prompt };
+      return delivery === 'refused' ? { status: 'held' } : { status: 'submitted', instant: delivery === 'handled', prompt: sent };
     },
     observe: async agent => {
       const live = this.live.get(agent.id);

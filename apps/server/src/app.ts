@@ -2713,7 +2713,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const attachments = promptAttachments(data.attachments);
     if (typeof data.prompt !== 'string' || attachments === undefined || !validPrompt(data.prompt, attachments)) return reply.code(400).send({ error: 'invalid prompt' });
     const id = (request.params as { id: string }).id;
-    if (attachments.length > 0 && await structuredAgents.has(id)) return reply.code(400).send({ error: 'This agent does not take attachments yet.' });
+    const structured = attachments.length === 0 ? undefined : await structuredAgents.agent(id);
+    if (structured !== undefined && structuredAdapterFor(structured.kind)?.attachments !== true) return reply.code(400).send({ error: 'This agent does not take attachments yet.' });
     if (!await prompts.submit(id, data.prompt, attachments)) return reply.code(404).send({ error: 'target unavailable' });
     // a prompt to an Exited Agent waits in its queue while the Agent resumes
     if ((await structuredAgents.agent(id))?.structured?.lifecycle === 'exited') void prompts.withExternalActivity(id, async () => await structuredAgents.resume(id), result => result === true).catch(error => { console.error(`[structured] ${id} could not resume:`, error); });
@@ -4966,7 +4967,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       resolveAgent: developerAgent,
       processGeneration: id => structuredAgents.processGeneration(id),
       createdAt: (id, itemId) => structuredAgents.transcriptObservedAt(id, itemId),
-      capabilities: agent => ({ attachments: agent.transport !== 'structured', steer: agent.transport === 'structured' && structuredAdapterFor(agent.kind)?.steers === true, compact: agent.transport === 'structured', resume: agent.transport === 'structured', restart: agent.transport === 'structured' }),
+      capabilities: agent => ({ attachments: agent.transport !== 'structured' || structuredAdapterFor(agent.kind)?.attachments === true, steer: agent.transport === 'structured' && structuredAdapterFor(agent.kind)?.steers === true, compact: agent.transport === 'structured', resume: agent.transport === 'structured', restart: agent.transport === 'structured' }),
       policy: developerPolicy,
       review: { tours: reviewTours, tourJobs: reviewJobs, codeJobs: codeReviews, store: reviewStore, asks, generalAsks, resolveWorktree: (principal, id) => developerWorktree(id, principal), currentBranch: reviewBranch },
       extensions: { ...sessionPorts, ...launchPorts, create_pull_request_review_draft: createReviewDraftPort({ worktrees: () => discovery.worktreesNow().filter(worktree => config.projects.some(project => project.id === worktree.projectId)), repositoryAt: originRepository, current: (id, input) => reviewTours.current(id, input), post: (id, input) => pullRequestReviews.post(id, input) }) }

@@ -337,6 +337,28 @@ describe('a structured Agent over HTTP', () => {
     await app.close();
   });
 
+  it('stages a structured Claude\'s attachments in its home and names them as `@path` under the prompt, which a Pi does not take', async () => {
+    const fake = fakeAgent();
+    const claude = { program: '/usr/local/bin/claude', args: [], env: {}, launchable: true, transport: 'structured' as const };
+    const { app, headers, root } = await consoleWith(fake, { config: { adapters: { claude } } });
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'claude' } })).json().agentId;
+    const attachments = [{ name: 'note.txt', data: Buffer.from('a note').toString('base64') }];
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'Read this', attachments } })).statusCode).toBe(204);
+    const path = /^Read this\n\nAttached files:\n@(node_modules\/\.remote-agent-console\/attachments\/[^/]+\/note\.txt)$/u.exec(fake.delivered[0] ?? '')?.[1];
+    expect(path).toBeDefined();
+    expect(await readFile(join(root, path!), 'utf8')).toBe('a note');
+
+    await app.close();
+
+    const piFake = fakeAgent();
+    const other = await consoleWith(piFake);
+    const pi: string = (await other.app.inject({ method: 'POST', url: '/api/agents/launch', headers: other.headers, payload: { kind: 'pi' } })).json().agentId;
+    const refused = await other.app.inject({ method: 'POST', url: `/api/agents/${pi}/prompt`, headers: other.headers, payload: { prompt: 'Read this', attachments } });
+    expect(refused.json()).toEqual({ error: 'This agent does not take attachments yet.' });
+    expect(piFake.delivered).toEqual([]);
+    await other.app.close();
+  });
+
   it('shows its latest answer and recent lines to the console\'s MCP readers', async () => {
     const secret = Buffer.alloc(32, 7).toString('base64url');
     vi.stubEnv('RAC_SESSION_SECRET', secret);

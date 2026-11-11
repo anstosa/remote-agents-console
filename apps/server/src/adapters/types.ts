@@ -521,6 +521,8 @@ export interface StructuredAdapter {
   readonly launchSetsModel?: true;
   /** With no Allowed models configured, its Agents may switch to any model their client lists. */
   readonly modelsWithoutPolicy?: true;
+  /** Its CLI reads files a prompt names as `@path`, so a prompt's attachments are staged in the Agent's home and named so. */
+  readonly attachments?: true;
 }
 /**
  * What a structured launch starts: a new Conversation, the one at `resume` (located by the
