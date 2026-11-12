@@ -30,11 +30,10 @@ const appSchema = {
       ],
     },
     icon: {
-      type: "enum",
+      type: "string",
       label: "Icon",
       optional: true,
       apply: "live",
-      options: ["terminal", "potato", "heart"],
     },
   },
 };
@@ -156,6 +155,11 @@ async function setupSelectFixture(page: Page) {
         json: { ticket: "settings-select-dashboard-ticket" },
       });
     // expose one settled settings status
+    // publish a library holding one icon beyond the original aliases
+    if (path === "/api/instance-icons")
+      return route.fulfill({
+        json: { icons: ["terminal", "heart", "potato", "rocket-2"].map((name) => ({ name })) },
+      });
     if (path === "/api/settings/status")
       return route.fulfill({
         json: {
@@ -363,9 +367,15 @@ test("uses custom enum, union, and icon selectors with exact staged patches", as
     name: "Server icon options",
   });
   await expect(iconOptions).toHaveAttribute("data-has-icons", "true");
+  await expect(iconOptions.getByRole("option")).toHaveText([
+    "Terminal",
+    "Heart",
+    "Potato",
+    "Rocket 2",
+  ]);
   await expect(
     iconOptions.locator(".settings-select-option-icon img"),
-  ).toHaveCount(3);
+  ).toHaveCount(4);
   await iconOptions.locator('[role="option"][data-value="heart"]').click();
   await expect(icon).toHaveAttribute("data-value", "heart");
 

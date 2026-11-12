@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { instanceIconNames, instanceIconSvg, isInstanceIcon, loadInstanceIconSvg } from '../src/instance-icon.js';
+import { instanceIconSvg, isInstanceIcon, listInstanceIcons, loadInstanceIconSvg } from '../src/instance-icon.js';
 
 const temporaryRoots: string[] = [];
 
@@ -39,13 +39,10 @@ describe('instance icon artwork', () => {
     expect(scanLines).toBeLessThan(terminalBadge);
   });
 
-  // retain the supported route aliases
-  it('recognizes only the published instance icon names', () => {
-    expect(instanceIconNames).toEqual(['terminal', 'potato', 'heart']);
-    expect(isInstanceIcon('terminal')).toBe(true);
-    expect(isInstanceIcon('potato')).toBe(true);
-    expect(isInstanceIcon('heart')).toBe(true);
-    expect(isInstanceIcon('unknown')).toBe(false);
+  // accept any library name while refusing paths and malformed names
+  it('recognizes icon names by the library name pattern', () => {
+    for (const name of ['terminal', 'heart', 'potato', 'rocket-2', '0', 'a'.repeat(32)]) expect(isInstanceIcon(name)).toBe(true);
+    for (const name of ['', '-lead', 'Upper', 'under_score', 'dot.ted', '../x', 'a/b', 'a'.repeat(33), ' heart']) expect(isInstanceIcon(name)).toBe(false);
   });
 
   // load private custom files without rewriting bytes
@@ -60,6 +57,25 @@ describe('instance icon artwork', () => {
     await expect(loadInstanceIconSvg('potato', configPath)).resolves.toBe(secondFixture);
   });
 
+  // list every valid library file after the built-in terminal
+  it('lists the built-in terminal then each named svg file in the library', async () => {
+    const { configPath, iconDirectory } = await iconFixtureDirectory();
+    for (const file of ['potato.svg', 'heart.svg', 'rocket-2.svg', 'terminal.svg', 'notes.txt', 'Bad_Name.svg', '.hidden.svg']) await writeFile(join(iconDirectory, file), '<svg></svg>\n');
+    await mkdir(join(iconDirectory, 'folder.svg'));
+
+    await expect(listInstanceIcons(configPath)).resolves.toEqual(['terminal', 'heart', 'potato', 'rocket-2']);
+  });
+
+  // keep the library usable before any artwork exists
+  it('lists only the terminal without a library directory or config', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-instance-icons-'));
+    temporaryRoots.push(root);
+    vi.stubEnv('RAC_CONFIG', undefined);
+
+    await expect(listInstanceIcons(join(root, 'server.yaml'))).resolves.toEqual(['terminal']);
+    await expect(listInstanceIcons()).resolves.toEqual(['terminal']);
+  });
+
   // keep the portable terminal icon built in
   it('ignores a local terminal file when config is available', async () => {
     const { configPath, iconDirectory } = await iconFixtureDirectory();
@@ -67,6 +83,14 @@ describe('instance icon artwork', () => {
     vi.stubEnv('RAC_CONFIG', configPath);
 
     await expect(loadInstanceIconSvg()).resolves.toBe(instanceIconSvg());
+  });
+
+  // never read outside the library, whoever passes the name
+  it('falls back instead of reading a name that would traverse', async () => {
+    const { configPath } = await iconFixtureDirectory();
+    await writeFile(join(configPath, '..', 'x.svg'), '<svg data-fixture="outside"></svg>\n');
+
+    await expect(loadInstanceIconSvg('../x', configPath)).resolves.toBe(instanceIconSvg());
   });
 
   // use the generic artwork without a config path

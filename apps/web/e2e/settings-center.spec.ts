@@ -696,12 +696,7 @@ async function setupSettings(
           },
           ...(includeIcons
             ? {
-                icon: {
-                  type: "enum",
-                  label: "Icon",
-                  optional: true,
-                  options: ["terminal", "potato", "heart"],
-                },
+                icon: { type: "string", label: "Icon", optional: true },
               }
             : {}),
           integrations: {
@@ -1118,6 +1113,10 @@ async function setupSettings(
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path === "/api/instance-icons")
+      return route.fulfill({
+        json: { icons: [{ name: "terminal" }, { name: "heart" }, { name: "potato" }] },
+      });
     // model a transient read failure after a successful settings commit
     if (path === "/api/auth/session" && state.authUnavailable)
       return route.fulfill({
@@ -1476,12 +1475,7 @@ function configureLegacyFederationFixture(
       properties: {
         url: { type: "string", label: "URL" },
         name: { type: "string", label: "Name", optional: true },
-        icon: {
-          type: "enum",
-          label: "Icon",
-          optional: true,
-          options: ["terminal", "potato", "heart"],
-        },
+        icon: { type: "string", label: "Icon", optional: true },
       },
     },
   };

@@ -141,12 +141,7 @@ function applicationSource(
             properties: {
               url: { type: "string", label: "Url" },
               name: { type: "string", label: "Name", optional: true },
-              icon: {
-                type: "enum",
-                label: "Icon",
-                optional: true,
-                options: ["terminal", "potato", "heart"],
-              },
+              icon: { type: "string", label: "Icon", optional: true },
             },
           },
         },
@@ -191,6 +186,11 @@ async function setupRemoteSettings(page: Page, options: FixtureOptions) {
       url: "https://console.example.test",
       remotes: clone(metadata),
     };
+    // publish a library holding one icon beyond the original aliases
+    if (path === "/api/instance-icons")
+      return route.fulfill({
+        json: { icons: ["terminal", "heart", "potato", "rocket-2"].map((name) => ({ name })) },
+      });
     // publish authenticated identity metadata
     if (path === "/api/auth/session")
       return route.fulfill({
@@ -411,10 +411,11 @@ for (const width of [320, 390, 1440, 2560]) {
     await expect(iconOptions.getByRole("option")).toHaveText([
       "Server Default",
       "Terminal",
-      "Potato",
       "Heart",
+      "Potato",
+      "Rocket-2",
     ]);
-    await expect(iconOptions.locator("img")).toHaveCount(4);
+    await expect(iconOptions.locator("img")).toHaveCount(5);
     await page.keyboard.press("Escape");
     await expect(
       row.getByRole("button", { name: /^(?:Add|Remove) (?:Name|Icon)$/u }),

@@ -61,6 +61,21 @@ describe('remote instance status', () => {
     expect(validInstanceStatusRequest(secret, remote.url.origin, timestamp, signature, requestedAt + 30_001)).toBe(false);
   });
 
+  it('accepts any library icon name from a peer and drops one that would leave the library', async () => {
+    const icons: Record<string, string> = { 'https://framework.example': 'rocket-2', 'https://archive.example': '../x' };
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      // only the signed status surface answers; the legacy identity read fails
+      if (url.pathname !== '/api/instance-status') return new Response('', { status: 404 });
+      return new Response(JSON.stringify({ name: 'Peer', icon: icons[url.origin], attention: 'idle' }), { status: 200 });
+    }));
+
+    await expect(new RemoteInstanceStatusPoller(secret).statuses([remote, { url: new URL('https://archive.example') }])).resolves.toEqual([
+      { url: 'https://framework.example', name: 'Peer', icon: 'rocket-2', attention: 'idle' },
+      { url: 'https://archive.example', name: 'archive.example', attention: 'idle' }
+    ]);
+  });
+
   it('queries published bootstrap metadata from older peers', async () => {
     const fetchStatus = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));

@@ -1,15 +1,25 @@
 import { useEffect, useState } from 'react';
 import { PanelIcon } from '../panel-header.js';
-import type { SettingsSource } from './contracts.js';
+import { isInstanceIcon, type InstanceIcon } from '../../../server/src/instance-icon-name.js';
+import type { SettingsRequest, SettingsSource } from './contracts.js';
 
 export const editableIconSources = new Set(['icon-heart', 'icon-potato']);
-export const instanceIcons = ['terminal', 'potato', 'heart'] as const;
-export type InstanceIconName = typeof instanceIcons[number];
+export type InstanceIconName = InstanceIcon;
 const staticTags = new Set(['svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'title', 'desc', 'text', 'tspan']);
 const imageGlyph = 'M3 3h18v18H3zM3 16l6-6 6 6 3-3 3 3M16 7h.01';
 
-// recognize only supported local artwork aliases
-export const isInstanceIconName = (value: unknown): value is InstanceIconName => typeof value === 'string' && instanceIcons.includes(value as InstanceIconName);
+export const isInstanceIconName = (value: unknown): value is InstanceIconName => typeof value === 'string' && isInstanceIcon(value);
+
+// read the server's icon library; the built-in terminal stands in when it cannot be read
+export async function fetchInstanceIcons(request: SettingsRequest): Promise<InstanceIconName[]> {
+  try {
+    const response = await request('/api/instance-icons', { cache: 'no-store' });
+    const icons: unknown = response.ok ? ((await response.json()) as { icons?: unknown } | null)?.icons : undefined;
+    return Array.isArray(icons) ? icons.map(icon => (icon as { name?: unknown } | null)?.name).filter(isInstanceIconName) : ['terminal'];
+  } catch {
+    return ['terminal'];
+  }
+}
 
 // preview inert geometry in an image document rather than injecting SVG into the page
 const svgImageUrl = (content: string): string | undefined => {

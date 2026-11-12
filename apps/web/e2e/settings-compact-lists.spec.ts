@@ -123,12 +123,7 @@ const appSchema = {
         properties: {
           url: { type: "string", label: "URL" },
           name: { type: "string", label: "Name", optional: true },
-          icon: {
-            type: "enum",
-            label: "Icon",
-            optional: true,
-            options: ["terminal", "potato", "heart"],
-          },
+          icon: { type: "string", label: "Icon", optional: true },
         },
       },
     },

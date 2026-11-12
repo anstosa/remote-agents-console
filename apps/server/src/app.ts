@@ -99,7 +99,7 @@ import { configuredWorktreeForWorkspace, projectIdOf, worktreeBranch, worktreeBy
 import { previewFileBytes, WorkspaceFileService } from './workspace-files/service.js';
 import { ComparisonService, type ComparisonScope } from './git/comparison-service.js';
 import { mergeBaseChoices, saveMergeBase } from './git/comparison.js';
-import { loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instance-icon.js';
+import { listInstanceIcons, loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instance-icon.js';
 import { instanceAttention, RemoteInstanceStatusPoller, validInstanceStatusRequest, type InstanceStatus } from './instance-status.js';
 import { createHmac, randomBytes } from 'node:crypto';
 import { integrationConfigForRemotes, parseDavoSettings, resolveAgentProgram, reviewConfig } from './config/schema.js';
@@ -1028,10 +1028,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.get('/instance-icons/:icon.svg', async (request, reply) => {
     browser(request);
     const icon = (request.params as { icon: string }).icon;
-    // reject unknown icon paths
+    // reject names outside the library pattern
     if (!isInstanceIcon(icon)) return reply.code(404).send({ error: 'icon unavailable' });
     return reply.type('image/svg+xml').send(await loadInstanceIconSvg(icon));
   });
+  // list the icon library as records so per-icon details can be added later
+  app.get('/api/instance-icons', async request => { session(request); return { icons: (await listInstanceIcons()).map(name => ({ name })) }; });
   app.get('/preview/:token', temporaryPreview);
   app.get('/preview/:token/*', temporaryPreview);
   // publish the privacy policy without session or controller checks

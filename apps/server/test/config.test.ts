@@ -497,6 +497,13 @@ describe('configuration safety', () => {
     expect(config.remoteServers).toEqual([{ url: new URL('https://framework.santosa.dev'), name: 'Workshop' }, { url: new URL('https://archive.santosa.dev'), icon: 'potato' }]);
     await expect(validateConfig({ ...scratch, remoteServers: [{ url: 'https://framework.santosa.dev' }, { url: 'https://framework.santosa.dev' }] })).rejects.toThrow('unique');
   });
+  it('accepts any icon library name and rejects a name that would leave the library', async () => {
+    const config = await validateConfig({ ...scratch, icon: 'rocket-2', remoteServers: [{ url: 'https://archive.santosa.dev', icon: 'absent' }] });
+    expect(config.icon).toBe('rocket-2');
+    expect(config.remoteServers[0]?.icon).toBe('absent');
+    await expect(validateConfig({ ...scratch, icon: '../x' })).rejects.toThrow(ZodError);
+    await expect(validateConfig({ ...scratch, remoteServers: [{ url: 'https://archive.santosa.dev', icon: 'Upper' }] })).rejects.toThrow(ZodError);
+  });
 });
 
 describe('adapter configuration', () => {

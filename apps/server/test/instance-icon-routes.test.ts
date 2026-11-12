@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { instanceIconSvg } from '../src/instance-icon.js';
 import { testConfig } from './helpers/config.js';
-import { testHost } from './helpers/auth.js';
+import { authenticatedHeaders, testAuthService, testHost } from './helpers/auth.js';
 
 const firstFixture = '<svg data-fixture="first"></svg>\n';
 const secondFixture = '<svg data-fixture="second"></svg>\n';
@@ -83,12 +83,45 @@ describe('instance icon routes', () => {
     expect(alias.json()).toEqual({ error: 'icon unavailable' });
   });
 
-  // reject names outside the published aliases
-  it('returns not found for an unknown icon name', async () => {
-    const response = await app.inject({ method: 'GET', url: '/instance-icons/unknown.svg', headers: { host: testHost } });
+  // serve any library file by name and the portable fallback for an absent one
+  it('serves any named library icon and falls back for an absent name', async () => {
+    const thirdFixture = '<svg data-fixture="third"></svg>\n';
+    await writeFile(join(iconDirectory, 'rocket-2.svg'), thirdFixture);
 
-    expect(response.statusCode).toBe(404);
-    expect(response.json()).toEqual({ error: 'icon unavailable' });
+    const added = await app.inject({ method: 'GET', url: '/instance-icons/rocket-2.svg', headers: { host: testHost } });
+    const absent = await app.inject({ method: 'GET', url: '/instance-icons/absent.svg', headers: { host: testHost } });
+
+    expect(added.statusCode).toBe(200);
+    expect(added.body).toBe(thirdFixture);
+    expect(absent.statusCode).toBe(200);
+    expect(absent.body).toBe(instanceIconSvg());
+  });
+
+  // keep requests inside the library directory
+  it('returns not found for a name outside the library pattern', async () => {
+    await writeFile(join(iconDirectory, '..', 'x.svg'), firstFixture);
+
+    for (const url of ['/instance-icons/..%2Fx.svg', '/instance-icons/Upper.svg', '/instance-icons/under_score.svg']) {
+      const response = await app.inject({ method: 'GET', url, headers: { host: testHost } });
+      expect(response.statusCode, url).toBe(404);
+      expect(response.json()).toEqual({ error: 'icon unavailable' });
+    }
+  });
+
+  // publish the library only to signed-in browsers
+  it('lists the icon library for an authenticated browser', async () => {
+    const authenticated = await buildApp(testConfig({ icon: 'heart' }), { auth: await testAuthService() });
+    try {
+      const anonymous = await authenticated.inject({ method: 'GET', url: '/api/instance-icons', headers: { host: testHost } });
+      const { host, cookie } = await authenticatedHeaders(authenticated);
+      const listed = await authenticated.inject({ method: 'GET', url: '/api/instance-icons', headers: { host, cookie } });
+
+      expect(anonymous.statusCode).toBe(401);
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json()).toEqual({ icons: [{ name: 'terminal' }, { name: 'heart' }, { name: 'potato' }] });
+    } finally {
+      await authenticated.close();
+    }
   });
 
   // preserve the canonical host boundary

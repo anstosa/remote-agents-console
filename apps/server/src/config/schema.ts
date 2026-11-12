@@ -10,7 +10,7 @@ import { adapterFor, structuredAdapterFor } from '../adapters/registry.js';
 import { codexProgramName, omxProgramName } from '../adapters/program-names.js';
 import { hostVisibleRepoRoot } from '../adapters/files.js';
 import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKind, type SandboxSettings } from '../adapters/types.js';
-import { instanceIconNames, type InstanceIcon } from '../instance-icon.js';
+import { instanceIconPattern, type InstanceIcon } from '../instance-icon.js';
 import { isIP } from 'node:net';
 import { defaultDavoContext, defaultDavoName } from '../integrations/realtime/settings.js';
 import { conductorOptInScopes, conductorScopes, conductorSpawnKinds, type ConductorSpawnKind, type IntegrationScope } from '../integrations/auth/types.js';
@@ -132,8 +132,8 @@ const piEntry = adapterEntry.omit({ program: true, updates: true, allowedModels:
 const claudeEntry = adapterEntry.extend({ transport: z.enum(['tmux', 'structured']).optional() }).strict();
 // keyed by kind, one strict entry each; an omitted block is observe-only (nothing launches)
 const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: claudeEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
-// constrain icons to supported aliases
-const instanceIcon = z.enum(instanceIconNames);
+// name an icon in the library; an absent one renders the terminal icon
+const instanceIcon = z.string().regex(instanceIconPattern, 'an icon name is lowercase letters, digits and hyphens');
 const remoteServer = z.object({ url: z.string(), name: serverName.optional(), icon: instanceIcon.optional() }).strict();
 const davoName = z.string().trim().min(1).max(80).refine(value => !value.includes('\0'), 'NUL is forbidden');
 const davoContext = z.string().trim().max(16_000).refine(value => !value.includes('\0'), 'NUL is forbidden');

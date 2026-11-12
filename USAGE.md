@@ -171,10 +171,13 @@ published defaults. Save changes persists these choices to config, and a RAC
 restart applies them to navigation. Overrides affect only this console's display
 of the remote, never the remote server's own published identity.
 
-Only the terminal icon is bundled. Custom `heart` and `potato` SVGs are
-server-local files named `heart.svg` and `potato.svg` in an `instance-icons/`
-directory beside the file selected by `RAC_CONFIG`. The favicon and server menu
-load those files at request time; a missing file uses the terminal icon instead.
+Only the terminal icon is bundled. Every other icon is a server-local SVG in an
+`instance-icons/` directory beside the file selected by `RAC_CONFIG`: the file
+`<name>.svg` is the icon `<name>`, where a name is 1-32 lowercase letters, digits
+and hyphens starting with a letter or digit (`heart.svg` is `"icon": "heart"`).
+`terminal` is reserved for the bundled icon. Settings lists the icons it finds in
+the directory. The favicon and server menu load those files at request time; a
+missing file uses the terminal icon instead.
 Keep custom artwork out of Git and provision it separately on each host. The
 Compose checkout's `config/instance-icons/` directory is ignored by Git and
 excluded from the build context; its runtime bind mount makes the files available
