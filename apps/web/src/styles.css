@@ -1892,9 +1892,11 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .question-text-answer { display: flex; flex-direction: column; gap: .4rem; }
 .question-text-answer textarea { width: 100%; min-height: 4.5rem; }
 .question-text-answer button, .question-dismiss { align-self: flex-end; min-height: 2.75rem; padding: .35rem .75rem; font: 700 .7rem var(--font-mono); }
-.steer-bar { display: flex; align-items: center; justify-content: flex-end; gap: .5rem; color: var(--subtext-0); font: 600 .7rem var(--font-mono); }
-.steer-pending { color: var(--peach); }
-.steer-hint { min-height: 2.75rem; padding: 0 .6rem; border: 1px dashed var(--surface-2); background: none; color: var(--subtext-0); font: inherit; }
+/* sits in the draft's bottom-right corner so working and idle composers keep one height */
+.steer-bar { position: absolute; right: .5rem; bottom: .35rem; z-index: 1; display: flex; align-items: center; gap: .4rem; color: var(--subtext-0); font: 600 .65rem var(--font-mono); }
+.prompt-composer:has(> .steer-bar) textarea { padding-bottom: 2.2rem; }
+.steer-hint { min-height: 1.6rem; padding: 0 .45rem; border: 1px dashed var(--surface-2); border-radius: calc(var(--control-radius) - .15rem); background: var(--mantle); color: var(--subtext-0); font: inherit; }
+.steer-pending { padding: 0 .3rem; color: var(--peach); border-radius: calc(var(--control-radius) - .15rem); background: var(--mantle); }
 .pending-steers { padding: .4rem .6rem; border-bottom: 1px solid var(--surface-1); color: var(--subtext-0); font-size: .75rem; }
 .pending-steers ul { margin: .25rem 0 0; padding-left: 1.1rem; color: var(--text); }
 @media (max-width: 600px) { .question-heading { flex-direction: column; }.question-tools { width: 100%; justify-content: stretch; }.question-tools button { flex: 1 1 auto; justify-content: center; } }

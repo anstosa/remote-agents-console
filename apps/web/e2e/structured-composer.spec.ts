@@ -23,7 +23,7 @@ async function mockPi(page: Page, { attention = 'working', structured = {}, canc
       const shaped = questions.map(question => ({ ...question, source: 'structured', choices: question.field.kind === 'choice' ? question.field.choices : [] }));
       const agent = { id: 'agent-1', transport: 'structured', panel: 'transcript', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: '', branch: 'cora', kind: 'pi', attention, ...(shaped[0] === undefined ? {} : { question: shaped[0] }), structured: { lifecycle: 'live', revision: 1, ...structured, ...(shaped.length === 0 ? {} : { questions: shaped }) }, queuedPromptCount: 0 };
       const pi = { launchable: true, program: '/node', stateSource: 'reported', turnCapture: true, conversations: false, naming: false, inlineQuestions: true, steer: true, commands: false, sandbox: false };
-      return route.fulfill({ json: { generation: 1, adapters: { pi }, agents: [agent], projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] } });
+      return route.fulfill({ json: { generation: 1, adapters: { pi: { ...pi, transport: 'structured', transports: { structured: pi } } }, agents: [agent], projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] } });
     }
     if (url.pathname === '/api/agents/agent-1/transcript') return route.fulfill({ json: { items: [], earlier: 0, status: { extension: [] } } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
