@@ -2455,8 +2455,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* a Finding's Ask thread, under its suggested or kept comment: questions, the reviewer's Markdown answers and the next question */
 .review-ask-open { display: flex; justify-content: flex-end; margin: -.25rem .6rem .5rem; }
 .review-ask-open button { padding: .2rem .55rem; border-color: transparent; background: transparent; box-shadow: none; color: var(--mauve); font: 700 .66rem var(--font-mono); }
-.review-ask { display: grid; gap: .5rem; margin: -.15rem .6rem .5rem 1.4rem; padding: .5rem .65rem; border-left: 2px solid color-mix(in srgb, var(--mauve) 55%, var(--surface-2)); background: var(--mantle); color: var(--text); font: 500 var(--diffs-font-size, .76rem)/1.45 var(--font-mono); white-space: normal; }
-.review-ask-turn { display: grid; gap: .3rem; }
+.review-ask { display: grid; grid-template-columns: minmax(0, 1fr); gap: .5rem; margin: -.15rem .6rem .5rem 1.4rem; padding: .5rem .65rem; border-left: 2px solid color-mix(in srgb, var(--mauve) 55%, var(--surface-2)); background: var(--mantle); color: var(--text); font: 500 var(--diffs-font-size, .76rem)/1.45 var(--font-mono); white-space: normal; }
+.review-ask-turn { display: grid; grid-template-columns: minmax(0, 1fr); gap: .3rem; }
 .review-ask-question { margin: 0; color: var(--subtext-0); font-weight: 700; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* not a scroll container, so the wheel over an answer scrolls the diff */
 .review-ask-answer { height: auto; overflow: visible; padding: 0; font-size: inherit; overflow-wrap: anywhere; }
