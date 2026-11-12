@@ -8515,6 +8515,7 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
   const [transcript, setTranscript] = useState<TranscriptPage>();
   const log = useRef<HTMLDivElement>(null);
   const following = useRef(true);
+  const lastScrollTop = useRef(0);
   // while earlier lines load: the page size asked for, and the distance from the bottom to keep
   const anchor = useRef<{ limit: number; fromBottom: number } | undefined>(undefined);
   // the terminal's font size, so a transcript reads at the size a terminal Agent's output does
@@ -8559,7 +8560,13 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
   const status = current?.status;
   const showStatus = status !== undefined && (status.extension.length > 0 || status.cost !== undefined || status.contextPercent !== undefined || status.contextTokens !== undefined);
   return <div className="structured-transcript">
-    <div ref={log} className="transcript-log" role="log" aria-label="Transcript" style={{ fontSize }} onScroll={event => { const list = event.currentTarget; following.current = list.scrollHeight - list.scrollTop - list.clientHeight < 8; }}>
+    <div ref={log} className="transcript-log" role="log" aria-label="Transcript" style={{ fontSize }} onScroll={event => {
+      // only scrolling up stops following: the scroll event from re-pinning to the bottom can arrive
+      // after the log shrank again (a phone keyboard opening), which would otherwise read as the reader leaving
+      const list = event.currentTarget;
+      following.current = list.scrollHeight - list.scrollTop - list.clientHeight < 8 || (following.current && list.scrollTop >= lastScrollTop.current);
+      lastScrollTop.current = list.scrollTop;
+    }}>
       {current !== undefined && current.earlier > 0 && <button type="button" className="transcript-earlier" onClick={loadEarlier}>Load earlier</button>}
       {groups.map((group, index) => {
         const live = index === groups.length - 1 && group.end === undefined && agent.attention === 'working';

@@ -201,6 +201,22 @@ test('a long transcript starts with Load earlier, which reads more of it', async
   await expect.poll(() => requested.at(-1)).toBe('?limit=400');
 });
 
+// a phone keyboard opening shrinks the viewport a step per frame
+test('the transcript stays at the bottom while the viewport shrinks frame by frame', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  const items = Array.from({ length: 30 }, (_, index) => [{ id: `u${index}`, kind: 'message', role: 'user', text: `Prompt ${index}` }, { id: `a${index}`, kind: 'message', role: 'assistant', text: `Answer ${index} `.repeat(30) }]).flat();
+  await mockPi(page, { items });
+  await page.goto('/');
+  await expect(log(page)).toContainText('Answer 29');
+  const gap = () => log(page).evaluate(list => list.scrollHeight - list.scrollTop - list.clientHeight);
+  await expect.poll(gap).toBeLessThan(1);
+  for (let height = 780; height >= 480; height -= 20) {
+    await page.setViewportSize({ width: 390, height });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+  }
+  await expect.poll(gap).toBeLessThan(1);
+});
+
 test('on a wide screen the transcript fills the panel', async ({ page }) => {
   await page.setViewportSize({ width: 1800, height: 900 });
   await mockPi(page, { items: [{ id: 'm1', kind: 'message', role: 'user', text: 'Hello' }] });
