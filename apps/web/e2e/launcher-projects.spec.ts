@@ -145,6 +145,11 @@ test('launcher keeps a worktree visible while its agent is already open', async 
 // shells, pins and running Agent a test can change; the panes and shells routes of every
 // Worktree answer from the same state, so a New shell is seen through a real refresh.
 type Shell = { paneId: string; name: string };
+
+// publish the current tmux capability contract
+const codexTransport = { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false };
+const adapters = { codex: { ...codexTransport, transport: 'tmux', transports: { tmux: codexTransport } } };
+
 async function mountWorkspaces(page: import('@playwright/test').Page, options: { shells?: Record<string, Shell[]>; agentAt?: string } = {}) {
   const shells: Record<string, Shell[]> = { 'repo:/repo': [], 'repo:/repo/feature': [], ...options.shells };
   const pinned = new Set(['repo:/repo']);
@@ -159,7 +164,7 @@ async function mountWorkspaces(page: import('@playwright/test').Page, options: {
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (path === '/api/dashboard') return route.fulfill({ json: {
       generation: 1,
-      adapters: { codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } },
+      adapters,
       agents: options.agentAt === undefined ? [] : [{ id: 'agent-1', sessionId: 'socket:$1', home: '/repo/feature', projectId: 'repo', worktreeId: options.agentAt, placeId: options.agentAt, title: 'Ready', kind: 'codex', attention: 'finished', queuedPromptCount: 0 }],
       projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [worktree('repo:/repo', 'Repo', '/repo', 0, 'main'), worktree('repo:/repo/feature', 'Feature', '/repo/feature', 1, 'feature')] }]
     } });

@@ -74,7 +74,10 @@ test('announces agent updates and opens the launcher from the notification route
   await page.locator('.flyout-backdrop').click({ position: { x: 2, y: 2 } });
   await expect(page.getByRole('group', { name: 'Agent launcher' })).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
+  // settle the unchanged target before mutating the next response
+  const unchangedAgents = page.waitForResponse('**/api/agents/updates');
   await page.reload();
+  await (await unchangedAgents).finished();
   await expect(page.getByRole('group', { name: 'Agent launcher' })).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotifications: unknown[] }).__testNotifications.length)).toBe(0);
   // announce one different target after the cold reload
@@ -103,7 +106,10 @@ test('announces upstream Remote Agent Console commits', async ({ page }) => {
   await expect.poll(async () => await page.evaluate(() => (window as typeof window & { __testNotifications: Array<{ title: string; options?: NotificationOptions }> }).__testNotifications), { timeout: 15_000 }).toEqual([
     expect.objectContaining({ title: 'Remote Agent Console update available', options: expect.objectContaining({ body: '3 commits upstream', tag: 'rac-update', data: expect.objectContaining({ url: '/#server-update' }) }) })
   ]);
+  // settle the unchanged target before mutating the next response
+  const unchangedServer = page.waitForResponse('**/api/server/update-available');
   await page.reload();
+  await (await unchangedServer).finished();
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotifications: unknown[] }).__testNotifications.length)).toBe(0);
   // announce a new target sha exactly once
   update.commitCount = 4;

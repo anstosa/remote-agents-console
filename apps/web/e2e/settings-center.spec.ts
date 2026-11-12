@@ -1158,6 +1158,8 @@ async function setupSettings(
     if (path === "/api/agents/updates")
       return route.fulfill({ json: { agents: [] } });
     if (path === "/api/push/public-key") return route.fulfill({ json: {} });
+    // acknowledge notification reconciliation without a live push backend
+    if (path === "/api/push/receipts") return route.fulfill({ status: 204 });
     if (path === "/api/console/theme") return route.fulfill({ status: 204 });
     if (path === "/api/server/update-available")
       return route.fulfill({ json: { available: false } });
@@ -9521,8 +9523,9 @@ test("shows a transient Saved toast while restart-required status remains action
   });
   const { settings, state } = await setupSettings(page);
   await settings.getByLabel("Server name", { exact: true }).fill("Toast save");
-  await page.clock.install();
-  await page.clock.pauseAt(await page.evaluate(() => Date.now()));
+  // pause ahead of a fixed origin rather than racing the browser clock
+  await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-01-01T00:00:01Z"));
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
@@ -10806,7 +10809,7 @@ test("merges browser controls and saves voice with file edits through one transa
   expect(state.saves).toHaveLength(0);
 
   // search browser fields without filtering the source navigation
-  await center
+  await settings
     .getByRole("searchbox", { name: "Search settings" })
     .fill("theme");
   await expect(
@@ -10815,7 +10818,7 @@ test("merges browser controls and saves voice with file edits through one transa
   await expect(
     nav.getByRole("button", { name: "Voice", exact: true }),
   ).toBeVisible();
-  await center.getByRole("searchbox", { name: "Search settings" }).fill("");
+  await settings.getByRole("searchbox", { name: "Search settings" }).fill("");
 
   // keep launcher preferences on Projects without splitting the save transaction
   await nav.getByRole("button", { name: "Projects", exact: true }).click();
@@ -10924,6 +10927,8 @@ test("edits advanced voice settings once through the voice tab", async ({
     settings.locator('[data-settings-path^="integrations.realtime"]'),
   ).toHaveCount(0);
   await nav.getByRole("button", { name: "Voice", exact: true }).click();
+  // reveal the preserved legacy gate before editing it
+  await settings.getByText("Existing write restriction", { exact: true }).click();
   const advanced = settings.locator(
     '[data-settings-path="integrations.realtime.writeToolsEnabled"]',
   );
@@ -11642,10 +11647,11 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
   const sheet = page.getByRole("dialog", { name: "Key bindings" });
   await expect(sheet).toBeVisible();
   await sheet.getByRole("button", { name: "Close key bindings" }).click();
-  await center
+  // search stays in the persistent panel header
+  await settings
     .getByRole("searchbox", { name: "Search settings" })
     .fill("keyboard");
-  await center
+  await settings
     .getByRole("searchbox", { name: "Search settings" })
     .press("Escape");
   await expectSettingsOptions(selector, settingsNavigationDestinations.length);
@@ -11754,6 +11760,8 @@ test("retains unified voice and advanced drafts on validation and commit failure
   await selectSettingsSection(settings, "voice", "Voice");
   await settings.getByRole("switch", { name: "Enable Davo" }).check();
   await settings.getByLabel("Davo name").fill("Riley");
+  // reveal the legacy gate before staging its draft
+  await settings.getByText("Existing write restriction", { exact: true }).click();
   await settings
     .locator('[data-settings-path="integrations.realtime.writeToolsEnabled"]')
     .getByRole("switch")
@@ -11801,6 +11809,8 @@ test("retains unified voice and advanced drafts on validation and commit failure
   await expect(
     settings.getByRole("switch", { name: "Enable Davo" }),
   ).not.toBeChecked();
+  // discard remounts the optional legacy disclosure in its closed state
+  await settings.getByText("Existing write restriction", { exact: true }).click();
   await expect(
     settings
       .locator('[data-settings-path="integrations.realtime.writeToolsEnabled"]')
@@ -11902,6 +11912,8 @@ test("blocks basic and advanced voice editing while application removal is stage
     .getByRole("button", { name: "Remove source", exact: true })
     .click();
   await selectSettingsSection(settings, "voice", "Voice");
+  // inspect the disabled legacy gate inside its disclosure
+  await settings.getByText("Existing write restriction", { exact: true }).click();
   await expect(
     settings.getByRole("switch", { name: "Enable Davo" }),
   ).toBeDisabled();
@@ -11983,6 +11995,8 @@ test("blocks voice edits until invalid application JSON is repaired", async ({
   ).toBeDisabled();
   await expect(application.locator(".settings-raw-mode")).toHaveCount(0);
   await selectSettingsSection(settings, "voice", "Voice");
+  // inspect the disabled legacy gate inside its disclosure
+  await settings.getByText("Existing write restriction", { exact: true }).click();
   await expect(
     settings.getByRole("switch", { name: "Enable Davo" }),
   ).toBeDisabled();
@@ -12861,6 +12875,8 @@ for (const width of [1440, 390]) {
       .getByRole("button", { name: "Refresh files", exact: true })
       .click();
     await selectSettingsSection(settings, "voice", "Voice");
+    // include the optional legacy gate in the expanded layout check
+    await settings.getByText("Existing write restriction", { exact: true }).click();
     const writeTools = settings.locator(
       '[data-settings-path="integrations.realtime.writeToolsEnabled"]',
     );

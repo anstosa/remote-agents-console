@@ -156,6 +156,8 @@ async function setupProjectButtons(page: Page, options: FixtureOptions = {}) {
       return route.fulfill({ json: { agents: [] } });
     // disable push enrollment
     if (path === "/api/push/public-key") return route.fulfill({ json: {} });
+    // discard fixture notification receipts
+    if (path === "/api/push/receipts") return route.fulfill({ status: 204 });
     if (path === "/api/console/theme") return route.fulfill({ status: 204 });
     // disable server update notices
     if (path === "/api/server/update-available")

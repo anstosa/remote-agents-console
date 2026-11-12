@@ -4,7 +4,9 @@ import { installPaneMock, seedPaneSize } from './pane-stream-mock.js';
 
 type OpenRecord = { path: string; action: string; kind?: string; sandboxed?: boolean; model?: unknown; effort?: unknown; optionsRevision?: string };
 
-const adapters = { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } };
+// publish the current tmux capability contract
+const codexCapability = { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false };
+const adapters = { codex: { ...codexCapability, transport: 'tmux', transports: { tmux: codexCapability } } };
 const scratch = { id: 'scratch:/home/ubuntu', kind: 'scratch', projectId: 'scratch', label: 'Scratch', home: '/home/ubuntu', pinned: false };
 const configured = { id: 'cora-main', projectId: 'cora', label: 'Cora', path: '/srv/cora', main: true, detached: false, locked: false, available: true, pinned: false, order: 0, branch: 'main', launch: { kind: 'codex', origin: 'project' } };
 // the implicit Project an opened repository becomes, and the ad-hoc Place an opened plain folder becomes

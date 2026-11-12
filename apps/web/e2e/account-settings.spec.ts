@@ -17,6 +17,9 @@ type Account = {
 };
 type RenameFailure = 'http' | 'network';
 
+// publish the transport envelope used by live dashboards
+const tmuxAdapter = (capability: Record<string, unknown>) => ({ ...capability, transport: 'tmux', transports: { tmux: capability } });
+
 // allow first-load compilation on shared CI hosts
 test.describe.configure({ timeout: 180_000 });
 
@@ -676,8 +679,8 @@ test('keeps Restart as choice-only and defers account loading to the toolbar', a
   await page.route('**/api/dashboard', route => route.fulfill({ json: {
     generation: 1,
     adapters: {
-      codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
-      claude: { program: '/usr/local/bin/claude', launchable: true, stateSource: 'reported', turnCapture: false, inlineQuestions: false, commands: true, sandbox: false },
+      codex: tmuxAdapter({ program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false }),
+      claude: tmuxAdapter({ program: '/usr/local/bin/claude', launchable: true, stateSource: 'reported', turnCapture: false, inlineQuestions: false, commands: true, sandbox: false }),
     },
     agents: [{ id: 'agent-cora', sessionId: 'socket:$1', home: '/worktrees/cora', projectId: 'project', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 1, title: 'Ready', kind: 'codex', attention: 'finished', queuedPromptCount: 0, launch: { kind: 'codex', origin: 'worktree' } }],
     projects: [{ id: 'project', label: 'Project', available: true, worktrees: [{ id: 'cora', projectId: 'project', label: 'Cora', path: '/worktrees/cora', available: true, pinned: true, order: 1, launch: { kind: 'codex', origin: 'worktree' } }] }],

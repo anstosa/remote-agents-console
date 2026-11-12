@@ -177,10 +177,12 @@ test('picks the Adapter and target from the pane and records each write', async 
   const scheduleWrites: Array<{ method: string; body?: ScheduleBody }> = [];
   let created = 0;
   const worktree = { id: 'wt-main', projectId: 'atlas', label: 'main', path: '/worktrees/atlas', main: true, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'main', launch: { kind: 'claude', origin: 'worktree' } };
-  const adapters = {
+  const tmuxAdapters = {
     claude: { launchable: true, program: 'claude', stateSource: 'reported', turnCapture: true, bookmarks: true, inlineQuestions: true, commands: true, sandbox: false },
     codex: { launchable: true, program: 'codex', stateSource: 'title', turnCapture: true, bookmarks: false, inlineQuestions: false, commands: true, sandbox: false },
   };
+  // publish the same per-transport capabilities as the dashboard
+  const adapters = Object.fromEntries(Object.entries(tmuxAdapters).map(([kind, capability]) => [kind, { ...capability, transport: 'tmux', transports: { tmux: capability } }]));
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -239,10 +241,12 @@ test('does not leak the Adapter pin across a note switch', async ({ page }) => {
     { id: 'note-following', text: 'Following body', title: 'Following note', schedule: { cron: '0 9 * * *', kind: 'claude', target: { worktreeId: 'wt-main' }, enabled: true }, nextRun: '2026-09-07T09:00:00-07:00' },
   ];
   const worktree = { id: 'wt-main', projectId: 'atlas', label: 'main', path: '/worktrees/atlas', main: true, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'main', launch: { kind: 'claude', origin: 'worktree' } };
-  const adapters = {
+  const tmuxAdapters = {
     claude: { launchable: true, program: 'claude', stateSource: 'reported', turnCapture: true, bookmarks: true, inlineQuestions: true, commands: true, sandbox: false },
     codex: { launchable: true, program: 'codex', stateSource: 'title', turnCapture: true, bookmarks: false, inlineQuestions: false, commands: true, sandbox: false },
   };
+  // publish the same per-transport capabilities as the dashboard
+  const adapters = Object.fromEntries(Object.entries(tmuxAdapters).map(([kind, capability]) => [kind, { ...capability, transport: 'tmux', transports: { tmux: capability } }]));
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());

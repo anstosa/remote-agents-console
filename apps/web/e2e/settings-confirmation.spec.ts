@@ -160,6 +160,8 @@ async function setupConfirmationSettings(page: Page, files = false) {
     if (path === "/api/agents/updates")
       return route.fulfill({ json: { agents: [] } });
     if (path === "/api/push/public-key") return route.fulfill({ json: {} });
+    // acknowledge notification reconciliation without a live push backend
+    if (path === "/api/push/receipts") return route.fulfill({ status: 204 });
     if (path === "/api/console/theme") return route.fulfill({ status: 204 });
     if (path === "/api/server/update-available")
       return route.fulfill({ json: { available: false } });

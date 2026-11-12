@@ -38,7 +38,7 @@ async function setupRemoveSettings(page: Page) {
             label: "Optional feature",
             optional: true,
             description:
-              "A deliberately long explanation that wraps so the destructive action must center against the complete label, description, and origin copy instead of only the first line.",
+              "A deliberately long explanation that wraps across wide and narrow settings panels so the destructive action must center against the complete label, description, and origin copy instead of only the first line, including when the desktop layout gives the field copy substantially more room.",
           },
           advanced: {
             type: "object",
@@ -131,6 +131,8 @@ async function setupRemoveSettings(page: Page) {
     if (path === "/api/agents/updates")
       return route.fulfill({ json: { agents: [] } });
     if (path === "/api/push/public-key") return route.fulfill({ json: {} });
+    // discard fixture notification receipts
+    if (path === "/api/push/receipts") return route.fulfill({ status: 204 });
     if (path === "/api/server/update-available")
       return route.fulfill({ json: { available: false } });
     if (path === "/api/settings/status")

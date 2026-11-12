@@ -4,7 +4,9 @@ import { expect, test, type Page, type Route } from '@playwright/test';
 // checkout) has no worktrees, so the launcher renders a Project-level Launch button in place
 // of worktree rows, keeps "New worktree…" disabled with its reason, and launches through
 // POST /api/projects/:id/launch — the same in-place spawn Scratch uses.
-const codex = { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false };
+// publish the current tmux capability contract
+const codexTransport = { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false };
+const codex = { ...codexTransport, transport: 'tmux', transports: { tmux: codexTransport } };
 const noWorktreesReason = 'this project is not a git repository, so it has no worktrees to manage';
 
 type LaunchPost = { path: string; body: unknown };

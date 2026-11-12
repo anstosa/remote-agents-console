@@ -206,6 +206,8 @@ async function setupCodeEditors(
     if (path === '/api/agents/updates') return route.fulfill({ json: { agents: [] } });
     // disable push registration
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    // discard fixture notification receipts
+    if (path === '/api/push/receipts') return route.fulfill({ status: 204 });
     if (path === '/api/console/theme') return route.fulfill({ status: 204 });
     // disable server updates
     if (path === '/api/server/update-available') return route.fulfill({ json: { available: false } });

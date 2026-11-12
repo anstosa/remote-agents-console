@@ -133,7 +133,7 @@ test('uses the full API model catalog and fixed controls without dirtying on dis
   await expect(settings.locator('[data-settings-path="conductor"]')).toHaveCount(0);
   const search = settings.getByRole('searchbox', { name: 'Search settings', exact: true });
   await search.fill('Scopes');
-  const scopeResult = page.getByRole('listbox', { name: 'Settings search results', exact: true }).getByRole('option').filter({ has: page.locator('.settings-search-result-title strong').filter({ hasText: /^Scopes$/u }) });
+  const scopeResult = page.getByRole('listbox', { name: 'Settings search results', exact: true }).getByRole('option').filter({ has: page.locator('.settings-search-result-title strong').filter({ hasText: /^Existing scopes$/u }) });
   await expect(scopeResult).toHaveCount(1);
   await scopeResult.click();
   await expect(settings).toContainText('configured directory Project');
@@ -159,10 +159,10 @@ test('uses the full API model catalog and fixed controls without dirtying on dis
   const effort = settings.getByRole('combobox', { name: 'Effort', exact: true });
   await expect(effort).toHaveAttribute('data-value', '');
   await expect(effort.locator('.settings-select-current-label')).toHaveText('Default');
-  const scopeGroup = settings.getByRole('group', { name: 'Scopes', exact: true });
+  const scopeGroup = settings.getByRole('group', { name: 'Existing scopes', exact: true });
   const canonicalScopes = conductorScopes.filter(scope => !conductorOptInScopes.includes(scope));
   await expect(scopeGroup.getByRole('checkbox')).toHaveCount(conductorScopes.length);
-  await expect(settings.locator('[data-settings-path="conductor.scopes"] .settings-field-copy small')).toHaveCount(0);
+  await expect(settings.locator('[data-settings-path="conductor.scopes"] .settings-field-copy small')).toHaveText('These legacy scope restrictions remain an additional limit on Conductor capabilities.');
   // verify the absent presentation default without staging it
   for (const scope of canonicalScopes) await expect(scopeGroup.getByRole('checkbox', { name: scope, exact: true })).toBeChecked();
   // opt-in permissions remain unchecked until explicitly granted
@@ -291,7 +291,9 @@ test('keeps effort and scopes permanent', async ({ page }) => {
   await openConductor(settings);
   const effort = settings.getByRole('combobox', { name: 'Effort', exact: true });
   await chooseOption(effort, '');
-  const group = settings.getByRole('group', { name: 'Scopes', exact: true });
+  // open the legacy limit independently of the current capability controls
+  await settings.getByText('Existing scope restrictions', { exact: true }).click();
+  const group = settings.getByRole('group', { name: 'Existing scopes', exact: true });
   expect(await group.getByRole('checkbox').evaluateAll(inputs => inputs.map(input => input.parentElement?.querySelector('span')?.textContent))).toEqual([...conductorScopes, 'legacy:unknown (unsupported)']);
   await group.getByRole('checkbox', { name: 'logs:read', exact: true }).check();
   await settings.getByRole('button', { name: 'Save changes' }).click();

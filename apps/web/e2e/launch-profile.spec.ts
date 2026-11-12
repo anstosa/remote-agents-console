@@ -1,7 +1,11 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 
-// A configured, launchable adapter capability with the given program.
-const adapter = (program: string, extra: Record<string, unknown> = {}) => ({ launchable: true, program, stateSource: 'reported', turnCapture: false, inlineQuestions: false, commands: true, sandbox: false, ...extra });
+// build the configured transport capability
+const adapter = (program: string, extra: Record<string, unknown> = {}, transport: 'tmux' | 'structured' = 'tmux') => {
+  const structured = transport === 'structured';
+  const capability = { launchable: true, program, stateSource: 'reported', turnCapture: structured, inlineQuestions: structured, commands: !structured, sandbox: structured, ...(structured ? { conversations: true, naming: true, steer: true } : {}), ...extra };
+  return { ...capability, transport, transports: { [transport]: capability } };
+};
 const codex = adapter('/bin/codex', { stateSource: 'both', turnCapture: true });
 const claude = adapter('/bin/claude');
 
@@ -39,7 +43,7 @@ const toolbar = (page: Page) => page.getByRole('region', { name: 'Workspace tool
 // promote the remembered kind while leaving the remaining configured adapters in registry order
 for (const origin of ['worktree', 'project', 'scratch', 'default']) {
   test(`puts the resolved ${origin} adapter first without an origin badge`, async ({ page }) => {
-    const posts = await mount(page, { generation: 1, adapters: { codex, omx: adapter('/bin/omx'), claude, pi: adapter('/bin/pi'), opencode: adapter('/bin/opencode') }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'pi', origin })] }] });
+    const posts = await mount(page, { generation: 1, adapters: { codex, omx: adapter('/bin/omx'), claude, pi: adapter('/bin/pi', {}, 'structured'), opencode: adapter('/bin/opencode') }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'pi', origin })] }] });
     await toolbar(page).getByRole('button', { name: 'Choose agent', exact: true }).click();
     const menu = page.getByRole('menu', { name: 'Choose agent' });
     await expect(menu.locator('.launch-card-summary strong')).toHaveText(['Pi', 'Codex', 'OMX', 'Claude', 'OpenCode']);
@@ -444,7 +448,7 @@ test('the + Scratch dropdown chooses an agent without a Place or resolution', as
 // keep agent glyphs full-size and colored only in the persistent Launch chooser
 test('the far-left Launch chooser owns every agent glyph and sandbox mark', async ({ page }) => {
   const sandboxedClaude = adapter('/bin/claude', { sandbox: true });
-  const adapters = { codex, omx: adapter('/bin/omx'), claude: sandboxedClaude, pi: adapter('/bin/pi'), opencode: adapter('/bin/opencode') };
+  const adapters = { codex, omx: adapter('/bin/omx'), claude: sandboxedClaude, pi: adapter('/bin/pi', {}, 'structured'), opencode: adapter('/bin/opencode') };
   const kinds = [
     { label: 'Codex', color: 'rgb(166, 227, 161)' },
     { label: 'OMX', color: 'rgb(148, 226, 213)' },
@@ -646,7 +650,7 @@ test('the Place entries stay out of the launch menus the + rows share', async ({
 
 // every Agent card owns transient target-specific model, Effort and security controls
 test('launch card controls send semantic choices and reset when reopened', async ({ page }) => {
-  const pi = adapter('/usr/bin/node', { allowedModels: [{ model: 'openai/gpt-5.6', effort: 'medium' }, { model: 'openrouter/~anthropic/claude-opus-latest' }], efforts: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] });
+  const pi = adapter('/usr/bin/node', { allowedModels: [{ model: 'openai/gpt-5.6', effort: 'medium' }, { model: 'openrouter/~anthropic/claude-opus-latest' }], efforts: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] }, 'structured');
   const options = { kinds: [
     { kind: 'claude', optionsRevision: 'rev-1', modelPolicy: { state: 'native-default', allowed: [], defaultSelection: { mode: 'native-default' }, catalog: [], catalogStatus: 'unavailable', message: 'Claude uses its native default.' }, security: { controls: [], defaults: {}, constraints: [], status: 'unsupported', message: 'Uses Claude native security.' } },
     { kind: 'pi', optionsRevision: 'rev-1', modelPolicy: { state: 'explicit', allowed: [{ model: 'openai/gpt-5.6', effort: 'medium' }, { model: 'openrouter/~anthropic/claude-opus-latest' }], defaultSelection: { mode: 'model', id: 'openai/gpt-5.6' }, catalog: [{ id: 'openai/gpt-5.6', name: 'GPT 5.6', provider: 'OpenAI', efforts: ['low', 'medium'] }, { id: 'openrouter/~anthropic/claude-opus-latest', name: 'Claude Opus', provider: 'OpenRouter', efforts: ['low', 'high'] }], catalogStatus: 'ready' }, security: { controls: [{ id: 'sandbox', label: 'Sandbox', icon: 'shield', options: [{ id: 'on', label: 'Sandbox on', risk: 'normal', detail: 'Bounded worktree writes' }, { id: 'off', label: 'Sandbox off', risk: 'danger', detail: 'Native tools are unrestricted' }] }], defaults: { sandbox: 'on' }, constraints: [], status: 'ready' } }
@@ -705,7 +709,7 @@ test('shows model search only above five allowed models and preserves drafts thr
     { kind: 'codex', optionsRevision: 'five-models', modelPolicy: policy(five), security: unsupportedSecurity },
     { kind: 'pi', optionsRevision: 'six-models', modelPolicy: policy(six), security: unsupportedSecurity }
   ] };
-  const pi = adapter('/usr/bin/node');
+  const pi = adapter('/usr/bin/node', {}, 'structured');
   await mount(page, { generation: 1, adapters: { codex, pi }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'codex', origin: 'worktree' })] }] }, options);
   await toolbar(page).getByRole('button', { name: 'Choose agent' }).click();
   const menu = page.getByRole('menu', { name: 'Choose agent' });
@@ -1063,7 +1067,7 @@ test('restart-as card ends with an explicit Restart action at 208px', async ({ p
 
 // pinned Pi versions offer a local dependency-change prompt
 test('shows the bundled Pi prompt icon only for an available release', async ({ page }) => {
-  const pi = adapter('/bin/pi');
+  const pi = adapter('/bin/pi', {}, 'structured');
   const options = { kinds: [{ kind: 'pi', optionsRevision: 'pi-update-rev', modelPolicy: { state: 'native-default', allowed: [], defaultSelection: { mode: 'native-default' }, catalog: [], catalogStatus: 'unavailable', message: 'Pi uses its native default.' }, security: { controls: [], defaults: {}, constraints: [], status: 'unsupported', message: 'Pi uses configured security.' } }] };
   await mount(page, { generation: 1, adapters: { pi }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'pi', origin: 'worktree' })] }] }, options, { agents: [{ kind: 'pi', currentVersion: '1.0.0', latestVersion: '1.1.0', updateAvailable: true, pinned: true }] });
   await toolbar(page).getByRole('button', { name: /^Choose agent/u }).click();
@@ -1074,7 +1078,7 @@ test('shows the bundled Pi prompt icon only for an available release', async ({ 
 });
 
 test('hides the bundled Pi prompt icon when its npm release is current', async ({ page }) => {
-  const pi = adapter('/bin/pi');
+  const pi = adapter('/bin/pi', {}, 'structured');
   const options = { kinds: [{ kind: 'pi', optionsRevision: 'pi-current-rev', modelPolicy: { state: 'native-default', allowed: [], defaultSelection: { mode: 'native-default' }, catalog: [], catalogStatus: 'unavailable', message: 'Pi uses its native default.' }, security: { controls: [], defaults: {}, constraints: [], status: 'unsupported', message: 'Pi uses configured security.' } }] };
   await mount(page, { generation: 1, adapters: { pi }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'pi', origin: 'worktree' })] }] }, options, { agents: [{ kind: 'pi', currentVersion: '1.1.0', latestVersion: '1.1.0', updateAvailable: false, pinned: true }] });
   await toolbar(page).getByRole('button', { name: /^Choose agent/u }).click();

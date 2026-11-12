@@ -1747,14 +1747,17 @@ function ServerUpdateDialog({ open, minimized, onMinimize, onClose }: { open: bo
 // share the global settings panel with the active workspace split and tab trigger
 const ClientSettingsSplitContext = createContext<{ open: boolean; page: ReactNode; trigger: ReactNode; close: () => Promise<boolean>; renameServer: () => void } | null>(null);
 
-// keep global notices below any visible settings toolbar with file actions
+// keep global notices below visible settings navigation and file actions
 const syncSettingsToastClearance = () => {
   let clearance = 0;
   // ignore offscreen carousel panels and settings hidden by another dialog
-  for (const header of Array.from(document.querySelectorAll<HTMLElement>('.settings-center-page:not([aria-hidden="true"]):not([inert]) > .panel-header:has(.settings-header-actions > button)'))) {
-    const bounds = header.getBoundingClientRect();
-    // reserve only toolbar geometry that intersects this browser viewport
-    if (bounds.width > 0 && bounds.right > 0 && bounds.left < window.innerWidth && bounds.bottom > 0 && bounds.top < window.innerHeight) clearance = Math.max(clearance, Math.ceil(bounds.bottom + 8));
+  for (const panel of Array.from(document.querySelectorAll<HTMLElement>('.settings-center-page:not([aria-hidden="true"]):not([inert])'))) {
+    // reserve both persistent navigation and the selected source actions
+    for (const controls of Array.from(panel.querySelectorAll<HTMLElement>(':scope > .panel-header, .settings-source-select, .settings-source-header-with-actions'))) {
+      const bounds = controls.getBoundingClientRect();
+      // reserve only controls that intersect this browser viewport
+      if (bounds.width > 0 && bounds.right > 0 && bounds.left < window.innerWidth && bounds.bottom > 0 && bounds.top < window.innerHeight) clearance = Math.max(clearance, Math.ceil(bounds.bottom + 8));
+    }
   }
   const root = document.documentElement;
   const next = `${clearance}px`;
@@ -1787,9 +1790,27 @@ function ClientSettingsPage({ panelRef, busy, hidden, onKeyDown, onClose, childr
     if (actionsTarget?.parentElement !== null && actionsTarget?.parentElement !== undefined) observer.observe(actionsTarget.parentElement);
     const intersection = new IntersectionObserver(measure);
     intersection.observe(header);
+    let clearanceFrame = 0;
+    // coalesce nested scrolls and source mutations into one layout read
+    const queueToastClearance = () => {
+      // keep only one measurement queued for the next frame
+      if (clearanceFrame !== 0) return;
+      clearanceFrame = requestAnimationFrame(() => {
+        // allow the next frame to observe newer geometry
+        clearanceFrame = 0;
+        syncSettingsToastClearance();
+      });
+    };
+    // refresh clearance when navigation replaces the inner source actions
+    const mutations = new MutationObserver(queueToastClearance);
+    const content = panel.querySelector('.client-settings-page-content');
+    // wait for mounted settings content before observing its descendants
+    if (content !== null) mutations.observe(content, { childList: true, subtree: true });
+    panel.addEventListener('scroll', queueToastClearance, true);
     window.addEventListener('resize', measure);
     measure();
-    return () => { observer.disconnect(); intersection.disconnect(); window.removeEventListener('resize', measure); requestAnimationFrame(syncSettingsToastClearance); };
+    // release every geometry observer with the owning settings split
+    return () => { observer.disconnect(); intersection.disconnect(); mutations.disconnect(); cancelAnimationFrame(clearanceFrame); panel.removeEventListener('scroll', queueToastClearance, true); window.removeEventListener('resize', measure); requestAnimationFrame(syncSettingsToastClearance); };
   }, [actionsTarget, hidden, panelRef]);
   // restore expansion before allowing escape to close the split
   const panelKey = (event: React.KeyboardEvent<HTMLDivElement>) => {

@@ -1,5 +1,9 @@
 import { expect, test } from '@playwright/test';
 
+// publish the current tmux capability contract
+const codexCapability = { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, bookmarks: true, inlineQuestions: false, commands: true, sandbox: false };
+const adapters = { codex: { ...codexCapability, transport: 'tmux', transports: { tmux: codexCapability } } };
+
 // build one launcher worktree fixture
 const worktree = (id: string, projectId: string, label: string, main: boolean) => ({ id, projectId, label, path: `/worktrees/${id}`, main, detached: false, locked: false, available: true, pinned: false, order: main ? 0 : 1, branch: main ? 'main' : 'feature/second', launch: { kind: 'codex', origin: 'project' } });
 
@@ -13,7 +17,7 @@ async function stubDynamicWorktrees(page: import('@playwright/test').Page, soloS
     // return one controlled browser session
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
     // return the launcher projects
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, bookmarks: true, inlineQuestions: false, commands: true, sandbox: false } }, agents: [{ id: 'agent-solo', sessionId: 'socket:$1', home: solo.path, worktreeId: solo.id, worktreeLabel: solo.label, title: 'Ready', kind: 'codex' }], projects: [{ id: 'solo', label: 'Solo', available: true, manageWorktrees: true, worktrees: [solo], ...(soloStale ? { stalePaths: ['/worktrees/stale'] } : {}) }, { id: 'multi', label: 'Multi', available: true, manageWorktrees: true, worktrees: [multiMain, multiSecond] }] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters, agents: [{ id: 'agent-solo', sessionId: 'socket:$1', home: solo.path, worktreeId: solo.id, worktreeLabel: solo.label, title: 'Ready', kind: 'codex' }], projects: [{ id: 'solo', label: 'Solo', available: true, manageWorktrees: true, worktrees: [solo], ...(soloStale ? { stalePaths: ['/worktrees/stale'] } : {}) }, { id: 'multi', label: 'Multi', available: true, manageWorktrees: true, worktrees: [multiMain, multiSecond] }] } });
     // offer cleanup for both expanded and compacted projects
     if (url.pathname === '/api/worktrees/closed-pull-requests') return route.fulfill({ json: { worktrees: [{ worktreeId: solo.id, reason: 'merged' }, { worktreeId: multiSecond.id, reason: 'closed' }] } });
     // return agent bootstrap data

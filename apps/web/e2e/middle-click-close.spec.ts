@@ -59,6 +59,9 @@ test.describe.configure({ timeout: 60_000 });
 const cora: Worktree = { id: 'cora', projectId: 'repo', label: 'Cora', path: '/worktrees/cora', available: true, pinned: true, order: 0, branch: 'cora', projectUrl: 'https://preview.example/', launch: { kind: 'codex', origin: 'worktree' } };
 const delta: Worktree = { id: 'delta', projectId: 'repo', label: 'Delta', path: '/worktrees/delta', available: true, pinned: true, order: 1, branch: 'delta', launch: { kind: 'codex', origin: 'worktree' } };
 
+// publish one capability on its actual transport
+const adapter = (capability: Record<string, unknown>, transport: 'tmux' | 'structured' = 'tmux') => ({ ...capability, transport, transports: { [transport]: capability } });
+
 // build one configured worktree agent
 const worktreeAgent = (id: string, worktree: Worktree, attention: Attention = 'finished', kind: Agent['kind'] = 'codex'): Agent => ({
   id,
@@ -139,8 +142,8 @@ const routeApi = async (page: Page, scenario: Scenario): Promise<ConsoleHarness>
       if (scenario.controlLost === true) return route.fulfill({ status: 423, json: { error: 'another device is active' } });
       const places = scenario.places?.map(place => ({ ...place, consoleShells: scenario.panes[place.id]?.filter(pane => pane.role === 'shell' && !pane.agent).length ?? 0 }));
       const adapters = {
-        codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
-        pi: { launchable: true, program: '/bin/pi', stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: false, sandbox: true }
+        codex: adapter({ launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false }),
+        pi: adapter({ launchable: true, program: '/bin/pi', stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: false, sandbox: true }, 'structured')
       };
       return route.fulfill({ json: { generation: lifecycle.length + 1, adapters, agents: scenario.agents, projects: scenario.projects, ...(places === undefined ? {} : { places }), ...(scenario.editor === true ? { editor: true } : {}) } });
     }

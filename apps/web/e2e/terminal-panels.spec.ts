@@ -1813,7 +1813,8 @@ test('bottom controls share the static workspace surface without extra row gaps'
       themeSurfaceColor,
       controlToTabsGap: tabs.getBoundingClientRect().top - controls.getBoundingClientRect().bottom,
       controlToTabButtonGap: tabSpan.top - controlSpan.bottom,
-      tabToToolbarButtonGap: toolbarSpan.top - tabSpan.bottom
+      // measure the final row gap including the tab container padding
+      tabToToolbarButtonGap: toolbarSpan.top - tabs.getBoundingClientRect().bottom + parseFloat(getComputedStyle(tabs).paddingBottom)
     };
   }, { controlContainerSelector, controlSelector });
   const samples: { name: string; surface: Awaited<ReturnType<typeof readSurface>> }[] = [];

@@ -31,6 +31,10 @@ const routeApi = async (page: Page) => {
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     // disable unrelated push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    // acknowledge the background notification receipt reconciliation
+    if (url.pathname === '/api/push/receipts') return route.fulfill({ status: 204 });
+    // keep retained voice history independent of the question under test
+    if (url.pathname === '/api/davo/conversation') return route.fulfill({ json: { conversationId: 'davo-conversation', generation: 4, revision: '33333333-3333-4333-8333-333333333333', retainedFrom: '2026-11-03T08:00:00.000Z', serverNow: new Date().toISOString(), retentionCutoffAt: new Date(Date.now() + 3_600_000).toISOString(), nextSequence: 1, hasMore: false, pendingChoices: [], messages: [] } });
     if (url.pathname === '/api/console/theme') return route.fulfill({ status: 204 });
     // disable cloudflare health preload
     if (url.pathname === '/api/settings/cloudflare/health') return route.fulfill({ json: { state: 'disabled', failures: 0, reconnecting: false, canReconnect: false } });
@@ -88,7 +92,7 @@ for (const viewport of viewports) {
     // retain browser console failures as regression evidence
     page.on('console', message => {
       // incomplete fixtures and application failures must both remain visible
-      if (message.type() === 'error') consoleErrors.push(message.text());
+      if (message.type() === 'error') consoleErrors.push(`${message.text()} (${message.location().url})`);
     });
     // retain uncaught browser errors as regression evidence
     page.on('pageerror', error => pageErrors.push(error.message));

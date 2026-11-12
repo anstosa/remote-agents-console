@@ -1,6 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 import { expectProgressBorder } from './progress-border-assertions';
 
+// publish the transport envelope used by live dashboards
+const tmuxAdapter = (capability: Record<string, unknown>) => ({ ...capability, transport: 'tmux', transports: { tmux: capability } });
+
 // verify lifecycle feedback names the chosen launch agent
 test('keeps agent on/off progress visible across lifecycle transitions', async ({ page }) => {
   let agentRunning = true;
@@ -10,8 +13,8 @@ test('keeps agent on/off progress visible across lifecycle transitions', async (
   const deactivateFinished = new Promise<void>(resolve => { finishDeactivate = resolve; });
   const launchFinished = new Promise<void>(resolve => { finishLaunch = resolve; });
   const adapters = {
-    codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
-    omx: { launchable: true, program: '/bin/omx', stateSource: 'title', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false }
+    codex: tmuxAdapter({ launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false }),
+    omx: tmuxAdapter({ launchable: true, program: '/bin/omx', stateSource: 'title', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false })
   };
 
   await page.route('**/api/**', async route => {
@@ -106,8 +109,8 @@ test('keeps agent on/off progress visible across lifecycle transitions', async (
 // keep fallback launch failures timed after their scoped operation toast leaves view
 test('shows a timed fallback launch error after leaving its workspace', async ({ page }) => {
   const adapters = {
-    codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
-    omx: { launchable: true, program: '/bin/omx', stateSource: 'title', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false }
+    codex: tmuxAdapter({ launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false }),
+    omx: tmuxAdapter({ launchable: true, program: '/bin/omx', stateSource: 'title', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false })
   };
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -155,7 +158,7 @@ test('clears and restarts an idle agent from the power menu', async ({ page }) =
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: agentId === 'agent-1' ? 1 : 2, adapters: { codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false }, claude: { launchable: true, program: '/bin/claude', stateSource: 'reported', turnCapture: false, inlineQuestions: false, commands: true, sandbox: false } }, agents: [{ id: agentId, sessionId: agentId === 'agent-1' ? 'socket:$1' : 'socket:$2', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', kind: 'codex', attention: 'finished', launch: { kind: 'codex', origin: 'worktree' } }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: agentId === 'agent-1' ? 1 : 2, adapters: { codex: tmuxAdapter({ launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false }), claude: tmuxAdapter({ launchable: true, program: '/bin/claude', stateSource: 'reported', turnCapture: false, inlineQuestions: false, commands: true, sandbox: false }) }, agents: [{ id: agentId, sessionId: agentId === 'agent-1' ? 'socket:$1' : 'socket:$2', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', kind: 'codex', attention: 'finished', launch: { kind: 'codex', origin: 'worktree' } }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });

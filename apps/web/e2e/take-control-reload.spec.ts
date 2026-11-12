@@ -70,6 +70,10 @@ async function mockConsole(page: Page) {
     if (path === '/api/agents/updates') return route.fulfill({ json: { agents: [] } });
     // disable push enrollment
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    // acknowledge the background notification receipt reconciliation
+    if (path === '/api/push/receipts') return route.fulfill({ status: 204 });
+    // settle the retained voice history independently of takeover state
+    if (path === '/api/davo/conversation') return route.fulfill({ json: { conversationId: 'davo-conversation', generation: 4, revision: '33333333-3333-4333-8333-333333333333', retainedFrom: '2026-11-03T08:00:00.000Z', serverNow: new Date().toISOString(), retentionCutoffAt: new Date(Date.now() + 3_600_000).toISOString(), nextSequence: 1, hasMore: false, pendingChoices: [], messages: [] } });
     // accept the controlling browser's pane theme
     if (path === '/api/console/theme') return route.fulfill({ status: 204 });
     scenario.browserErrors.push(`Unexpected request: ${route.request().method()} ${path}`);

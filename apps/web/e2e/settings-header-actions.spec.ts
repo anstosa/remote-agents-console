@@ -522,6 +522,18 @@ async function expectNoticeBelowHeader(settings: Locator, notice: Locator) {
   expect(layout.contentFromPane).toBeLessThan(layout.noticeBottomFromPane);
 }
 
+// keep notices clear of navigation and source actions after geometry changes
+async function expectToastControlClearance(settings: Locator) {
+  await expect.poll(() => settings.evaluate(panel => {
+    // measure rendered controls rather than the cached clearance variable
+    const bounds = [...panel.querySelectorAll<HTMLElement>(':scope > .panel-header, .settings-source-select, .settings-source-header-with-actions')]
+      .map(element => element.getBoundingClientRect())
+      .filter(box => box.width > 0 && box.right > 0 && box.left < innerWidth && box.bottom > 0 && box.top < innerHeight);
+    const top = document.querySelector('.toast-region')!.getBoundingClientRect().top;
+    return top - Math.max(...bounds.map(box => box.bottom));
+  })).toBeGreaterThanOrEqual(8);
+}
+
 // retain content geometry while transient and persistent notices enter and leave
 for (const width of [320, 390, 1440]) {
   test(`overlays Settings toasts without moving content at ${width}px`, async ({ page }) => {
@@ -553,6 +565,26 @@ for (const width of [320, 390, 1440]) {
     await saved.getByRole('button', { name: 'Dismiss operation status', exact: true }).click();
     await expect(saved).toHaveCount(0);
     await expect.poll(geometry).toEqual(baseline);
+    await expectToastControlClearance(settings);
+    // retain usable mobile navigation while the persistent notice stays visible
+    if (width <= 780) {
+      await selectSection(settings, 'env', 'Environment & keys');
+      await expect(notice).toBeVisible();
+      await expectToastControlClearance(settings);
+      await selectSection(settings, 'app', 'Application');
+      await expectToastControlClearance(settings);
+      const source = settings.locator('.settings-source-panel');
+      const beforeScroll = await page.locator('.toast-region').evaluate(element => element.getBoundingClientRect().top);
+      // scroll the source header away and require a fresh animation-frame measurement
+      await source.evaluate(element => { element.scrollTop = 120; });
+      await expect.poll(() => source.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+      await expect.poll(() => page.locator('.toast-region').evaluate(element => element.getBoundingClientRect().top)).toBeLessThan(beforeScroll);
+      await expectToastControlClearance(settings);
+      // restore the original geometry before retaining the existing cleanup checks
+      await source.evaluate(element => { element.scrollTop = 0; });
+      await expectToastControlClearance(settings);
+      await expect.poll(geometry).toEqual(baseline);
+    }
     state.pending = false;
     await fileActions(settings).refresh.click();
     await expect(notice).toHaveCount(0);

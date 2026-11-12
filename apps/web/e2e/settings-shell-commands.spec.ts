@@ -190,6 +190,8 @@ async function setupShellSettings(page: Page) {
     if (path === "/api/dashboard/ticket")
       return route.fulfill({ json: { ticket: "shell-settings-ticket" } });
     if (path === "/api/push/public-key") return route.fulfill({ json: {} });
+    // discard fixture notification receipts
+    if (path === "/api/push/receipts") return route.fulfill({ status: 204 });
     if (path === "/api/console/theme") return route.fulfill({ status: 204 });
     // keep model discovery read-only in the shell editor fixture
     if (path === "/api/launch/options" && request.method() === "POST")

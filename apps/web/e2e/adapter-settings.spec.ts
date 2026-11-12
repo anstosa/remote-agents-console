@@ -6,6 +6,13 @@ type SettingsSave = { changes: Array<{ sourceId: string; revisionId: string; pat
 type PiUpdatePrompt = { requestId: string; currentVersion: string; targetVersion: string };
 type PiUpdatePromptResponse = { status?: number; json: { agentId?: string; error?: string } } | { abort: true };
 
+// publish flat fixture capabilities on their native transport
+const publishedAdapters = (adapters: unknown) => Object.fromEntries(Object.entries(adapters as Record<string, Record<string, unknown>>).map(([kind, capability]) => {
+  // map structured-only Pi separately
+  const transport = kind === 'pi' ? 'structured' : 'tmux';
+  return [kind, { ...capability, transport, transports: { [transport]: capability } }];
+}));
+
 // stub a controlled console whose dashboard carries the given adapter capabilities
 async function openSettings(page: import('@playwright/test').Page, adapters: unknown, options: { defaultAgent?: string; davo?: VoiceSettings; onDefaultAgent?: (kind: string) => void; onDavo?: (settings: Omit<VoiceSettings, 'available'>) => void; onSettingsSave?: (settings: SettingsSave) => void; agentUpdates?: Array<{ kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string; pinned?: true }>; onAgentUpdate?: (kind: string) => { kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }; onPiUpdatePrompt?: (prompt: PiUpdatePrompt) => PiUpdatePromptResponse | Promise<PiUpdatePromptResponse>; onDashboard?: (read: number) => Record<string, unknown>; emptyWorkspace?: boolean; open?: boolean } = {}) {
   let davo = options.davo ?? { enabled: false, available: true, name: 'Davo', context: 'Existing Davo persona.' };
@@ -95,7 +102,7 @@ async function openSettings(page: import('@playwright/test').Page, adapters: unk
     if (url.pathname === '/api/dashboard') {
       dashboardReads += 1;
       const dashboard = options.onDashboard?.(dashboardReads) ?? { generation: 1, adapters, scratchLaunch: { kind: 'codex', origin: 'default' }, agents: options.emptyWorkspace ? [] : [{ id: 'agent-cora', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', unread: false }], projects: options.emptyWorkspace ? [{ id: 'proj', label: 'Proj', available: true, worktrees: [{ id: 'cora', label: 'Cora', path: '/worktrees/cora', available: true, pinned: true, order: 1, launch: { kind: 'codex', origin: 'worktree' } }] }] : [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } };
-      return route.fulfill({ json: dashboard });
+      return route.fulfill({ json: { ...dashboard, adapters: publishedAdapters(dashboard.adapters ?? adapters) } });
     }
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
@@ -162,7 +169,7 @@ async function startRunningCodexUpdate(page: Page) {
   return { toolbar, ring: toolbar.locator('.update-progress-ring') };
 }
 
-const piAdapter = { program: '/usr/bin/node', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: false, sandbox: false };
+const piAdapter = { program: '/usr/bin/node', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: false, sandbox: true };
 const piAvailable = [{ kind: 'pi', currentVersion: '1.4.0', latestVersion: '1.5.0', updateAvailable: true, pinned: true } as const];
 
 test('offers the bundled Pi prompt independently of RAC updates and cancels without mutation', async ({ page }) => {
@@ -253,8 +260,8 @@ test('retries an ambiguous Pi prompt response with the same request identity', a
 test('selects the submitted Pi update agent when the same worktree reports it later', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('rac.hidden-agent:place-cora', '1'));
   let revealSubmittedAgent = false;
-  const oldAgent = { id: 'agent-cora', panel: 'transcript', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 1, title: 'Existing task', kind: 'codex', attention: 'finished', queuedPromptCount: 0, unread: false };
-  const submittedAgent = { ...oldAgent, id: 'agent-pi-delayed', title: 'Update bundled Pi' };
+  const oldAgent = { id: 'agent-cora', panel: 'terminal', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 1, title: 'Existing task', kind: 'codex', attention: 'finished', queuedPromptCount: 0, unread: false };
+  const submittedAgent = { ...oldAgent, id: 'agent-pi-delayed', panel: 'transcript', kind: 'pi', title: 'Update bundled Pi' };
   const dashboard = () => ({
     generation: revealSubmittedAgent ? 2 : 1,
     adapters: { pi: piAdapter, codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } },
@@ -525,6 +532,8 @@ test('stages Davo and advanced voice fields until the global settings save', asy
   await expect(settingsPage.getByLabel('Davo name')).toHaveValue('Riley');
   await expect(settingsPage.getByRole('switch', { name: 'Enable Riley' })).toBeChecked();
   await expect(context).toHaveValue('Speak plainly and keep the tone dry.');
+  // expose the legacy write gate before editing it
+  await settingsPage.locator('details.settings-mcp-gates').getByText('Existing write restriction', { exact: true }).click();
   await settingsPage.getByRole('switch', { name: 'Write tools enabled', exact: true }).check();
   await expect(settingsPage.getByRole('button', { name: 'Save', exact: true })).toHaveCount(0);
   expect(updates).toEqual([]);
@@ -545,7 +554,7 @@ test('stages Davo and advanced voice fields until the global settings save', asy
   await expect(page.getByRole('status').getByText('Saved', { exact: true })).toBeVisible();
   await expect(settingsPage).toBeVisible();
   await settingsPage.getByRole('button', { name: 'Close settings' }).click();
-  await expect(page.getByRole('button', { name: 'Call Riley' }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Riley' }).first()).toBeVisible();
 });
 
 // size an already-enabled voice editor whenever its navigation panel mounts
@@ -718,11 +727,11 @@ for (const viewport of updateFlyoutViewports) {
 test('opens the full settings workspace beside desktop output and above narrow static controls', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   const settingsPage = await openSettings(page, {});
-  // reuse the floating title and action pills from other workspace splits
+  // reuse the searchable title and action pills from other workspace splits
   await expect(settingsPage.locator('.panel-header .panel-header-pill')).toHaveCount(2);
-  const titlePill = settingsPage.locator('.panel-header-title');
-  await expect(titlePill.getByRole('heading', { name: 'Settings' })).toBeVisible();
-  // keep text equally inset from both title-pill edges
+  await expect(settingsPage.getByRole('heading', { name: 'Settings' })).toBeVisible();
+  const titlePill = settingsPage.getByRole('searchbox', { name: 'Search settings' });
+  // keep search text equally inset from both pill edges
   const titleInset = await titlePill.evaluate(element => {
     const style = getComputedStyle(element);
     return { left: parseFloat(style.paddingLeft), right: parseFloat(style.paddingRight) };

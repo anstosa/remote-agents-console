@@ -7,7 +7,7 @@ const cora = 'repo:/repo/wts/cora';
 const idle = 'repo:/repo/wts/idle';
 const dashboard = {
   generation: 1,
-  adapters: { claude },
+  adapters: { claude: { ...claude, transport: 'tmux', transports: { tmux: claude } } },
   cleanupPending: 2,
   agents: [
     { id: 'agent-1', sessionId: 'socket:$1', home: '/repo/wts/cora', kind: 'claude', worktreeId: cora, placeId: cora, projectId: 'repo', branch: 'feature/workspace-toolbar', gitStatus: { files: 3, staged: 1, unstaged: 2, untracked: 0, conflicted: 0 }, title: 'Ready', projectUrl: 'https://project.example.com', stack: { actions: ['start', 'build'], running: true, tunnel: true }, newTaskConfigured: true, queuedPromptCount: 0 },

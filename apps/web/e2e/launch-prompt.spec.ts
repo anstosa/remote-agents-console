@@ -21,7 +21,9 @@ type PendingSessionHarness = {
   refreshDashboard: () => Promise<void>;
 };
 
-const codexAdapter = { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, bookmarks: true, inlineQuestions: false, commands: true, sandbox: false };
+// publish the current tmux capability contract
+const codexTransport = { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, bookmarks: true, inlineQuestions: false, commands: true, sandbox: false };
+const codexAdapter = { ...codexTransport, transport: 'tmux', transports: { tmux: codexTransport } };
 
 // mount one launch lifecycle
 const mountLifecycle = async (page: Page, options: { failFirst?: boolean; holdFailure?: boolean; pinned?: boolean } = {}): Promise<LifecycleHarness> => {
@@ -401,7 +403,7 @@ test('a pending scratch session keeps the mobile keyboard gutter', async ({ page
   await expect(pendingPanel).toBeVisible();
   await expect(page.locator('.log > .log-split')).toHaveCount(1);
   await expect(pendingPanel.getByRole('region', { name: 'Prompt composer' })).toBeVisible();
-  // keep the direct pending output border above its composer
+  // keep pending output and composer flush without a decorative phone border
   const borderPlacement = await pendingPanel.evaluate(element => {
     const output = element.querySelector<HTMLElement>('.agent-output');
     const composer = element.querySelector<HTMLElement>('.agent-composer');
@@ -413,7 +415,7 @@ test('a pending scratch session keeps the mobile keyboard gutter', async ({ page
       gap: composer.getBoundingClientRect().top - output.getBoundingClientRect().bottom
     };
   });
-  expect(borderPlacement).toEqual({ outputBorder: '1px', panelBorder: '0px', gap: 0 });
+  expect(borderPlacement).toEqual({ outputBorder: '0px', panelBorder: '0px', gap: 0 });
   await page.evaluate(() => document.documentElement.classList.add('software-keyboard-open'));
   const layout = await page.evaluate(() => {
     const controls = [...document.querySelectorAll<HTMLElement>('.log > .log-split > .log-output .agent-composer textarea, .log > .log-split > .log-output .agent-composer button')].map(element => element.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
@@ -524,7 +526,7 @@ test('confirms and discards a failed directory launch without server cleanup', a
   expect(harness.launchRequests()).toBe(1);
   const unexpectedDiscardMutations = harness.mutations().slice(mutationsBeforeDiscard.length).filter(mutation => {
     /* allow selected-agent bookkeeping */
-    return mutation.path !== '/api/panes/ticket' && mutation.path !== '/api/agents/anchor/notifications/dismiss';
+    return mutation.path !== '/api/panes/ticket' && mutation.path !== '/api/agents/anchor/notifications/dismiss' && mutation.path !== '/api/push/receipts';
   });
   expect(unexpectedDiscardMutations).toEqual([]);
 });

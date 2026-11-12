@@ -138,6 +138,7 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
       tabsBorder: getComputedStyle(document.querySelector<HTMLElement>('.tabs')!).borderBottomWidth,
       tabsShadow: getComputedStyle(document.querySelector<HTMLElement>('.tabs')!).boxShadow,
       tabsGap: getComputedStyle(document.querySelector<HTMLElement>('.tabs')!).gap,
+      tabsPaddingBottom: getComputedStyle(document.querySelector<HTMLElement>('.tabs')!).paddingBottom,
       leadGap: getComputedStyle(document.querySelector<HTMLElement>('.tab-row-lead')!).gap,
       bar: bounds('.workspace-toolbar'),
       barActions: bounds('.workspace-toolbar .workspace-toolbar-actions'),
@@ -199,7 +200,8 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
   expect(layout.tabsGap).toBe(layout.promptGap);
   expect(layout.leadGap).toBe(layout.promptGap);
   expect(layout.barGap).toBe(layout.promptGap);
-  expect(Math.abs(layout.barActions.top - layout.activeTab.bottom - parseFloat(layout.promptGap))).toBeLessThanOrEqual(1);
+  // measure the final row gap including the tab container padding
+  expect(Math.abs(layout.barActions.top - layout.tabs.bottom + parseFloat(layout.tabsPaddingBottom) - parseFloat(layout.promptGap))).toBeLessThanOrEqual(1);
   // the one active split still reserves the area used by multi-split position controls
   expect(layout.spacer.width).toBeGreaterThan(20);
   const buttonGaps = layout.controls.slice(1).map((control, index) => control.left - layout.controls[index].right);

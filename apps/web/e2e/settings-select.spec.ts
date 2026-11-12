@@ -226,6 +226,8 @@ async function setupSelectFixture(page: Page) {
       return route.fulfill({ json: { agents: [] } });
     // disable push enrollment
     if (path === "/api/push/public-key") return route.fulfill({ json: {} });
+    // discard fixture notification receipts
+    if (path === "/api/push/receipts") return route.fulfill({ status: 204 });
     // disable server update notices
     if (path === "/api/server/update-available")
       return route.fulfill({ json: { available: false } });
@@ -279,26 +281,10 @@ for (const width of [320, 390, 1440]) {
   }) => {
     await page.setViewportSize({ width, height: 860 });
     const { settings } = await setupSelectFixture(page);
-    const search = settings.getByRole("searchbox", {
-      name: "Search settings",
-      exact: true,
-    });
     const section = settings.getByRole("combobox", {
       name: "Settings section",
       exact: true,
     });
-    // compare mobile navigation before leaving the initial section
-    if (width <= 780) {
-      const [searchBox, sectionBox] = await Promise.all([
-        search.boundingBox(),
-        section.boundingBox(),
-      ]);
-      expect(searchBox).not.toBeNull();
-      expect(sectionBox).not.toBeNull();
-      expect(
-        Math.abs(searchBox!.height - sectionBox!.height),
-      ).toBeLessThanOrEqual(1);
-    }
     await selectSource(settings, "app", "Application");
     const title = settings.getByRole("textbox", { name: "Title", exact: true });
     const mode = settings.getByRole("combobox", { name: "Mode", exact: true });
@@ -314,6 +300,12 @@ for (const width of [320, 390, 1440]) {
     expect(titleBox).not.toBeNull();
     expect(modeBox).not.toBeNull();
     expect(iconBox).not.toBeNull();
+    // compare mobile navigation with an ordinary settings input
+    if (width <= 780) {
+      const sectionBox = await section.boundingBox();
+      expect(sectionBox).not.toBeNull();
+      expect(Math.abs(titleBox!.height - sectionBox!.height)).toBeLessThanOrEqual(1);
+    }
     expect(Math.abs(titleBox!.height - modeBox!.height)).toBeLessThanOrEqual(1);
     expect(Math.abs(titleBox!.height - iconBox!.height)).toBeLessThanOrEqual(1);
   });

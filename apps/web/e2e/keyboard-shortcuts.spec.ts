@@ -378,7 +378,9 @@ test('the palette opens the Stack panel and a bound key closes it', async ({ pag
 
 test('the palette and a bound key launch the toolbar Launch\'s resolved kind', async ({ page }) => {
   const launches: unknown[] = [];
-  const adapters = { codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } };
+  // publish the current tmux capability contract
+  const codexTransport = { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false };
+  const adapters = { codex: { ...codexTransport, transport: 'tmux', transports: { tmux: codexTransport } } };
   const worktree = { id: 'cora', projectId: 'proj', label: 'Cora', path: '/worktrees/cora', main: true, available: true, pinned: true, order: 0, launch: { kind: 'codex', origin: 'worktree' } };
   await openWithTerminal(page, { keys: { prefix: { a: 'launch-agent' } }, launches, agent: { projectId: 'proj', kind: 'codex' }, dashboard: { adapters, projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [worktree] }] } });
 

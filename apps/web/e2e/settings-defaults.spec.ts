@@ -535,6 +535,8 @@ for (const width of [320, 390, 1440]) {
     await expect(body).not.toContainText(/\b(?:restart|recreate)\b/iu);
 
     await selectSection(settings, "voice", "Voice");
+    // reveal the preserved legacy gate before checking its default
+    await settings.getByText("Existing write restriction", { exact: true }).click();
     const writeTools = settings.locator(
       '[data-settings-path="integrations.realtime.writeToolsEnabled"]',
     );
