@@ -65,6 +65,7 @@ import type { FileEntry } from './files-panel/contracts.js';
 import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './settings/settings-center.js';
 import { SettingsHeaderActionsContext, SettingsHeaderSearchContext } from './settings/header-actions.js';
 import { isSettingsSnapshot, settingsResponseError } from './settings/contracts.js';
+import { isInstanceIconName, type InstanceIconName } from './settings/icon-preview.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
 import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
 import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
@@ -365,10 +366,9 @@ const NoteFeedbackContext = createContext<{ deleted: (label: string, undoToken: 
 // the Adapter and target a new Schedule pre-fills with, plus the launcher rows the note pane's
 // Adapter and target pickers offer, all resolved from the dashboard for the active tab's context
 type SchedulePrefill = { kind: AgentKind; target: ScheduleTarget; runsOnText: string; adapters: ScheduleAdapterOption[]; targets: ScheduleTargetOption[]; liveAgentIds: string[] };
-type InstanceIcon = 'terminal'|'potato'|'heart';
 // retain inherited peer identity separately from local navigation overrides
-type RemoteServer = { name: string; url: string; icon?: InstanceIcon; defaultName?: string; defaultIcon?: InstanceIcon };
-type ServerInfo = { name: string; url: string; icon?: InstanceIcon; remotes: RemoteServer[] };
+type RemoteServer = { name: string; url: string; icon?: InstanceIconName; defaultName?: string; defaultIcon?: InstanceIconName };
+type ServerInfo = { name: string; url: string; icon?: InstanceIconName; remotes: RemoteServer[] };
 type InstanceAttention = 'idle'|'working'|'question'|'completed'|'unavailable';
 type InstanceStatus = RemoteServer & { attention: InstanceAttention };
 type DavoSettings = { enabled: boolean; available: boolean; name: string; context: string };
@@ -1372,15 +1372,13 @@ const isServerUpdatePreview = (value: unknown): value is ServerUpdatePreview => 
     && Array.isArray(advisory.reasons)
     && advisory.reasons.every(isServerUpdateAdvisoryReason);
 };
-// validate one configured icon name
-const isInstanceIcon = (value: unknown): value is InstanceIcon => value === 'terminal' || value === 'potato' || value === 'heart';
 // validate one server switch target
 const isRemoteServer = (value: unknown): value is RemoteServer => value !== null && typeof value === 'object'
   && typeof (value as RemoteServer).name === 'string'
   && typeof (value as RemoteServer).url === 'string'
-  && ((value as RemoteServer).icon === undefined || isInstanceIcon((value as RemoteServer).icon))
+  && ((value as RemoteServer).icon === undefined || isInstanceIconName((value as RemoteServer).icon))
   && ((value as RemoteServer).defaultName === undefined || typeof (value as RemoteServer).defaultName === 'string')
-  && ((value as RemoteServer).defaultIcon === undefined || isInstanceIcon((value as RemoteServer).defaultIcon));
+  && ((value as RemoteServer).defaultIcon === undefined || isInstanceIconName((value as RemoteServer).defaultIcon));
 // validate public server metadata
 const isServerInfo = (value: unknown): value is ServerInfo => isRemoteServer(value)
   && Array.isArray((value as ServerInfo).remotes)
@@ -1411,7 +1409,7 @@ const sameServerStatuses = (left: Readonly<Record<string, InstanceAttention>>, r
 // provide backward-compatible identity while older servers update
 const fallbackServerInfo = (): ServerInfo => ({ name: 'Remote Agents', url: location.origin, remotes: [] });
 // resolve bundled server artwork
-const serverIconPath = (icon: InstanceIcon | undefined): string => `/instance-icons/${icon ?? 'terminal'}.svg`;
+const serverIconPath = (icon: InstanceIconName | undefined): string => `/instance-icons/${icon ?? 'terminal'}.svg`;
 // describe one server attention marker
 const instanceAttentionLabel = (attention: InstanceAttention): string | undefined => {
   // map only visible attention states
