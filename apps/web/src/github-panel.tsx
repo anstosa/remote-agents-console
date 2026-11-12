@@ -65,7 +65,7 @@ const rowId = (identity: GithubItemIdentity) => `${encodeURIComponent(identity.r
 // normalize old focus callers through the owning repository
 const focusIdentity = (focus: GithubFocus | undefined, repository: string | undefined): GithubItemIdentity | undefined => focus === undefined ? undefined : githubItemIdentity(focus.repositoryKey ?? focus.repository ?? repository ?? '', focus.kind ?? (focus.issue ? 'issue' : 'pull'), focus.number);
 // a panel narrower than this drills down from the list to a detail, as a phone does
-const drillDownWidth = 544;
+const drillDownWidth = 720;
 
 // whether the panel is on screen: a phone's carousel and an expanded sibling hide it without unmounting it
 function useInView(ref: React.RefObject<HTMLElement | null>): boolean {

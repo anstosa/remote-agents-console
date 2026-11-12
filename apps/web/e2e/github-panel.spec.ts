@@ -594,7 +594,7 @@ test('fits a pull request\'s detail beside the list from a wide panel down to a 
     expect(await overflows(page, '.github-detail-column')).toBe(false);
 
     // just wide enough for both: every detail wraps to the column, and the rows to theirs
-    await sizePanel(page, 560);
+    await sizePanel(page, 740);
     await expect(panel.locator('.github-pane-body')).toHaveClass(/split/u);
     for (const [tab, name] of [[/^Mine/u, /^#214 Serve/u], [/^Reviews/u, /^#90 Handle/u], [/^Mine/u, /^#231 Needs/u], [/^Issues/u, /^#201 GitHub/u]] as const) {
       await panel.getByRole('tab', { name: tab }).click();
@@ -1058,7 +1058,7 @@ test('keeps fork-parent and origin PRs separate and routes parent detail writes 
   await expect(github.getByRole('button', { name: /^#4978 Origin pull request with the same number/u })).toBeVisible();
   await expect(github).not.toContainText('Unrelated same-name repository');
 
-  await sizePanel(page, 560);
+  await sizePanel(page, 740);
   await expect(github.locator('.overview-none')).toHaveCount(0);
   const laneHeaders = await github.locator('.overview-column-head').evaluateAll(headers => headers.map(header => {
     const box = header.getBoundingClientRect();
