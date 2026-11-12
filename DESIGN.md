@@ -202,7 +202,7 @@ naming available when the validated catalog has no current row.
 Show all conversations expands the same list to automatic and review entries
 without changing folder scope; Show fewer conversations restores the short
 list. Search includes all conversations within the selected scope and keeps confirmed
-console renames first. Remove the separate row action area and trash controls.
+console renames first. Rows carry no action area beyond one trailing trash control on console-named rows, a sibling of the resume button, which forgets the console's record (the row moves behind Show all; the transcript and its name stay).
 Place the current conversation's Edit icon immediately after its name, within the
 title line. Keep it keyboard-accessible and independent of any resume button:
 the current row is noninteractive content containing Edit; historical rows remain

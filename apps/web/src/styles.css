@@ -3124,6 +3124,11 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .conversation-edit { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 1.5rem; height: 1.5rem; min-width: 0; padding: .15rem; border: 0; background: transparent; color: var(--subtext-0); box-shadow: none; }
 .conversation-edit:not(:disabled):hover { color: var(--text); }
 .conversation-edit svg { width: .85rem; height: .85rem; }
+/* a muted Remove that forgets the console's record without touching the transcript */
+.conversation-remove { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 2.2rem; min-width: 0; padding: 0; border: 0; border-left: 1px solid var(--surface-1); border-radius: 0; background: transparent; color: var(--subtext-0); box-shadow: none; cursor: pointer; }
+.conversation-remove svg { width: .9rem; height: .9rem; }
+.conversation-remove:not(:disabled):hover { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
+.conversation-remove:disabled { cursor: default; opacity: .5; }
 .conversation-name { display: flex; gap: .3rem; width: 100%; align-items: center; }
 .conversations-menu .conversation-name input { width: 0; min-width: 0; flex: 1 1 0; }
 .conversations-menu .conversation-name button { display: inline-grid; place-items: center; flex: 0 0 1.9rem; min-width: 0; width: 1.9rem; height: 2rem; padding: .35rem; background: var(--surface-0); color: var(--text); box-shadow: none; }

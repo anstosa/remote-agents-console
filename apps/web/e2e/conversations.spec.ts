@@ -50,6 +50,7 @@ type ConversationMockOptions = {
   switchError?: string;
   onSwitch?: (worktreeId: string, body: unknown) => void;
   onRead?: (url: URL) => void;
+  onRemove?: (path: string) => void;
   extraAgents?: Array<{ id: string; sessionId: string; home: string; worktreeId: string; worktreeLabel: string; worktreeOrder: number; title: string }>;
 };
 
@@ -78,6 +79,13 @@ async function mockConsole(page: Page, options: ConversationMockOptions = {}) {
       options.onSwitch?.(switchMatch[1]!, request.postDataJSON());
       if (options.switchError !== undefined) return route.fulfill({ status: 409, json: { error: options.switchError } });
       return route.fulfill({ status: 201, json: { agentId: `resumed-${switchMatch[1]}` } });
+    }
+    // forget one console record; the row stays listed, no longer console-named
+    const removeMatch = url.pathname.match(/^\/api\/worktrees\/cora\/conversations\/([^/]+)\/([^/]+)$/u);
+    if (removeMatch !== null && request.method() === 'DELETE') {
+      options.onRemove?.(url.pathname);
+      rows = rows.map(row => row.kind === removeMatch[1] && row.id === removeMatch[2] ? { ...row, consoleNamed: false } : row);
+      return route.fulfill({ status: 204 });
     }
     // restore one controlling browser
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
@@ -744,26 +752,27 @@ test('resumes a sibling-worktree conversation through its home worktree', async 
   await expect.poll(() => switches).toEqual([{ worktreeId: 'owen', body: { kind: 'claude', id: sibling.id } }]);
 });
 
-// omit remove controls and trailing action columns from every starter row
-test('renders conversation rows without remove or trailing action columns', async ({ page }) => {
-  await mockConsole(page);
+// forget a console record from its trailing control; the row moves behind Show all
+test('removes a console-named conversation from the starter list', async ({ page }) => {
+  const removals: string[] = [];
+  await mockConsole(page, { onRemove: path => removals.push(path) });
   await page.goto('/');
-  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const toggle = page.getByRole('button', { name: /^Conversations/u });
+  await toggle.click();
   const flyout = page.locator('.conversations-menu');
   const rows = flyout.locator('.conversation-row');
   await expect(rows).toHaveCount(2);
-  await expect(flyout.locator('.conversation-remove')).toHaveCount(0);
-  await expect(flyout.getByRole('button', { name: /^Remove /u })).toHaveCount(0);
-  await expect(flyout.locator('.conversation-row > .conversation-edit')).toHaveCount(0);
-  await expect(rows.first().locator(':scope > *')).toHaveCount(1);
-  await expect(rows.nth(1).locator(':scope > *')).toHaveCount(1);
+  await expect(toggle).toHaveAccessibleName('Conversations (2)');
+  await expect(flyout.locator('.conversation-remove')).toHaveCount(2);
+  await expect(flyout.locator('button button')).toHaveCount(0);
+  await flyout.getByRole('button', { name: 'Remove Historical conversation 1 from this list' }).click();
+  await expect.poll(() => removals).toEqual([`/api/worktrees/cora/conversations/claude/${baseRows[1]!.id}`]);
+  await expect(rows).toHaveCount(1);
+  await expect(toggle).toHaveAccessibleName('Conversations (1)');
+  await flyout.getByRole('button', { name: 'Show all conversations' }).click();
   const historical = rows.filter({ hasText: 'Historical conversation 1' });
-  const rowBounds = await historical.boundingBox();
-  const rowClientWidth = await historical.evaluate(element => element.clientWidth);
-  const choiceBounds = await historical.locator(':scope > .conversation-choice').boundingBox();
-  requireBounds(rowBounds, 'historical conversation row');
-  requireBounds(choiceBounds, 'historical conversation choice');
-  expect(Math.abs(rowClientWidth - choiceBounds.width)).toBeLessThan(1);
+  await expect(historical).toHaveCount(1);
+  await expect(historical.locator('.conversation-remove')).toHaveCount(0);
 });
 
 // ignore a late list after the flyout closes

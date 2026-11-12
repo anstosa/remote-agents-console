@@ -3625,6 +3625,7 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [resumingKey, setResumingKey] = useState<string>();
+  const [removingKey, setRemovingKey] = useState<string>();
   const [nameDraft, setNameDraft] = useState('');
   const [editingKey, setEditingKey] = useState<string>();
   const searchRef = useRef<HTMLInputElement>(null);
@@ -3808,6 +3809,26 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
     }
   };
 
+  // forget the console's record of one Conversation. The transcript and its name survive, so the
+  // row drops out of the starter list but stays under Show all; the flag is cleared in place.
+  const doRemove = async (conversation: ListedConversation) => {
+    const key = `${conversation.kind}:${conversation.id}`;
+    if (removingKey !== undefined || resourceBase === undefined) return;
+    const owner = contextIdentity;
+    setRemovingKey(key);
+    setError('');
+    try {
+      const response = await request(`${resourceBase}/conversations/${encodeURIComponent(conversation.kind)}/${encodeURIComponent(conversation.id)}`, { method: 'DELETE' });
+      // a 404 means the record was already gone; either way it is no longer console-named
+      if (!response.ok && response.status !== 404) throw new Error('remove failed');
+      if (owner === contextRef.current) setConversations(current => current?.map(row => row.kind === conversation.kind && row.id === conversation.id ? { ...row, consoleNamed: false } : row));
+    } catch {
+      if (owner === contextRef.current) setError('Unable to remove this conversation from the list');
+    } finally {
+      if (owner === contextRef.current) setRemovingKey(undefined);
+    }
+  };
+
   // start a new Conversation in place; the Agent keeps its queue, model and Effort
   const startNew = async () => {
     if (startingNew || agentId === undefined) return;
@@ -3855,6 +3876,7 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
     const key = `${conversation.kind}:${conversation.id}`;
     const blockedReason = resumeBlockedReason(conversation);
     const resuming = resumingKey === key;
+    const removing = removingKey === key;
     const editable = conversation.current && agentId !== undefined;
     const metadata = `${agentKindLabel[conversation.kind]} · ${relativeAge(conversation.lastActiveAt)}${conversation.automatic ? ' · automatic' : conversation.consoleNamed ? ' · named here' : ''}${conversation.reviewRun ? ' · review run' : ''}`;
     // share title and metadata without nesting interactive controls
@@ -3862,6 +3884,8 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
     return <li key={key} className={`conversation-row${conversation.automatic ? ' automatic' : ''}${conversation.current ? ' current' : ''}`} aria-current={conversation.current ? 'true' : undefined}>
       {/* current content can contain edit, but historical resume buttons cannot */}
       {editingKey === key ? nameForm : conversation.current ? <div className="conversation-choice" title={blockedReason}>{content}</div> : <button className={`conversation-choice${progressBorder(resuming, 'blue')}`} type="button" aria-busy={resuming || undefined} disabled={blockedReason !== undefined || resumingKey !== undefined || naming} title={blockedReason ?? `Resume ${conversation.name}`} onClick={() => void doResume(conversation)}>{content}</button>}
+      {/* a sibling of the resume button, never nested in it */}
+      {renamed(conversation) && editingKey !== key && <button className={`conversation-remove${progressBorder(removing, 'red')}`} type="button" aria-busy={removing || undefined} disabled={removingKey !== undefined || resumingKey !== undefined || naming} aria-label={`Remove ${conversation.name} from this list`} title="Forget the console record; keep the named conversation" onClick={() => void doRemove(conversation)}><ProgressRing busy={removing} /><PanelIcon path={actionIconPaths.trash} /></button>}
     </li>;
   };
   const control = <div className="conversations-control" ref={anchorRef}><button className={`log-control page-arrow conversations-toggle${menuOpen ? ' active' : ''}`} type="button" aria-label={label} title={label} data-context-flyout aria-expanded={menuOpen} onPointerDown={event => event.preventDefault()} onClick={toggle}><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7l-5 4V5a2 2 0 0 1 2-2Z" /><path d="M20 8a2 2 0 0 1 2 2v11l-4-3h-7a2 2 0 0 1-2-2" /></svg>{consoleNamedCount > 0 && <span className="saved-prompts-count conversations-count" aria-hidden="true">{consoleNamedCount}</span>}</button>
