@@ -292,7 +292,7 @@ function describeProjectSettings(schema: SettingsSchema): void {
     worktreesDirectory: 'Directory where RAC creates Worktrees. Relative paths resolve from the Main checkout.',
     externalUrl: 'Existing HTTPS origin to open directly.',
     commands: 'Trusted shell commands shared by this Project’s Worktrees.',
-    newTask: 'Trusted shell command for New Task. It is available only for clean, pushed Worktrees; {taskId} inserts a random task ID.',
+    newTask: 'Trusted shell command for New Task. Evaluated by the configured interactive shell, so aliases and functions are available; use that shell’s syntax. Available only for clean, pushed Worktrees; {taskId} inserts a random task ID.',
     buttons: 'Replace application buttons with the same text or append new buttons. Empty lists inherit application buttons.'
   };
   // describe every declared project field

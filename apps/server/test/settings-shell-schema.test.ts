@@ -62,6 +62,9 @@ describe('shell command settings metadata', () => {
 
     expect(property(project, 'newTask').editor).toBe('shell');
     expect(property(project, 'newTask').singleLine).toBeUndefined();
+    expect(property(project, 'newTask').description).toContain('configured interactive shell');
+    expect(property(project, 'newTask').description).toContain('aliases and functions are available');
+    expect(property(project, 'newTask').description).toContain('use that shell’s syntax');
     // verify project and override command sets use the same presentation metadata
     for (const owner of [project, override]) {
       const commands = property(owner, 'commands');

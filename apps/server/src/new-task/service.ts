@@ -7,14 +7,13 @@ import { cleanAndPushedOrDetached, type GitCommand } from '../git/worktree-state
 import { worktreeHostRoot, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
 import { TmuxAdapter } from '../tmux/adapter.js';
 import { run, tmuxFormatLiteral } from '../tmux/command.js';
-import { hostCommand, hostInteractiveShellPath, interactiveShellBootstrap, interactiveShellPath } from '../tmux/interactive-shell.js';
+import { hostCommand, hostInteractiveShellPath, interactiveShellBootstrap, interactiveShellPath, interactiveShellQuote } from '../tmux/interactive-shell.js';
 import { startNamedReplacementSession, worktreeSessionName } from '../tmux/session-name.js';
 
 export type NewTaskAvailability = { enabled: boolean; reason?: string };
 
 const unavailableReason = 'The working copy must be clean, and any checked-out branch must be pushed before starting a new task.';
 
-const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const taskId = () => randomBytes(6).toString('base64url');
 
 export class NewTaskService {
@@ -29,6 +28,7 @@ export class NewTaskService {
     return enabled ? { enabled } : { enabled, reason: unavailableReason };
   }
 
+  // replace an eligible workspace with its configured native-shell task
   async start(agentId: string): Promise<boolean> {
     const target = await this.discovery.target(agentId);
     const worktree = target === undefined ? undefined : this.worktree(target.agent.home);
@@ -36,10 +36,11 @@ export class NewTaskService {
     const path = worktreeHostRoot(worktree);
     const home = dirname(path);
     const task = worktree.newTask.replaceAll('{taskId}', taskId());
-    const script = hostCommand(`cd -- ${quote(path)} && eval ${quote(task)}`, home);
+    // keep configured aliases and functions in the initialized native shell
+    const shell = process.env.RAC_HOST_TMUX_DIR === undefined ? interactiveShellPath() : hostInteractiveShellPath();
+    const script = hostCommand(`cd -- ${interactiveShellQuote(path, shell)} && eval ${interactiveShellQuote(task, shell)}`, home, undefined, shell);
     const session = worktreeSessionName(path);
     const currentSession = paneTmuxSession(target.agent.pane);
-    const shell = process.env.RAC_HOST_TMUX_DIR === undefined ? interactiveShellPath() : hostInteractiveShellPath();
     const pane = await startNamedReplacementSession(this.tmuxBinary, target.socket.path, currentSession, session, ['-c', tmuxFormatLiteral(path), shell, '-lc', interactiveShellBootstrap(script, home, shell, true)], this.command);
     if (pane === undefined) return false;
     // the new session replaces the Agent's as the Worktree's Workspace

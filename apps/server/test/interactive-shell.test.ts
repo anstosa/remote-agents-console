@@ -26,8 +26,10 @@ async function runBootstrap(shell: string, rc: string, command: string, stay = f
   const home = await mkdtemp(join(tmpdir(), 'rac-shell-'));
   homes.push(home);
   await mkdir(join(home, '.config', 'fish'), { recursive: true });
+  // suppress distribution banners without weakening command-output assertions
+  await writeFile(join(home, '.hushlogin'), '');
   await writeFile(join(home, rc), shell.endsWith('fish') ? 'set -gx MARKER rc\n' : 'export MARKER=rc\n');
-  return execFileSync(shell, ['-lc', interactiveShellBootstrap(command, home, shell, stay)], { env: { PATH: '/usr/bin:/bin', TERM: 'dumb' }, input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+  return execFileSync(shell, ['-lc', interactiveShellBootstrap(command, home, shell, stay)], { env: { HOME: home, ZDOTDIR: home, XDG_CONFIG_HOME: join(home, '.config'), PATH: '/usr/bin:/bin', TERM: 'dumb' }, input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
 }
 
 const probe = `printf '%s|%s|%s\\n' "$MARKER" "\${RAC_AGENT_COMMAND-unset}" "it's"`;
@@ -81,7 +83,9 @@ describe('interactive agent shell', () => {
   });
 
   it.skipIf(fish === undefined)('returns to an interactive fish after the command when asked to stay', async () => {
-    const output = await runBootstrap(fish!, '.config/fish/config.fish', probe, true, 'echo after:$MARKER:(set -q RAC_AGENT_COMMAND; and echo set; or echo unset)\n');
+    // staying tasks use native fish syntax rather than a POSIX child shell
+    const nativeProbe = `printf '%s|%s|%s\\n' "$MARKER" (set -q RAC_AGENT_COMMAND; and echo set; or echo unset) "it's"`;
+    const output = await runBootstrap(fish!, '.config/fish/config.fish', nativeProbe, true, 'echo after:$MARKER:(set -q RAC_AGENT_COMMAND; and echo set; or echo unset)\n');
     expect(output).toContain("rc|unset|it's\n");
     expect(output).toContain('after:rc:unset');
   });

@@ -305,8 +305,9 @@ The program is launched from an interactive zsh shell by default. Set
 `RAC_HOST_INTERACTIVE_SHELL` for host-tmux sessions. Absolute zsh, bash, and
 fish paths are supported; each loads the operator's normal configuration
 (`.zshenv`/`.zshrc`, `.bashrc`, or `config.fish`) before starting the agent. The
-agent command itself always runs as POSIX shell, so operator `setup`/`teardown`
-and `newTask` snippets stay in POSIX syntax regardless of the interactive shell.
+operator `setup`/`teardown` commands use POSIX shell syntax. A configured
+`newTask` command instead runs in the selected interactive shell, so its aliases
+and functions are available; write the command using that shell’s syntax.
 
 New console-created headless panes with default tmux styles receive the console theme's default foreground/background colors (Catppuccin Mocha for Dark, Latte for Light) before their shell or agent starts. This lets programs such as Codex query both terminal colors during startup instead of falling back to monochrome output or a gradient blended against the wrong background, and lets programs that ask tmux for the light/dark theme (`CSI ? 996 n`) see the console's choice. The console theme is the Light/Dark setting of the browser in control: it is sent when that browser takes control and on every toggle, and defaults to Dark until a browser sends it. A toggle also recolors the panes the console colored, so programs that enabled theme update reports (mode 2031), such as Neovim, follow it live. Panes with default or custom tmux styles, and sessions with an attached real terminal, are not restyled. Programs that read the colors only at startup keep them until they restart.
 Set `RAC_HOST_PATH` to a complete PATH when host commands require executables
