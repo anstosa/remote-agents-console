@@ -3,7 +3,7 @@ import type { RemoteServer } from './config/schema.js';
 import type { Agent } from './domain/models.js';
 import { instanceIconHashPattern } from './instance-icon-name.js';
 import { agentPresentationAttentionState } from './notifications.js';
-import { validateSvg } from './settings/validation.js';
+import { maxIconBytes, validateSvg } from './instance-icon-svg.js';
 
 export type InstanceAttention = 'idle' | 'working' | 'question' | 'completed' | 'unavailable';
 // iconHash names artwork this server has fetched, verified and can serve itself
@@ -12,12 +12,13 @@ type PublishedIdentity = Pick<InstanceStatus, 'name' | 'iconHash'>;
 // each signed peer surface has its own HMAC label, so a signature for one never authorizes another
 export type PeerRequest = 'status' | 'icon';
 
+// viewers built before the icon library drop a peer's whole identity for any other icon name;
+// status can stop naming the icon once no viewer older than the iconHash field remains
+export const legacyPeerIconNames: ReadonlySet<string> = new Set(['terminal', 'potato', 'heart']);
 const statusClockSkewMs = 30_000;
 const statusResponseBytes = 2_048;
 const legacyMetadataResponseBytes = 8_192;
 const statusCacheMs = 5_000;
-// matches validateSvg's ceiling so any artwork it accepts can be fetched
-const artworkResponseBytes = 262_144;
 const artworkRetryMs = 60_000;
 
 // identify one artwork revision by its bytes
@@ -158,7 +159,7 @@ async function remoteInstanceArtwork(server: RemoteServer, secret: string, hash:
   const response = await fetch(new URL('/api/instance-icon', server.url), { headers: peerHeaders(secret, 'icon', server.url.origin, 'image/svg+xml'), redirect: 'error', signal: AbortSignal.timeout(4_000) });
   // retry unsuccessful responses on a later poll
   if (!response.ok) throw new Error('peer artwork unavailable');
-  const svg = await boundedResponseText(response, artworkResponseBytes);
+  const svg = await boundedResponseText(response, maxIconBytes);
   if (svg === undefined) return undefined;
   // artwork replaced between the status and this read is retried rather than remembered
   if (instanceIconHash(svg) !== hash) throw new Error('peer artwork changed');
@@ -171,8 +172,10 @@ export class RemoteInstanceStatusPoller {
   private readonly cached = new Map<string, { expiresAt: number; status: InstanceStatus }>();
   private readonly pending = new Map<string, Promise<InstanceStatus>>();
   private readonly identities = new Map<string, PublishedIdentity>();
-  // one artwork per peer origin, replaced when the peer announces a new hash
-  private readonly artworks = new Map<string, { hash: string; svg?: string; retryAt?: number }>();
+  // the last verified artwork per peer origin, kept until a newer one verifies
+  private readonly artworks = new Map<string, { hash: string; svg: string }>();
+  // a peer's announced hash that is not servable: refused for good, or retried after retryAt
+  private readonly refused = new Map<string, { hash: string; retryAt?: number }>();
 
   constructor(private readonly secret: string) {}
 
@@ -183,23 +186,31 @@ export class RemoteInstanceStatusPoller {
 
   // serve cached peer artwork by its content hash
   artwork(hash: string): string | undefined {
-    for (const entry of this.artworks.values()) if (entry.hash === hash && entry.svg !== undefined) return entry.svg;
+    for (const entry of this.artworks.values()) if (entry.hash === hash) return entry.svg;
     return undefined;
   }
 
-  // fetch a peer's artwork only when its announced hash changes
-  private async verifiedArtwork(server: RemoteServer, hash: string): Promise<string | undefined> {
-    const cached = this.artworks.get(server.url.origin);
-    if (cached?.hash === hash && (cached.retryAt === undefined || cached.retryAt > Date.now())) return cached.svg;
-    let entry: { hash: string; svg?: string; retryAt?: number };
-    try {
-      const svg = await remoteInstanceArtwork(server, this.secret, hash);
-      entry = { hash, ...(svg === undefined ? {} : { svg }) };
-    } catch {
-      entry = { hash, retryAt: Date.now() + artworkRetryMs };
+  // name the artwork to publish for a peer's announced hash, fetching it only when the hash changes
+  private async publishedHash(server: RemoteServer, hash: string): Promise<string | undefined> {
+    const origin = server.url.origin;
+    if (this.artworks.get(origin)?.hash === hash) return hash;
+    const refused = this.refused.get(origin);
+    if (refused?.hash !== hash || refused.retryAt !== undefined && refused.retryAt <= Date.now()) {
+      try {
+        const svg = await remoteInstanceArtwork(server, this.secret, hash);
+        if (svg !== undefined) {
+          this.artworks.set(origin, { hash, svg });
+          this.refused.delete(origin);
+          return hash;
+        }
+        this.refused.set(origin, { hash });
+        this.artworks.delete(origin);
+      } catch {
+        this.refused.set(origin, { hash, retryAt: Date.now() + artworkRetryMs });
+      }
     }
-    this.artworks.set(server.url.origin, entry);
-    return entry.svg;
+    // the previous artwork stands in while a new one is retried; artwork the peer cannot serve shows the terminal
+    return this.refused.get(origin)?.retryAt === undefined ? undefined : this.artworks.get(origin)?.hash;
   }
 
   // reuse one fresh or in-flight peer result
@@ -216,7 +227,8 @@ export class RemoteInstanceStatusPoller {
       if (status.attention !== 'unavailable') {
         const { iconHash, ...rest } = status;
         // publish a hash only once its artwork is verified and servable here
-        status = iconHash !== undefined && await this.verifiedArtwork(server, iconHash) !== undefined ? status : rest;
+        const published = iconHash === undefined ? undefined : await this.publishedHash(server, iconHash);
+        status = published === undefined ? rest : { ...rest, iconHash: published };
         // retain the last published identity across outages
         this.identities.set(server.url.origin, { name: status.name, ...(status.iconHash === undefined ? {} : { iconHash: status.iconHash }) });
       }

@@ -63,6 +63,15 @@ describe('instance icon routes', () => {
     expect(secondAlias.body).toBe(secondFixture);
   });
 
+  // the artwork sandbox follows the matched route, not the raw request text
+  it('sandboxes artwork however its path is spelled', async () => {
+    for (const url of ['/%69nstance-icons/heart.svg', '/favicon.svg?x', '/instance-icons/heart.svg?revision=1']) {
+      const response = await app.inject({ method: 'GET', url, headers: { host: testHost } });
+      expect(response.body).toBe(firstFixture);
+      expect(response.headers['content-security-policy']).toContain('sandbox');
+    }
+  });
+
   // fall back for unavailable private files on both routes
   it('serves the generic icon when custom assets are missing', async () => {
     await rm(join(iconDirectory, 'heart.svg'));

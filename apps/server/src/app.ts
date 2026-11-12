@@ -99,9 +99,10 @@ import { configuredWorktreeForWorkspace, projectIdOf, worktreeBranch, worktreeBy
 import { previewFileBytes, WorkspaceFileService } from './workspace-files/service.js';
 import { ComparisonService, type ComparisonScope } from './git/comparison-service.js';
 import { mergeBaseChoices, saveMergeBase } from './git/comparison.js';
-import { instanceIconHashPattern, instanceIconSvg, listInstanceIcons, loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instance-icon.js';
-import { validateSvg } from './settings/validation.js';
-import { instanceAttention, instanceIconHash, RemoteInstanceStatusPoller, validPeerRequest, type InstanceStatus } from './instance-status.js';
+import { instanceIconSvg, listInstanceIcons, loadInstanceIconSvg } from './instance-icon.js';
+import { instanceIconHashPattern, isInstanceIconName } from './instance-icon-name.js';
+import { validateSvg } from './instance-icon-svg.js';
+import { instanceAttention, instanceIconHash, legacyPeerIconNames, RemoteInstanceStatusPoller, validPeerRequest, type InstanceStatus } from './instance-status.js';
 import { createHmac, randomBytes } from 'node:crypto';
 import { integrationConfigForRemotes, parseDavoSettings, resolveAgentProgram, reviewConfig } from './config/schema.js';
 import { OrchestrationService, type AgentStatusV1, type PlaceScope } from './orchestration/index.js';
@@ -510,7 +511,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // a remote's icon is only the artwork it publishes (iconHash); the local server's is a library name
   type PublishedRemoteServer = { name: string; url: string; defaultName: string; iconHash?: string };
   type PublishedRemoteStatus = PublishedRemoteServer & Pick<InstanceStatus, 'attention'>;
-  type PublishedServerNavigation = { name: string; url: string; icon?: InstanceIcon; remotes: PublishedRemoteServer[] };
+  type PublishedServerNavigation = { name: string; url: string; icon?: string; remotes: PublishedRemoteServer[] };
   const remotesByOrigin = new Map(config.remoteServers.map(remote => [remote.url.origin, remote]));
   // apply the local name override without mutating peer-published status cache entries
   const publishedRemote = (status: Pick<InstanceStatus, 'url' | 'name' | 'iconHash'>): PublishedRemoteServer => ({ url: status.url, defaultName: status.name, name: remotesByOrigin.get(status.url)?.name ?? status.name, ...(status.iconHash === undefined ? {} : { iconHash: status.iconHash }) });
@@ -708,8 +709,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const staticFile = request.routeOptions.url === '/*' && reply.statusCode < 400;
     const cacheControl = !staticFile ? 'no-store' : request.url.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache';
     reply.header('Cache-Control', cacheControl).header('X-Frame-Options', 'DENY').header('X-Content-Type-Options', 'nosniff').header('Referrer-Policy', 'no-referrer').header('Permissions-Policy', 'camera=(), microphone=(self), geolocation=(self), clipboard-read=(self), clipboard-write=(self)').header('Cross-Origin-Opener-Policy', 'same-origin-allow-popups').header('Cross-Origin-Resource-Policy', 'same-origin').header('Content-Security-Policy', `default-src 'self'; ${formatterPolicy}connect-src 'self' ${websocketScheme}://${expectedHost}${integrationConfig.realtime.enabled ? ' https://api.openai.com' : ''}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; ${frameSourcePolicy}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
-    // isolate editable static artwork from the application policy
-    if (request.url === '/favicon.svg' || request.url.startsWith('/instance-icons/')) reply.header('Content-Security-Policy', "default-src 'none'; style-src 'none'; sandbox; base-uri 'none'; frame-ancestors 'none'");
+    // isolate editable static artwork from the application policy, keyed on the matched route so no spelling of the path escapes it
+    if (request.routeOptions.url === '/favicon.svg' || request.routeOptions.url?.startsWith('/instance-icons/')) reply.header('Content-Security-Policy', "default-src 'none'; style-src 'none'; sandbox; base-uri 'none'; frame-ancestors 'none'");
     // publish HSTS only for HTTPS deployments
     if (secureOrigin) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     return payload;
@@ -1017,10 +1018,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     browser(request);
     // require an authenticated peer signature
     if (!validPeerRequest(instanceStatusSecret, 'status', config.publicOrigin.origin, request.headers['x-rac-status-timestamp'], request.headers['x-rac-status-signature'])) return reply.code(401).send({ error: 'unauthorized' });
-    // older viewers draw their own file of a named icon and drop the whole identity for a name outside
-    // terminal, potato and heart, so only those names are sent; unreadable artwork omits only the hash
+    // older viewers draw their own file of a named icon; unreadable artwork omits only the hash
     const artwork = await loadInstanceIconSvg(server.icon).catch(() => undefined);
-    return { name: server.name, ...(server.icon === 'potato' || server.icon === 'heart' || server.icon === 'terminal' ? { icon: server.icon } : {}), ...(artwork === undefined ? {} : { iconHash: instanceIconHash(artwork) }), attention: await localInstanceAttention() };
+    return { name: server.name, ...(server.icon !== undefined && legacyPeerIconNames.has(server.icon) ? { icon: server.icon } : {}), ...(artwork === undefined ? {} : { iconHash: instanceIconHash(artwork) }), attention: await localInstanceAttention() };
   });
   // hand the chosen artwork to a signed peer, which verifies it against the announced iconHash
   app.get('/api/instance-icon', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
@@ -1035,7 +1035,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     browser(request);
     const icon = (request.params as { icon: string }).icon;
     // reject names outside the library pattern
-    if (!isInstanceIcon(icon)) return reply.code(404).send({ error: 'icon unavailable' });
+    if (!isInstanceIconName(icon)) return reply.code(404).send({ error: 'icon unavailable' });
     return reply.type('image/svg+xml').send(await loadInstanceIconSvg(icon));
   });
   // serve a peer's verified artwork from this origin so the page CSP stays 'self'

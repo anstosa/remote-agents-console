@@ -266,6 +266,7 @@ describe('settings schema metadata', () => {
     expect(schema.properties?.projects?.items?.properties?.commands?.properties?.processes?.items?.type).toBe('union');
     expect(schema.properties?.integrations?.properties?.realtime?.properties).toMatchObject({ enabled: expect.any(Object), name: expect.any(Object), context: expect.any(Object), writeToolsEnabled: expect.any(Object) });
     expect(applicationSettingsSchema().properties?.integrations?.properties?.multiInstance).toBeUndefined();
+    expect(applicationSettingsSchema().properties?.remoteServers?.items?.properties).not.toHaveProperty('icon');
     expect(schema.properties?.keys).toMatchObject({ type: 'json', optional: true });
   });
 

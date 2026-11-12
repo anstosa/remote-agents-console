@@ -373,6 +373,9 @@ class FakeTransport implements SettingsTransport {
         // reject uncataloged fixture writes
         if (source === undefined) throw new SettingsError('settings_source_unavailable', 503);
         const destination = source.serverPath ?? source.path;
+        const before = await readBounded(destination, true);
+        // refuse a source that changed since the service read it, as the host does
+        if (selected.existed !== undefined && selected.existed !== (before !== undefined) || selected.contentHash !== contentHash(before)) throw new SettingsError('source_conflict', 503);
         // remove only an explicitly optional source
         if (selected.remove) await unlink(destination).catch(() => undefined);
         else {
@@ -1163,12 +1166,10 @@ describe('settings save and validation', () => {
     const appSource = current.transport.descriptor.sources.app!; const envSource = current.transport.descriptor.sources.env!;
     current.transport.descriptor.sources.app = { path: appSource.path, kind: appSource.kind, apply: appSource.apply };
     current.transport.descriptor.sources.env = { path: envSource.path, kind: envSource.kind, apply: envSource.apply };
-    const iconPath = join(current.root, 'icon.svg');
-    await writeFile(iconPath, '<svg xmlns="http://www.w3.org/2000/svg"/>\n');
-    current.transport.descriptor.sources['icon-heart'] = { path: iconPath, serverPath: iconPath, kind: 'svg', apply: 'live' };
-    const before = source(await current.service.snapshot(true, 'controller-session'), 'icon-heart');
+    await mkdir(join(current.root, 'instance-icons'));
 
-    await current.service.save({ changes: [{ sourceId: 'icon-heart', revisionId: before.revisionId, content: '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>\n' }] }, 'controller-session');
+    // with a host-only app source the library is not listed, but a new icon can still be created
+    await current.service.save({ changes: [{ sourceId: 'icon-heart', revisionId: 'new', content: '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>\n' }] }, 'controller-session');
 
     expect(await readFile(current.appPath, 'utf8')).toBe(`${JSON.stringify(current.app, null, 2)}\n`);
     expect(await readFile(current.envPath, 'utf8')).toBe(current.env);
@@ -1198,6 +1199,67 @@ describe('settings save and validation', () => {
     await current.service.save({ changes: [{ sourceId: 'icon-comet', revisionId: created.revisionId, remove: true }] }, 'controller-session');
     await expect(stat(join(directory, 'comet.svg'))).rejects.toMatchObject({ code: 'ENOENT' });
     for (const sourceId of ['icon-terminal', 'icon-..', 'icon-Bad_Name']) await expect(current.service.save({ changes: [{ sourceId, revisionId: 'new', content: artwork }] }, 'controller-session')).rejects.toMatchObject({ code: 'invalid_settings_source' });
+  });
+
+  // an edit binds to the listed bytes, so the host can refuse a file that changed under it
+  it('edits a library icon against its current revision', async () => {
+    const current = await fixture();
+    const path = join(current.root, 'instance-icons', 'heart.svg');
+    await mkdir(join(current.root, 'instance-icons'));
+    const original = '<svg xmlns="http://www.w3.org/2000/svg"/>\n';
+    const edited = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="2"/></svg>\n';
+    await writeFile(path, original);
+    const before = source(await current.service.snapshot(true, 'controller-session'), 'icon-heart');
+
+    await current.service.save({ changes: [{ sourceId: 'icon-heart', revisionId: before.revisionId, content: edited }] }, 'controller-session');
+    expect(current.transport.records.at(-1)?.request.sources).toEqual([{ id: 'icon-heart', contentHash: contentHash(original), existed: true, candidate: 'icon-heart' }]);
+    expect(await readFile(path, 'utf8')).toBe(edited);
+
+    await expect(current.service.save({ changes: [{ sourceId: 'icon-heart', revisionId: before.revisionId, content: original }] }, 'controller-session')).rejects.toMatchObject({ code: 'settings_conflict', statusCode: 409 });
+    await expect(current.service.save({ changes: [{ sourceId: 'icon-heart', revisionId: 'new', content: original }] }, 'controller-session')).rejects.toMatchObject({ code: 'settings_conflict', statusCode: 409 });
+  });
+
+  // a stale edit of an icon removed meanwhile must not silently recreate it
+  it('refuses a stale edit of a removed icon', async () => {
+    const current = await fixture();
+    const path = join(current.root, 'instance-icons', 'heart.svg');
+    await mkdir(join(current.root, 'instance-icons'));
+    await writeFile(path, '<svg xmlns="http://www.w3.org/2000/svg"/>\n');
+    const before = source(await current.service.snapshot(true, 'controller-session'), 'icon-heart');
+    await unlink(path);
+
+    await expect(current.service.save({ changes: [{ sourceId: 'icon-heart', revisionId: before.revisionId, content: '<svg xmlns="http://www.w3.org/2000/svg"><circle r="2"/></svg>\n' }] }, 'controller-session')).rejects.toMatchObject({ code: 'settings_conflict', statusCode: 409 });
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  // one bad library file must not take every Settings read and write down with it
+  it('leaves unreadable icon files out with a warning and keeps Settings working', async () => {
+    const current = await fixture();
+    const directory = join(current.root, 'instance-icons');
+    await mkdir(directory);
+    const artwork = '<svg xmlns="http://www.w3.org/2000/svg"/>\n';
+    await writeFile(join(directory, 'heart.svg'), artwork);
+    await writeFile(join(directory, 'huge.svg'), `<svg>${' '.repeat(1_048_576)}</svg>`);
+    await writeFile(join(directory, 'nul.svg'), '<svg>\0</svg>');
+
+    const snapshot = await current.service.snapshot(true, 'controller-session');
+    expect(snapshot.sources.filter(source => source.id.startsWith('icon-')).map(source => source.id)).toEqual(['icon-heart']);
+    expect(snapshot.warnings).toEqual(['The icon file huge.svg cannot be read, so Settings leaves it out. Fix or remove it on the host.', 'The icon file nul.svg cannot be read, so Settings leaves it out. Fix or remove it on the host.']);
+    await expect(current.service.status()).resolves.toBeDefined();
+    const app = source(snapshot, 'app');
+    await expect(current.service.save({ changes: [{ sourceId: 'app', revisionId: app.revisionId, patches: [{ op: 'set', path: ['name'], value: 'Renamed' }] }] })).resolves.toBeDefined();
+    await expect(current.service.restart()).resolves.toMatchObject({ state: 'queued' });
+  });
+
+  // an unlistable library reads as empty rather than failing Settings
+  it('reads an unlistable icon library as empty with a warning', async () => {
+    const current = await fixture();
+    await writeFile(join(current.root, 'instance-icons'), 'not a directory');
+
+    const snapshot = await current.service.snapshot(true, 'controller-session');
+    expect(snapshot.sources.some(source => source.id.startsWith('icon-'))).toBe(false);
+    expect(snapshot.warnings).toEqual(['The icon library cannot be read, so Settings shows no icons. Check the instance-icons directory beside the app config.']);
+    await expect(current.service.status()).resolves.toBeDefined();
   });
 
   // live artwork is not a restart input, so a large library never bloats the manifest
@@ -1908,9 +1970,9 @@ describe('settings pending and restart state', () => {
   // file-backed icon readers consume saved bytes without replacing RAC
   it('does not require restart for immediately served SVG assets', async () => {
     const current = await fixture();
-    const icon = join(current.root, 'icon.svg');
+    const icon = join(current.root, 'instance-icons', 'heart.svg');
+    await mkdir(join(current.root, 'instance-icons'));
     await writeFile(icon, '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>');
-    current.transport.descriptor.sources['icon-heart'] = { path: icon, serverPath: icon, kind: 'svg', apply: 'live' };
     await establishEffective(current);
     const before = source(await current.service.snapshot(), 'icon-heart');
     const saved = await current.service.save({ changes: [{ sourceId: 'icon-heart', revisionId: before.revisionId, content: '<svg xmlns="http://www.w3.org/2000/svg"><circle r="2"/></svg>' }] });

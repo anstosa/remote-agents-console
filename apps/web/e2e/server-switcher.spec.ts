@@ -1,5 +1,6 @@
 import { expect, test, type Locator } from '@playwright/test';
-import { instanceIconSvg, isInstanceIcon } from '../../server/src/instance-icon.js';
+import { instanceIconSvg } from '../../server/src/instance-icon.js';
+import { isInstanceIconName } from '../../server/src/instance-icon-name.js';
 
 type BoundingBox = NonNullable<Awaited<ReturnType<Locator['boundingBox']>>>;
 
@@ -59,7 +60,7 @@ test('shows and switches the configured server on authentication and output scre
     // render the shared icon fallback instead of vite html
     const icon = /^\/instance-icons\/(\w+)\.svg$/u.exec(url.pathname)?.[1];
     // keep fixture aliases independent of local artwork
-    if (icon !== undefined && isInstanceIcon(icon) || /^\/instance-icons\/remote\/[\w-]{43}\.svg$/u.test(url.pathname)) return route.fulfill({ contentType: 'image/svg+xml', body: instanceIconSvg() });
+    if (icon !== undefined && isInstanceIconName(icon) || /^\/instance-icons\/remote\/[\w-]{43}\.svg$/u.test(url.pathname)) return route.fulfill({ contentType: 'image/svg+xml', body: instanceIconSvg() });
     if (!url.pathname.startsWith('/api/')) return route.continue();
     if (url.pathname === '/api/auth/session') {
       if (screen === 'login') return route.fulfill({ status: 401, json: { error: 'unauthorized' } });

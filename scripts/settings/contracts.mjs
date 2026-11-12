@@ -62,8 +62,12 @@ export function sourceOf(descriptor, id) {
     return undefined;
   }
   const file = `instance-icons/${name}.svg`;
+  const path = resolve(dirname(app.path), file);
+  // installed sources are checked once in validateDescriptor; a derived icon file or its directory
+  // must not be an indirection out of the installed roots for any consumer
+  assertAllowedSource(path, descriptor.allowedRoots);
   return {
-    path: resolve(dirname(app.path), file),
+    path,
     ...(app.serverPath === undefined ? {} : { serverPath: resolve(dirname(app.serverPath), file) }),
     kind: "svg",
     optional: true,
@@ -253,10 +257,6 @@ export function readRequest(path, descriptor) {
         throw safeError("invalid-request");
       }
       ids.add(source.id);
-      // a named icon file or its directory must not be an indirection out of the installed roots
-      if (!Object.hasOwn(descriptor.sources, source.id)) {
-        assertAllowedSource(sourceOf(descriptor, source.id).path, descriptor.allowedRoots);
-      }
       return source;
     });
   }

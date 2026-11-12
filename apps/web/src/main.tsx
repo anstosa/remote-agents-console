@@ -65,7 +65,7 @@ import type { FileEntry } from './files-panel/contracts.js';
 import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './settings/settings-center.js';
 import { SettingsHeaderActionsContext, SettingsHeaderSearchContext } from './settings/header-actions.js';
 import { isSettingsSnapshot, settingsResponseError } from './settings/contracts.js';
-import { isInstanceIconHash, isInstanceIconName, type InstanceIconName } from './settings/icon-preview.js';
+import { instanceIconHashPattern, isInstanceIconName } from '../../server/src/instance-icon-name.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
 import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
 import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
@@ -367,8 +367,8 @@ const NoteFeedbackContext = createContext<{ deleted: (label: string, undoToken: 
 // Adapter and target pickers offer, all resolved from the dashboard for the active tab's context
 type SchedulePrefill = { kind: AgentKind; target: ScheduleTarget; runsOnText: string; adapters: ScheduleAdapterOption[]; targets: ScheduleTargetOption[]; liveAgentIds: string[] };
 // a server's icon is a library name on the current server and the hash of published artwork on a remote
-type RemoteServer = { name: string; url: string; icon?: InstanceIconName; iconHash?: string; defaultName?: string };
-type ServerInfo = { name: string; url: string; icon?: InstanceIconName; remotes: RemoteServer[] };
+type RemoteServer = { name: string; url: string; icon?: string; iconHash?: string; defaultName?: string };
+type ServerInfo = { name: string; url: string; icon?: string; remotes: RemoteServer[] };
 type InstanceAttention = 'idle'|'working'|'question'|'completed'|'unavailable';
 type InstanceStatus = RemoteServer & { attention: InstanceAttention };
 type DavoSettings = { enabled: boolean; available: boolean; name: string; context: string };
@@ -1377,7 +1377,7 @@ const isRemoteServer = (value: unknown): value is RemoteServer => value !== null
   && typeof (value as RemoteServer).name === 'string'
   && typeof (value as RemoteServer).url === 'string'
   && ((value as RemoteServer).icon === undefined || isInstanceIconName((value as RemoteServer).icon))
-  && ((value as RemoteServer).iconHash === undefined || isInstanceIconHash((value as RemoteServer).iconHash))
+  && ((value as RemoteServer).iconHash === undefined || (typeof (value as RemoteServer).iconHash === 'string' && instanceIconHashPattern.test((value as RemoteServer).iconHash!)))
   && ((value as RemoteServer).defaultName === undefined || typeof (value as RemoteServer).defaultName === 'string');
 // validate public server metadata
 const isServerInfo = (value: unknown): value is ServerInfo => isRemoteServer(value)

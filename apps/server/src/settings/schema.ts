@@ -25,6 +25,7 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
   });
   // keep legacy source compatibility without publishing an obsolete control
   delete schema.properties!.integrations!.properties!.multiInstance;
+  delete schema.properties!.remoteServers!.items!.properties!.icon;
   // capitalize product acronyms only in presentation metadata
   const mcp = schema.properties!.integrations!.properties!.mcp!;
   mcp.label = 'MCP';

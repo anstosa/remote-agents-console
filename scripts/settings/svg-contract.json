@@ -1,0 +1,35 @@
+{
+  "description": "data-only static SVG icon contract, enforced independently by the server (apps/server/src/instance-icon-svg.ts) and the privileged helper (scripts/settings/validate.mjs)",
+  "maintenance": "update these vectors and both test drivers whenever the accepted tags, attributes or token rules change; do not share production parsing across the privilege boundary",
+  "accept": [
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><circle cx=\"32\" cy=\"32\" r=\"20\" fill=\"#f38ba8\"/></svg>",
+    "<svg><g><path d='M0 0'/></g></svg>",
+    "<svg><title>Hi there</title></svg>",
+    "<svg><rect width = \"1\" /></svg>",
+    "  <svg ></svg >\n",
+    "<svg/>"
+  ],
+  "reject": [
+    "",
+    "<svg>\u0000</svg>",
+    "<svg onload=\"x\"></svg>",
+    "<svg><script></script></svg>",
+    "<svg><a href=\"https://example.com\">x</a></svg>",
+    "<svg class=\"x\"></svg>",
+    "<svg width=1></svg>",
+    "<svg><rect width=\"1\" x y=\"2\"/></svg>",
+    "<svg>text</svg>",
+    "<svg><g></svg>",
+    "<g></g>",
+    "<svg></svg>junk",
+    "<svg></svg><svg></svg>",
+    "<svg><g x=\"1\"></g x=\"1\"></svg>",
+    "<svg><rect / width=\"1\"></svg>"
+  ],
+  "adversarial": [
+    { "description": "an unclosed tag name at the size cap", "prefix": "<svg", "repeat": "b", "count": 262000, "suffix": "" },
+    { "description": "an unclosed tag of spaces", "prefix": "<svg", "repeat": " ", "count": 260000, "suffix": "" },
+    { "description": "one long attribute name without a value", "prefix": "<svg ", "repeat": "a", "count": 250000, "suffix": ">" },
+    { "description": "many bare attribute names", "prefix": "<svg ", "repeat": "a ", "count": 125000, "suffix": "></svg>" }
+  ]
+}

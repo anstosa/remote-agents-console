@@ -2,14 +2,14 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { mkdir, open, rm } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
+import { isAbsolute, join, posix, resolve } from 'node:path';
 import { z } from 'zod';
 import type { AgentKind } from '../adapters/types.js';
 import { defaultIntegrationConfig, sourceSchema, type DavoSettings, type ValidatedConfig } from '../config/schema.js';
 import { appApply, environmentDescription, envApply, knownEnvironmentKeys, labels, managedEnvironment, managedEnvironmentKeys, protectedEnvironment, protectedPath } from './catalog.js';
 import { scratchHome } from '../places/places.js';
-import { instanceIconFiles } from '../instance-icon.js';
-import { iconSourceName } from '../instance-icon-name.js';
+import { instanceIconDirectory, instanceIconFiles } from '../instance-icon.js';
+import { iconSourceLabel, iconSourceName, newIconRevision } from '../instance-icon-name.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
 import { readPlaceholderRuntime, resolvedEnvironmentFallback, type EnvironmentFallbackContext, type PlaceholderRuntime } from './fallbacks.js';
 import { SettingsError, settingsRestartProgress, type CloudflareStatus, type HostReceipt, type HostRequest, type Installation, type InstallationSource, type SettingsFallback, type SettingsInput, type SettingsIssue, type SettingsOperation, type SettingsSnapshot, type SettingsSource, type SettingsStatus, type SettingsTarget, type SettingsValidation, type TunnelHealth } from './contracts.js';
@@ -268,36 +268,41 @@ export class SettingsService {
     return [source.path, source.serverPath ?? '', desired?.path ?? source.path, desired?.serverPath ?? source.serverPath ?? ''];
   }
   // list the icon library beside the app configuration as one live source per artwork file
-  private async iconSources(installation: Installation): Promise<Record<string, InstallationSource>> {
+  private async iconSources(installation: Installation, warnings: string[]): Promise<Record<string, InstallationSource>> {
     const app = installation.sources.app?.serverPath;
     if (app === undefined) return {};
-    const ids = (await instanceIconFiles(join(dirname(app), 'instance-icons'))).map(name => `icon-${name}`);
-    return Object.fromEntries(ids.map(id => [id, installationSource(installation, id)!]));
+    let names: string[];
+    try { names = await instanceIconFiles(instanceIconDirectory(app)); }
+    catch { warnings.push('The icon library cannot be read, so Settings shows no icons. Check the instance-icons directory beside the app config.'); return {}; }
+    return Object.fromEntries(names.map(name => [`icon-${name}`, installationSource(installation, `icon-${name}`)!]));
   }
-  // describe a valid icon name that has no file yet, so a save can create it
+  // describe a valid icon name that has no file yet; only a save that says it is new matches it
   private absentIcon(installation: Installation, id: string): Document | undefined {
     const source = installationSource(installation, id);
-    if (source === undefined || iconSourceName(id) === undefined) return undefined;
-    this.sourceIdentities.set(id, this.sourceIdentity(id, source));
-    const hash = contentHash(undefined);
-    return { source, hash, existed: false, revisionId: this.revision(id, [hash, false]) };
+    return source === undefined || iconSourceName(id) === undefined ? undefined : { source, hash: contentHash(undefined), existed: false, revisionId: newIconRevision };
   }
-  // read current bytes instead of cached settings values
-  private async documents(installation: Installation | undefined): Promise<Map<string, Document>> {
+  // read current bytes instead of cached settings values; an unreadable icon is left out and reported in warnings
+  private async documents(installation: Installation | undefined, warnings: string[] = []): Promise<Map<string, Document>> {
     const fallbackPath = this.options.configPath ?? process.env.RAC_CONFIG;
-    const icons = installation === undefined ? {} : await this.iconSources(installation);
+    const icons = installation === undefined ? {} : await this.iconSources(installation, warnings);
     for (const [id, source] of Object.entries(icons)) this.sourceIdentities.set(id, this.sourceIdentity(id, source));
     const sources: Record<string, InstallationSource> = installation === undefined ? (fallbackPath === undefined ? {} : { app: { path: fallbackPath, serverPath: fallbackPath, kind: 'json', apply: 'rac-restart' } }) : { ...installation.sources, ...icons };
     const documents = new Map<string, Document>();
     // read every installed source without persisting disclosure plaintext
     for (const [id, source] of Object.entries(sources)) {
       let content: string | undefined; let inspected: { contentHash: string; existed: boolean } | undefined;
-      // host-only sources disclose only private identity metadata by default
-      if (installation !== undefined && source.serverPath === undefined) {
-        // inspection failure is not proof that an optional source is absent
-        if (this.transport.inspect === undefined) throw new SettingsError('settings_inspection_unavailable', 503);
-        inspected = await this.transport.inspect(id);
-      } else content = installation === undefined ? await readBounded(source.path, source.optional) : await this.transport.read(id);
+      try {
+        // host-only sources disclose only private identity metadata by default
+        if (installation !== undefined && source.serverPath === undefined) {
+          // inspection failure is not proof that an optional source is absent
+          if (this.transport.inspect === undefined) throw new SettingsError('settings_inspection_unavailable', 503);
+          inspected = await this.transport.inspect(id);
+        } else content = installation === undefined ? await readBounded(source.path, source.optional) : await this.transport.read(id);
+      } catch (error) {
+        if (!Object.hasOwn(icons, id)) throw error;
+        warnings.push(`The icon file ${iconSourceName(id)}.svg cannot be read, so Settings leaves it out. Fix or remove it on the host.`);
+        continue;
+      }
       let value: unknown;
       // preserve invalid external JSON as protected source repair mode
       if (content !== undefined && ['json', 'installation'].includes(source.kind)) { try { value = JSON.parse(content); } catch { value = undefined; } }
@@ -347,7 +352,7 @@ export class SettingsService {
   }
   // expose no raw secret-bearing defaults
   async snapshot(controller = true, sessionId?: string): Promise<SettingsSnapshot> {
-    const installation = await this.installation(); const documents = await this.documents(installation);
+    const installation = await this.installation(); const warnings: string[] = []; const documents = await this.documents(installation, warnings);
     const effective = installation === undefined ? undefined : await this.metadata<{ targets?: { rac?: HostReceipt } }>('effective.json');
     const shadowedEnvironment = new Set(effective?.targets?.rac?.shadowedEnvironmentKeys ?? []);
     // trust ownership only from this Compose installation generation
@@ -377,7 +382,7 @@ export class SettingsService {
       const editorContent = currentContent !== undefined && doc.source.kind === 'env' ? partitionEnvironment(currentContent, managedEnvironmentKeys).visible : currentContent;
       const editor = editorContent === undefined ? undefined : redactEditorSource(editorContent, doc.source.kind, doc.revisionId, protectedValues);
       const hasProtectedContent = editor?.hasProtectedContent ?? (doc.source.serverPath === undefined && doc.existed);
-      const source: SettingsSource = { id, label: labels[id] ?? (iconSourceName(id) === undefined ? id : `${iconSourceName(id)} icon`), ...(controller ? { path: doc.source.path } : {}), format: doc.source.kind, exists: doc.existed, writable: controller && installation !== undefined, protected: hasProtectedContent, tracked: id === 'compose', revisionId: doc.revisionId, apply: id === 'installation' ? 'source-migration' : doc.source.apply, ...(controller && editor !== undefined ? { content: editor.content } : {}), hasProtectedContent, origin: 'Current installation file' };
+      const source: SettingsSource = { id, label: labels[id] ?? (iconSourceName(id) === undefined ? id : iconSourceLabel(iconSourceName(id)!)), ...(controller ? { path: doc.source.path } : {}), format: doc.source.kind, exists: doc.existed, writable: controller && installation !== undefined, protected: hasProtectedContent, tracked: id === 'compose', revisionId: doc.revisionId, apply: id === 'installation' ? 'source-migration' : doc.source.apply, ...(controller && editor !== undefined ? { content: editor.content } : {}), hasProtectedContent, origin: 'Current installation file' };
       // derive strict recursive controls from the actual source schema
       if (doc.source.kind === 'json' || doc.source.kind === 'installation') {
         if (controller) source.value = redact(currentValue, [], protectedValues);
@@ -405,7 +410,7 @@ export class SettingsService {
       sources.push(source);
     }
     // expose only the installed mode, never infer it from editable desired branches
-    return { version: 1, ...(installation === undefined ? {} : { installationKind: installation.kind }), revisionId: this.revision('snapshot', sources.map(source => source.revisionId)), sources, status: await this.computeStatus(installation, documents) };
+    return { version: 1, ...(installation === undefined ? {} : { installationKind: installation.kind }), revisionId: this.revision('snapshot', sources.map(source => source.revisionId)), sources, ...(warnings.length === 0 ? {} : { warnings }), status: await this.computeStatus(installation, documents) };
   }
   // read private proof records without returning their hashes
   private async metadata<T>(name: string): Promise<T | undefined> { const raw = await readBounded(join(this.controlRoot, name), true, true, 2_097_152); try { return raw === undefined ? undefined : JSON.parse(raw) as T; } catch { throw new SettingsError('settings_metadata_invalid', 503); } }
@@ -696,9 +701,9 @@ export class SettingsService {
     }
     // apply each explicit source intent once
     for (const change of parsed.data.changes) {
-      // a whole new icon has no listed revision; the host refuses it if the file appears first
-      const created = documents.has(change.sourceId) || change.content === undefined ? undefined : this.absentIcon(installation, change.sourceId);
-      if (created !== undefined) documents.set(change.sourceId, created);
+      // an unlisted icon is absent: only a save that says it creates it passes the revision check, and the host refuses it if the file appears first
+      const absent = documents.has(change.sourceId) ? undefined : this.absentIcon(installation, change.sourceId);
+      if (absent !== undefined) documents.set(change.sourceId, absent);
       const doc = documents.get(change.sourceId);
       if (doc === undefined || candidates.has(change.sourceId) || change.content !== undefined && change.patches !== undefined || change.remove && (change.content !== undefined || change.patches !== undefined)) throw new SettingsError('invalid_settings_source');
       let baselineContent = sourceContents.get(change.sourceId) ?? doc.content;
@@ -717,7 +722,7 @@ export class SettingsService {
       // avoid editing an old owner after its replacement file has already been prepared
       if (change.sourceId !== 'installation' && this.desiredInstallation !== undefined && (desiredSource?.path !== doc.source.path || desiredSource.serverPath !== doc.source.serverPath)) throw new SettingsError('source_migration_restart_required', 409);
       // protected or structural edits require an exact document revision
-      if (created === undefined && change.revisionId !== doc.revisionId) {
+      if (change.revisionId !== doc.revisionId) {
         const canRebase = doc.source.kind === 'json' && change.content === undefined && !change.remove && (change.patches?.length ?? 0) > 0 && change.patches!.every(patch => patch.op === 'set' && safePath(patch.path) && patch.path.length > 0 && !patch.path.some((_part, index) => protectedPath(patch.path.slice(0, index + 1))) && patch.revisionId === this.pathRevision(change.sourceId, baselineValue, patch.path));
         if (!canRebase) throw new SettingsError('settings_conflict', 409);
       }

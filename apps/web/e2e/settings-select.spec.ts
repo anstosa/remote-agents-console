@@ -158,7 +158,7 @@ async function setupSelectFixture(page: Page) {
     // publish a library holding one icon beyond the original aliases
     if (path === "/api/instance-icons")
       return route.fulfill({
-        json: { icons: ["terminal", "heart", "potato", "rocket-2"].map((name) => ({ name })) },
+        json: { icons: ["terminal", "heart", "potato", "rocket-2"].map((name) => ({ name, valid: true })) },
       });
     if (path === "/api/settings/status")
       return route.fulfill({

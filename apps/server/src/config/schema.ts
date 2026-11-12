@@ -10,7 +10,7 @@ import { adapterFor, structuredAdapterFor } from '../adapters/registry.js';
 import { codexProgramName, omxProgramName } from '../adapters/program-names.js';
 import { hostVisibleRepoRoot } from '../adapters/files.js';
 import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKind, type SandboxSettings } from '../adapters/types.js';
-import { instanceIconPattern, type InstanceIcon } from '../instance-icon.js';
+import { instanceIconPattern } from '../instance-icon-name.js';
 import { isIP } from 'node:net';
 import { defaultDavoContext, defaultDavoName } from '../integrations/realtime/settings.js';
 import { conductorOptInScopes, conductorScopes, conductorSpawnKinds, type ConductorSpawnKind, type IntegrationScope } from '../integrations/auth/types.js';
@@ -134,8 +134,8 @@ const claudeEntry = adapterEntry.extend({ transport: z.enum(['tmux', 'structured
 const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: claudeEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
 // name an icon in the library; an absent one renders the terminal icon
 const instanceIcon = z.string().regex(instanceIconPattern, 'an icon name is lowercase letters, digits and hyphens');
-// icon is deprecated: accepted so older configs load, and ignored (a remote's icon is what it publishes)
-const remoteServer = z.object({ url: z.string(), name: serverName.optional(), icon: instanceIcon.optional() }).strict();
+// icon is deprecated: any value is accepted so older configs load, and ignored (a remote's icon is what it publishes)
+const remoteServer = z.object({ url: z.string(), name: serverName.optional(), icon: z.unknown().optional() }).strict();
 const davoName = z.string().trim().min(1).max(80).refine(value => !value.includes('\0'), 'NUL is forbidden');
 const davoContext = z.string().trim().max(16_000).refine(value => !value.includes('\0'), 'NUL is forbidden');
 const davoSettingsSchema = z.object({ enabled: z.boolean(), name: davoName, context: davoContext }).strict();
@@ -220,7 +220,7 @@ export type DavoSettings = z.output<typeof davoSettingsSchema>;
  */
 export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; permissions?: McpPermissions; spawnKinds: ConductorSpawnKind[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
 // launchHome is runtime-only; null means account lookup failed, omission supports legacy callers
-export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; launchHome?: string | null; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; replySuggestions: boolean; buttons?: ButtonSlots; projects: Project[] };
+export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: string; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; launchHome?: string | null; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; replySuggestions: boolean; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable
 // programs, a crossed OMX/Codex program); `checkExecutables` runs the boot X_OK probe
 // and is skipped under the host bridge, where `program` is a host path the container

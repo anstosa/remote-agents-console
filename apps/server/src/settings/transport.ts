@@ -1,10 +1,11 @@
 import { createDecipheriv, createHash, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes } from 'node:crypto';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { rm } from 'node:fs/promises';
 import { SettingsError, settingsRestartProgress, type HostReply, type HostRequest, type Installation, type InstallationSource, type RevealContext, type SettingsIssue } from './contracts.js';
 import { readBounded, writePrivate } from './files.js';
 import { iconSourceName } from '../instance-icon-name.js';
+import { instanceIconDirectory } from '../instance-icon.js';
 
 export type SettingsTransport = { installation(): Promise<Installation | undefined>; request(request: HostRequest, wait?: boolean, published?: () => void): Promise<HostReply>; read(sourceId: string, context?: RevealContext): Promise<string | undefined>; inspect?(sourceId: string): Promise<NonNullable<HostReply['sourceMetadata']>> };
 // frame disclosure identities with unambiguous bounded lengths
@@ -41,8 +42,7 @@ export function installationSource(installation: Installation, id: string): Inst
   if (Object.hasOwn(installation.sources, id)) return installation.sources[id];
   const name = iconSourceName(id); const app = installation.sources.app;
   if (name === undefined || app === undefined) return undefined;
-  const file = `instance-icons/${name}.svg`;
-  return { path: join(dirname(app.path), file), ...(app.serverPath === undefined ? {} : { serverPath: join(dirname(app.serverPath), file) }), kind: 'svg', optional: true, apply: 'live' };
+  return { path: join(instanceIconDirectory(app.path), `${name}.svg`), ...(app.serverPath === undefined ? {} : { serverPath: join(instanceIconDirectory(app.serverPath), `${name}.svg`) }), kind: 'svg', optional: true, apply: 'live' };
 }
 // validate a descriptor without treating a path or transcript as authority
 export function validateInstallation(raw: unknown): Installation {

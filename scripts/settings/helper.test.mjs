@@ -756,10 +756,15 @@ test("legacy heart and potato sources drop out and their ids resolve as named ic
   assert.equal(existsSync(heart), false);
 });
 
-test("svg validator permits static artwork and rejects active content", () => {
-  assert.doesNotThrow(() => validateSvg(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>')));
-  assert.throws(() => validateSvg(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')), /invalid-svg/);
-  assert.throws(() => validateSvg(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><a href="https://example.com">x</a></svg>')), /invalid-svg/);
+const svgContract = JSON.parse(readFileSync(new URL("./svg-contract.json", import.meta.url), "utf8"));
+test("svg validator enforces the shared static icon contract in linear time", () => {
+  for (const svg of svgContract.accept) assert.doesNotThrow(() => validateSvg(Buffer.from(svg)), svg);
+  for (const svg of svgContract.reject) assert.throws(() => validateSvg(Buffer.from(svg)), /invalid-svg/, svg);
+  for (const { description, prefix, repeat, count, suffix } of svgContract.adversarial) {
+    const started = performance.now();
+    assert.throws(() => validateSvg(Buffer.from(`${prefix}${repeat.repeat(count)}${suffix}`)), /invalid-svg/, description);
+    assert.ok(performance.now() - started < 1_000, description);
+  }
 });
 
 test("installer preserves override bytes while adding one fixed control binding", () => {
@@ -2145,6 +2150,29 @@ test("icon commits refuse an icon directory linked outside the installed roots",
   assert.equal(status.state, "failed");
   assert.equal(status.error, "unsafe-source");
   assert.equal(existsSync(resolve(elsewhere, "rocket.svg")), false);
+});
+
+test("icon inspect and reveal refuse an icon directory linked outside the installed roots", async () => {
+  const current = fixture();
+  const elsewhere = mkdtempSync(resolve(tmpdir(), "rac-icons-elsewhere-"));
+  atomicWriteFile(resolve(elsewhere, "secret.svg"), "outside bytes\n", 0o600);
+  symlinkSync(elsewhere, resolve(current.root, "instance-icons"));
+  enqueueRequest(current.controlRoot, { version: 1, id: "icon_linked_inspect_0001", kind: "inspect", generation: 1, inspect: { sourceId: "icon-secret" } });
+  await drainQueue(current.descriptor, { emptyDelayMs: 0 });
+  const inspected = JSON.parse(readFileSync(resolve(current.controlRoot, "status", "icon_linked_inspect_0001.json"), "utf8"));
+  assert.equal(inspected.state, "failed");
+  assert.equal(inspected.sourceMetadata, undefined);
+  const id = "icon_linked_reveal_00001";
+  const publicKey = generateKeyPairSync("x25519").publicKey.export({ format: "der", type: "spki" }).toString("base64url");
+  const bootNonce = "synthetic_boot_nonce_00001";
+  atomicWriteFile(resolve(current.controlRoot, "boot.json"), JSON.stringify({ version: 1, generation: 1, bootNonce }), 0o600);
+  const reveal = { sourceId: "icon-secret", bootNonce, sessionBinding: "s".repeat(43), revisionId: "r".repeat(43), contentHash: sha256(Buffer.from("outside bytes\n")), existed: true, nonce: "n".repeat(43), expiresAt: Date.now() + 30_000, publicKey };
+  const binding = frameFields([current.descriptor.installationId, 1, reveal.bootNonce, reveal.sessionBinding, id, reveal.sourceId, reveal.revisionId, reveal.contentHash, reveal.existed, reveal.nonce, reveal.expiresAt, publicKey]).toString("base64url");
+  enqueueRequest(current.controlRoot, { version: 1, id, kind: "reveal", generation: 1, reveal: { ...reveal, binding } });
+  await drainQueue(current.descriptor, { emptyDelayMs: 0 });
+  const revealed = JSON.parse(readFileSync(resolve(current.controlRoot, "status", `${id}.json`), "utf8"));
+  assert.equal(revealed.state, "failed");
+  assert.equal(revealed.response, undefined);
 });
 
 test("missing wrappers validate without execution and commit owner-only executable bytes", async () => {

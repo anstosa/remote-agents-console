@@ -209,30 +209,34 @@ export function validateSvg(bytes) {
   const attributes = new Set(["xmlns", "viewBox", "width", "height", "x", "y", "x1", "x2", "y1", "y2", "cx", "cy", "r", "rx", "ry", "d", "points", "fill", "fill-rule", "fill-opacity", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-opacity", "opacity", "transform", "id", "role", "aria-label"]);
   const stack = [];
   let end = 0;
-  // validate each static markup token
-  for (const match of text.matchAll(/<\/?([A-Za-z][A-Za-z0-9-]*)([^<>]*?)\/?\s*>/gu)) {
+  // validate each static markup token; the patterns stay linear, and the lookahead stops an
+  // unclosed tag from retrying every shorter name
+  for (const match of text.matchAll(/<(\/?)([A-Za-z][A-Za-z0-9-]*)(?![A-Za-z0-9-])([^<>]*)>/gu)) {
     // allow text only within descriptions
     if (text.slice(end, match.index).trim() !== "" && !["title", "desc"].includes(stack.at(-1) ?? "")) {
       throw safeError("invalid-svg");
     }
-    const name = match[1];
+    const name = match[2];
     if (!tags.has(name)) {
       throw safeError("invalid-svg");
     }
+    const trimmed = match[3].trim();
+    const selfClosing = trimmed.endsWith("/");
     // validate closing structure
-    if (match[0].startsWith("</")) {
-      if (stack.pop() !== name || match[2].trim() !== "") {
+    if (match[1] === "/") {
+      if (stack.pop() !== name || (trimmed !== "" && trimmed !== "/")) {
         throw safeError("invalid-svg");
       }
     } else {
-      const rest = match[2].trim();
+      const rest = selfClosing ? trimmed.slice(0, -1) : trimmed;
+      const attribute = /\s*([A-Za-z][A-Za-z0-9-]*)\s*=\s*("[^"]*"|'[^']*')/uy;
       let consumed = 0;
-      // require quoted allowlisted attributes
-      for (const attribute of rest.matchAll(/([A-Za-z][A-Za-z0-9-]*)\s*=\s*("[^"]*"|'[^']*')/gu)) {
-        if (rest.slice(consumed, attribute.index).trim() !== "" || !attributes.has(attribute[1])) {
+      // require quoted allowlisted attributes, each directly after the last
+      for (let found = attribute.exec(rest); found !== null; found = attribute.exec(rest)) {
+        if (!attributes.has(found[1])) {
           throw safeError("invalid-svg");
         }
-        consumed = attribute.index + attribute[0].length;
+        consumed = attribute.lastIndex;
       }
       if (rest.slice(consumed).trim() !== "") {
         throw safeError("invalid-svg");
@@ -240,7 +244,7 @@ export function validateSvg(bytes) {
       if (stack.length === 0 && (name !== "svg" || (end !== 0 && text.slice(0, end).trim() !== ""))) {
         throw safeError("invalid-svg");
       }
-      if (!/\/\s*>$/u.test(match[0])) {
+      if (!selfClosing) {
         stack.push(name);
       }
     }

@@ -492,7 +492,7 @@ describe('configuration safety', () => {
     await expect(validateConfig({ ...scratch, publicOrigin: 'http://agents.example.com' })).rejects.toThrow('HTTPS');
   });
   it('validates local identity, preserves a remote name override and ignores the deprecated remote icon', async () => {
-    const config = await validateConfig({ ...scratch, name: 'X1 Carbon', publicOrigin: 'https://x1carbon.santosa.dev', remoteServers: [{ url: 'https://framework.santosa.dev', name: 'Workshop' }, { url: 'https://archive.santosa.dev', icon: 'potato' }] });
+    const config = await validateConfig({ ...scratch, name: 'X1 Carbon', publicOrigin: 'https://x1carbon.santosa.dev', remoteServers: [{ url: 'https://framework.santosa.dev', name: 'Workshop', icon: 'Not a name' }, { url: 'https://archive.santosa.dev', icon: 'potato' }] });
     expect(config.name).toBe('X1 Carbon');
     expect(config.remoteServers).toEqual([{ url: new URL('https://framework.santosa.dev'), name: 'Workshop' }, { url: new URL('https://archive.santosa.dev') }]);
     await expect(validateConfig({ ...scratch, remoteServers: [{ url: 'https://framework.santosa.dev' }, { url: 'https://framework.santosa.dev' }] })).rejects.toThrow('unique');
@@ -501,7 +501,6 @@ describe('configuration safety', () => {
     const config = await validateConfig({ ...scratch, icon: 'rocket-2' });
     expect(config.icon).toBe('rocket-2');
     await expect(validateConfig({ ...scratch, icon: '../x' })).rejects.toThrow(ZodError);
-    await expect(validateConfig({ ...scratch, remoteServers: [{ url: 'https://archive.santosa.dev', icon: 'Upper' }] })).rejects.toThrow(ZodError);
   });
 });
 

@@ -191,6 +191,28 @@ describe('remote instance status', () => {
     expect(fetchPeer.mock.calls.filter(([input]) => new URL(String(input)).pathname === '/api/instance-icon')).toHaveLength(2);
   });
 
+  it('keeps the last verified artwork while a new hash waits to be fetched', async () => {
+    let announced = heartHash;
+    let artworkStatus = 200;
+    const fetchPeer = peer(() => ({ name: 'Framework', iconHash: announced, attention: 'idle' }), () => new Response(announced === heartHash ? heart : leaf, { status: artworkStatus }));
+    vi.stubGlobal('fetch', fetchPeer);
+    let now = 1_800_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const poller = new RemoteInstanceStatusPoller(secret);
+
+    await poller.statuses([remote]);
+    announced = leafHash;
+    artworkStatus = 503;
+    now += 5_001;
+    await expect(poller.statuses([remote])).resolves.toEqual([{ url: remote.url.origin, name: 'Framework', iconHash: heartHash, attention: 'idle' }]);
+    expect(poller.artwork(heartHash)).toBe(heart);
+
+    artworkStatus = 200;
+    now += 60_000;
+    await expect(poller.statuses([remote])).resolves.toEqual([{ url: remote.url.origin, name: 'Framework', iconHash: leafHash, attention: 'idle' }]);
+    expect(poller.artwork(leafHash)).toBe(leaf);
+  });
+
   it('keeps the verified artwork while the peer is unavailable', async () => {
     let up = true;
     const fetchPeer = peer(() => ({ name: 'Framework', iconHash: heartHash, attention: 'idle' }), () => new Response(heart, { status: 200 }));

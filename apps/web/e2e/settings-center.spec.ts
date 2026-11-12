@@ -1079,7 +1079,7 @@ async function setupSettings(
       ? [
           {
             id: "icon-heart",
-            label: "Heart icon",
+            label: "heart icon",
             path: "/checkout/config/instance-icons/heart.svg",
             format: "svg",
             exists: true,
@@ -1094,16 +1094,17 @@ async function setupSettings(
           },
           {
             id: "icon-potato",
-            label: "Potato icon",
+            label: "potato icon",
             path: "/checkout/config/instance-icons/potato.svg",
             format: "svg",
-            exists: false,
+            exists: true,
             writable: true,
             protected: false,
             tracked: false,
             revisionId: "potato-r1",
             apply: "live",
-            value: "",
+            content:
+              '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>\n',
             hasProtectedContent: false,
           },
         ]
@@ -1287,6 +1288,7 @@ async function setupSettings(
       for (const change of body.changes) {
         if (
           change.sourceId.startsWith("icon-") &&
+          change.revisionId === "new" &&
           typeof change.content === "string" &&
           !sources.some((candidate) => candidate.id === change.sourceId)
         )
@@ -2630,10 +2632,10 @@ test("keeps multiple application editors and collapsed artwork reachable", async
   const applicationEditor = applicationInput.locator("..").locator("..");
   const artwork = settings
     .locator(".settings-icon-source")
-    .filter({ hasText: "View / edit Heart icon" });
+    .filter({ hasText: "View / edit heart icon" });
   const nextArtwork = settings
     .locator(".settings-icon-source")
-    .filter({ hasText: "View / edit Potato icon" });
+    .filter({ hasText: "View / edit potato icon" });
   const summary = artwork.locator("summary");
   const [collapsedArtwork, collapsedSummary] = await Promise.all([
     artwork.boundingBox(),
@@ -2645,12 +2647,12 @@ test("keeps multiple application editors and collapsed artwork reachable", async
     collapsedArtwork!.height - collapsedSummary!.height,
   ).toBeLessThanOrEqual(2);
   await summary.click();
-  const artworkInput = artwork.getByLabel("Heart icon source content", {
+  const artworkInput = artwork.getByLabel("heart icon source content", {
     exact: true,
   });
   const artworkEditor = artworkInput.locator("..").locator("..");
   await expect(artworkInput).toBeVisible();
-  await expect(settings.locator(".settings-code-editor")).toHaveCount(2);
+  await expect(settings.locator(".settings-code-editor:visible")).toHaveCount(2);
   const [collapsedNextArtwork, collapsedNextSummary] = await Promise.all([
     nextArtwork.boundingBox(),
     nextArtwork.locator("summary").boundingBox(),
@@ -8891,7 +8893,7 @@ for (const width of [390, 1440]) {
     const { settings, state } = await setupSettings(page, true, true);
     const artwork = settings
       .locator(".settings-icon-source")
-      .filter({ hasText: "View / edit Heart icon" });
+      .filter({ hasText: "View / edit heart icon" });
     const summary = artwork.locator("summary");
     const pencil = summary.locator(
       'svg path[d="m4 20 4-1 11-11-3-3L5 16l-1 4ZM14 7l3 3"]',
@@ -8906,14 +8908,14 @@ for (const width of [390, 1440]) {
     // other icon viewers keep their independent closed state
     const potato = settings
       .locator(".settings-icon-source")
-      .filter({ hasText: "View / edit Potato icon" });
+      .filter({ hasText: "View / edit potato icon" });
     await expect(
       potato.locator(
         'summary svg path[d="m4 20 4-1 11-11-3-3L5 16l-1 4ZM14 7l3 3"]',
       ),
     ).toBeVisible();
     const input = artwork.getByRole("textbox", {
-      name: "Heart icon source content",
+      name: "heart icon source content",
       exact: true,
     });
     const draft =
@@ -8949,14 +8951,14 @@ for (const width of [390, 1440]) {
     const { settings, state } = await setupSettings(page, true, true);
     const artwork = settings
       .locator(".settings-icon-source")
-      .filter({ hasText: "View / edit Heart icon" });
+      .filter({ hasText: "View / edit heart icon" });
     const summary = artwork.locator("summary");
     const trash = summary.getByRole("button", {
-      name: "Remove Heart icon",
+      name: "Remove heart icon",
       exact: true,
     });
     await expect(trash).toBeVisible();
-    await expect(trash).toHaveAttribute("title", "Remove Heart icon");
+    await expect(trash).toHaveAttribute("title", "Remove heart icon");
     await expect(trash.locator("span")).toHaveClass("sr-only");
     await expect(trash.locator("svg path")).toHaveAttribute(
       "d",
@@ -8992,12 +8994,6 @@ for (const width of [390, 1440]) {
     expect(geometry.squareDelta).toBeLessThanOrEqual(1);
     expect(geometry.color).toBe(geometry.expectedColor);
     expect(geometry.overflow).toBe(0);
-    const potato = settings
-      .locator(".settings-icon-source")
-      .filter({ hasText: "View / edit Potato icon" });
-    await expect(
-      potato.getByRole("button", { name: "Remove Potato icon", exact: true }),
-    ).toHaveCount(0);
     // removing a closed source stages only and never opens its viewer
     await trash.click();
     await expect(artwork).not.toHaveAttribute("open");
@@ -10350,7 +10346,7 @@ test("edits and previews icon files beside their use with image-bearing custom d
     settingsNavigationDestinations.length,
   );
   await expect(
-    menu.getByRole("option", { name: /Heart icon|Potato icon/u }),
+    menu.getByRole("option", { name: /heart icon|potato icon/u }),
   ).toHaveCount(0);
   // show a painted glyph in every section choice
   for (const option of await menu.getByRole("option").all())
@@ -10374,9 +10370,9 @@ test("edits and previews icon files beside their use with image-bearing custom d
   await page.keyboard.press("Escape");
   await expect(settings).toBeVisible();
   await expect(icon).toHaveAttribute("data-value", "heart");
-  await settings.getByText("View / edit Heart icon", { exact: true }).click();
+  await settings.getByText("View / edit heart icon", { exact: true }).click();
   const svg = settings.getByRole("textbox", {
-    name: "Heart icon source content",
+    name: "heart icon source content",
     exact: true,
   });
   await expect(svg).toHaveValue(/M0 0h10/u);
@@ -10385,7 +10381,7 @@ test("edits and previews icon files beside their use with image-bearing custom d
   await svg.fill(changed);
   await expect(
     settings
-      .getByRole("img", { name: "Heart icon preview", exact: true })
+      .getByRole("img", { name: "heart icon preview", exact: true })
       .first(),
   ).toHaveAttribute(
     "src",
@@ -10526,11 +10522,7 @@ for (const width of [390, 1440]) {
 test("warns when the server icon is removed or its artwork is refused by peers", async ({
   page,
 }) => {
-  const { settings, state, sources } = await setupSettings(page, true, true);
-  Object.assign(sources.find((source) => source.id === "icon-potato")!, {
-    exists: true,
-    content: '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>',
-  });
+  const { settings, state } = await setupSettings(page, true, true);
   // heart turns valid once a save has rewritten it
   await page.route("**/api/instance-icons", (route) =>
     route.fulfill({
@@ -10556,7 +10548,7 @@ test("warns when the server icon is removed or its artwork is refused by peers",
   await expect(
     section
       .locator(".settings-icon-source")
-      .filter({ hasText: "View / edit Heart icon" })
+      .filter({ hasText: "View / edit heart icon" })
       .getByText("Peers show Terminal", { exact: true }),
   ).toBeVisible();
   await expect(
@@ -10565,13 +10557,13 @@ test("warns when the server icon is removed or its artwork is refused by peers",
   // removing an icon the server does not use needs no warning
   const potato = section
     .locator(".settings-icon-source")
-    .filter({ hasText: "View / edit Potato icon" });
+    .filter({ hasText: "View / edit potato icon" });
   await potato
-    .getByRole("button", { name: "Remove Potato icon", exact: true })
+    .getByRole("button", { name: "Remove potato icon", exact: true })
     .click();
   await expect(section.locator(".settings-source-warning")).toHaveCount(1);
   await section
-    .getByRole("button", { name: "Remove Heart icon", exact: true })
+    .getByRole("button", { name: "Remove heart icon", exact: true })
     .click();
   await expect(
     section.getByText(
@@ -10588,10 +10580,10 @@ test("warns when the server icon is removed or its artwork is refused by peers",
   await expect(section.getByText(peers, { exact: true })).toBeVisible();
   const heart = section
     .locator(".settings-icon-source")
-    .filter({ hasText: "View / edit Heart icon" });
+    .filter({ hasText: "View / edit heart icon" });
   await heart.locator("summary").click();
   await heart
-    .getByRole("textbox", { name: "Heart icon source content", exact: true })
+    .getByRole("textbox", { name: "heart icon source content", exact: true })
     .fill('<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>\n');
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
@@ -10604,20 +10596,17 @@ test("warns when the server icon is removed or its artwork is refused by peers",
 });
 
 // retain source capabilities and revision handling inside contextual editors
-test("creates missing artwork and saves it with an explicitly changed server icon", async ({
+test("saves edited artwork with an explicitly changed server icon", async ({
   page,
 }) => {
   const { settings, state } = await setupSettings(page, true, true);
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   await expect(
-    nav.getByRole("button", { name: /Heart icon|Potato icon/u }),
+    nav.getByRole("button", { name: /heart icon|potato icon/u }),
   ).toHaveCount(0);
-  await settings.getByText("View / edit Potato icon", { exact: true }).click();
-  await settings
-    .getByRole("button", { name: "Create source", exact: true })
-    .click();
+  await settings.getByText("View / edit potato icon", { exact: true }).click();
   const input = settings.getByRole("textbox", {
-    name: "Potato icon source content",
+    name: "potato icon source content",
     exact: true,
   });
   const content =
@@ -10666,9 +10655,9 @@ test("keeps unsafe SVG drafts inert and respects read-only contextual source con
       return route.abort();
     },
   );
-  await settings.getByText("View / edit Heart icon", { exact: true }).click();
+  await settings.getByText("View / edit heart icon", { exact: true }).click();
   const input = settings.getByRole("textbox", {
-    name: "Heart icon source content",
+    name: "heart icon source content",
     exact: true,
   });
   const unsafe =
@@ -10700,14 +10689,14 @@ test("keeps unsafe SVG drafts inert and respects read-only contextual source con
   ).toBeEnabled();
   const artwork = settings
     .locator(".settings-icon-source")
-    .filter({ hasText: "View / edit Heart icon" });
-  await artwork.getByText("View / edit Heart icon", { exact: true }).click();
+    .filter({ hasText: "View / edit heart icon" });
+  await artwork.getByText("View / edit heart icon", { exact: true }).click();
   await expect(input).toBeDisabled();
   await expect(
     artwork.getByRole("button", { name: "Format", exact: true }),
   ).toBeDisabled();
   await expect(
-    artwork.getByRole("button", { name: "Remove Heart icon", exact: true }),
+    artwork.getByRole("button", { name: "Remove heart icon", exact: true }),
   ).toBeDisabled();
   await expect(
     settings.getByRole("button", { name: "Save changes", exact: true }),

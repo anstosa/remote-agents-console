@@ -108,6 +108,8 @@ export type SettingsSnapshot = {
   installationKind?: 'compose' | 'systemd';
   revisionId: string;
   sources: SettingsSource[];
+  // problems reading part of the installation that Settings worked around, such as an unreadable icon file
+  warnings?: string[];
   status: SettingsStatus;
 };
 
@@ -347,6 +349,7 @@ export const isSettingsSnapshot = (value: unknown): value is SettingsSnapshot =>
   && typeof (value as SettingsSnapshot).revisionId === 'string'
   && Array.isArray((value as SettingsSnapshot).sources)
   && (value as SettingsSnapshot).sources.every(isSettingsSource)
+  && ((value as SettingsSnapshot).warnings === undefined || Array.isArray((value as SettingsSnapshot).warnings) && (value as SettingsSnapshot).warnings!.every(warning => typeof warning === 'string'))
   && isSettingsStatus((value as SettingsSnapshot).status);
 
 // identify the only masked value shape accepted from settings reads

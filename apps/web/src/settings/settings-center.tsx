@@ -26,7 +26,8 @@ import { SettingsMultiSelect, SettingsSelect, type SettingsMultiSelectOption, ty
 import { inheritedProjectButtons, isConfiguredButtonPath, SettingsButtonColorSwatch, SettingsButtonFields, SettingsButtonPreview } from './button-fields.js';
 import { CloudflareSettings, useCloudflareSetupDraft } from './cloudflare-settings.js';
 import { GoogleCalendarSettings, useGoogleCalendarSetup } from './google-calendar-settings.js';
-import { fetchInstanceIcons, iconSourceName, InstanceIconPreview, isInstanceIconName, type LibraryIcon } from './icon-preview.js';
+import { fetchInstanceIcons, InstanceIconPreview, type LibraryIcon } from './icon-preview.js';
+import { iconSourceLabel, iconSourceName, isInstanceIconName, newIconRevision } from '../../../server/src/instance-icon-name.js';
 import { composeOptionSettings, environmentDescription, knownEnvironmentKeys, labels as sourceLabels, protectedSettingIdentity } from '../../../server/src/settings/catalog.js';
 import { buildSettingsSearchIndex, type SettingsSearchResult } from './search-index.js';
 import { SettingsSearch, SettingsSearchPath, useSettingsSearchNavigation, type SettingsSearchDestination } from './search.js';
@@ -298,9 +299,9 @@ const replacementPatch = (draft: Draft | undefined, path: string[]): SettingsPat
 // distinguish file edits from an optional handover choice
 const hasDraftMutation = (draft: Draft | undefined): boolean => draft !== undefined && (draft.patches.length > 0 || draft.content !== undefined || draft.remove !== undefined);
 
-// a staged icon has no file or revision yet; the server creates it on save
-const newIconRevision = 'new';
-const newIconSource = (name: string): SettingsSource => ({ id: `icon-${name}`, label: `${name} icon`, format: 'svg', exists: false, writable: true, protected: false, tracked: false, revisionId: newIconRevision, apply: 'live', hasProtectedContent: false });
+// a staged icon has no file yet; its save carries the new-icon revision, so the server creates it
+const newIconSource = (name: string): SettingsSource => ({ id: `icon-${name}`, label: iconSourceLabel(name), format: 'svg', exists: false, writable: true, protected: false, tracked: false, revisionId: newIconRevision, apply: 'live', hasProtectedContent: false });
+const isNewIcon = (source: SettingsSource): boolean => source.revisionId === newIconRevision;
 
 // preview only ordinary or server-redacted artwork never revealed credential bytes
 const iconPreviewContent = (source: SettingsSource, draft?: Draft): string | undefined => draft?.content !== undefined && !draft.disclosureContent ? draft.content : source.content ?? (source.exists && !source.protected && typeof source.value === 'string' ? source.value : undefined);
@@ -1655,7 +1656,7 @@ function IconArtwork({ sources, drafts, disclosures, issues, disabled, icons, ca
   return <div className="settings-icon-artwork" role="group" aria-label="Icon library"><p>Each icon is an SVG file in the instance-icons directory beside the app config. Editing one does not change which icon this server uses.</p>{artwork.map(source => {
     const name = iconSourceName(source.id)!;
     const draft = drafts[source.id];
-    const isNew = source.revisionId === newIconRevision;
+    const isNew = isNewIcon(source);
     // show artwork draft status only when its saved bytes actually differ
     const changed = hasSettingsDraftChanges(source, draft, (value, next) => applyLocalPatch(value, next, source.id), [...disclosures.values()].filter(disclosure => disclosure.sourceId === source.id));
     const status = isNew ? 'New icon' : changed ? 'Unsaved artwork changes' : icons.find(icon => icon.name === name)?.valid === false ? 'Peers show Terminal' : source.exists ? 'Saved artwork' : 'Not created';
@@ -1672,7 +1673,7 @@ function ApplicationIconSetting({ source, showSelector, onPatch, ...artwork }: O
   const name = isInstanceIconName(value) ? value : 'terminal';
   const selectedSource = artwork.sources.find(candidate => candidate.id === `icon-${name}`);
   const selectedDraft = selectedSource === undefined ? undefined : artwork.drafts[selectedSource.id];
-  const staged = artwork.sources.filter(candidate => candidate.revisionId === newIconRevision).map(candidate => iconSourceName(candidate.id)!);
+  const staged = artwork.sources.filter(isNewIcon).map(candidate => iconSourceName(candidate.id)!);
   // keep the configured choice selectable even when its file is absent from the library
   const options: SettingsSelectOption[] = [...new Set([...artwork.icons.map(icon => icon.name), ...staged, name])].map(icon => {
     const iconSource = artwork.sources.find(candidate => candidate.id === `icon-${icon}`);
@@ -2081,7 +2082,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     // retain the transaction captured for validation
     if (operationPending.current) return;
     // an icon staged but never saved has no file to remove, so drop it instead
-    setDrafts(current => { const { [source.id]: _, ...rest } = current; return source.revisionId === newIconRevision ? rest : { ...rest, [source.id]: { patches: [], remove: true } }; });
+    setDrafts(current => { const { [source.id]: _, ...rest } = current; return isNewIcon(source) ? rest : { ...rest, [source.id]: { patches: [], remove: true } }; });
     setMessage(''); setError('');
   }, []);
 
@@ -2171,7 +2172,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     const draft = drafts[source.id];
     // omit handover choices until an actual source edit exists
     if (!hasDraftMutation(draft)) return [];
-    const baseline = source.revisionId === newIconRevision ? source : snapshot?.sources.find(candidate => candidate.id === source.id);
+    const baseline = isNewIcon(source) ? source : snapshot?.sources.find(candidate => candidate.id === source.id);
     const knownValues = [...disclosures.values()].filter(disclosure => disclosure.sourceId === source.id);
     // exclude reversible no-op edits against the saved snapshot, not its local preview
     if (baseline === undefined || !hasSettingsDraftChanges(baseline, draft, (value, next) => applyLocalPatch(value, next, source.id), knownValues)) return [];
@@ -2745,6 +2746,8 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     setRawSourceIds(current => { const next = new Set(current); if (rawMode) next.delete(selected.id); else next.add(selected.id); return next; });
     setMessage(''); setError('');
   };
+  // keep the latest read's warnings beside this transaction's
+  const feedbackWarnings = [...new Set([...snapshot?.warnings ?? [], ...warnings])];
   // retain transaction status without a redundant page introduction
   return <section className="settings-center" aria-label="Settings center" aria-busy={saving}>
     {!loading && snapshot === undefined && <div className="settings-catalog-state" role="alert"><span>Installation files are unavailable. Browser preferences remain available in This browser, Interface, and Projects; file settings are unavailable.</span><button type="button" onClick={() => { /* retry without discarding browser preferences */ void reloadFiles(); }}>Retry files</button></div>}
@@ -2771,7 +2774,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
         {selected.id === 'app' && <ApplicationIconSetting source={selected} icons={instanceIcons} showSelector={!rawMode} sources={editableSources} drafts={drafts} disclosures={disclosures} issues={issues} disabled={saving || !runtime.canMutate} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} />}
       </>}</div></SettingsSearchPath.Provider>
     </div>
-    {(warnings.length > 0 || error || message) && <div className="settings-feedback" aria-live="polite">{warnings.map(warning => <p key={warning} className="warning">{warning}</p>)}{error && <p className="error" role="alert">{error}</p>}{!error && message && <p>{message}</p>}</div>}
+    {(feedbackWarnings.length > 0 || error || message) && <div className="settings-feedback" aria-live="polite">{feedbackWarnings.map(warning => <p key={warning} className="warning">{warning}</p>)}{error && <p className="error" role="alert">{error}</p>}{!error && message && <p>{message}</p>}</div>}
     {headerActionsTarget !== null && createPortal(<>
       {/* show commit actions only while drafts remain unsaved */}
       {dirtyCount > 0 && <>

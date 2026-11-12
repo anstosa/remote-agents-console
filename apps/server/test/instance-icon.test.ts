@@ -2,7 +2,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { instanceIconSvg, isInstanceIcon, listInstanceIcons, loadInstanceIconSvg } from '../src/instance-icon.js';
+import { instanceIconSvg, listInstanceIcons, loadInstanceIconSvg } from '../src/instance-icon.js';
+import { isInstanceIconName } from '../src/instance-icon-name.js';
 
 const temporaryRoots: string[] = [];
 
@@ -41,8 +42,8 @@ describe('instance icon artwork', () => {
 
   // accept any library name while refusing paths and malformed names
   it('recognizes icon names by the library name pattern', () => {
-    for (const name of ['terminal', 'heart', 'potato', 'rocket-2', '0', 'a'.repeat(32)]) expect(isInstanceIcon(name)).toBe(true);
-    for (const name of ['', '-lead', 'Upper', 'under_score', 'dot.ted', '../x', 'a/b', 'a'.repeat(33), ' heart']) expect(isInstanceIcon(name)).toBe(false);
+    for (const name of ['terminal', 'heart', 'potato', 'rocket-2', '0', 'a'.repeat(32)]) expect(isInstanceIconName(name)).toBe(true);
+    for (const name of ['', '-lead', 'Upper', 'under_score', 'dot.ted', '../x', 'a/b', 'a'.repeat(33), ' heart']) expect(isInstanceIconName(name)).toBe(false);
   });
 
   // load private custom files without rewriting bytes
