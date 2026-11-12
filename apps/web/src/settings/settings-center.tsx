@@ -26,7 +26,7 @@ import { SettingsMultiSelect, SettingsSelect, type SettingsMultiSelectOption, ty
 import { inheritedProjectButtons, isConfiguredButtonPath, SettingsButtonColorSwatch, SettingsButtonFields, SettingsButtonPreview } from './button-fields.js';
 import { CloudflareSettings, useCloudflareSetupDraft } from './cloudflare-settings.js';
 import { GoogleCalendarSettings, useGoogleCalendarSetup } from './google-calendar-settings.js';
-import { editableIconSources, fetchInstanceIcons, InstanceIconPreview, isInstanceIconName, type InstanceIconName } from './icon-preview.js';
+import { fetchInstanceIcons, iconSourceName, InstanceIconPreview, isInstanceIconName, type InstanceIconName } from './icon-preview.js';
 import { composeOptionSettings, environmentDescription, knownEnvironmentKeys, labels as sourceLabels, protectedSettingIdentity } from '../../../server/src/settings/catalog.js';
 import { buildSettingsSearchIndex, type SettingsSearchResult } from './search-index.js';
 import { SettingsSearch, SettingsSearchPath, useSettingsSearchNavigation, type SettingsSearchDestination } from './search.js';
@@ -1631,26 +1631,22 @@ function RawSourceEditor({ source, draft, disclosure, issues, disabled, showRemo
 
 type IconArtworkProps = {
   sources: SettingsSource[]; drafts: Record<string, Draft>; disclosures: Map<string, Disclosure>; issues: SettingsIssue[]; disabled: boolean;
-  installation?: SettingsSource; installationDraft?: Draft; onPatch: SetPatch;
+  onPatch: SetPatch;
   onContent: (source: SettingsSource, content: string) => void; onRemove: (source: SettingsSource) => void;
   onReveal: (source: SettingsSource, path: string[]) => Promise<void>; onRemask: (key: string) => Promise<void>;
 };
 
 // keep each editable file beside the setting that consumes its artwork
-function IconArtwork({ sources, drafts, disclosures, issues, disabled, installation, installationDraft, onPatch, onContent, onRemove, onReveal, onRemask }: IconArtworkProps) {
-  const artwork = sources.filter(source => editableIconSources.has(source.id));
+function IconArtwork({ sources, drafts, disclosures, issues, disabled, onContent, onRemove, onReveal, onRemask }: IconArtworkProps) {
+  const artwork = sources.filter(source => iconSourceName(source.id) !== undefined);
   return <div className="settings-icon-artwork" role="group" aria-label="Local icon artwork"><p>View or edit local artwork without changing the selected server icon. Artwork is shared wherever its alias is shown by this console.</p>{artwork.map(source => {
-    const name = source.id === 'icon-heart' ? 'heart' : 'potato';
-    // edit icon file locations beside their application-owned artwork
-    const locationPath = ['sources', 'icons', name];
-    const locationSchema = installation?.schema?.properties?.sources?.properties?.icons?.properties?.[name];
-    const locationBlocked = installationDraft?.content !== undefined || installationDraft?.remove === true;
+    const name = iconSourceName(source.id)!;
     const draft = drafts[source.id];
     // show artwork draft status only when its saved bytes actually differ
     const changed = hasSettingsDraftChanges(source, draft, (value, next) => applyLocalPatch(value, next, source.id), [...disclosures.values()].filter(disclosure => disclosure.sourceId === source.id));
     return <details key={source.id} className="settings-icon-source">
       <summary><span className="settings-icon-thumbnail"><InstanceIconPreview name={name} source={source} content={iconPreviewContent(source, draft)} removed={draft?.remove} label={`${source.label} preview`} /></span><span><strong>View / edit {source.label}</strong><small>{changed ? 'Unsaved artwork changes' : source.exists ? 'Saved artwork' : 'Not created'}</small></span><svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="settings-icon-source-edit" d={panelIcons.editor} /><path className="settings-icon-source-close" d={panelIcons.close} /></svg>{source.exists && <SettingsRemoveButton ariaLabel={`Remove ${source.label}`} title={`Remove ${source.label}`} label={`Remove ${source.label}`} labelClassName="sr-only" disabled={disabled || !source.writable || draft?.remove === true} onClick={event => { /* stage removal without toggling the viewer */ event.preventDefault(); event.stopPropagation(); onRemove(source); }} />}</summary>
-      <div className="settings-icon-source-content">{source.path && <code>{source.path}</code>}{installation !== undefined && locationSchema !== undefined && <SchemaField source={installation} schema={{ ...locationSchema, label: `${labelForKey(name)} icon path` }} value={valueAt(installation.value, locationPath)} path={locationPath} draft={installationDraft} disclosures={disclosures} issues={issues} disabled={disabled || !installation.writable || installation.value === undefined || locationBlocked} onPatch={onPatch} onReveal={onReveal} onRemask={onRemask} />}{locationBlocked && <p role="note">Finish or discard the Installation whole-source draft or removal before editing icon paths.</p>}{!source.writable && <p role="note">This artwork is read-only in the current installation.</p>}<RawSourceEditor source={source} draft={draft} disclosure={disclosures.get(disclosureKey(source.id, []))} issues={issues} disabled={disabled || !source.writable} showRemove={false} onContent={onContent} onRemove={onRemove} onReveal={onReveal} onRemask={onRemask} /></div>
+      <div className="settings-icon-source-content">{source.path && <code>{source.path}</code>}{!source.writable && <p role="note">This artwork is read-only in the current installation.</p>}<RawSourceEditor source={source} draft={draft} disclosure={disclosures.get(disclosureKey(source.id, []))} issues={issues} disabled={disabled || !source.writable} showRemove={false} onContent={onContent} onRemove={onRemove} onReveal={onReveal} onRemask={onRemask} /></div>
     </details>;
   })}{artwork.length === 0 && <p role="note">Custom artwork sources are unavailable in this installation.</p>}</div>;
 }
@@ -1718,8 +1714,8 @@ function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
     if (sourceId === 'compose') pages.add('compose-override');
     // tunnel source editors live inside Cloudflare
     if (sourceId === 'cloudflared' || sourceId === 'cloudflared-credentials') pages.add('cloudflare');
-    // artwork and its location selectors live on Application
-    if (editableIconSources.has(sourceId) || sourceId === 'installation' && section === 'sources' && key === 'icons') pages.add('app');
+    // artwork lives on Application
+    if (iconSourceName(sourceId) !== undefined) pages.add('app');
   }
   return pages;
 }
@@ -2206,8 +2202,8 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     }
   };
   const changedSourceIds = new Set(changes.map(change => change.sourceId));
-  // surface icon file and location edits beside their application controls
-  if (changes.some(change => editableIconSources.has(change.sourceId) || change.sourceId === 'installation' && change.patches?.some(patch => patch.path[0] === 'sources' && patch.path[1] === 'icons'))) changedSourceIds.add('app');
+  // surface icon file edits beside their application controls
+  if (changes.some(change => iconSourceName(change.sourceId) !== undefined)) changedSourceIds.add('app');
   // surface edits from every backing source on the virtual TMUX tab
   if (changes.some(isTmuxSettingsChange)) changedSourceIds.add('tmux');
   // surface voice policy and environment drafts on their dedicated page
@@ -2659,7 +2655,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // retain pending navigation while shortening the application page name
   const navigationSources = (snapshot === undefined ? pendingSourceNavigation : sources).map(source => source.id === 'app' ? { ...source, label: 'Application' } : source);
   // keep file navigation stable while search offers separate destinations
-  const visibleSources = navigationSources.filter(source => source.id !== 'compose' && source.id !== 'wrapper' && source.id !== 'cloudflared' && source.id !== 'cloudflared-credentials' && !editableIconSources.has(source.id));
+  const visibleSources = navigationSources.filter(source => source.id !== 'compose' && source.id !== 'wrapper' && source.id !== 'cloudflared' && source.id !== 'cloudflared-credentials' && iconSourceName(source.id) === undefined);
   // merge file-backed and virtual pages beneath their visible group
   const groups = [...new Set([...visiblePreferences.map(preference => preference.group), ...visibleSources.map(sourceGroup)])];
   // share the concise application name with its header and scroll region
@@ -2751,7 +2747,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
         {selectedSupportsRawRepair && selected.id !== 'app' && <div className="settings-raw-mode"><span><strong>{rawMode ? 'Whole source editor' : 'Structured editor'}</strong><small>{forceRawMode ? 'The current JSON cannot be parsed. Edit its source to repair it; credential values stay masked.' : 'Edit the source with syntax highlighting and line numbers. Credential placeholders are restored on save. Reveal keys to edit them; switching discards incompatible drafts.'}</small></span>{!forceRawMode && <button type="button" disabled={disabled} onClick={toggleRawMode}>{rawMode ? 'Use structured editor' : 'Edit whole source'}</button>}</div>}
         {rawMode || rawFormats.has(selected.format) ? <RawSourceEditor source={selected} draft={drafts[selected.id]} disclosure={disclosures.get(disclosureKey(selected.id, []))} issues={issues} disabled={disabled} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} /> : selected.format === 'installation' ? <InstallationEditor key={`${selected.id}:${catalogEditorEpoch}`} source={selected} installationKind={snapshot?.installationKind} sources={sources} onNavigate={selectSection} draft={drafts[selected.id]} disclosures={disclosures} issues={issues} disabled={disabled} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} /> : selected.format === 'env' ? <EnvironmentEditor source={selected} excludedKeys={dedicatedEnvironmentKeys} draft={drafts[selected.id]} disclosures={disclosures} issues={issues} disabled={disabled} onPatch={patch} onReveal={reveal} onRemask={remask} /> : <SchemaField key={`${selected.id}:${catalogEditorEpoch}`} source={selected} schema={selected.schema} value={selected.value} path={[]} draft={drafts[selected.id]} disclosures={disclosures} issues={issues} disabled={disabled} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} navigationDisabled={loading || saving} remoteServers={remoteServers} instanceIcons={instanceIcons} />}
         {/* keep local icon files with their application consumer even in raw repair mode */}
-        {selected.id === 'app' && <ApplicationIconSetting source={selected} icons={instanceIcons} showSelector={!rawMode} sources={sources} drafts={drafts} installation={sources.find(source => source.id === 'installation')} installationDraft={drafts.installation} disclosures={disclosures} issues={issues} disabled={saving || !runtime.canMutate} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} />}
+        {selected.id === 'app' && <ApplicationIconSetting source={selected} icons={instanceIcons} showSelector={!rawMode} sources={sources} drafts={drafts} disclosures={disclosures} issues={issues} disabled={saving || !runtime.canMutate} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} />}
       </>}</div></SettingsSearchPath.Provider>
     </div>
     {(warnings.length > 0 || error || message) && <div className="settings-feedback" aria-live="polite">{warnings.map(warning => <p key={warning} className="warning">{warning}</p>)}{error && <p className="error" role="alert">{error}</p>}{!error && message && <p>{message}</p>}</div>}

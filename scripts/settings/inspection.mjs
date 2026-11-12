@@ -2,11 +2,12 @@ import { existsSync } from "node:fs";
 import { sha256 } from "./crypto.mjs";
 import { inspectOwnedPath, readBoundedFile, safeError } from "./fs.mjs";
 import { MAX_SOURCE_BYTES } from "./constants.mjs";
+import { sourceOf } from "./contracts.mjs";
 
 // return private identity metadata without decrypting or disclosing source bytes
 export function inspectSource(descriptor, request) {
   const sourceId = request.inspect.sourceId;
-  const source = descriptor.sources[sourceId];
+  const source = sourceOf(descriptor, sourceId);
   if (!source) throw safeError("invalid-source");
   const existed = existsSync(source.path);
   if (existed) inspectOwnedPath(source.path);

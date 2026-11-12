@@ -2,6 +2,8 @@ import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
   APPLY_CLASSES,
+  ICON_SOURCE_PATTERN,
+  MAX_ICON_SOURCES,
   MAX_REQUEST_BYTES,
   MAX_REVEAL_TTL_MS,
   PROTOCOL_VERSION,
@@ -37,9 +39,50 @@ function assertRecord(value, code = "invalid-request") {
   return value;
 }
 
+// name the icon file an `icon-<name>` source selects; `terminal` stays built in
+function iconName(id) {
+  const name = typeof id === "string" ? ICON_SOURCE_PATTERN.exec(id)?.[1] : undefined;
+  return name === "terminal" ? undefined : name;
+}
+
+// accept the fixed source identities and any named icon
+export function isSourceId(id) {
+  return SOURCE_IDS.has(id) || iconName(id) !== undefined;
+}
+
+// resolve a fixed source, or a named icon: always `<name>.svg` in the `instance-icons`
+// directory beside the app configuration, where the server reads its library
+export function sourceOf(descriptor, id) {
+  if (Object.hasOwn(descriptor.sources, id)) {
+    return descriptor.sources[id];
+  }
+  const name = iconName(id);
+  const app = descriptor.sources.app;
+  if (name === undefined || app === undefined) {
+    return undefined;
+  }
+  const file = `instance-icons/${name}.svg`;
+  return {
+    path: resolve(dirname(app.path), file),
+    ...(app.serverPath === undefined ? {} : { serverPath: resolve(dirname(app.serverPath), file) }),
+    kind: "svg",
+    optional: true,
+    apply: "live"
+  };
+}
+
+// drop the fixed heart and potato sources older installers wrote; their ids now resolve as named icons
+export function migrateLegacyIconSources(descriptor) {
+  if (!["icon-heart", "icon-potato"].some((id) => Object.hasOwn(descriptor.sources ?? {}, id))) {
+    return descriptor;
+  }
+  const { "icon-heart": _heart, "icon-potato": _potato, ...sources } = descriptor.sources;
+  return { ...descriptor, sources };
+}
+
 // validate the immutable installation descriptor
 export function validateDescriptor(raw, descriptorPath) {
-  const descriptor = assertRecord(raw, "invalid-descriptor");
+  const descriptor = migrateLegacyIconSources(assertRecord(raw, "invalid-descriptor"));
   assertKeys(descriptor, new Set([
     "version",
     "installationId",
@@ -180,7 +223,7 @@ export function readRequest(path, descriptor) {
     throw safeError("invalid-request");
   }
   if (request.sources !== undefined) {
-    if (!Array.isArray(request.sources) || request.sources.length > SOURCE_IDS.size) {
+    if (!Array.isArray(request.sources) || request.sources.length > SOURCE_IDS.size + MAX_ICON_SOURCES) {
       throw safeError("invalid-request");
     }
     const ids = new Set();
@@ -188,8 +231,8 @@ export function readRequest(path, descriptor) {
       const source = assertRecord(sourceValue);
       assertKeys(source, new Set(["id", "contentHash", "existed", "candidate", "remove", "migration"]));
       if (
-        !SOURCE_IDS.has(source.id) ||
-        !descriptor.sources[source.id] ||
+        !isSourceId(source.id) ||
+        !sourceOf(descriptor, source.id) ||
         !HASH_PATTERN.test(source.contentHash ?? "") ||
         (source.existed !== undefined && typeof source.existed !== "boolean") ||
         (source.candidate !== undefined && (typeof source.candidate !== "string" || source.candidate.length > 256)) ||
@@ -210,6 +253,10 @@ export function readRequest(path, descriptor) {
         throw safeError("invalid-request");
       }
       ids.add(source.id);
+      // a named icon file or its directory must not be an indirection out of the installed roots
+      if (!Object.hasOwn(descriptor.sources, source.id)) {
+        assertAllowedSource(sourceOf(descriptor, source.id).path, descriptor.allowedRoots);
+      }
       return source;
     });
   }
@@ -231,7 +278,7 @@ export function readRequest(path, descriptor) {
   if (request.kind === "inspect") {
     const inspect = assertRecord(request.inspect);
     assertKeys(inspect, new Set(["sourceId"]));
-    if (!descriptor.sources[inspect.sourceId]) throw safeError("invalid-request");
+    if (!sourceOf(descriptor, inspect.sourceId)) throw safeError("invalid-request");
   } else if (request.inspect !== undefined) throw safeError("invalid-request");
   if (["validate", "commit"].includes(request.kind) && !request.sources?.length) {
     throw safeError("invalid-request");
@@ -289,7 +336,7 @@ function validateReveal(request, descriptor) {
   assertKeys(reveal, new Set(["sourceId", "publicKey", "nonce", "binding", "expiresAt", "bootNonce", "sessionBinding", "revisionId", "contentHash", "existed"]));
   const expiry = reveal.expiresAt;
   if (
-    !SOURCE_IDS.has(reveal.sourceId) ||
+    !isSourceId(reveal.sourceId) ||
     typeof reveal.publicKey !== "string" ||
     reveal.publicKey.length > 256 ||
     typeof reveal.nonce !== "string" ||

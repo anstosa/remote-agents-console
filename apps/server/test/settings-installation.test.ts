@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { isSettingsSnapshot } from '../../web/src/settings/contracts.js';
 import { installationSettingsPresentationSchema } from '../src/settings/schema.js';
-import { validateInstallation } from '../src/settings/transport.js';
+import { installationSource, validateInstallation } from '../src/settings/transport.js';
 import { installationSettingsSchema } from '../src/settings/validation.js';
 
 const snapshot = { version: 1, revisionId: 'installation-snapshot', sources: [], status: { pending: false, targets: [], effective: 'known', restartAvailable: false } };
@@ -67,5 +67,39 @@ describe('Compose option settings', () => {
     // distinguish acceptance from the bounded descriptor error
     if (accepted) expect(() => validateInstallation(descriptor)).not.toThrow();
     else expect(() => validateInstallation(descriptor)).toThrowError('settings_installation_invalid');
+  });
+});
+
+describe('icon sources', () => {
+  const root = '/tmp/rac-icon-directory-settings';
+  const app = { path: `${root}/config/remote-agent-console.docker.json`, serverPath: '/workspace/config/remote-agent-console.docker.json', kind: 'json', apply: 'rac-restart' };
+  const descriptor = {
+    version: 1,
+    installationId: 'icon-directory-test-0001',
+    generation: 1,
+    uid: process.getuid(),
+    gid: process.getgid(),
+    kind: 'compose',
+    hostControlRoot: `${root}/control`,
+    hostCheckout: root,
+    serverCheckout: '/workspace',
+    allowedRoots: [root],
+    sources: { app },
+    compose: { projectDirectory: root, projectName: 'rac', files: [`${root}/compose.yaml`], envFiles: [`${root}/.env`], profiles: [] }
+  };
+
+  // an un-reinstalled applier's fixed heart and potato files stay readable as named icons
+  it('drops legacy heart and potato sources from an installed descriptor', () => {
+    const legacy = { ...descriptor, sources: { app, 'icon-heart': { path: `${root}/elsewhere/heart.svg`, serverPath: '/workspace/elsewhere/heart.svg', kind: 'svg', optional: true, apply: 'live' }, 'icon-potato': { path: `${root}/config/instance-icons/potato.svg`, kind: 'svg', optional: true, apply: 'rac-restart' } } };
+    const installation = validateInstallation(legacy);
+    expect(Object.keys(installation.sources)).toEqual(['app']);
+    expect(installationSource(installation, 'icon-heart')?.path).toBe(`${root}/config/instance-icons/heart.svg`);
+  });
+
+  // a named icon is always one file in the library beside the app configuration
+  it('resolves only valid icon names beside the app configuration', () => {
+    const installation = validateInstallation(descriptor);
+    expect(installationSource(installation, 'icon-rocket-2')).toEqual({ path: `${root}/config/instance-icons/rocket-2.svg`, serverPath: '/workspace/config/instance-icons/rocket-2.svg', kind: 'svg', optional: true, apply: 'live' });
+    for (const id of ['icon-terminal', 'icon-../x', 'icon-Upper', 'icon-', 'heart', 'constructor', '__proto__']) expect(installationSource(installation, id)).toBeUndefined();
   });
 });

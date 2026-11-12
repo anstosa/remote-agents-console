@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { PanelIcon } from '../panel-header.js';
 import { instanceIconHashPattern, isInstanceIcon, type InstanceIcon } from '../../../server/src/instance-icon-name.js';
+export { iconSourceName } from '../../../server/src/instance-icon-name.js';
 import type { SettingsRequest, SettingsSource } from './contracts.js';
 
-export const editableIconSources = new Set(['icon-heart', 'icon-potato']);
 export type InstanceIconName = InstanceIcon;
 const staticTags = new Set(['svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'title', 'desc', 'text', 'tspan']);
 const imageGlyph = 'M3 3h18v18H3zM3 16l6-6 6 6 3-3 3 3M16 7h.01';

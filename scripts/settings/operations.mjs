@@ -24,7 +24,7 @@ import {
   validateCloudflarePair,
   validateComposeCandidates
 } from "./validate.mjs";
-import { resolveCandidate, validateDescriptor } from "./contracts.mjs";
+import { resolveCandidate, sourceOf, validateDescriptor } from "./contracts.mjs";
 import {
   deriveDesiredDescriptor,
   deriveMigrationPlan,
@@ -113,7 +113,7 @@ export async function processOperation(descriptor, request, options = {}) {
 function revealSource(descriptor, request) {
   const requested = request.sources?.[0];
   const sourceId = request.reveal.sourceId;
-  const source = descriptor.sources[sourceId];
+  const source = sourceOf(descriptor, sourceId);
   if (!source || !existsSync(source.path)) {
     throw safeError("disclosure-failed");
   }
@@ -136,7 +136,7 @@ export async function validateRequest(descriptor, request, options = {}) {
   );
   // validate every nonremoved candidate
   for (const [sourceId, candidate] of candidates) {
-    await validateCandidate(descriptor.sources[sourceId], candidate, options);
+    await validateCandidate(sourceOf(descriptor, sourceId), candidate, options);
   }
   // derive Project mounts only inside an enlisted Compose override transaction
   if (descriptor.kind === "compose" && candidates.has("app")) {
@@ -157,7 +157,7 @@ export async function validateRequest(descriptor, request, options = {}) {
       if (synchronized !== original) atomicWriteFile(override, synchronized, 0o600);
     }
   }
-  const touchesCompose = [...candidates].some(([sourceId]) => ["compose", "env"].includes(descriptor.sources[sourceId].kind));
+  const touchesCompose = [...candidates].some(([sourceId]) => ["compose", "env"].includes(sourceOf(descriptor, sourceId).kind));
   let dependencySnapshot;
   let winningEnvironment = {};
   let shadowedEnvironmentKeys = [];
@@ -204,7 +204,7 @@ async function commitRequest(descriptor, request, options) {
   const originals = [];
   // recheck all expected bytes before the first mutation
   for (const requested of request.sources) {
-    const source = descriptor.sources[requested.id];
+    const source = sourceOf(descriptor, requested.id);
     const existed = existsSync(source.path);
     const bytes = existed ? readBoundedFile(source.path, MAX_SOURCE_BYTES) : Buffer.alloc(0);
     if ((requested.existed !== undefined && requested.existed !== existed) || sha256(bytes) !== requested.contentHash) {
@@ -275,7 +275,7 @@ async function commitRequest(descriptor, request, options) {
     }
     // commit each independently atomic file
     for (const requested of request.sources) {
-      const source = descriptor.sources[requested.id];
+      const source = sourceOf(descriptor, requested.id);
       const existed = existsSync(source.path);
       const selected = requested.remove && existed ? inspectOwnedPath(source.path) : undefined;
       const current = existed ? readBoundedFile(source.path, MAX_SOURCE_BYTES) : Buffer.alloc(0);
@@ -351,7 +351,7 @@ async function commitRequest(descriptor, request, options) {
     const hashes = currentHashes(desiredDescriptor, request.sources.map((source) => source.id));
     const targets = [...new Set(request.sources
       .filter((requested) => requestedSourceAffectsRuntime(descriptor, requested, winningEnvironment))
-      .map((requested) => descriptor.sources[requested.id].apply)
+      .map((requested) => sourceOf(descriptor, requested.id).apply)
       .filter((apply) => apply === "rac-restart" || apply === "cloudflared-recreate")
       .map((apply) => apply === "rac-restart" ? "rac" : "cloudflared"))];
     // direct tunnel selector changes require their own replacement proof
@@ -414,7 +414,7 @@ async function commitRequest(descriptor, request, options) {
 
 // suppress runtime work when a Compose env edit cannot affect the service
 function requestedSourceAffectsRuntime(descriptor, requested, winningEnvironment) {
-  const source = descriptor.sources[requested.id];
+  const source = sourceOf(descriptor, requested.id);
   // preserve non-env apply behavior
   if (descriptor.kind !== "compose" || source.kind !== "env") {
     return true;
@@ -427,7 +427,7 @@ function requiredCommitBaselineTargets(descriptor, request, migrationPlans) {
   const targets = new Set();
   // map every runtime-affecting source to its installed target
   for (const requested of request.sources) {
-    const source = descriptor.sources[requested.id];
+    const source = sourceOf(descriptor, requested.id);
     if (source.apply === "rac-restart") {
       targets.add("rac");
     } else if (source.apply === "cloudflared-recreate") {
@@ -449,7 +449,7 @@ function requiredCommitBaselineTargets(descriptor, request, migrationPlans) {
 function rollbackWritten(descriptor, originals, written, candidates, sourcePublications) {
   // reverse partial commits
   for (const sourceId of [...written].reverse()) {
-    const source = descriptor.sources[sourceId];
+    const source = sourceOf(descriptor, sourceId);
     const candidate = candidates.get(sourceId);
     const original = originals.find((entry) => entry.id === sourceId);
     const currentExists = existsSync(source.path);
@@ -531,7 +531,7 @@ export function recoverClaimedTransaction(descriptor, request) {
     return undefined;
   }
   if (journal.phase === "committing") {
-    const envelope = readJsonFile(resolve(descriptor.controlRoot, "recovery", `${request.id}.json`), 2 * MAX_SOURCE_BYTES * Object.keys(descriptor.sources).length);
+    const envelope = readJsonFile(resolve(descriptor.controlRoot, "recovery", `${request.id}.json`), 2 * MAX_SOURCE_BYTES * (Object.keys(descriptor.sources).length + request.sources.length));
     const bundle = openLocal(readRecoveryKey(descriptor.controlRoot), envelope);
     const candidates = candidateMapFromRequest(descriptor, request, (path) => resolveCandidate(descriptor.controlRoot, request.id, path));
     rollbackWritten(descriptor, bundle.originals, journal.written ?? [], candidates, journal.sourcePublications);
@@ -555,7 +555,7 @@ export function currentHashes(descriptor, sourceIds = Object.keys(descriptor.sou
   const hashes = {};
   // hash each fixed source identity
   for (const id of sourceIds) {
-    const path = descriptor.sources[id]?.path;
+    const path = sourceOf(descriptor, id)?.path;
     if (!path) {
       throw safeError("invalid-source");
     }
@@ -970,7 +970,7 @@ function requireSuccess(result, code) {
 function verifyRequestedHashes(descriptor, sources) {
   // reject drift since the server built the manifest
   for (const source of sources) {
-    const exists = existsSync(descriptor.sources[source.id]?.path);
+    const exists = existsSync(sourceOf(descriptor, source.id)?.path);
     const current = currentHashes(descriptor, [source.id])[source.id];
     if ((source.existed !== undefined && source.existed !== exists) || current !== source.contentHash) {
       throw safeError("source-conflict");
@@ -1059,7 +1059,7 @@ function effectiveProofSources(descriptor, boot, sources) {
   // require every other boot-consumed source to remain exact
   for (const source of sources) {
     // ignore sources outside the server boot attestation
-    if (!["json", "env"].includes(descriptor.sources[source.id]?.kind)) continue;
+    if (!["json", "env"].includes(sourceOf(descriptor, source.id)?.kind)) continue;
     // replace only the attested app transition
     if (source.id === "app" && migration !== undefined) continue;
     // reject every unrelated attested hash change

@@ -189,6 +189,20 @@ describe('settings host transport', () => {
     await expect(transport.installation()).rejects.toThrowError('settings_installation_invalid');
   });
 
+  // read named icons from the library beside the app configuration and nothing else
+  it('reads a named icon beside the app configuration and refuses the built-in terminal', async () => {
+    const root = await fixtureRoot();
+    const app = join(root, 'config.json');
+    await writeFile(join(root, 'installation.json'), JSON.stringify(installation(root, { sources: { app: { path: app, serverPath: app, kind: 'json', apply: 'rac-restart' } } })), { mode: 0o600 });
+    await mkdir(join(root, 'instance-icons'));
+    await writeFile(join(root, 'instance-icons', 'rocket.svg'), '<svg/>\n');
+    const transport = new HostSettingsTransport(root, 20);
+
+    await expect(transport.read('icon-rocket')).resolves.toBe('<svg/>\n');
+    await expect(transport.read('icon-comet')).resolves.toBeUndefined();
+    await expect(transport.read('icon-terminal')).rejects.toThrowError('settings_source_unavailable');
+  });
+
   // queue only canonical operation identifiers and private request envelopes
   it('publishes asynchronous requests privately and rejects invalid operation ids', async () => {
     const root = await fixtureRoot();

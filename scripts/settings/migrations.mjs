@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { assertAllowedSource, isPathInside, safeError } from "./fs.mjs";
 import { composePrefix, validateCandidate, validateComposeModel, validateInstallationSettings } from "./validate.mjs";
-import { validateDescriptor } from "./contracts.mjs";
+import { sourceOf, validateDescriptor } from "./contracts.mjs";
 import { runBounded } from "./command.mjs";
 import { validateCheckoutHandover } from "./checkout-handover.mjs";
 
@@ -85,7 +85,7 @@ export function deriveMigrationPlan(descriptor, request, candidates, winningEnvi
   const plans = [];
   const missingOwners = [];
   for (const requested of request.sources ?? []) {
-    const source = descriptor.sources[requested.id];
+    const source = sourceOf(descriptor, requested.id);
     const candidate = candidates.get(requested.id);
     // derive merged Compose selectors after ordinary sources
     if (source.kind === "compose") {
@@ -203,7 +203,7 @@ function composeSelectorMigrationPlans(descriptor, request, selectors) {
   if (descriptor.kind !== "compose") {
     return { plans: [] };
   }
-  const requested = (request.sources ?? []).filter((entry) => descriptor.sources[entry.id]?.kind === "compose");
+  const requested = (request.sources ?? []).filter((entry) => sourceOf(descriptor, entry.id)?.kind === "compose");
   if (requested.length === 0) {
     return { plans: [] };
   }
@@ -299,9 +299,7 @@ function installationSelectorChanges(descriptor, currentPath, candidatePath) {
     ["native.environmentFile", current.native?.environmentFile, candidate.native?.environmentFile, { kind: "env" }],
     ["native.cloudflaredConfig", current.native?.cloudflaredConfig, candidate.native?.cloudflaredConfig, { kind: "cloudflared" }],
     ["native.cloudflaredCredentials", current.native?.cloudflaredCredentials, candidate.native?.cloudflaredCredentials, { kind: "credentials" }],
-    ["sources.wrapper", current.sources?.wrapper, candidate.sources?.wrapper, { kind: "wrapper" }],
-    ["sources.icons.heart", current.sources?.icons?.heart, candidate.sources?.icons?.heart, { kind: "svg" }],
-    ["sources.icons.potato", current.sources?.icons?.potato, candidate.sources?.icons?.potato, { kind: "svg" }]
+    ["sources.wrapper", current.sources?.wrapper, candidate.sources?.wrapper, { kind: "wrapper" }]
   ];
   const changes = selectors
     .filter(([, from, to]) => from && to && from !== to)
@@ -824,12 +822,10 @@ function visibleServerPath(hostCheckout, path) {
   return isPathInside(hostCheckout, path) ? serverPathFor(hostCheckout, path) : undefined;
 }
 
-// apply wrapper and icon selector paths
+// apply the wrapper selector path; icons live beside the app configuration
 function applyOptionalDesiredSources(descriptor, next, settings, hostCheckout) {
   const paths = {
-    wrapper: settings.sources?.wrapper,
-    "icon-heart": settings.sources?.icons?.heart,
-    "icon-potato": settings.sources?.icons?.potato
+    wrapper: settings.sources?.wrapper
   };
   for (const [id, value] of Object.entries(paths)) {
     if (value && descriptor.sources[id]) {

@@ -19,7 +19,7 @@ import { ensureRecoveryKey } from "./operations.mjs";
 import { preflightComposeDependencyGraph } from "./dependencies.mjs";
 import { installRecoveryCommand } from "./recovery-command.mjs";
 import { composePrefix, validateInstallationSettings } from "./validate.mjs";
-import { validateDescriptor } from "./contracts.mjs";
+import { migrateLegacyIconSources, validateDescriptor } from "./contracts.mjs";
 import { preflightMigrationPublisher } from "./migrations.mjs";
 
 const INSTALLATION_FILE = "config/remote-agent-console.installation.json";
@@ -68,11 +68,11 @@ export async function installSettingsApplier(options) {
     if (descriptor.kind === "compose") {
       preflightComposeDependencyGraph(descriptor.compose.files);
     }
-    const promoted = promoteLiveIconSources(raw);
-    // persist the fixed live icon policy only after graph preflight
-    if (promoted !== raw) {
-      descriptor = validateDescriptor(promoted, descriptorPath);
-      atomicWriteFile(descriptorPath, `${JSON.stringify(promoted, null, 2)}\n`, 0o600);
+    const migrated = migrateLegacyIconSources(raw);
+    // persist dropping the legacy icon sources only after graph preflight
+    if (migrated !== raw) {
+      descriptor = validateDescriptor(migrated, descriptorPath);
+      atomicWriteFile(descriptorPath, `${JSON.stringify(migrated, null, 2)}\n`, 0o600);
     }
     installRecoveryCommand({ repository, node: process.execPath, ...(options.recoveryBinDirectory ? { binDirectory: options.recoveryBinDirectory } : {}) });
     renderApplierUnits({ repository, controlRoot, node: process.execPath });
@@ -233,11 +233,7 @@ async function buildComposeInstallation(repository, controlRoot, existingDesired
       options: composeOptions
     },
     sources: {
-      wrapper: resolve(repository, "config/host-tmux"),
-      icons: {
-        heart: resolve(repository, "config/instance-icons/heart.svg"),
-        potato: resolve(repository, "config/instance-icons/potato.svg")
-      }
+      wrapper: resolve(repository, "config/host-tmux")
     }
   };
   const appRelative = env.RAC_CONFIG?.startsWith("/workspace/") ? env.RAC_CONFIG.slice("/workspace/".length) : "config/remote-agent-console.docker.json";
@@ -250,9 +246,7 @@ async function buildComposeInstallation(repository, controlRoot, existingDesired
     "compose-override": finalFiles[1],
     cloudflared: resolve(repository, "config/cloudflared.yml"),
     "cloudflared-credentials": credentials,
-    wrapper: resolve(repository, "config/host-tmux"),
-    "icon-heart": resolve(repository, "config/instance-icons/heart.svg"),
-    "icon-potato": resolve(repository, "config/instance-icons/potato.svg")
+    wrapper: resolve(repository, "config/host-tmux")
   }, true, profiles.includes("tunnel"));
   return {
     desired,
@@ -498,20 +492,14 @@ function buildNativeInstallation(repository, controlRoot, existingDesired, envir
     host: { checkout: repository },
     native: { environmentFile },
     sources: {
-      wrapper: resolve(repository, "config/host-tmux"),
-      icons: {
-        heart: resolve(repository, "config/instance-icons/heart.svg"),
-        potato: resolve(repository, "config/instance-icons/potato.svg")
-      }
+      wrapper: resolve(repository, "config/host-tmux")
     }
   };
   const paths = {
     app: appPath,
     env: environmentFile,
     installation: resolve(repository, INSTALLATION_FILE),
-    wrapper: resolve(repository, "config/host-tmux"),
-    "icon-heart": resolve(repository, "config/instance-icons/heart.svg"),
-    "icon-potato": resolve(repository, "config/instance-icons/potato.svg")
+    wrapper: resolve(repository, "config/host-tmux")
   };
   if (existingDesired?.native?.cloudflaredConfig) {
     paths.cloudflared = resolve(existingDesired.native.cloudflaredConfig);
@@ -548,9 +536,7 @@ function fixedSources(repository, paths, compose, cloudflaredActive) {
     "compose-override": ["compose", "rac-restart", false],
     cloudflared: ["cloudflared", cloudflaredActive ? "cloudflared-recreate" : "saved-only", true],
     "cloudflared-credentials": ["credentials", cloudflaredActive ? "cloudflared-recreate" : "saved-only", true],
-    wrapper: ["wrapper", "rac-restart", true],
-    "icon-heart": ["svg", "live", true],
-    "icon-potato": ["svg", "live", true]
+    wrapper: ["wrapper", "rac-restart", true]
   };
   const sources = {};
   // include present and explicitly optional installation sources
@@ -571,21 +557,6 @@ function fixedSources(repository, paths, compose, cloudflaredActive) {
     }
   }
   return sources;
-}
-
-// upgrade only the two installer-owned icon policies
-function promoteLiveIconSources(descriptor) {
-  let sources;
-  // copy lazily when a legacy icon policy is present
-  for (const id of ["icon-heart", "icon-potato"]) {
-    const source = descriptor.sources?.[id];
-    if (source?.kind !== "svg" || source.apply === "live") {
-      continue;
-    }
-    sources ??= { ...descriptor.sources };
-    sources[id] = { ...source, apply: "live" };
-  }
-  return sources ? { ...descriptor, sources } : descriptor;
 }
 
 // read and preserve a file mode

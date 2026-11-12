@@ -8,6 +8,8 @@ import type { AgentKind } from '../adapters/types.js';
 import { defaultIntegrationConfig, sourceSchema, type DavoSettings, type ValidatedConfig } from '../config/schema.js';
 import { appApply, environmentDescription, envApply, knownEnvironmentKeys, labels, managedEnvironment, managedEnvironmentKeys, protectedEnvironment, protectedPath } from './catalog.js';
 import { scratchHome } from '../places/places.js';
+import { instanceIconFiles } from '../instance-icon.js';
+import { iconSourceName } from '../instance-icon-name.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
 import { readPlaceholderRuntime, resolvedEnvironmentFallback, type EnvironmentFallbackContext, type PlaceholderRuntime } from './fallbacks.js';
 import { SettingsError, settingsRestartProgress, type CloudflareStatus, type HostReceipt, type HostRequest, type Installation, type InstallationSource, type SettingsFallback, type SettingsInput, type SettingsIssue, type SettingsOperation, type SettingsSnapshot, type SettingsSource, type SettingsStatus, type SettingsTarget, type SettingsValidation, type TunnelHealth } from './contracts.js';
@@ -18,7 +20,7 @@ import { applyPatch, atPath, safePath, validPatchValue } from './patches.js';
 import { applicationHash, contentHash, environmentProjection } from './proof.js';
 import { applyAuthoredProjectPatch } from './project-normalization.js';
 import { applicationSettingsSchema, installationSettingsPresentationSchema } from './schema.js';
-import { HostSettingsTransport, revealBinding, settingsControlRoot, validateInstallation, type SettingsTransport } from './transport.js';
+import { HostSettingsTransport, installationSource, revealBinding, settingsControlRoot, validateInstallation, type SettingsTransport } from './transport.js';
 import { probeTunnelRoute, TunnelHealthMonitor, type TunnelProbe } from './tunnel-health.js';
 import { installationSettingsSchema, validateApplication, validateEnvironment, validateSvg } from './validation.js';
 
@@ -257,13 +259,35 @@ export class SettingsService {
     // bind pending handovers to the same installed capability and next generation
     if (installation !== undefined && this.desiredInstallation !== undefined && (this.desiredInstallation.installationId !== installation.installationId || this.desiredInstallation.hostControlRoot !== installation.hostControlRoot || ![installation.generation, installation.generation + 1].includes(this.desiredInstallation.generation))) throw new SettingsError('settings_metadata_invalid', 503);
     this.revisionIdentity = [installation?.installationId ?? 'uninstalled', String(installation?.generation ?? 0), String(this.desiredInstallation?.generation ?? installation?.generation ?? 0)];
-    this.sourceIdentities = new Map(Object.entries(installation?.sources ?? {}).map(([id, source]) => [id, [source.path, source.serverPath ?? '', this.desiredInstallation?.sources[id]?.path ?? source.path, this.desiredInstallation?.sources[id]?.serverPath ?? source.serverPath ?? '']]));
+    this.sourceIdentities = new Map(Object.entries(installation?.sources ?? {}).map(([id, source]) => [id, this.sourceIdentity(id, source)]));
     return installation;
+  }
+  // bind a revision to the installed and pending owner of one source
+  private sourceIdentity(id: string, source: InstallationSource): string[] {
+    const desired = this.desiredInstallation === undefined ? undefined : installationSource(this.desiredInstallation, id);
+    return [source.path, source.serverPath ?? '', desired?.path ?? source.path, desired?.serverPath ?? source.serverPath ?? ''];
+  }
+  // list the icon library beside the app configuration as one live source per artwork file
+  private async iconSources(installation: Installation): Promise<Record<string, InstallationSource>> {
+    const app = installation.sources.app?.serverPath;
+    if (app === undefined) return {};
+    const ids = (await instanceIconFiles(join(dirname(app), 'instance-icons'))).map(name => `icon-${name}`);
+    return Object.fromEntries(ids.map(id => [id, installationSource(installation, id)!]));
+  }
+  // describe a valid icon name that has no file yet, so a save can create it
+  private absentIcon(installation: Installation, id: string): Document | undefined {
+    const source = installationSource(installation, id);
+    if (source === undefined || iconSourceName(id) === undefined) return undefined;
+    this.sourceIdentities.set(id, this.sourceIdentity(id, source));
+    const hash = contentHash(undefined);
+    return { source, hash, existed: false, revisionId: this.revision(id, [hash, false]) };
   }
   // read current bytes instead of cached settings values
   private async documents(installation: Installation | undefined): Promise<Map<string, Document>> {
     const fallbackPath = this.options.configPath ?? process.env.RAC_CONFIG;
-    const sources: Record<string, InstallationSource> = installation?.sources ?? (fallbackPath === undefined ? {} : { app: { path: fallbackPath, serverPath: fallbackPath, kind: 'json', apply: 'rac-restart' } });
+    const icons = installation === undefined ? {} : await this.iconSources(installation);
+    for (const [id, source] of Object.entries(icons)) this.sourceIdentities.set(id, this.sourceIdentity(id, source));
+    const sources: Record<string, InstallationSource> = installation === undefined ? (fallbackPath === undefined ? {} : { app: { path: fallbackPath, serverPath: fallbackPath, kind: 'json', apply: 'rac-restart' } }) : { ...installation.sources, ...icons };
     const documents = new Map<string, Document>();
     // read every installed source without persisting disclosure plaintext
     for (const [id, source] of Object.entries(sources)) {
@@ -353,7 +377,7 @@ export class SettingsService {
       const editorContent = currentContent !== undefined && doc.source.kind === 'env' ? partitionEnvironment(currentContent, managedEnvironmentKeys).visible : currentContent;
       const editor = editorContent === undefined ? undefined : redactEditorSource(editorContent, doc.source.kind, doc.revisionId, protectedValues);
       const hasProtectedContent = editor?.hasProtectedContent ?? (doc.source.serverPath === undefined && doc.existed);
-      const source: SettingsSource = { id, label: labels[id] ?? id, ...(controller ? { path: doc.source.path } : {}), format: doc.source.kind, exists: doc.existed, writable: controller && installation !== undefined, protected: hasProtectedContent, tracked: id === 'compose', revisionId: doc.revisionId, apply: id === 'installation' ? 'source-migration' : doc.source.apply, ...(controller && editor !== undefined ? { content: editor.content } : {}), hasProtectedContent, origin: 'Current installation file' };
+      const source: SettingsSource = { id, label: labels[id] ?? (iconSourceName(id) === undefined ? id : `${iconSourceName(id)} icon`), ...(controller ? { path: doc.source.path } : {}), format: doc.source.kind, exists: doc.existed, writable: controller && installation !== undefined, protected: hasProtectedContent, tracked: id === 'compose', revisionId: doc.revisionId, apply: id === 'installation' ? 'source-migration' : doc.source.apply, ...(controller && editor !== undefined ? { content: editor.content } : {}), hasProtectedContent, origin: 'Current installation file' };
       // derive strict recursive controls from the actual source schema
       if (doc.source.kind === 'json' || doc.source.kind === 'installation') {
         if (controller) source.value = redact(currentValue, [], protectedValues);
@@ -672,6 +696,9 @@ export class SettingsService {
     }
     // apply each explicit source intent once
     for (const change of parsed.data.changes) {
+      // a whole new icon has no listed revision; the host refuses it if the file appears first
+      const created = documents.has(change.sourceId) || change.content === undefined ? undefined : this.absentIcon(installation, change.sourceId);
+      if (created !== undefined) documents.set(change.sourceId, created);
       const doc = documents.get(change.sourceId);
       if (doc === undefined || candidates.has(change.sourceId) || change.content !== undefined && change.patches !== undefined || change.remove && (change.content !== undefined || change.patches !== undefined)) throw new SettingsError('invalid_settings_source');
       let baselineContent = sourceContents.get(change.sourceId) ?? doc.content;
@@ -686,11 +713,11 @@ export class SettingsService {
       if (change.patches !== undefined && baselineContent !== undefined && ['json', 'installation'].includes(doc.source.kind)) {
         try { baselineValue = JSON.parse(baselineContent); } catch { baselineValue = undefined; }
       }
-      const desiredSource = this.desiredInstallation?.sources[change.sourceId];
+      const desiredSource = this.desiredInstallation === undefined ? undefined : installationSource(this.desiredInstallation, change.sourceId);
       // avoid editing an old owner after its replacement file has already been prepared
       if (change.sourceId !== 'installation' && this.desiredInstallation !== undefined && (desiredSource?.path !== doc.source.path || desiredSource.serverPath !== doc.source.serverPath)) throw new SettingsError('source_migration_restart_required', 409);
       // protected or structural edits require an exact document revision
-      if (change.revisionId !== doc.revisionId) {
+      if (created === undefined && change.revisionId !== doc.revisionId) {
         const canRebase = doc.source.kind === 'json' && change.content === undefined && !change.remove && (change.patches?.length ?? 0) > 0 && change.patches!.every(patch => patch.op === 'set' && safePath(patch.path) && patch.path.length > 0 && !patch.path.some((_part, index) => protectedPath(patch.path.slice(0, index + 1))) && patch.revisionId === this.pathRevision(change.sourceId, baselineValue, patch.path));
         if (!canRebase) throw new SettingsError('settings_conflict', 409);
       }
@@ -877,7 +904,7 @@ export class SettingsService {
   // revoke only this browser's disclosure lease
   async remask(leaseId: string, sessionId: string): Promise<{ ok: true }> { if (this.leases.get(leaseId)?.sessionId === sessionId) this.leases.delete(leaseId); return { ok: true }; }
   // queue an explicit fixed restart that survives this process
-  async restart(): Promise<SettingsOperation> { return await this.serialized(async () => { const installation = await this.installation(); if (installation === undefined) throw new SettingsError('settings_applier_unavailable', 503); const documents = await this.documents(installation); const status = await this.computeStatus(installation, documents); if (status.operation !== undefined && ['queued', 'running'].includes(status.operation.state)) return status.operation; if (!status.pending) throw new SettingsError('settings_restart_not_pending', 409); const id = randomBytes(24).toString('base64url'); const operation: SettingsOperation = { id, state: 'queued' }; await this.transport.request({ version: 1, id, kind: 'restart', generation: installation.generation, targets: status.targets, sources: [...documents].map(([id, doc]) => ({ id, contentHash: doc.hash, existed: doc.existed })) }, false); await writePrivate(join(this.controlRoot, 'latest-deploy.json'), JSON.stringify({ ...operation, kind: 'restart' })); this.leases.clear(); return operation; }); }
+  async restart(): Promise<SettingsOperation> { return await this.serialized(async () => { const installation = await this.installation(); if (installation === undefined) throw new SettingsError('settings_applier_unavailable', 503); const documents = await this.documents(installation); const status = await this.computeStatus(installation, documents); if (status.operation !== undefined && ['queued', 'running'].includes(status.operation.state)) return status.operation; if (!status.pending) throw new SettingsError('settings_restart_not_pending', 409); const id = randomBytes(24).toString('base64url'); const operation: SettingsOperation = { id, state: 'queued' }; await this.transport.request({ version: 1, id, kind: 'restart', generation: installation.generation, targets: status.targets, sources: [...documents].filter(([id]) => Object.hasOwn(installation.sources, id)).map(([id, doc]) => ({ id, contentHash: doc.hash, existed: doc.existed })) }, false); await writePrivate(join(this.controlRoot, 'latest-deploy.json'), JSON.stringify({ ...operation, kind: 'restart' })); this.leases.clear(); return operation; }); }
   // return bounded redacted durable operation progress
   async operation(id: string): Promise<SettingsOperation | undefined> { if (!/^[A-Za-z0-9_-]{20,64}$/u.test(id)) throw new SettingsError('invalid_settings_operation'); const result = await this.metadata<SettingsOperation>(`status/${id}.json`); const restart = settingsRestartProgress(result?.restart); return result === undefined ? undefined : { id: result.id, state: result.state, ...(result.kind === 'cloudflare' ? { kind: result.kind } : {}), ...(result.phase ? { phase: result.phase } : {}), ...(result.error && /^[a-z0-9_-]{1,80}$/u.test(result.error) ? { error: result.error } : {}), ...(restart ? { restart } : {}) }; }
 }

@@ -1,9 +1,10 @@
 import { createDecipheriv, createHash, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes } from 'node:crypto';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { rm } from 'node:fs/promises';
-import { SettingsError, settingsRestartProgress, type HostReply, type HostRequest, type Installation, type RevealContext, type SettingsIssue } from './contracts.js';
+import { SettingsError, settingsRestartProgress, type HostReply, type HostRequest, type Installation, type InstallationSource, type RevealContext, type SettingsIssue } from './contracts.js';
 import { readBounded, writePrivate } from './files.js';
+import { iconSourceName } from '../instance-icon-name.js';
 
 export type SettingsTransport = { installation(): Promise<Installation | undefined>; request(request: HostRequest, wait?: boolean, published?: () => void): Promise<HostReply>; read(sourceId: string, context?: RevealContext): Promise<string | undefined>; inspect?(sourceId: string): Promise<NonNullable<HostReply['sourceMetadata']>> };
 // frame disclosure identities with unambiguous bounded lengths
@@ -11,10 +12,12 @@ export function revealBinding(fields: (string | number | boolean)[]): string { r
 const pathSchema = z.string().max(4096).refine(value => isAbsolute(value) && !/[\0\r\n]/u.test(value));
 // allow Docker's unlimited sentinel or bounded concurrency
 const composeParallelSchema = z.number().int().refine(value => value === -1 || value >= 1 && value <= 64);
-const sourceIdSchema = z.enum(['app', 'env', 'installation', 'compose', 'compose-override', 'cloudflared', 'cloudflared-credentials', 'wrapper', 'icon-heart', 'icon-potato']);
+const sourceIdSchema = z.enum(['app', 'env', 'installation', 'compose', 'compose-override', 'cloudflared', 'cloudflared-credentials', 'wrapper']);
+// older installers wrote two fixed icon files; their ids now resolve as named icons
+const legacyIconSourceIds = ['icon-heart', 'icon-potato'] as const;
 const descriptorSchema = z.object({
   version: z.literal(1), installationId: z.string().regex(/^[A-Za-z0-9_-]{12,64}$/u), generation: z.number().int().positive(), uid: z.number().int().nonnegative(), gid: z.number().int().nonnegative(), kind: z.enum(['compose', 'systemd']), hostControlRoot: pathSchema, hostCheckout: pathSchema, serverCheckout: pathSchema, allowedRoots: z.array(pathSchema).min(1).max(32),
-  sources: z.record(sourceIdSchema, z.object({ path: pathSchema, serverPath: pathSchema.optional(), kind: z.enum(['json', 'env', 'compose', 'cloudflared', 'credentials', 'wrapper', 'svg', 'installation']), optional: z.boolean().optional(), apply: z.enum(['saved-only', 'rac-restart', 'cloudflared-recreate', 'live']) }).strict()),
+  sources: z.record(z.union([sourceIdSchema, z.enum(legacyIconSourceIds)]), z.object({ path: pathSchema, serverPath: pathSchema.optional(), kind: z.enum(['json', 'env', 'compose', 'cloudflared', 'credentials', 'wrapper', 'svg', 'installation']), optional: z.boolean().optional(), apply: z.enum(['saved-only', 'rac-restart', 'cloudflared-recreate', 'live']) }).strict()),
   compose: z.object({ projectDirectory: pathSchema, projectName: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/u), files: z.array(pathSchema).min(1).max(16), envFiles: z.array(pathSchema).max(16), profiles: z.array(z.string().regex(/^[A-Za-z0-9_.-]+$/u)).max(16), options: z.object({ parallel: composeParallelSchema.optional(), compatibility: z.boolean().optional() }).strict().optional() }).strict().optional(),
   native: z.object({ unit: z.literal('remote-agent-console.service'), environmentFile: pathSchema, cloudflaredUnit: z.string().regex(/^[A-Za-z0-9_.@-]{1,128}\.service$/u).optional() }).strict().optional()
 }).strict();
@@ -29,10 +32,22 @@ function migrationIssues(request: HostRequest, metadata: unknown): SettingsIssue
   if (new Set(parsed.data.sourceIds).size !== parsed.data.sourceIds.length || parsed.data.sourceIds.some(sourceId => !requested.has(sourceId))) throw new SettingsError('settings_helper_invalid', 503);
   return parsed.data.sourceIds.map(sourceId => ({ sourceId, path: [], code: 'migration_required', message: 'Source handover is required before saving.' }));
 }
+// drop the legacy fixed heart and potato sources
+function withoutLegacyIconSources(value: Installation): Installation {
+  return { ...value, sources: Object.fromEntries(Object.entries(value.sources).filter(([id]) => !(legacyIconSourceIds as readonly string[]).includes(id))) };
+}
+// resolve a fixed source, or a named icon: always `<name>.svg` in the `instance-icons` directory beside the app configuration
+export function installationSource(installation: Installation, id: string): InstallationSource | undefined {
+  if (Object.hasOwn(installation.sources, id)) return installation.sources[id];
+  const name = iconSourceName(id); const app = installation.sources.app;
+  if (name === undefined || app === undefined) return undefined;
+  const file = `instance-icons/${name}.svg`;
+  return { path: join(dirname(app.path), file), ...(app.serverPath === undefined ? {} : { serverPath: join(dirname(app.serverPath), file) }), kind: 'svg', optional: true, apply: 'live' };
+}
 // validate a descriptor without treating a path or transcript as authority
 export function validateInstallation(raw: unknown): Installation {
   let value: Installation;
-  try { value = descriptorSchema.parse(raw); } catch { throw new SettingsError('settings_installation_invalid', 503); }
+  try { value = withoutLegacyIconSources(descriptorSchema.parse(raw)); } catch { throw new SettingsError('settings_installation_invalid', 503); }
   // bound every immutable selector to installed host roots
   if (value.uid !== process.getuid?.() || value.gid !== process.getgid?.() || !contained(value.hostCheckout, value.allowedRoots) || Object.values(value.sources).some(source => !contained(source.path, value.allowedRoots)) || value.kind === 'compose' && (value.compose === undefined || !contained(value.compose.projectDirectory, value.allowedRoots) || [...value.compose.files, ...value.compose.envFiles].some(path => !contained(path, value.allowedRoots))) || value.kind === 'systemd' && (value.native === undefined || !contained(value.native.environmentFile, value.allowedRoots))) throw new SettingsError('settings_installation_invalid', 503);
   return value;
@@ -93,7 +108,7 @@ export class HostSettingsTransport implements SettingsTransport {
   // inspect host-only identity without disclosing its bytes
   async inspect(sourceId: string): Promise<NonNullable<HostReply['sourceMetadata']>> {
     const installation = await this.installation();
-    if (installation?.sources[sourceId] === undefined) throw new SettingsError('settings_source_unavailable', 503);
+    if (installation === undefined || installationSource(installation, sourceId) === undefined) throw new SettingsError('settings_source_unavailable', 503);
     const id = randomBytes(24).toString('base64url');
     try {
       const result = await this.request({ version: 1, id, kind: 'inspect', generation: installation.generation, inspect: { sourceId } });
@@ -106,7 +121,7 @@ export class HostSettingsTransport implements SettingsTransport {
   // transfer explicitly requested host bytes without durable plaintext
   async read(sourceId: string, context?: RevealContext): Promise<string | undefined> {
     const installation = await this.installation();
-    const source = installation?.sources[sourceId];
+    const source = installation === undefined ? undefined : installationSource(installation, sourceId);
     // restrict reads to installed source identities
     if (installation === undefined || source === undefined) throw new SettingsError('settings_source_unavailable', 503);
     // directory-bound sources are readable locally

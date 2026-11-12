@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import argon2 from 'argon2';
-import { mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validateConfig, type ValidatedConfig } from '../src/config/schema.js';
@@ -8,7 +8,7 @@ import { SettingsError, type CloudflareStatus, type HostReply, type HostRequest,
 import { readBounded, writePrivate } from '../src/settings/files.js';
 import { applicationHash, contentHash, environmentProjection } from '../src/settings/proof.js';
 import { SettingsService } from '../src/settings/service.js';
-import type { SettingsTransport } from '../src/settings/transport.js';
+import { installationSource, type SettingsTransport } from '../src/settings/transport.js';
 import { TunnelHealthMonitor, type TunnelProbe } from '../src/settings/tunnel-health.js';
 
 type RequestRecord = { request: HostRequest; wait: boolean | undefined };
@@ -341,14 +341,14 @@ class FakeTransport implements SettingsTransport {
   // read one allowlisted fixture source
   async read(sourceId: string): Promise<string | undefined> {
     this.reads.push(sourceId);
-    const source = this.descriptor.sources[sourceId];
+    const source = installationSource(this.descriptor, sourceId);
     // reject uncataloged fixture reads
     if (source === undefined) throw new SettingsError('settings_source_unavailable', 503);
     return await readBounded(source.serverPath ?? source.path, source.optional);
   }
   // return only bounded identity metadata for host-only fixture sources
   async inspect(sourceId: string): Promise<{ sourceId: string; contentHash: string; existed: boolean }> {
-    const selected = this.descriptor.sources[sourceId]!;
+    const selected = installationSource(this.descriptor, sourceId)!;
     const content = await readBounded(selected.path, selected.optional);
     return { sourceId, contentHash: contentHash(content), existed: content !== undefined };
   }
@@ -369,7 +369,7 @@ class FakeTransport implements SettingsTransport {
     if (request.kind === 'commit') {
       // apply each requested fixture source
       for (const selected of request.sources ?? []) {
-        const source = this.descriptor.sources[selected.id];
+        const source = installationSource(this.descriptor, selected.id);
         // reject uncataloged fixture writes
         if (source === undefined) throw new SettingsError('settings_source_unavailable', 503);
         const destination = source.serverPath ?? source.path;
@@ -1172,6 +1172,44 @@ describe('settings save and validation', () => {
 
     expect(await readFile(current.appPath, 'utf8')).toBe(`${JSON.stringify(current.app, null, 2)}\n`);
     expect(await readFile(current.envPath, 'utf8')).toBe(current.env);
+  });
+
+  // list the icon library beside the app configuration as one live artwork source per file
+  it('lists one source per icon file and creates or removes named icons', async () => {
+    const current = await fixture();
+    const directory = join(current.root, 'instance-icons');
+    await mkdir(directory);
+    const artwork = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>\n';
+    for (const file of ['rocket-2.svg', 'heart.svg', 'terminal.svg', 'Bad_Name.svg', 'notes.txt']) await writeFile(join(directory, file), artwork);
+
+    const before = await current.service.snapshot(true, 'controller-session');
+    const icons = before.sources.filter(source => source.id.startsWith('icon-'));
+    expect(icons.map(({ id, label, format, apply, exists, value }) => ({ id, label, format, apply, exists, value }))).toEqual([
+      { id: 'icon-heart', label: 'heart icon', format: 'svg', apply: 'live', exists: true, value: artwork },
+      { id: 'icon-rocket-2', label: 'rocket-2 icon', format: 'svg', apply: 'live', exists: true, value: artwork }
+    ]);
+
+    // a new name needs no listed revision: the host refuses it if the file appeared meanwhile
+    await current.service.save({ changes: [{ sourceId: 'icon-comet', revisionId: 'new', content: artwork }] }, 'controller-session');
+    expect(await readFile(join(directory, 'comet.svg'), 'utf8')).toBe(artwork);
+    expect(current.transport.records.at(-1)?.request.sources).toEqual([{ id: 'icon-comet', contentHash: contentHash(undefined), existed: false, candidate: 'icon-comet' }]);
+    const created = source(await current.service.snapshot(true, 'controller-session'), 'icon-comet');
+
+    await current.service.save({ changes: [{ sourceId: 'icon-comet', revisionId: created.revisionId, remove: true }] }, 'controller-session');
+    await expect(stat(join(directory, 'comet.svg'))).rejects.toMatchObject({ code: 'ENOENT' });
+    for (const sourceId of ['icon-terminal', 'icon-..', 'icon-Bad_Name']) await expect(current.service.save({ changes: [{ sourceId, revisionId: 'new', content: artwork }] }, 'controller-session')).rejects.toMatchObject({ code: 'invalid_settings_source' });
+  });
+
+  // live artwork is not a restart input, so a large library never bloats the manifest
+  it('leaves icon sources out of the restart manifest', async () => {
+    const current = await fixture();
+    const directory = join(current.root, 'instance-icons');
+    await mkdir(directory);
+    await writeFile(join(directory, 'heart.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>\n');
+
+    await current.service.restart();
+
+    expect(current.transport.records.at(-1)?.request.sources?.map(source => source.id)).toEqual(['app', 'env']);
   });
 
   // use exact receipt hashes for non-disclosing host-only status checks

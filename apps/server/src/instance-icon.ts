@@ -14,17 +14,20 @@ export function instanceIconSvg(): string {
 
 const libraryDirectory = (configPath: string): string => join(dirname(configPath), 'instance-icons');
 
-// list the built-in terminal, then each named artwork file in the library
-export async function listInstanceIcons(configPath: string | undefined = process.env.RAC_CONFIG): Promise<InstanceIcon[]> {
-  if (configPath === undefined) return ['terminal'];
+// name each artwork file in one library directory, sorted and without the built-in terminal
+export async function instanceIconFiles(directory: string): Promise<InstanceIcon[]> {
   try {
-    const entries = await readdir(libraryDirectory(configPath), { withFileTypes: true });
-    const names = entries.filter(entry => entry.isFile() && entry.name.endsWith('.svg')).map(entry => entry.name.slice(0, -4)).filter(name => name !== 'terminal' && isInstanceIcon(name));
-    return ['terminal', ...names.sort()];
+    const entries = await readdir(directory, { withFileTypes: true });
+    return entries.filter(entry => entry.isFile() && entry.name.endsWith('.svg')).map(entry => entry.name.slice(0, -4)).filter(name => name !== 'terminal' && isInstanceIcon(name)).sort();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('icon library unavailable', { cause: error });
-    return ['terminal'];
+    return [];
   }
+}
+
+// list the built-in terminal, then each named artwork file in the library
+export async function listInstanceIcons(configPath: string | undefined = process.env.RAC_CONFIG): Promise<InstanceIcon[]> {
+  return configPath === undefined ? ['terminal'] : ['terminal', ...await instanceIconFiles(libraryDirectory(configPath))];
 }
 
 // load trusted server-local artwork beside the configuration

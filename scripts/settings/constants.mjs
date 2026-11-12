@@ -39,10 +39,11 @@ export const SOURCE_IDS = new Set([
   "compose-override",
   "cloudflared",
   "cloudflared-credentials",
-  "wrapper",
-  "icon-heart",
-  "icon-potato"
+  "wrapper"
 ]);
+// one `<name>.svg` in the installed icon directory; mirrors apps/server/src/instance-icon-name.ts
+export const ICON_SOURCE_PATTERN = /^icon-([a-z0-9][a-z0-9-]{0,31})$/u;
+export const MAX_ICON_SOURCES = 64;
 export const CONTROL_DIRECTORIES = [
   "queued",
   "claimed",

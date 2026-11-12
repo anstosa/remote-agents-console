@@ -7,3 +7,9 @@ export const instanceIconHashPattern = /^[A-Za-z0-9_-]{43}$/u;
 export function isInstanceIcon(value: string): value is InstanceIcon {
   return instanceIconPattern.test(value);
 }
+
+// name the library artwork an `icon-<name>` settings source edits; the built-in terminal has no file
+export function iconSourceName(sourceId: string): InstanceIcon | undefined {
+  const name = sourceId.startsWith('icon-') ? sourceId.slice('icon-'.length) : '';
+  return name !== 'terminal' && isInstanceIcon(name) ? name : undefined;
+}

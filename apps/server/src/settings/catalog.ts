@@ -1,6 +1,6 @@
 import type { SettingsApply, SettingsFallback, SettingsSchema } from './contracts.js';
 
-export const labels: Record<string, string> = { app: 'Application configuration', env: 'Environment & keys', installation: 'Installation', compose: 'Base Compose', 'compose-override': 'Docker', cloudflared: 'Cloudflare tunnel', 'cloudflared-credentials': 'Cloudflare credentials', wrapper: 'Installation wrapper', 'icon-heart': 'Heart icon', 'icon-potato': 'Potato icon' };
+export const labels: Record<string, string> = { app: 'Application configuration', env: 'Environment & keys', installation: 'Installation', compose: 'Base Compose', 'compose-override': 'Docker', cloudflared: 'Cloudflare tunnel', 'cloudflared-credentials': 'Cloudflare credentials', wrapper: 'Installation wrapper' };
 export const composeOptionSettings = {
   parallel: { default: -1, placeholder: '-1 (from Docker Compose default; unlimited)', description: 'Maximum simultaneous Docker operations, such as image pulls and builds. This does not limit RAC agents or requests.' },
   compatibility: { default: false, placeholder: 'false', description: 'Use legacy Compose behavior, including underscore-separated container names.' }

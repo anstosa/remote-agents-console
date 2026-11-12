@@ -6,8 +6,8 @@ import {
   unlinkSync
 } from "node:fs";
 import { basename, resolve } from "node:path";
-import { MAX_REQUEST_BYTES, PROTOCOL_VERSION, SOURCE_IDS } from "./constants.mjs";
-import { readRequest, validateDescriptor } from "./contracts.mjs";
+import { MAX_REQUEST_BYTES, PROTOCOL_VERSION } from "./constants.mjs";
+import { isSourceId, readRequest, validateDescriptor } from "./contracts.mjs";
 import { sha256 } from "./crypto.mjs";
 import { atomicWriteFile, inspectOwnedPath, readBoundedFile, readJsonFile, safeError, syncDirectory } from "./fs.mjs";
 import { processOperation, recoverClaimedTransaction, removeOperationStage } from "./operations.mjs";
@@ -298,7 +298,7 @@ function migrationErrorMetadata(error, request) {
   const sourceIds = [];
   // filter unknown, foreign and duplicate identities
   for (const sourceId of error.sourceIds) {
-    if (typeof sourceId !== "string" || !SOURCE_IDS.has(sourceId) || !requested.has(sourceId) || sourceIds.includes(sourceId)) {
+    if (typeof sourceId !== "string" || !isSourceId(sourceId) || !requested.has(sourceId) || sourceIds.includes(sourceId)) {
       continue;
     }
     sourceIds.push(sourceId);

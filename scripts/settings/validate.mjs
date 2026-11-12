@@ -148,6 +148,7 @@ export function validateInstallationSettings(bytes) {
       !isRecord(value.sources) ||
       !Object.keys(value.sources).every((key) => allowed.has(key)) ||
       (value.sources.wrapper !== undefined && typeof value.sources.wrapper !== "string") ||
+      // older installers named the heart and potato files; icons now live beside the app configuration
       (value.sources.icons !== undefined && (
         !isRecord(value.sources.icons) ||
         !Object.keys(value.sources.icons).every((key) => new Set(["heart", "potato"]).has(key)) ||

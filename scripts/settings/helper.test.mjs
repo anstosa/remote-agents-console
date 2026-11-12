@@ -13,6 +13,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync
 } from "node:fs";
@@ -737,6 +738,24 @@ test("installed Compose descriptors accept only supported parallel limits", () =
   }
 });
 
+test("legacy heart and potato sources drop out and their ids resolve as named icons", async () => {
+  const current = fixture();
+  const path = resolve(current.controlRoot, "installation.json");
+  const directory = resolve(current.root, "instance-icons");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const heart = resolve(directory, "heart.svg");
+  atomicWriteFile(heart, '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>\n', 0o600);
+  const descriptor = JSON.parse(readFileSync(path, "utf8"));
+  descriptor.sources["icon-heart"] = { path: heart, serverPath: "/workspace/config/instance-icons/heart.svg", kind: "svg", optional: true, apply: "rac-restart" };
+  descriptor.sources["icon-potato"] = { path: resolve(directory, "potato.svg"), serverPath: "/workspace/config/instance-icons/potato.svg", kind: "svg", optional: true, apply: "live" };
+  atomicWriteFile(path, `${JSON.stringify(descriptor)}\n`, 0o600);
+  assert.deepEqual(Object.keys(validateDescriptor(descriptor, path).sources), ["app"]);
+  // the legacy ids keep naming the same files as any other icon
+  const removed = await commitIcon(current, "legacy_heart_remove_0001", { id: "icon-heart", existed: true, contentHash: sha256(readFileSync(heart)), remove: true });
+  assert.equal(removed.state, "complete");
+  assert.equal(existsSync(heart), false);
+});
+
 test("svg validator permits static artwork and rejects active content", () => {
   assert.doesNotThrow(() => validateSvg(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>')));
   assert.throws(() => validateSvg(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')), /invalid-svg/);
@@ -906,13 +925,17 @@ test("native installer creates desired source before publishing descriptor", asy
       recoveryBinDirectory: resolve(repository, "bin"),
       runner
     });
-    assert.equal(JSON.parse(readFileSync(resolve(repository, "config/remote-agent-console.installation.json"), "utf8")).version, 1);
+    const icons = resolve(repository, "config/instance-icons");
+    const desired = JSON.parse(readFileSync(resolve(repository, "config/remote-agent-console.installation.json"), "utf8"));
+    assert.equal(desired.version, 1);
+    assert.equal(desired.sources.icons, undefined);
     const installedDescriptorPath = resolve(installed.controlRoot, "installation.json");
     const installedDescriptor = JSON.parse(readFileSync(installedDescriptorPath, "utf8"));
     assert.equal(installedDescriptor.hostControlRoot, installed.controlRoot);
-    assert.equal(installedDescriptor.sources["icon-heart"].apply, "live");
-    installedDescriptor.sources["icon-heart"].apply = "rac-restart";
-    installedDescriptor.sources["icon-potato"].apply = "rac-restart";
+    assert.equal(Object.keys(installedDescriptor.sources).some((id) => id.startsWith("icon-")), false);
+    // reinstate the legacy fixed icon sources an older installer wrote
+    installedDescriptor.sources["icon-heart"] = { path: resolve(icons, "heart.svg"), serverPath: resolve(icons, "heart.svg"), kind: "svg", optional: true, apply: "rac-restart" };
+    installedDescriptor.sources["icon-potato"] = { path: resolve(icons, "potato.svg"), serverPath: resolve(icons, "potato.svg"), kind: "svg", optional: true, apply: "live" };
     atomicWriteFile(installedDescriptorPath, `${JSON.stringify(installedDescriptor, null, 2)}\n`, 0o600);
     const repaired = await installSettingsApplier({
       repository,
@@ -922,8 +945,9 @@ test("native installer creates desired source before publishing descriptor", asy
       recoveryBinDirectory: resolve(repository, "bin"),
       runner
     });
-    assert.equal(repaired.descriptor.sources["icon-heart"].apply, "live");
-    assert.equal(repaired.descriptor.sources["icon-potato"].apply, "live");
+    const persisted = JSON.parse(readFileSync(installedDescriptorPath, "utf8"));
+    assert.equal(Object.keys(persisted.sources).some((id) => id.startsWith("icon-")), false);
+    assert.equal(Object.keys(repaired.descriptor.sources).some((id) => id.startsWith("icon-")), false);
   } finally {
     if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previousStateHome;
@@ -2068,6 +2092,59 @@ test("existence checks reject optional create and delete races", async () => {
     sources: [{ id: "icon-heart", existed: true, contentHash: sha256(readFileSync(optional)), remove: true }]
   });
   assert.equal(existsSync(optional), false);
+});
+
+// stage one icon commit through the durable queue and return its terminal status
+async function commitIcon(current, id, source) {
+  const stage = resolve(current.controlRoot, "staging", id);
+  mkdirSync(stage, { recursive: true, mode: 0o700 });
+  if (source.candidate !== undefined) atomicWriteFile(resolve(stage, source.candidate), source.bytes, 0o600);
+  const { bytes: _bytes, ...requested } = source;
+  enqueueRequest(current.controlRoot, { version: 1, id, kind: "commit", generation: 1, sources: [requested] });
+  await drainQueue(current.descriptor, { emptyDelayMs: 0 });
+  return JSON.parse(readFileSync(resolve(current.controlRoot, "status", `${id}.json`), "utf8"));
+}
+
+test("commits create and remove any named icon beside the app configuration", async () => {
+  const current = fixture();
+  const rocket = resolve(current.root, "instance-icons", "rocket-2.svg");
+  const artwork = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>\n';
+  const created = await commitIcon(current, "icon_create_commit_0001", { id: "icon-rocket-2", existed: false, contentHash: sha256(Buffer.alloc(0)), candidate: "icon-rocket-2", bytes: artwork });
+  assert.equal(created.state, "complete");
+  assert.equal(readFileSync(rocket, "utf8"), artwork);
+  assert.deepEqual(created.privateRecord.targets, []);
+  const removed = await commitIcon(current, "icon_remove_commit_0001", { id: "icon-rocket-2", existed: true, contentHash: sha256(Buffer.from(artwork)), remove: true });
+  assert.equal(removed.state, "complete");
+  assert.equal(existsSync(rocket), false);
+});
+
+test("icon commits reject traversal, reserved and linked names without writing", async () => {
+  const current = fixture();
+  mkdirSync(resolve(current.root, "instance-icons"), { mode: 0o700 });
+  const outside = resolve(current.root, "outside.svg");
+  atomicWriteFile(outside, "<svg/>\n", 0o600);
+  symlinkSync(outside, resolve(current.root, "instance-icons", "linked.svg"));
+  const artwork = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>\n';
+  const attempts = [["icon-../x", "invalid-request"], ["icon-terminal", "invalid-request"], ["icon-Upper", "invalid-request"], ["icon-a/b", "invalid-request"], ["icon-linked", "unsafe-source"]];
+  for (const [index, [sourceId, code]] of attempts.entries()) {
+    const status = await commitIcon(current, `icon_rejected_commit_000${index}`, { id: sourceId, existed: false, contentHash: sha256(Buffer.alloc(0)), candidate: "icon", bytes: artwork });
+    assert.equal(status.state, "failed", sourceId);
+    assert.equal(status.error, code, sourceId);
+  }
+  assert.equal(existsSync(resolve(current.root, "x.svg")), false);
+  assert.equal(existsSync(resolve(current.root, "instance-icons", "terminal.svg")), false);
+  assert.equal(readFileSync(outside, "utf8"), "<svg/>\n");
+});
+
+test("icon commits refuse an icon directory linked outside the installed roots", async () => {
+  const current = fixture();
+  const elsewhere = mkdtempSync(resolve(tmpdir(), "rac-icons-elsewhere-"));
+  symlinkSync(elsewhere, resolve(current.root, "instance-icons"));
+  const artwork = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>\n';
+  const status = await commitIcon(current, "icon_linked_directory_01", { id: "icon-rocket", existed: false, contentHash: sha256(Buffer.alloc(0)), candidate: "icon-rocket", bytes: artwork });
+  assert.equal(status.state, "failed");
+  assert.equal(status.error, "unsafe-source");
+  assert.equal(existsSync(resolve(elsewhere, "rocket.svg")), false);
 });
 
 test("missing wrappers validate without execution and commit owner-only executable bytes", async () => {
