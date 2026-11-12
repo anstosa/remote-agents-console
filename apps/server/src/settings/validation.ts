@@ -78,8 +78,9 @@ export function validateSvg(content: string): void {
   const attributes = new Set(['xmlns', 'viewBox', 'width', 'height', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'd', 'points', 'fill', 'fill-rule', 'fill-opacity', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-opacity', 'opacity', 'transform', 'id', 'role', 'aria-label']);
   const stack: string[] = [];
   let end = 0;
-  // validate each token rather than only the root; the patterns stay linear because peers supply this markup
-  for (const match of content.matchAll(/<(\/?)([A-Za-z][A-Za-z0-9-]*)([^<>]*)>/gu)) {
+  // validate each token rather than only the root; the patterns stay linear because peers supply this markup,
+  // so the lookahead stops an unclosed tag from retrying every shorter name
+  for (const match of content.matchAll(/<(\/?)([A-Za-z][A-Za-z0-9-]*)(?![A-Za-z0-9-])([^<>]*)>/gu)) {
     // permit text only in inert title and description elements
     if (content.slice(end, match.index).trim() !== '' && !['title', 'desc'].includes(stack.at(-1) ?? '')) throw new SettingsError('invalid_static_icon');
     const name = match[2]!;

@@ -181,9 +181,20 @@ Only the terminal icon is bundled. Every other icon is a server-local SVG in an
 `instance-icons/` directory beside the file selected by `RAC_CONFIG`: the file
 `<name>.svg` is the icon `<name>`, where a name is 1-32 lowercase letters, digits
 and hyphens starting with a letter or digit (`heart.svg` is `"icon": "heart"`).
-`terminal` is reserved for the bundled icon. Settings lists the icons it finds in
-the directory. The favicon and server menu load those files at request time; a
-missing file uses the terminal icon instead.
+`terminal` is reserved for the bundled icon. The favicon and server menu load
+those files at request time; a missing file uses the terminal icon instead.
+
+**Settings → Application → Server icon and artwork** manages the library when the
+host settings applier is installed. Each icon file is listed with a preview and
+opens in an editor; **Load SVG file** replaces the draft with a file's contents,
+and pasting into the editor also works. **Add icon** takes a new name and stages
+an empty icon to fill the same way, and the trash button stages a removal. Save
+changes writes the files, validated against the static-SVG rules. The **Server
+icon** picker offers Terminal and every library icon, including ones added but
+not yet saved. Removing the selected icon warns that the server will show the
+terminal icon until another is picked. A hand-placed file that breaks the
+static-SVG rules still draws locally, but peers refuse it; Settings marks it
+**Peers show Terminal**.
 Keep custom artwork out of Git and provision it separately on each host. The
 Compose checkout's `config/instance-icons/` directory is ignored by Git and
 excluded from the build context; its runtime bind mount makes the files available

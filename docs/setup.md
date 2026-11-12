@@ -187,7 +187,9 @@ be reused as the federation credential. The status API exposes only the
 server's published name and icon (its name and the hash of its artwork) plus
 aggregate question, completed, idle, or unavailable attention; a second signed
 peer endpoint returns that artwork. Each endpoint's signature is bound to it, and
-both reject unsigned or stale peer requests.
+both reject unsigned or stale peer requests. A peer whose artwork is not a
+static SVG the viewer accepts shows the terminal icon there; its own Settings
+marks that library icon **Peers show Terminal** (see [USAGE.md](../USAGE.md)).
 
 To run the console and its managed tmux/Codex sessions in Docker instead, see
 [the Docker Compose guide](docker.md).

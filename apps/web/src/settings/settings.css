@@ -506,6 +506,10 @@ button.settings-installation-file-link:disabled { background: transparent; color
 .settings-icon-source > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .settings-icon-source-content { display: grid; min-width: 0; gap: .7rem; padding: .7rem; border-top: 1px solid var(--surface-1); }
 .settings-icon-source-content > code { overflow-wrap: anywhere; color: var(--overlay-1); font: 500 .6rem var(--font-mono); }
+/* a file input dressed as the same link-style action the icon picker uses */
+.settings-icon-file { width: max-content; padding: .3rem .48rem; border-radius: var(--control-radius); color: var(--blue); font: 700 .6rem var(--font-mono); cursor: pointer; }
+.settings-icon-file:focus-within { outline: 2px solid var(--blue); outline-offset: 2px; }
+.settings-icon-file:has(input:disabled) { color: var(--overlay-0); cursor: default; }
 
 /* keep file-backed shortcut controls inside a resizable settings split */
 .settings-keyboard { display: grid; min-width: 0; gap: .8rem; }

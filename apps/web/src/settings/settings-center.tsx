@@ -26,7 +26,7 @@ import { SettingsMultiSelect, SettingsSelect, type SettingsMultiSelectOption, ty
 import { inheritedProjectButtons, isConfiguredButtonPath, SettingsButtonColorSwatch, SettingsButtonFields, SettingsButtonPreview } from './button-fields.js';
 import { CloudflareSettings, useCloudflareSetupDraft } from './cloudflare-settings.js';
 import { GoogleCalendarSettings, useGoogleCalendarSetup } from './google-calendar-settings.js';
-import { fetchInstanceIcons, iconSourceName, InstanceIconPreview, isInstanceIconName, type InstanceIconName } from './icon-preview.js';
+import { fetchInstanceIcons, iconSourceName, InstanceIconPreview, isInstanceIconName, type LibraryIcon } from './icon-preview.js';
 import { composeOptionSettings, environmentDescription, knownEnvironmentKeys, labels as sourceLabels, protectedSettingIdentity } from '../../../server/src/settings/catalog.js';
 import { buildSettingsSearchIndex, type SettingsSearchResult } from './search-index.js';
 import { SettingsSearch, SettingsSearchPath, useSettingsSearchNavigation, type SettingsSearchDestination } from './search.js';
@@ -297,6 +297,10 @@ const replacementPatch = (draft: Draft | undefined, path: string[]): SettingsPat
 
 // distinguish file edits from an optional handover choice
 const hasDraftMutation = (draft: Draft | undefined): boolean => draft !== undefined && (draft.patches.length > 0 || draft.content !== undefined || draft.remove !== undefined);
+
+// a staged icon has no file or revision yet; the server creates it on save
+const newIconRevision = 'new';
+const newIconSource = (name: string): SettingsSource => ({ id: `icon-${name}`, label: `${name} icon`, format: 'svg', exists: false, writable: true, protected: false, tracked: false, revisionId: newIconRevision, apply: 'live', hasProtectedContent: false });
 
 // preview only ordinary or server-redacted artwork never revealed credential bytes
 const iconPreviewContent = (source: SettingsSource, draft?: Draft): string | undefined => draft?.content !== undefined && !draft.disclosureContent ? draft.content : source.content ?? (source.exists && !source.protected && typeof source.value === 'string' ? source.value : undefined);
@@ -1249,7 +1253,7 @@ function AdapterSettingsCard({ label, path, configured, unimplemented, disabled,
 }
 
 // render every schema kind with collection-preserving patches
-function SchemaField({ source, schema: providedSchema, value, path, draft, disclosures, issues, disabled: inheritedDisabled, navigationDisabled: inheritedNavigationDisabled = inheritedDisabled, onPatch, onReveal, onRemask, onHideCollection, remoteServers = [], instanceIcons = ['terminal'], installationKind, renderAdapterEnvironment }: { source: SettingsSource; schema?: SettingsSchema; value: unknown; path: string[]; draft?: Draft; disclosures: Map<string, Disclosure>; issues: SettingsIssue[]; disabled: boolean; navigationDisabled?: boolean; onPatch: SetPatch; onReveal: (source: SettingsSource, path: string[]) => Promise<void>; onRemask: (key: string) => Promise<void>; onHideCollection?: HideCollection; remoteServers?: readonly RemoteServerDefaults[]; instanceIcons?: readonly InstanceIconName[]; installationKind?: SettingsSnapshot['installationKind']; renderAdapterEnvironment?: (adapter: string) => ReactNode }) {
+function SchemaField({ source, schema: providedSchema, value, path, draft, disclosures, issues, disabled: inheritedDisabled, navigationDisabled: inheritedNavigationDisabled = inheritedDisabled, onPatch, onReveal, onRemask, onHideCollection, remoteServers = [], installationKind, renderAdapterEnvironment }: { source: SettingsSource; schema?: SettingsSchema; value: unknown; path: string[]; draft?: Draft; disclosures: Map<string, Disclosure>; issues: SettingsIssue[]; disabled: boolean; navigationDisabled?: boolean; onPatch: SetPatch; onReveal: (source: SettingsSource, path: string[]) => Promise<void>; onRemask: (key: string) => Promise<void>; onHideCollection?: HideCollection; remoteServers?: readonly RemoteServerDefaults[]; installationKind?: SettingsSnapshot['installationKind']; renderAdapterEnvironment?: (adapter: string) => ReactNode }) {
   const controlId = useId();
   const baseSchema = providedSchema ?? inferSchema(value);
   // leave existing file-managed proxy modes unchanged in the structured editor
@@ -1362,7 +1366,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
     return adapterBlock ? <AdapterSettingsCard label={label} path={path} configured={false} unimplemented={unimplementedAdapter} disabled={disabled} navigationDisabled={inheritedNavigationDisabled} onCollapse={() => { /* revoke any adapter-scoped disclosure */ onHideCollection?.(source, path); }}>{addControl}</AdapterSettingsCard> : addControl;
   }
   // show absent-object inheritance only on its scalar value controls
-  const child = (nextSchema: SettingsSchema, nextValue: unknown, nextPath: string[], key: string) => <SchemaField key={key} source={source} schema={effectiveValue === undefined && schema.type === 'object' && ['string', 'number'].includes(nextSchema.type) && nextSchema.placeholder === undefined ? { ...nextSchema, placeholder: schema.placeholder } : nextSchema} value={nextValue} path={nextPath} draft={draft} disclosures={disclosures} issues={issues} disabled={disabled} navigationDisabled={navigationDisabled} onPatch={stagePatch} onReveal={onReveal} onRemask={onRemask} onHideCollection={onHideCollection} remoteServers={remoteServers} instanceIcons={instanceIcons} installationKind={installationKind} renderAdapterEnvironment={renderAdapterEnvironment} />;
+  const child = (nextSchema: SettingsSchema, nextValue: unknown, nextPath: string[], key: string) => <SchemaField key={key} source={source} schema={effectiveValue === undefined && schema.type === 'object' && ['string', 'number'].includes(nextSchema.type) && nextSchema.placeholder === undefined ? { ...nextSchema, placeholder: schema.placeholder } : nextSchema} value={nextValue} path={nextPath} draft={draft} disclosures={disclosures} issues={issues} disabled={disabled} navigationDisabled={navigationDisabled} onPatch={stagePatch} onReveal={onReveal} onRemask={onRemask} onHideCollection={onHideCollection} remoteServers={remoteServers} installationKind={installationKind} renderAdapterEnvironment={renderAdapterEnvironment} />;
   let control: ReactNode;
   // render structured objects as field groups
   if (schema.type === 'object') {
@@ -1631,39 +1635,52 @@ function RawSourceEditor({ source, draft, disclosure, issues, disabled, showRemo
 
 type IconArtworkProps = {
   sources: SettingsSource[]; drafts: Record<string, Draft>; disclosures: Map<string, Disclosure>; issues: SettingsIssue[]; disabled: boolean;
-  onPatch: SetPatch;
+  icons: readonly LibraryIcon[]; canAdd: boolean;
   onContent: (source: SettingsSource, content: string) => void; onRemove: (source: SettingsSource) => void;
   onReveal: (source: SettingsSource, path: string[]) => Promise<void>; onRemask: (key: string) => Promise<void>;
 };
 
-// keep each editable file beside the setting that consumes its artwork
-function IconArtwork({ sources, drafts, disclosures, issues, disabled, onContent, onRemove, onReveal, onRemask }: IconArtworkProps) {
+// list the library's artwork files, each editable in place, and stage new ones by name
+function IconArtwork({ sources, drafts, disclosures, issues, disabled, icons, canAdd, onContent, onRemove, onReveal, onRemask }: IconArtworkProps) {
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [added, setAdded] = useState<string>();
   const artwork = sources.filter(source => iconSourceName(source.id) !== undefined);
-  return <div className="settings-icon-artwork" role="group" aria-label="Local icon artwork"><p>View or edit local artwork without changing the selected server icon. Artwork is shared wherever its alias is shown by this console.</p>{artwork.map(source => {
+  const taken = new Set([...icons.map(icon => icon.name), ...artwork.map(source => iconSourceName(source.id))]);
+  const problem = newName === '' ? undefined : newName === 'terminal' ? 'Terminal is built in.' : !isInstanceIconName(newName) ? 'Use 1-32 lowercase letters, digits, or hyphens.' : taken.has(newName) ? `The library already has ${newName}.` : undefined;
+  const add = () => {
+    onContent(newIconSource(newName), '');
+    setAdded(`icon-${newName}`); setAdding(false); setNewName('');
+  };
+  return <div className="settings-icon-artwork" role="group" aria-label="Icon library"><p>Each icon is an SVG file in the instance-icons directory beside the app config. Editing one does not change which icon this server uses.</p>{artwork.map(source => {
     const name = iconSourceName(source.id)!;
     const draft = drafts[source.id];
+    const isNew = source.revisionId === newIconRevision;
     // show artwork draft status only when its saved bytes actually differ
     const changed = hasSettingsDraftChanges(source, draft, (value, next) => applyLocalPatch(value, next, source.id), [...disclosures.values()].filter(disclosure => disclosure.sourceId === source.id));
-    return <details key={source.id} className="settings-icon-source">
-      <summary><span className="settings-icon-thumbnail"><InstanceIconPreview name={name} source={source} content={iconPreviewContent(source, draft)} removed={draft?.remove} label={`${source.label} preview`} /></span><span><strong>View / edit {source.label}</strong><small>{changed ? 'Unsaved artwork changes' : source.exists ? 'Saved artwork' : 'Not created'}</small></span><svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="settings-icon-source-edit" d={panelIcons.editor} /><path className="settings-icon-source-close" d={panelIcons.close} /></svg>{source.exists && <SettingsRemoveButton ariaLabel={`Remove ${source.label}`} title={`Remove ${source.label}`} label={`Remove ${source.label}`} labelClassName="sr-only" disabled={disabled || !source.writable || draft?.remove === true} onClick={event => { /* stage removal without toggling the viewer */ event.preventDefault(); event.stopPropagation(); onRemove(source); }} />}</summary>
-      <div className="settings-icon-source-content">{source.path && <code>{source.path}</code>}{!source.writable && <p role="note">This artwork is read-only in the current installation.</p>}<RawSourceEditor source={source} draft={draft} disclosure={disclosures.get(disclosureKey(source.id, []))} issues={issues} disabled={disabled || !source.writable} showRemove={false} onContent={onContent} onRemove={onRemove} onReveal={onReveal} onRemask={onRemask} /></div>
+    const status = isNew ? 'New icon' : changed ? 'Unsaved artwork changes' : icons.find(icon => icon.name === name)?.valid === false ? 'Peers show Terminal' : source.exists ? 'Saved artwork' : 'Not created';
+    return <details key={source.id} className="settings-icon-source" open={added === source.id || undefined}>
+      <summary><span className="settings-icon-thumbnail"><InstanceIconPreview name={name} source={source} content={iconPreviewContent(source, draft)} removed={draft?.remove} label={`${source.label} preview`} /></span><span><strong>View / edit {source.label}</strong><small>{status}</small></span><svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="settings-icon-source-edit" d={panelIcons.editor} /><path className="settings-icon-source-close" d={panelIcons.close} /></svg>{(source.exists || isNew) && <SettingsRemoveButton ariaLabel={`Remove ${source.label}`} title={`Remove ${source.label}`} label={`Remove ${source.label}`} labelClassName="sr-only" disabled={disabled || !source.writable || draft?.remove === true} onClick={event => { /* stage removal without toggling the viewer */ event.preventDefault(); event.stopPropagation(); onRemove(source); }} />}</summary>
+      <div className="settings-icon-source-content">{source.path && <code>{source.path}</code>}{!source.writable && <p role="note">This artwork is read-only in the current installation.</p>}{source.writable && <label className="settings-icon-file">Load SVG file<input className="sr-only" type="file" accept=".svg,image/svg+xml" disabled={disabled} onChange={event => { /* replace the draft with the chosen file's text */ const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; if (file !== undefined) void file.text().then(text => onContent(source, text)); }} /></label>}<RawSourceEditor source={source} draft={draft} disclosure={disclosures.get(disclosureKey(source.id, []))} issues={issues} disabled={disabled || !source.writable} showRemove={false} onContent={onContent} onRemove={onRemove} onReveal={onReveal} onRemask={onRemask} /></div>
     </details>;
-  })}{artwork.length === 0 && <p role="note">Custom artwork sources are unavailable in this installation.</p>}</div>;
+  })}{canAdd ? <section className="settings-env-add" aria-label="Add icon">{adding ? <div className="settings-env-add-form"><label>Icon name<input className="settings-env-variable-name" placeholder="rocket-2" autoFocus value={newName} disabled={disabled} autoCapitalize="off" spellCheck={false} onChange={event => setNewName(event.target.value.trim())} /></label>{problem !== undefined && <span className="settings-field-error" role="alert">{problem}</span>}<span className="settings-inline-actions"><button type="button" disabled={disabled} onClick={() => { /* leave the library unchanged */ setAdding(false); setNewName(''); }}>Cancel</button><button type="button" className="settings-primary-button" disabled={disabled || newName === '' || problem !== undefined} onClick={add}>Add</button></span></div> : <button type="button" className="settings-collection-add-button" disabled={disabled} onClick={() => setAdding(true)}>Add icon</button>}</section> : artwork.length === 0 && <p role="note">Editing the icon library needs the host settings applier.</p>}</div>;
 }
 
 // select the local identity once while preserving independent icon file drafts
-function ApplicationIconSetting({ source, icons, showSelector, onPatch, ...artwork }: IconArtworkProps & { source: SettingsSource; icons: readonly InstanceIconName[]; showSelector: boolean }) {
+function ApplicationIconSetting({ source, showSelector, onPatch, ...artwork }: Omit<IconArtworkProps, 'canAdd'> & { source: SettingsSource; showSelector: boolean; onPatch: SetPatch }) {
   const value = valueAt(source.value, ['icon']);
   const name = isInstanceIconName(value) ? value : 'terminal';
   const selectedSource = artwork.sources.find(candidate => candidate.id === `icon-${name}`);
   const selectedDraft = selectedSource === undefined ? undefined : artwork.drafts[selectedSource.id];
+  const staged = artwork.sources.filter(candidate => candidate.revisionId === newIconRevision).map(candidate => iconSourceName(candidate.id)!);
   // keep the configured choice selectable even when its file is absent from the library
-  const options: SettingsSelectOption[] = [...new Set([...icons, name])].map(icon => {
+  const options: SettingsSelectOption[] = [...new Set([...artwork.icons.map(icon => icon.name), ...staged, name])].map(icon => {
     const iconSource = artwork.sources.find(candidate => candidate.id === `icon-${icon}`);
     const draft = iconSource === undefined ? undefined : artwork.drafts[iconSource.id];
     return { value: icon, label: labelForKey(icon), icon: <InstanceIconPreview name={icon} source={iconSource} content={iconSource === undefined ? undefined : iconPreviewContent(iconSource, draft)} removed={draft?.remove} /> };
   });
-  return <section className="settings-application-icon" data-settings-path="icon" aria-label="Server icon and artwork"><header><h3>Server icon and artwork</h3><p>The server selector and favicon use this choice. Terminal is built in; custom files remain editable below.</p></header>{showSelector && <div className="settings-icon-choice"><span className="settings-icon-selected-preview"><InstanceIconPreview name={name} source={selectedSource} content={selectedSource === undefined ? undefined : iconPreviewContent(selectedSource, selectedDraft)} removed={selectedDraft?.remove} label="Server icon preview" /></span><div><span className="settings-code-label">Server icon</span><SettingsSelect label="Server icon" value={name} options={options} disabled={artwork.disabled || !source.writable} onChange={icon => { /* stage identity without saving or restarting */ onPatch(source, { op: 'set', path: ['icon'], value: icon }); }} />{value !== undefined && <button type="button" disabled={artwork.disabled || !source.writable} onClick={() => { /* restore the portable default explicitly */ onPatch(source, { op: 'remove', path: ['icon'] }); }}>Use default icon</button>}</div></div>}<IconArtwork {...artwork} onPatch={onPatch} /></section>;
+  const warning = selectedDraft?.remove === true ? `Saving removes ${name}, the server icon. This server will show the Terminal icon until you pick another.` : name !== 'terminal' && selectedSource === undefined && !artwork.icons.some(icon => icon.name === name) ? `${name} is not in the icon library. This server will show the Terminal icon until you pick another.` : selectedDraft === undefined && artwork.icons.find(icon => icon.name === name)?.valid === false ? `Peers show the Terminal icon for ${name}: its file is not a static SVG they accept. Edit and save it to fix.` : undefined;
+  return <section className="settings-application-icon" data-settings-path="icon" aria-label="Server icon and artwork"><header><h3>Server icon and artwork</h3><p>The server selector, favicon, and peer consoles show this choice. Terminal is built in; add, edit, or remove library icons below.</p></header>{showSelector && <div className="settings-icon-choice"><span className="settings-icon-selected-preview"><InstanceIconPreview name={name} source={selectedSource} content={selectedSource === undefined ? undefined : iconPreviewContent(selectedSource, selectedDraft)} removed={selectedDraft?.remove} label="Server icon preview" /></span><div><span className="settings-code-label">Server icon</span><SettingsSelect label="Server icon" value={name} options={options} disabled={artwork.disabled || !source.writable} onChange={icon => { /* stage identity without saving or restarting */ onPatch(source, { op: 'set', path: ['icon'], value: icon }); }} />{value !== undefined && <button type="button" disabled={artwork.disabled || !source.writable} onClick={() => { /* restore the portable default explicitly */ onPatch(source, { op: 'remove', path: ['icon'] }); }}>Use default icon</button>}{warning !== undefined && <p className="settings-source-warning" role="note">{warning}</p>}</div></div>}<IconArtwork {...artwork} canAdd={source.writable} /></section>;
 }
 
 // group installation sources for quick navigation
@@ -1835,7 +1852,7 @@ function VoiceEditor({ source, voice, draft, disabled, disclosures, issues, onPa
 export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, requestedSection, onSectionSelected, remoteServers = [], closeGuardRef, session }: { active: boolean; browser: BrowserSettingsIdentity; voice: VoiceSettings; onSaved: () => Promise<void>; onSaveNotice: (tone: 'success' | 'error', detail: string) => void; requestedSection?: { id: string; request: number }; onSectionSelected: (request: number) => void; remoteServers?: readonly RemoteServerDefaults[]; closeGuardRef?: Ref<SettingsCloseGuard>; session: ReturnType<typeof useSettingsSession> }) {
   const runtime = useSettingsRuntime();
   const workspaceEditor = useSettingsTerminalEditor();
-  const [instanceIcons, setInstanceIcons] = useState<InstanceIconName[]>(['terminal']);
+  const [instanceIcons, setInstanceIcons] = useState<LibraryIcon[]>([{ name: 'terminal', valid: true }]);
   const headerActionsTarget = useContext(SettingsHeaderActionsContext);
   const headerSearchTarget = useContext(SettingsHeaderSearchContext);
   const { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft: browserDraftState, cloudflare, googleCalendar, operationPending, saveCancelled, loading, setLoading, saving: fileSaving, setSaving, savePending, setSavePending, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds } = session;
@@ -2063,7 +2080,8 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   const removeSource = useCallback((source: SettingsSource) => {
     // retain the transaction captured for validation
     if (operationPending.current) return;
-    setDrafts(current => ({ ...current, [source.id]: { patches: [], remove: true } }));
+    // an icon staged but never saved has no file to remove, so drop it instead
+    setDrafts(current => { const { [source.id]: _, ...rest } = current; return source.revisionId === newIconRevision ? rest : { ...rest, [source.id]: { patches: [], remove: true } }; });
     setMessage(''); setError('');
   }, []);
 
@@ -2146,19 +2164,21 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     return () => { for (const timer of timers) window.clearTimeout(timer); };
   }, [disclosures, remask]);
 
+  // a staged icon edits like a library file until a save creates it
+  const editableSources = useMemo(() => [...sources, ...Object.keys(drafts).filter(id => iconSourceName(id) !== undefined && drafts[id]!.content !== undefined && !sources.some(source => source.id === id)).map(id => newIconSource(iconSourceName(id)!))], [drafts, sources]);
   // serialize only changed sources with opaque revisions
-  const changes = useMemo<SettingsChange[]>(() => sources.flatMap(source => {
+  const changes = useMemo<SettingsChange[]>(() => editableSources.flatMap(source => {
     const draft = drafts[source.id];
     // omit handover choices until an actual source edit exists
     if (!hasDraftMutation(draft)) return [];
-    const baseline = snapshot?.sources.find(candidate => candidate.id === source.id);
+    const baseline = source.revisionId === newIconRevision ? source : snapshot?.sources.find(candidate => candidate.id === source.id);
     const knownValues = [...disclosures.values()].filter(disclosure => disclosure.sourceId === source.id);
     // exclude reversible no-op edits against the saved snapshot, not its local preview
     if (baseline === undefined || !hasSettingsDraftChanges(baseline, draft, (value, next) => applyLocalPatch(value, next, source.id), knownValues)) return [];
     // omit neutral leaf writes, including unchanged disclosed credentials
     const patches = effectiveSettingsPatches(baseline, draft.patches, (value, next) => applyLocalPatch(value, next, source.id), knownValues);
     return [{ sourceId: source.id, revisionId: source.revisionId, ...(patches.length === 0 ? {} : { patches }), ...(draft.content === undefined ? {} : { content: draft.content }), ...(draft.remove === undefined ? {} : { remove: draft.remove }) }];
-  }), [disclosures, drafts, snapshot?.sources, sources]);
+  }), [disclosures, drafts, snapshot?.sources, editableSources]);
   const fileAndBrowserDirtyCount = changes.length + (browserDraft.dirty ? 1 : 0);
   const dirtyCount = fileAndBrowserDirtyCount + (cloudflare.dirty ? 1 : 0);
   const confirmationTarget = headerActionsTarget?.closest<HTMLElement>('.client-settings-page');
@@ -2316,6 +2336,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
         if (!isSettingsSnapshot(payload)) { failSave('Settings saved, but their refreshed state is unavailable. Browser changes remain unsaved. Reload Settings before editing again.'); return; }
         filesSaved = true;
         setSnapshot(payload); setSources(payload.sources); setDrafts({}); setIssues([]); setWarnings([]); setCatalogEditorEpoch(current => current + 1);
+        void fetchInstanceIcons(runtime.request).then(setInstanceIcons);
       }
       // do not start a browser write after ownership was revoked during file commit
       const browserError = browserDraft.dirty ? saveCancelled.current ? 'Saving was interrupted; browser preferences remain unsaved.' : await browserDraft.save() : undefined;
@@ -2745,9 +2766,9 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
         {/* keep application source editing behind the compact header action */}
         {selected.id === 'app' && forceRawMode && <p className="settings-source-warning" role="note">The current JSON cannot be parsed. Edit its source to repair it; credential values stay masked.</p>}
         {selectedSupportsRawRepair && selected.id !== 'app' && <div className="settings-raw-mode"><span><strong>{rawMode ? 'Whole source editor' : 'Structured editor'}</strong><small>{forceRawMode ? 'The current JSON cannot be parsed. Edit its source to repair it; credential values stay masked.' : 'Edit the source with syntax highlighting and line numbers. Credential placeholders are restored on save. Reveal keys to edit them; switching discards incompatible drafts.'}</small></span>{!forceRawMode && <button type="button" disabled={disabled} onClick={toggleRawMode}>{rawMode ? 'Use structured editor' : 'Edit whole source'}</button>}</div>}
-        {rawMode || rawFormats.has(selected.format) ? <RawSourceEditor source={selected} draft={drafts[selected.id]} disclosure={disclosures.get(disclosureKey(selected.id, []))} issues={issues} disabled={disabled} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} /> : selected.format === 'installation' ? <InstallationEditor key={`${selected.id}:${catalogEditorEpoch}`} source={selected} installationKind={snapshot?.installationKind} sources={sources} onNavigate={selectSection} draft={drafts[selected.id]} disclosures={disclosures} issues={issues} disabled={disabled} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} /> : selected.format === 'env' ? <EnvironmentEditor source={selected} excludedKeys={dedicatedEnvironmentKeys} draft={drafts[selected.id]} disclosures={disclosures} issues={issues} disabled={disabled} onPatch={patch} onReveal={reveal} onRemask={remask} /> : <SchemaField key={`${selected.id}:${catalogEditorEpoch}`} source={selected} schema={selected.schema} value={selected.value} path={[]} draft={drafts[selected.id]} disclosures={disclosures} issues={issues} disabled={disabled} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} navigationDisabled={loading || saving} remoteServers={remoteServers} instanceIcons={instanceIcons} />}
+        {rawMode || rawFormats.has(selected.format) ? <RawSourceEditor source={selected} draft={drafts[selected.id]} disclosure={disclosures.get(disclosureKey(selected.id, []))} issues={issues} disabled={disabled} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} /> : selected.format === 'installation' ? <InstallationEditor key={`${selected.id}:${catalogEditorEpoch}`} source={selected} installationKind={snapshot?.installationKind} sources={sources} onNavigate={selectSection} draft={drafts[selected.id]} disclosures={disclosures} issues={issues} disabled={disabled} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} /> : selected.format === 'env' ? <EnvironmentEditor source={selected} excludedKeys={dedicatedEnvironmentKeys} draft={drafts[selected.id]} disclosures={disclosures} issues={issues} disabled={disabled} onPatch={patch} onReveal={reveal} onRemask={remask} /> : <SchemaField key={`${selected.id}:${catalogEditorEpoch}`} source={selected} schema={selected.schema} value={selected.value} path={[]} draft={drafts[selected.id]} disclosures={disclosures} issues={issues} disabled={disabled} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} navigationDisabled={loading || saving} remoteServers={remoteServers} />}
         {/* keep local icon files with their application consumer even in raw repair mode */}
-        {selected.id === 'app' && <ApplicationIconSetting source={selected} icons={instanceIcons} showSelector={!rawMode} sources={sources} drafts={drafts} disclosures={disclosures} issues={issues} disabled={saving || !runtime.canMutate} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} />}
+        {selected.id === 'app' && <ApplicationIconSetting source={selected} icons={instanceIcons} showSelector={!rawMode} sources={editableSources} drafts={drafts} disclosures={disclosures} issues={issues} disabled={saving || !runtime.canMutate} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} />}
       </>}</div></SettingsSearchPath.Provider>
     </div>
     {(warnings.length > 0 || error || message) && <div className="settings-feedback" aria-live="polite">{warnings.map(warning => <p key={warning} className="warning">{warning}</p>)}{error && <p className="error" role="alert">{error}</p>}{!error && message && <p>{message}</p>}</div>}

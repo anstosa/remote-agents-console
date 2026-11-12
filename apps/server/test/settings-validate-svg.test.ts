@@ -32,4 +32,11 @@ describe('static SVG validation', () => {
   ])('rejects active, unknown or malformed markup %#', svg => {
     expect(() => validateSvg(svg)).toThrow();
   });
+
+  // a tag name that never closes must not make the tokenizer retry every shorter name
+  it('rejects an unclosed tag at the size cap quickly', () => {
+    const started = performance.now();
+    expect(() => validateSvg(`<svg${'b'.repeat(262_000)}`)).toThrow();
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
 });

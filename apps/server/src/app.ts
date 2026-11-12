@@ -100,6 +100,7 @@ import { previewFileBytes, WorkspaceFileService } from './workspace-files/servic
 import { ComparisonService, type ComparisonScope } from './git/comparison-service.js';
 import { mergeBaseChoices, saveMergeBase } from './git/comparison.js';
 import { instanceIconHashPattern, instanceIconSvg, listInstanceIcons, loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instance-icon.js';
+import { validateSvg } from './settings/validation.js';
 import { instanceAttention, instanceIconHash, RemoteInstanceStatusPoller, validPeerRequest, type InstanceStatus } from './instance-status.js';
 import { createHmac, randomBytes } from 'node:crypto';
 import { integrationConfigForRemotes, parseDavoSettings, resolveAgentProgram, reviewConfig } from './config/schema.js';
@@ -1044,8 +1045,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (!instanceIconHashPattern.test(hash)) return reply.code(404).send({ error: 'icon unavailable' });
     return reply.type('image/svg+xml').send(instanceStatusPoller.artwork(hash) ?? instanceIconSvg());
   });
-  // list the icon library as records so per-icon details can be added later
-  app.get('/api/instance-icons', async request => { session(request); return { icons: (await listInstanceIcons()).map(name => ({ name })) }; });
+  // list the icon library, flagging artwork that peers refuse and so draw as the terminal
+  app.get('/api/instance-icons', async request => {
+    session(request);
+    return { icons: await Promise.all((await listInstanceIcons()).map(async name => ({ name, valid: await loadInstanceIconSvg(name).then(validateSvg).then(() => true, () => false) }))) };
+  });
   app.get('/preview/:token', temporaryPreview);
   app.get('/preview/:token/*', temporaryPreview);
   // publish the privacy policy without session or controller checks

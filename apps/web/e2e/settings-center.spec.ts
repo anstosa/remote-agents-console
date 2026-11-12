@@ -1115,7 +1115,14 @@ async function setupSettings(
     const path = new URL(request.url()).pathname;
     if (path === "/api/instance-icons")
       return route.fulfill({
-        json: { icons: [{ name: "terminal" }, { name: "heart" }, { name: "potato" }] },
+        json: {
+          icons: [
+            "terminal",
+            ...sources
+              .filter((source) => source.id.startsWith("icon-"))
+              .map((source) => source.id.slice("icon-".length)),
+          ].map((name) => ({ name, valid: true })),
+        },
       });
     // model a transient read failure after a successful settings commit
     if (path === "/api/auth/session" && state.authUnavailable)
@@ -1278,6 +1285,23 @@ async function setupSettings(
         });
       // project successful structured writes into the authoritative fixture
       for (const change of body.changes) {
+        if (
+          change.sourceId.startsWith("icon-") &&
+          typeof change.content === "string" &&
+          !sources.some((candidate) => candidate.id === change.sourceId)
+        )
+          sources.push({
+            id: change.sourceId,
+            label: `${change.sourceId.slice("icon-".length)} icon`,
+            format: "svg",
+            exists: false,
+            writable: true,
+            protected: false,
+            tracked: false,
+            revisionId: "created",
+            apply: "live",
+            hasProtectedContent: false,
+          } as (typeof sources)[number]);
         const source = sources.find(
           (candidate) => candidate.id === change.sourceId,
         );
@@ -2572,12 +2596,7 @@ test("expands nested structured JSON without internal vertical scrolling", async
     element.scrollTo({ top: element.scrollHeight }),
   );
   await expect(
-    settings.getByText(
-      "Custom artwork sources are unavailable in this installation.",
-      {
-        exact: true,
-      },
-    ),
+    settings.getByRole("button", { name: "Add icon", exact: true }),
   ).toBeVisible();
   expect((await settingsEditorContentGeometry(input)).documentScrollTop).toBe(
     0,
@@ -2780,12 +2799,7 @@ test("keeps a structured JSON editor intrinsic and following content reachable",
     element.scrollTo({ top: element.scrollHeight }),
   );
   await expect(
-    settings.getByText(
-      "Custom artwork sources are unavailable in this installation.",
-      {
-        exact: true,
-      },
-    ),
+    settings.getByRole("button", { name: "Add icon", exact: true }),
   ).toBeVisible();
   expect((await settingsEditorGeometry(editor)).documentScrollTop).toBe(0);
   expect(state.saves).toEqual([]);
@@ -10389,6 +10403,204 @@ test("edits and previews icon files beside their use with image-bearing custom d
   ]);
   expect(state.status.pending).toBe(false);
   expect(state.restarts).toBe(0);
+});
+
+// grow the icon library from a name and an SVG file, then pick the new icon
+for (const width of [390, 1440]) {
+  test(`adds a named icon from an SVG file and saves it as a new library file at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { settings, state } = await setupSettings(page, true, true);
+    const library = settings.getByRole("group", {
+      name: "Icon library",
+      exact: true,
+    });
+    await library.getByRole("button", { name: "Add icon", exact: true }).click();
+    const name = library.getByRole("textbox", { name: "Icon name", exact: true });
+    const add = library.getByRole("button", { name: "Add", exact: true });
+    // refuse names the library cannot hold
+    for (const [value, message] of [
+      ["terminal", "Terminal is built in."],
+      ["heart", "The library already has heart."],
+      ["Rocket", "Use 1-32 lowercase letters, digits, or hyphens."],
+    ]) {
+      await name.fill(value);
+      await expect(library.getByText(message, { exact: true })).toBeVisible();
+      await expect(add).toBeDisabled();
+    }
+    await name.fill("rocket-2");
+    await add.click();
+    const artwork = library
+      .locator(".settings-icon-source")
+      .filter({ hasText: "View / edit rocket-2 icon" });
+    await expect(artwork).toHaveAttribute("open", "");
+    await expect(artwork.getByText("New icon", { exact: true })).toBeVisible();
+    const content =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>\n';
+    await artwork.getByLabel("Load SVG file", { exact: true }).setInputFiles({
+      name: "rocket.svg",
+      mimeType: "image/svg+xml",
+      buffer: Buffer.from(content),
+    });
+    await expect(
+      artwork.getByRole("textbox", {
+        name: "rocket-2 icon source content",
+        exact: true,
+      }),
+    ).toHaveValue(content);
+    await expect(
+      artwork.getByRole("img", { name: "rocket-2 icon preview", exact: true }),
+    ).toHaveAttribute(
+      "src",
+      `data:image/svg+xml;charset=utf-8,${encodeURIComponent(content)}`,
+    );
+    // an unsaved icon goes away without staging a file removal
+    await library.getByRole("button", { name: "Add icon", exact: true }).click();
+    await name.fill("spare");
+    await add.click();
+    const spare = library
+      .locator(".settings-icon-source")
+      .filter({ hasText: "View / edit spare icon" });
+    await spare
+      .getByRole("button", { name: "Remove spare icon", exact: true })
+      .click();
+    await expect(spare).toHaveCount(0);
+    const icon = settings.getByRole("combobox", {
+      name: "Server icon",
+      exact: true,
+    });
+    const pick = async (value: string) => {
+      await icon.click();
+      await page
+        .getByRole("listbox", { name: "Server icon options", exact: true })
+        .locator(`[role="option"][data-value="${value}"]`)
+        .click();
+    };
+    // dropping a staged icon the server uses leaves the choice pointing nowhere
+    await library.getByRole("button", { name: "Add icon", exact: true }).click();
+    await name.fill("temp");
+    await add.click();
+    await pick("temp");
+    await library
+      .getByRole("button", { name: "Remove temp icon", exact: true })
+      .click();
+    await expect(
+      settings.getByText(
+        "temp is not in the icon library. This server will show the Terminal icon until you pick another.",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    const overflow = await library.evaluate(
+      (element) => element.scrollWidth - element.clientWidth,
+    );
+    expect(overflow).toBe(0);
+    await pick("rocket-2");
+    await settings
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    await expect.poll(() => state.saves.length).toBe(1);
+    const saved = state.saves[0] as { body: { changes: unknown[] } };
+    expect(saved.body.changes).toEqual(
+      expect.arrayContaining([
+        { sourceId: "icon-rocket-2", revisionId: "new", content },
+        {
+          sourceId: "app",
+          revisionId: "app-r1",
+          patches: [{ op: "set", path: ["icon"], value: "rocket-2" }],
+        },
+      ]),
+    );
+    expect(saved.body.changes).toHaveLength(2);
+    await expect(
+      library
+        .locator(".settings-icon-source")
+        .filter({ hasText: "View / edit rocket-2 icon" })
+        .getByText("Saved artwork", { exact: true }),
+    ).toBeVisible();
+    await expect(settings.locator(".settings-source-warning")).toHaveCount(0);
+  });
+}
+
+// say what peers will draw before the operator saves a removal or keeps refused artwork
+test("warns when the server icon is removed or its artwork is refused by peers", async ({
+  page,
+}) => {
+  const { settings, state, sources } = await setupSettings(page, true, true);
+  Object.assign(sources.find((source) => source.id === "icon-potato")!, {
+    exists: true,
+    content: '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>',
+  });
+  // heart turns valid once a save has rewritten it
+  await page.route("**/api/instance-icons", (route) =>
+    route.fulfill({
+      json: {
+        icons: [
+          { name: "terminal", valid: true },
+          { name: "heart", valid: state.saves.length > 0 },
+          { name: "potato", valid: true },
+        ],
+      },
+    }),
+  );
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  const section = settings.getByRole("region", {
+    name: "Server icon and artwork",
+    exact: true,
+  });
+  const peers =
+    "Peers show the Terminal icon for heart: its file is not a static SVG they accept. Edit and save it to fix.";
+  await expect(section.getByText(peers, { exact: true })).toBeVisible();
+  await expect(
+    section
+      .locator(".settings-icon-source")
+      .filter({ hasText: "View / edit Heart icon" })
+      .getByText("Peers show Terminal", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    section.getByText("Peers show Terminal", { exact: true }),
+  ).toHaveCount(1);
+  // removing an icon the server does not use needs no warning
+  const potato = section
+    .locator(".settings-icon-source")
+    .filter({ hasText: "View / edit Potato icon" });
+  await potato
+    .getByRole("button", { name: "Remove Potato icon", exact: true })
+    .click();
+  await expect(section.locator(".settings-source-warning")).toHaveCount(1);
+  await section
+    .getByRole("button", { name: "Remove Heart icon", exact: true })
+    .click();
+  await expect(
+    section.getByText(
+      "Saving removes heart, the server icon. This server will show the Terminal icon until you pick another.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(section.getByText(peers, { exact: true })).toHaveCount(0);
+  // saving fixed artwork clears the peers warning without a manual refresh
+  await settings
+    .getByRole("button", { name: "Discard changes", exact: true })
+    .click();
+  await confirmSettingsDiscard(page);
+  await expect(section.getByText(peers, { exact: true })).toBeVisible();
+  const heart = section
+    .locator(".settings-icon-source")
+    .filter({ hasText: "View / edit Heart icon" });
+  await heart.locator("summary").click();
+  await heart
+    .getByRole("textbox", { name: "Heart icon source content", exact: true })
+    .fill('<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>\n');
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  await expect(section.getByText(peers, { exact: true })).toHaveCount(0);
+  await expect(
+    section.getByText("Peers show Terminal", { exact: true }),
+  ).toHaveCount(0);
 });
 
 // retain source capabilities and revision handling inside contextual editors

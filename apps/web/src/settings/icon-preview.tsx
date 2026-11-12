@@ -5,20 +5,25 @@ export { iconSourceName } from '../../../server/src/instance-icon-name.js';
 import type { SettingsRequest, SettingsSource } from './contracts.js';
 
 export type InstanceIconName = InstanceIcon;
-const staticTags = new Set(['svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'title', 'desc', 'text', 'tspan']);
+// the tags the server's validateSvg accepts, so a draft that previews also saves
+const staticTags = new Set(['svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'title', 'desc']);
 const imageGlyph = 'M3 3h18v18H3zM3 16l6-6 6 6 3-3 3 3M16 7h.01';
 
 export const isInstanceIconName = (value: unknown): value is InstanceIconName => typeof value === 'string' && isInstanceIcon(value);
 export const isInstanceIconHash = (value: unknown): value is string => typeof value === 'string' && instanceIconHashPattern.test(value);
 
+// `valid` is false when peers refuse the artwork and draw the terminal instead
+export type LibraryIcon = { name: InstanceIconName; valid: boolean };
+const terminalOnly: LibraryIcon[] = [{ name: 'terminal', valid: true }];
+
 // read the server's icon library; the built-in terminal stands in when it cannot be read
-export async function fetchInstanceIcons(request: SettingsRequest): Promise<InstanceIconName[]> {
+export async function fetchInstanceIcons(request: SettingsRequest): Promise<LibraryIcon[]> {
   try {
     const response = await request('/api/instance-icons', { cache: 'no-store' });
     const icons: unknown = response.ok ? ((await response.json()) as { icons?: unknown } | null)?.icons : undefined;
-    return Array.isArray(icons) ? icons.map(icon => (icon as { name?: unknown } | null)?.name).filter(isInstanceIconName) : ['terminal'];
+    return Array.isArray(icons) ? icons.map(icon => icon as { name?: unknown; valid?: unknown } | null).filter(icon => isInstanceIconName(icon?.name)).map(icon => ({ name: icon!.name as InstanceIconName, valid: icon!.valid !== false })) : terminalOnly;
   } catch {
-    return ['terminal'];
+    return terminalOnly;
   }
 }
 

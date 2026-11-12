@@ -118,6 +118,7 @@ describe('instance icon routes', () => {
 
   // publish the library only to signed-in browsers
   it('lists the icon library for an authenticated browser', async () => {
+    await writeFile(join(iconDirectory, 'rocket.svg'), '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0h10"/></svg>\n');
     const authenticated = await buildApp(testConfig({ icon: 'heart' }), { auth: await testAuthService() });
     try {
       const anonymous = await authenticated.inject({ method: 'GET', url: '/api/instance-icons', headers: { host: testHost } });
@@ -126,7 +127,8 @@ describe('instance icon routes', () => {
 
       expect(anonymous.statusCode).toBe(401);
       expect(listed.statusCode).toBe(200);
-      expect(listed.json()).toEqual({ icons: [{ name: 'terminal' }, { name: 'heart' }, { name: 'potato' }] });
+      // the fixtures carry a data attribute peers refuse, so they would show the terminal there
+      expect(listed.json()).toEqual({ icons: [{ name: 'terminal', valid: true }, { name: 'heart', valid: false }, { name: 'potato', valid: false }, { name: 'rocket', valid: true }] });
     } finally {
       await authenticated.close();
     }
