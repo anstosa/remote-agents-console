@@ -35,11 +35,14 @@ export function hostCommand(command: string, home: string, path = process.env.RA
 
 // Evaluate the POSIX command carried in the environment, unset first so the program never
 // inherits it. It reads the same in zsh, bash and fish, so one bootstrap serves all three.
-const runCommand = `sh -c 'cmd=$RAC_AGENT_COMMAND; unset RAC_AGENT_COMMAND; eval "$cmd"'`;
+// `sh` cannot exec through `eval` and stays the program's parent, so job control (`set -m`)
+// gives each job its own foreground process group: tmux names the pane after that group's
+// leader, the program, not `sh`. Without a tty (`run-shell`) job control is silently off.
+const runCommand = `sh -c 'set -m 2>/dev/null; cmd=$RAC_AGENT_COMMAND; unset RAC_AGENT_COMMAND; eval "$cmd"'`;
 
 // Start the operator's interactive shell — `-i` loads `.zshrc`, `.bashrc` or `config.fish`, which
-// restore the PATH and credentials `safeEnv()` strips — and have it exec `command`, so the command
-// becomes the pane's process and the pane closes with it. With `stay` the native shell evaluates
+// restore the PATH and credentials `safeEnv()` strips — and have it run `command` as the pane's
+// foreground process, so the pane closes with it. With `stay` the native shell evaluates
 // the command with its aliases and functions, then becomes a fresh interactive shell; an empty
 // command is that shell alone. The command travels in the environment, never in `ps` argv.
 export function interactiveShellBootstrap(command: string, home = '$HOME', shell = interactiveShellPath(), stay = false): string {

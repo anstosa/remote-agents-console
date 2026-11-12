@@ -43,7 +43,7 @@ describe('interactive agent shell', () => {
     expect(hostInteractiveShellPath()).toBe('/usr/bin/zsh');
     expect(bootstrap).toBe([
       `export RAC_AGENT_COMMAND='cd -- '\\''/home/ubuntu/dave'\\'' && eval '\\''detach && new task-1'\\'''`,
-      `exec '/usr/bin/zsh' -i -c 'exec sh -c '\\''cmd=$RAC_AGENT_COMMAND; unset RAC_AGENT_COMMAND; eval "$cmd"'\\'''`
+      `exec '/usr/bin/zsh' -i -c 'exec sh -c '\\''set -m 2>/dev/null; cmd=$RAC_AGENT_COMMAND; unset RAC_AGENT_COMMAND; eval "$cmd"'\\'''`
     ].join('\n'));
   });
 
@@ -70,6 +70,19 @@ describe('interactive agent shell', () => {
     const output = await runBootstrap('/bin/bash', '.bashrc', probe, true, 'echo "after:$MARKER:${RAC_AGENT_COMMAND-unset}"\n');
     expect(output).toContain("rc|unset|it's\n");
     expect(output).toContain('after:rc:unset');
+  });
+
+  // tmux names a pane (`pane_current_command`) after the leader of its tty's foreground process
+  // group, so the program must lead that group rather than run under a lingering `sh`
+  it.skipIf(!existsSync('/usr/bin/script') || !existsSync('/proc/self/stat'))('makes a compound command\'s program lead the pane\'s foreground process group', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'rac-shell-'));
+    homes.push(home);
+    // pid, process group and the tty's foreground process group of the program itself
+    const command = `export X=1\ncd . && cut -d' ' -f1,5,8 /proc/self/stat`;
+    const output = execFileSync('/usr/bin/script', ['-qec', '/bin/bash -lc "$BOOTSTRAP"', '/dev/null'], { env: { BOOTSTRAP: interactiveShellBootstrap(command, home, '/bin/bash'), SHELL: '/bin/sh', HOME: home, PATH: '/usr/bin:/bin', TERM: 'dumb' }, encoding: 'utf8' });
+    const [pid, group, foreground] = output.trim().split(/\s+/u).slice(-3);
+    expect(group).toBe(pid);
+    expect(foreground).toBe(pid);
   });
 
   it.skipIf(fish === undefined)('runs the POSIX command after config.fish loads, then exits with it', async () => {
