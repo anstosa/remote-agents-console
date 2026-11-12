@@ -163,13 +163,19 @@ deployment can run plain Codex in some worktrees and OMX in others.
 ```
 
 `name` identifies the current Remote Agents server. Remote entries require their
-canonical URL and may include optional local `name` and `icon` overrides. Without
-an override, each server's identity comes from its authenticated peer-status API.
-In Application settings, leave Name blank or select **Server Default** for Icon
-to remove the corresponding override; the controls remain visible and show the
-published defaults. Save changes persists these choices to config, and a RAC
-restart applies them to navigation. Overrides affect only this console's display
-of the remote, never the remote server's own published identity.
+canonical URL and may include an optional local `name` override. Without it, each
+server's name comes from its authenticated peer-status API. In Application
+settings, leave Name blank to remove the override; the control remains visible and
+shows the published name. Save changes persists it to config, and a RAC restart
+applies it to navigation. The override affects only this console's display of the
+remote, never the remote server's own published identity.
+
+A remote's icon is set only on that server. Each server publishes a hash of its
+chosen artwork; when the hash changes, this console fetches the artwork once over
+the signed peer channel, checks it against the hash and the static-SVG rules, and
+serves it from its own origin. A peer that publishes no hash (an older version) or
+whose artwork fails those checks shows the terminal icon. The per-remote `icon`
+field is deprecated: older configs that still carry it load, and it is ignored.
 
 Only the terminal icon is bundled. Every other icon is a server-local SVG in an
 `instance-icons/` directory beside the file selected by `RAC_CONFIG`: the file

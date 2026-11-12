@@ -46,22 +46,22 @@ describe('server identity API', () => {
     const namedConfig = { ...config, publicOrigin: new URL('https://x1carbon.santosa.dev'), remoteServers: [{ url: new URL('https://framework.santosa.dev'), name: 'Workshop', icon: 'potato' as const }] };
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     // hold peer discovery indefinitely
-    const instanceStatusPoller = { statuses: () => new Promise<never>(() => {}) };
+    const instanceStatusPoller = { statuses: () => new Promise<never>(() => {}), artwork: () => undefined };
     const identityApp = await buildApp(namedConfig, { auth: new AuthService(hash, Buffer.alloc(32, 20).toString('base64url')), instanceStatusPoller });
     // close the isolated app after assertions
     try {
       const bootstrap = await identityApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'x1carbon.santosa.dev' } });
       expect(bootstrap.statusCode).toBe(200);
-      expect(bootstrap.json().server.remotes).toEqual([{ name: 'Workshop', icon: 'potato', defaultName: 'framework.santosa.dev', defaultIcon: 'terminal', url: 'https://framework.santosa.dev' }]);
+      expect(bootstrap.json().server.remotes).toEqual([{ name: 'Workshop', defaultName: 'framework.santosa.dev', url: 'https://framework.santosa.dev' }]);
       const login = await identityApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'x1carbon.santosa.dev', origin: 'https://x1carbon.santosa.dev', 'x-csrf-token': bootstrap.json().csrfToken }, payload: { password: 'synthetic-password' } });
       expect(login.statusCode).toBe(200);
-      expect(login.json().server.remotes).toEqual([{ name: 'Workshop', icon: 'potato', defaultName: 'framework.santosa.dev', defaultIcon: 'terminal', url: 'https://framework.santosa.dev' }]);
+      expect(login.json().server.remotes).toEqual([{ name: 'Workshop', defaultName: 'framework.santosa.dev', url: 'https://framework.santosa.dev' }]);
     } finally {
       await identityApp.close();
     }
   }, 15_000);
 
-  // verify peer metadata refreshes through status polling
+  // verify peer metadata refreshes through status polling, and a remote's icon is only what it publishes
   it('publishes local and remote server choices before login and in sessions', async () => {
     const namedConfig: ValidatedConfig = {
       ...config,
@@ -78,13 +78,15 @@ describe('server identity API', () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const statusSecret = 'shared-status-secret-with-thirty-two-bytes';
     vi.stubEnv('RAC_INSTANCE_STATUS_SECRET', statusSecret);
+    const heartHash = 'lSxGd7vzK6UvvUIlS6950IzQ8fnMvk0EBAMnDfXCtAg';
+    const cloudHash = 'QC2kBz3Jyj-dnHJOd1-Xt2HT80T_BmczAwvEHvoik_0';
     const peerStatuses = [
-      { url: 'https://framework.santosa.dev', name: 'Framework', icon: 'heart' as const, attention: 'idle' as const },
+      { url: 'https://framework.santosa.dev', name: 'Framework', iconHash: heartHash, attention: 'idle' as const },
       { url: 'https://lab.santosa.dev', name: 'Lab', attention: 'working' as const },
-      { url: 'https://archive.santosa.dev', name: 'Archive', icon: 'cloud' as const, attention: 'completed' as const },
+      { url: 'https://archive.santosa.dev', name: 'Archive', iconHash: cloudHash, attention: 'completed' as const },
       { url: 'https://offline.santosa.dev', name: 'offline.santosa.dev', attention: 'unavailable' as const }
     ];
-    const instanceStatusPoller = { statuses: async () => peerStatuses };
+    const instanceStatusPoller = { statuses: async () => peerStatuses, artwork: () => undefined };
     // avoid host discovery in identity test
     const discovery = { worktreesNow: () => [], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [] }) };
     const identityApp = await buildApp(namedConfig, { auth: new AuthService(hash, Buffer.alloc(32, 16).toString('base64url')), instanceStatusPoller, discovery: discovery as never });
@@ -92,10 +94,10 @@ describe('server identity API', () => {
     try {
       const bootstrap = await identityApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'x1carbon.santosa.dev' } });
       const expected = { name: 'X1 Carbon', icon: 'potato', url: 'https://x1carbon.santosa.dev', remotes: [
-        { name: 'Workshop', icon: 'heart', defaultName: 'Framework', defaultIcon: 'heart', url: 'https://framework.santosa.dev' },
-        { name: 'Lab', icon: 'potato', defaultName: 'Lab', defaultIcon: 'terminal', url: 'https://lab.santosa.dev' },
-        { name: 'Archive', icon: 'cloud', defaultName: 'Archive', defaultIcon: 'cloud', url: 'https://archive.santosa.dev' },
-        { name: 'Offline override', icon: 'cloud', defaultName: 'offline.santosa.dev', defaultIcon: 'terminal', url: 'https://offline.santosa.dev' }
+        { name: 'Workshop', iconHash: heartHash, defaultName: 'Framework', url: 'https://framework.santosa.dev' },
+        { name: 'Lab', defaultName: 'Lab', url: 'https://lab.santosa.dev' },
+        { name: 'Archive', iconHash: cloudHash, defaultName: 'Archive', url: 'https://archive.santosa.dev' },
+        { name: 'Offline override', defaultName: 'offline.santosa.dev', url: 'https://offline.santosa.dev' }
       ] };
       expect(bootstrap.json().server).toMatchObject({ name: expected.name, icon: expected.icon, url: expected.url, remotes: expected.remotes.map(remote => ({ url: remote.url })) });
       const login = await identityApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'x1carbon.santosa.dev', origin: 'https://x1carbon.santosa.dev', 'x-csrf-token': bootstrap.json().csrfToken }, payload: { password: 'synthetic-password' } });
@@ -113,15 +115,15 @@ describe('server identity API', () => {
       expect(current.json().server).toEqual(expected);
       // keep injected peer cache values raw after browser-facing overlays
       expect(peerStatuses).toEqual([
-        { url: 'https://framework.santosa.dev', name: 'Framework', icon: 'heart', attention: 'idle' },
+        { url: 'https://framework.santosa.dev', name: 'Framework', iconHash: heartHash, attention: 'idle' },
         { url: 'https://lab.santosa.dev', name: 'Lab', attention: 'working' },
-        { url: 'https://archive.santosa.dev', name: 'Archive', icon: 'cloud', attention: 'completed' },
+        { url: 'https://archive.santosa.dev', name: 'Archive', iconHash: cloudHash, attention: 'completed' },
         { url: 'https://offline.santosa.dev', name: 'offline.santosa.dev', attention: 'unavailable' }
       ]);
       const timestamp = String(Date.now());
       const signature = createHmac('sha256', statusSecret).update(`rac-instance-status-v1\n${namedConfig.publicOrigin.origin}\n${timestamp}`).digest('base64url');
       const published = await identityApp.inject({ method: 'GET', url: '/api/instance-status', headers: { host: 'x1carbon.santosa.dev', 'x-rac-status-timestamp': timestamp, 'x-rac-status-signature': signature } });
-      expect(published.json()).toEqual({ name: 'X1 Carbon', icon: 'potato', attention: 'idle' });
+      expect(published.json()).toMatchObject({ name: 'X1 Carbon', icon: 'potato', attention: 'idle' });
     } finally { await identityApp.close(); }
   }, 15_000);
 });

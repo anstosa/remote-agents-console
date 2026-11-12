@@ -2,14 +2,12 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mockAccountSocket } from "./account-fixture.js";
 import { confirmSettingsDiscard } from "./settings-confirmation-helpers.js";
 
-type IconName = "terminal" | "potato" | "heart";
-type RemoteConfig = { url: string; name?: string; icon?: IconName };
+// icon is the deprecated per-remote override older configs may still carry
+type RemoteConfig = { url: string; name?: string; icon?: string };
 type RemoteMetadata = {
   url: string;
   name: string;
-  icon?: IconName;
   defaultName?: string;
-  defaultIcon?: IconName;
 };
 type SettingsPatch = {
   op: "set" | "remove" | "insert" | "move";
@@ -331,16 +329,6 @@ async function selectApplication(settings: Locator) {
     .click();
 }
 
-// choose one exact custom-select value
-async function chooseValue(select: Locator, value: string) {
-  await select.click();
-  await select
-    .page()
-    .getByRole("listbox")
-    .locator(`[role="option"][data-value=${JSON.stringify(value)}]`)
-    .click();
-}
-
 // address duplicate accessible fieldsets by position
 const remoteRows = (settings: Locator) =>
   settings.getByRole("group", { name: /^Remote server \d+$/u });
@@ -372,9 +360,7 @@ for (const width of [320, 390, 1440, 2560]) {
         {
           url: "https://framework.example.test",
           name: "Framework",
-          icon: "heart",
           defaultName: "Framework",
-          defaultIcon: "heart",
         },
       ],
     });
@@ -390,50 +376,17 @@ for (const width of [320, 390, 1440, 2560]) {
     await editRemote(row);
     const url = row.getByRole("textbox", { name: "URL", exact: true });
     const name = row.getByRole("textbox", { name: "Name", exact: true });
-    const icon = row.getByRole("combobox", { name: "Icon", exact: true });
     await expect(url).toHaveValue("https://framework.example.test/");
     await expect(name).toHaveValue("");
     await expect(name).toHaveAttribute("placeholder", "Framework (from Remote server identity)");
     // keep inheritance guidance inside the controls
     await expect(row.getByText("Leave blank to use the other server’s name.", { exact: true })).toHaveCount(0);
-    await expect(row.getByText("Server Default uses the other server’s icon.", { exact: true })).toHaveCount(0);
-    await expect(icon).toHaveAttribute("data-value", "server-default");
-    await expect(icon).toContainText("Server Default");
-    await expect(icon.locator("img")).toHaveAttribute(
-      "src",
-      /\/instance-icons\/heart\.svg/u,
-    );
-    await icon.click();
-    const iconOptions = page.getByRole("listbox", {
-      name: "Icon options",
-      exact: true,
-    });
-    await expect(iconOptions.getByRole("option")).toHaveText([
-      "Server Default",
-      "Terminal",
-      "Heart",
-      "Potato",
-      "Rocket-2",
-    ]);
-    await expect(iconOptions.locator("img")).toHaveCount(5);
-    await page.keyboard.press("Escape");
+    // a remote's icon is set only on that server
+    await expect(row.getByRole("combobox", { name: "Icon", exact: true })).toHaveCount(0);
     await expect(
-      row.getByRole("button", { name: /^(?:Add|Remove) (?:Name|Icon)$/u }),
+      row.getByRole("button", { name: /^(?:Add|Remove) Name$/u }),
     ).toHaveCount(0);
-    const [nameBounds, iconBounds, overflow] = await Promise.all([
-      name.boundingBox(),
-      icon.boundingBox(),
-      row.evaluate((element) => element.scrollWidth - element.clientWidth),
-    ]);
-    expect(nameBounds).not.toBeNull();
-    expect(iconBounds).not.toBeNull();
-    // stack remote identity fields at every viewport width
-    expect(iconBounds!.y).toBeGreaterThanOrEqual(nameBounds!.y + nameBounds!.height);
-    expect(Math.abs(nameBounds!.x - iconBounds!.x)).toBeLessThanOrEqual(1);
-    expect(Math.abs(nameBounds!.width - iconBounds!.width)).toBeLessThanOrEqual(1);
-    expect(
-      Math.abs(nameBounds!.height - iconBounds!.height),
-    ).toBeLessThanOrEqual(1);
+    const overflow = await row.evaluate((element) => element.scrollWidth - element.clientWidth);
     expect(overflow).toBeLessThanOrEqual(0);
     await expect(
       settings.getByRole("button", { name: "Save changes", exact: true }),
@@ -443,7 +396,7 @@ for (const width of [320, 390, 1440, 2560]) {
   });
 }
 
-test("clears identity overrides through remove patches while keeping controls available across discard and save", async ({
+test("clears the name override through a remove patch and never writes the deprecated icon", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -459,22 +412,18 @@ test("clears identity overrides through remove patches while keeping controls av
       {
         url: "https://framework.example.test",
         name: "Workshop",
-        icon: "heart",
         defaultName: "Framework",
-        defaultIcon: "potato",
       },
     ],
   });
   let row = remoteRows(settings).first();
   await editRemote(row);
   let name = row.getByRole("textbox", { name: "Name", exact: true });
-  let icon = row.getByRole("combobox", { name: "Icon", exact: true });
   await expect(name).toHaveValue("Workshop");
   await expect(name).toHaveAttribute("placeholder", "Framework (from Remote server identity)");
-  await expect(icon).toHaveAttribute("data-value", "heart");
+  await expect(row.getByRole("combobox", { name: "Icon", exact: true })).toHaveCount(0);
 
   await name.fill("   ");
-  await chooseValue(icon, "server-default");
   await settings
     .getByRole("button", { name: "Discard changes", exact: true })
     .click();
@@ -485,12 +434,9 @@ test("clears identity overrides through remove patches while keeping controls av
   ).toBeVisible();
   await editRemote(row);
   name = row.getByRole("textbox", { name: "Name", exact: true });
-  icon = row.getByRole("combobox", { name: "Icon", exact: true });
   await expect(name).toHaveValue("Workshop");
-  await expect(icon).toHaveAttribute("data-value", "heart");
 
   await name.fill("");
-  await chooseValue(icon, "server-default");
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
@@ -498,13 +444,9 @@ test("clears identity overrides through remove patches while keeping controls av
   expect(saves[0]!.changes).toEqual([
     expect.objectContaining({
       sourceId: "app",
-      patches: expect.arrayContaining([
-        { op: "remove", path: ["remoteServers", "0", "name"] },
-        { op: "remove", path: ["remoteServers", "0", "icon"] },
-      ]),
+      patches: [{ op: "remove", path: ["remoteServers", "0", "name"] }],
     }),
   ]);
-  expect(JSON.stringify(saves[0])).not.toContain("server-default");
   row = remoteRows(settings).first();
   await editRemote(row);
   await expect(
@@ -513,12 +455,6 @@ test("clears identity overrides through remove patches while keeping controls av
   await expect(
     row.getByRole("textbox", { name: "Name", exact: true }),
   ).toHaveAttribute("placeholder", "Framework (from Remote server identity)");
-  await expect(
-    row.getByRole("combobox", { name: "Icon", exact: true }),
-  ).toHaveAttribute("data-value", "server-default");
-  await expect(
-    row.getByRole("combobox", { name: "Icon", exact: true }).locator("img"),
-  ).toHaveAttribute("src", /\/instance-icons\/potato\.svg/u);
   await expect(
     page.getByRole("status", { name: "Restart pending" }),
   ).toBeVisible();
@@ -537,16 +473,12 @@ test("keeps duplicate row identity associated by canonical URL through reorder",
       {
         url: "https://framework.example.test",
         name: "Framework",
-        icon: "potato",
         defaultName: "Framework",
-        defaultIcon: "potato",
       },
       {
         url: "https://lab.example.test/",
         name: "Local Lab",
-        icon: "heart",
         defaultName: "Laboratory",
-        defaultIcon: "terminal",
       },
     ],
   });
@@ -587,9 +519,6 @@ test("keeps duplicate row identity associated by canonical URL through reorder",
   await expect(
     first.getByRole("textbox", { name: "Name", exact: true }),
   ).toHaveAttribute("placeholder", "Laboratory (from Remote server identity)");
-  await expect(
-    first.getByRole("combobox", { name: "Icon", exact: true }),
-  ).toHaveAttribute("data-value", "heart");
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
@@ -613,9 +542,7 @@ test("updates inherited peer metadata without replacing local drafts", async ({
       {
         url: "https://framework.example.test",
         name: "Pinned name",
-        icon: "terminal",
         defaultName: "Old peer",
-        defaultIcon: "terminal",
       },
     ],
     heldMetadata: update.promise,
@@ -631,20 +558,12 @@ test("updates inherited peer metadata without replacing local drafts", async ({
     {
       url: "https://framework.example.test",
       name: "Pinned name",
-      icon: "heart",
       defaultName: "New peer",
-      defaultIcon: "heart",
     },
   ]);
   await expect.poll(() => fixture.statusRequests).toBeGreaterThanOrEqual(1);
   await expect(name).toHaveValue("Browser draft");
   await expect(name).toHaveAttribute("placeholder", "New peer (from Remote server identity)");
-  const icon = row.getByRole("combobox", { name: "Icon", exact: true });
-  await expect(icon).toHaveAttribute("data-value", "server-default");
-  await expect(icon.locator("img")).toHaveAttribute(
-    "src",
-    /\/instance-icons\/heart\.svg/u,
-  );
 });
 
 test("falls back to legacy metadata and offline hostnames without fetching edited URLs", async ({
@@ -660,7 +579,6 @@ test("falls back to legacy metadata and offline hostnames without fetching edite
       {
         url: "https://framework.example.test",
         name: "Legacy Framework",
-        icon: "potato",
       },
     ],
   });
@@ -669,28 +587,16 @@ test("falls back to legacy metadata and offline hostnames without fetching edite
   await expect(
     legacy.getByRole("textbox", { name: "Name", exact: true }),
   ).toHaveAttribute("placeholder", "Legacy Framework (from Remote server identity)");
-  await expect(
-    legacy.getByRole("combobox", { name: "Icon", exact: true }),
-  ).toHaveAttribute("data-value", "server-default");
-  await expect(
-    legacy.getByRole("combobox", { name: "Icon", exact: true }).locator("img"),
-  ).toHaveAttribute("src", /\/instance-icons\/potato\.svg/u);
   const offline = remoteRows(settings).nth(1);
   await editRemote(offline);
   await expect(
     offline.getByRole("textbox", { name: "Name", exact: true }),
   ).toHaveAttribute("placeholder", "offline.example.test (from URL hostname)");
-  await expect(
-    offline.getByRole("combobox", { name: "Icon", exact: true }).locator("img"),
-  ).toHaveAttribute("src", /\/instance-icons\/terminal\.svg/u);
   await offline
     .getByRole("textbox", { name: "URL", exact: true })
     .fill("not a valid URL");
   await expect(
     offline.getByRole("textbox", { name: "Name", exact: true }),
-  ).toBeVisible();
-  await expect(
-    offline.getByRole("combobox", { name: "Icon", exact: true }),
   ).toBeVisible();
   expect(externalRequests).toHaveLength(0);
 });
@@ -709,13 +615,11 @@ test("disables every remote entry action when Application configuration is read-
         url: "https://framework.example.test",
         name: "Framework",
         defaultName: "Framework",
-        defaultIcon: "terminal",
       },
       {
         url: "https://lab.example.test",
         name: "Lab",
         defaultName: "Lab",
-        defaultIcon: "potato",
       },
     ],
     writable: false,
@@ -729,9 +633,6 @@ test("disables every remote entry action when Application configuration is read-
     ).toBeDisabled();
     await expect(
       row.getByRole("textbox", { name: "Name", exact: true }),
-    ).toBeDisabled();
-    await expect(
-      row.getByRole("combobox", { name: "Icon", exact: true }),
     ).toBeDisabled();
   }
   await expect(

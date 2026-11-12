@@ -134,6 +134,7 @@ const claudeEntry = adapterEntry.extend({ transport: z.enum(['tmux', 'structured
 const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: claudeEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
 // name an icon in the library; an absent one renders the terminal icon
 const instanceIcon = z.string().regex(instanceIconPattern, 'an icon name is lowercase letters, digits and hyphens');
+// icon is deprecated: accepted so older configs load, and ignored (a remote's icon is what it publishes)
 const remoteServer = z.object({ url: z.string(), name: serverName.optional(), icon: instanceIcon.optional() }).strict();
 const davoName = z.string().trim().min(1).max(80).refine(value => !value.includes('\0'), 'NUL is forbidden');
 const davoContext = z.string().trim().max(16_000).refine(value => !value.includes('\0'), 'NUL is forbidden');
@@ -209,7 +210,7 @@ export const sourceSchema = z.object({
   if (countButtonDefinitions(config.buttons, config.projects.map(project => project.buttons)) > 4_096) context.addIssue({ code: z.ZodIssueCode.custom, path: ['buttons'], message: 'configuration expands to at most 4096 buttons' });
 });
 export type ConfigInput = z.input<typeof sourceSchema>;
-export type RemoteServer = { url: URL; name?: string; icon?: InstanceIcon };
+export type RemoteServer = { url: URL; name?: string };
 export type IntegrationConfig = z.output<typeof integrationFeatures>;
 export type DavoSettings = z.output<typeof davoSettingsSchema>;
 /**
@@ -526,7 +527,7 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
   if (parsed.proxy.trustedSourceIps.some((ip) => !loopback.has(ip))) throw new Error('only loopback proxy sources are permitted');
   const publicOrigin = canonicalOrigin(parsed.publicOrigin, 'publicOrigin', true);
   // retain canonical remote origins and optional local identity overrides
-  const remoteServers = parsed.remoteServers.map(server => ({ url: canonicalOrigin(server.url, 'remote server'), ...(server.name === undefined ? {} : { name: server.name }), ...(server.icon === undefined ? {} : { icon: server.icon }) }));
+  const remoteServers = parsed.remoteServers.map(server => ({ url: canonicalOrigin(server.url, 'remote server'), ...(server.name === undefined ? {} : { name: server.name }) }));
   const serverUrls = new Set([publicOrigin.origin]);
   // reject duplicate server switch targets
   for (const server of remoteServers) {

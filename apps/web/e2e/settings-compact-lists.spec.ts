@@ -288,13 +288,11 @@ async function setupCompactLists(page: Page, options: FixtureOptions = {}) {
                 url: "https://framework.example.test",
                 name: "Framework",
                 defaultName: "Framework",
-                defaultIcon: "potato",
               },
               {
                 url: "https://lab.example.test",
                 name: "Laboratory",
                 defaultName: "Laboratory",
-                defaultIcon: "terminal",
               },
             ],
           },

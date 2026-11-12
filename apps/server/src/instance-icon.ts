@@ -2,7 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { isInstanceIcon, type InstanceIcon } from './instance-icon-name.js';
 
-export { instanceIconPattern, isInstanceIcon, type InstanceIcon } from './instance-icon-name.js';
+export { instanceIconHashPattern, instanceIconPattern, isInstanceIcon, type InstanceIcon } from './instance-icon-name.js';
 
 // texture the shared display background
 const scanLines = '<path d="M6 11.5h52M6 16.5h52M6 21.5h52M6 26.5h52M6 31.5h52M6 36.5h52M6 41.5h52M6 46.5h52M6 51.5h52M6 56.5h52" fill="none" stroke="#45475a" stroke-width="1" stroke-opacity=".42"/>';

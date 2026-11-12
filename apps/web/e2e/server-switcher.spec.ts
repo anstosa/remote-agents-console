@@ -16,7 +16,10 @@ test('shows and switches the configured server on authentication and output scre
   let remoteAttention: 'idle'|'working'|'question'|'completed' = 'working';
   let remoteName = 'Framework';
   let statusAvailable = true;
-  const remoteServer = { name: 'Framework', url: 'https://framework.santosa.dev', icon: 'heart' };
+  // a remote's icon is the artwork it publishes, served from this origin by content hash
+  const remoteHash = 'lSxGd7vzK6UvvUIlS6950IzQ8fnMvk0EBAMnDfXCtAg';
+  let remoteIconHash: string | undefined = remoteHash;
+  const remoteServer = { name: 'Framework', url: 'https://framework.santosa.dev', iconHash: remoteHash };
   const server = { name: 'X1 Carbon', url: 'https://x1carbon.santosa.dev', icon: 'potato', remotes: [remoteServer] };
   const revision = { sha: 'a1b2c3d4e5f6789012345678901234567890abcd', committedAt: '2026-09-06T14:22:31-07:00' };
   await page.addInitScript(() => {
@@ -56,7 +59,7 @@ test('shows and switches the configured server on authentication and output scre
     // render the shared icon fallback instead of vite html
     const icon = /^\/instance-icons\/(\w+)\.svg$/u.exec(url.pathname)?.[1];
     // keep fixture aliases independent of local artwork
-    if (icon !== undefined && isInstanceIcon(icon)) return route.fulfill({ contentType: 'image/svg+xml', body: instanceIconSvg() });
+    if (icon !== undefined && isInstanceIcon(icon) || /^\/instance-icons\/remote\/[\w-]{43}\.svg$/u.test(url.pathname)) return route.fulfill({ contentType: 'image/svg+xml', body: instanceIconSvg() });
     if (!url.pathname.startsWith('/api/')) return route.continue();
     if (url.pathname === '/api/auth/session') {
       if (screen === 'login') return route.fulfill({ status: 401, json: { error: 'unauthorized' } });
@@ -74,7 +77,7 @@ test('shows and switches the configured server on authentication and output scre
     if (url.pathname === '/api/server-statuses') {
       // simulate an aggregate outage
       if (!statusAvailable) return route.fulfill({ status: 503, json: { error: 'unavailable' } });
-      return route.fulfill({ json: { servers: [{ name: server.name, url: server.url, icon: server.icon, attention: 'working' }, { ...remoteServer, name: remoteName, attention: remoteAttention }] } });
+      return route.fulfill({ json: { servers: [{ name: server.name, url: server.url, icon: server.icon, attention: 'working' }, { name: remoteName, url: remoteServer.url, ...(remoteIconHash === undefined ? {} : { iconHash: remoteIconHash }), attention: remoteAttention }] } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -89,7 +92,7 @@ test('shows and switches the configured server on authentication and output scre
     await expect(targets.nth(0)).toHaveAttribute('aria-current', 'page');
     await expect(targets.nth(1)).not.toHaveAttribute('aria-current', 'page');
     await expect(targets.nth(0).locator('img')).toHaveAttribute('src', '/instance-icons/potato.svg');
-    await expect(targets.nth(1).locator('img')).toHaveAttribute('src', '/instance-icons/heart.svg');
+    await expect(targets.nth(1).locator('img')).toHaveAttribute('src', `/instance-icons/remote/${remoteHash}.svg`);
     // preserve Android WebAPK link capture
     await expect(group.locator('button.server-switcher-button:not(.server-switcher-settings)')).toHaveCount(1);
     await expect(group.locator('a.server-switcher-button')).toHaveAttribute('href', remoteServer.url);
@@ -195,12 +198,18 @@ test('shows and switches the configured server on authentication and output scre
   // preserve Android WebAPK link capture
   await expect(remote).toHaveAttribute('href', remoteServer.url);
   await expect(remote).toHaveAccessibleName('Framework — Working');
-  await expect(remote.locator('img')).toHaveAttribute('src', '/instance-icons/heart.svg');
+  await expect(remote.locator('img')).toHaveAttribute('src', `/instance-icons/remote/${remoteHash}.svg`);
   await expect(menu.locator('.server-switcher-attention.working')).toHaveCount(2);
   // choosing the current server just closes the menu
   await current.click();
   await expect(menu).toHaveCount(0);
   await expect(selector).toHaveAttribute('aria-expanded', 'false');
+
+  // a peer whose artwork stops verifying loses only its hash and draws the terminal icon
+  remoteIconHash = undefined;
+  await selector.click();
+  await expect(remote.locator('img')).toHaveAttribute('src', '/instance-icons/terminal.svg', { timeout: 8_000 });
+  await current.click();
 
   remoteName = 'Framework Published';
   remoteAttention = 'completed';
@@ -283,7 +292,7 @@ test('leads the empty console tab row with the server selector', async ({ page }
 });
 
 test('rolls the most urgent remote attention onto the closed selector', async ({ page }) => {
-  const remotes = [{ name: 'Framework', url: 'https://framework.santosa.dev', icon: 'heart' }, { name: 'Homelab', url: 'https://homelab.santosa.dev', icon: 'terminal' }];
+  const remotes = [{ name: 'Framework', url: 'https://framework.santosa.dev' }, { name: 'Homelab', url: 'https://homelab.santosa.dev' }];
   const server = { name: 'X1 Carbon', url: 'https://x1carbon.santosa.dev', icon: 'potato', remotes };
   let attention = { framework: 'working', homelab: 'question' };
   await page.route('**/api/**', async route => {
@@ -317,7 +326,7 @@ test('rolls the most urgent remote attention onto the closed selector', async ({
 test('cycles one corner status dot through configured servers at narrow phone width', async ({ page }) => {
   await page.clock.install();
   await page.setViewportSize({ width: 320, height: 780 });
-  const remotes = Array.from({ length: 2 }, (_, index) => ({ name: `Remote ${index + 1}`, url: `https://remote-${index + 1}.example.com`, icon: 'terminal' }));
+  const remotes = Array.from({ length: 2 }, (_, index) => ({ name: `Remote ${index + 1}`, url: `https://remote-${index + 1}.example.com` }));
   const server = { name: 'X1 Carbon', url: 'https://x1carbon.santosa.dev', icon: 'potato', remotes };
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;

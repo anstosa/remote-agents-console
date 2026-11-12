@@ -65,7 +65,7 @@ import type { FileEntry } from './files-panel/contracts.js';
 import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './settings/settings-center.js';
 import { SettingsHeaderActionsContext, SettingsHeaderSearchContext } from './settings/header-actions.js';
 import { isSettingsSnapshot, settingsResponseError } from './settings/contracts.js';
-import { isInstanceIconName, type InstanceIconName } from './settings/icon-preview.js';
+import { isInstanceIconHash, isInstanceIconName, type InstanceIconName } from './settings/icon-preview.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
 import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
 import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
@@ -366,8 +366,8 @@ const NoteFeedbackContext = createContext<{ deleted: (label: string, undoToken: 
 // the Adapter and target a new Schedule pre-fills with, plus the launcher rows the note pane's
 // Adapter and target pickers offer, all resolved from the dashboard for the active tab's context
 type SchedulePrefill = { kind: AgentKind; target: ScheduleTarget; runsOnText: string; adapters: ScheduleAdapterOption[]; targets: ScheduleTargetOption[]; liveAgentIds: string[] };
-// retain inherited peer identity separately from local navigation overrides
-type RemoteServer = { name: string; url: string; icon?: InstanceIconName; defaultName?: string; defaultIcon?: InstanceIconName };
+// a server's icon is a library name on the current server and the hash of published artwork on a remote
+type RemoteServer = { name: string; url: string; icon?: InstanceIconName; iconHash?: string; defaultName?: string };
 type ServerInfo = { name: string; url: string; icon?: InstanceIconName; remotes: RemoteServer[] };
 type InstanceAttention = 'idle'|'working'|'question'|'completed'|'unavailable';
 type InstanceStatus = RemoteServer & { attention: InstanceAttention };
@@ -1377,8 +1377,8 @@ const isRemoteServer = (value: unknown): value is RemoteServer => value !== null
   && typeof (value as RemoteServer).name === 'string'
   && typeof (value as RemoteServer).url === 'string'
   && ((value as RemoteServer).icon === undefined || isInstanceIconName((value as RemoteServer).icon))
-  && ((value as RemoteServer).defaultName === undefined || typeof (value as RemoteServer).defaultName === 'string')
-  && ((value as RemoteServer).defaultIcon === undefined || isInstanceIconName((value as RemoteServer).defaultIcon));
+  && ((value as RemoteServer).iconHash === undefined || isInstanceIconHash((value as RemoteServer).iconHash))
+  && ((value as RemoteServer).defaultName === undefined || typeof (value as RemoteServer).defaultName === 'string');
 // validate public server metadata
 const isServerInfo = (value: unknown): value is ServerInfo => isRemoteServer(value)
   && Array.isArray((value as ServerInfo).remotes)
@@ -1408,8 +1408,8 @@ const sameServerStatuses = (left: Readonly<Record<string, InstanceAttention>>, r
 };
 // provide backward-compatible identity while older servers update
 const fallbackServerInfo = (): ServerInfo => ({ name: 'Remote Agents', url: location.origin, remotes: [] });
-// resolve bundled server artwork
-const serverIconPath = (icon: InstanceIconName | undefined): string => `/instance-icons/${icon ?? 'terminal'}.svg`;
+// resolve local library artwork, or a remote's artwork that this server verified and serves
+const serverIconPath = ({ icon, iconHash }: Pick<RemoteServer, 'icon' | 'iconHash'>): string => iconHash !== undefined ? `/instance-icons/remote/${iconHash}.svg` : `/instance-icons/${icon ?? 'terminal'}.svg`;
 // describe one server attention marker
 const instanceAttentionLabel = (attention: InstanceAttention): string | undefined => {
   // map only visible attention states
@@ -2445,7 +2445,7 @@ function ServerTargetLink({ target, current, className, onSelectCurrent }: { tar
   const attention = statuses[target.url] ?? 'idle';
   const attentionLabel = instanceAttentionLabel(attention);
   const label = `${target.name}${attentionLabel === undefined ? '' : ` — ${attentionLabel}`}`;
-  const content = <><img src={serverIconPath(target.icon)} alt="" /><span>{target.name}</span><i className={`server-switcher-attention ${attention}`} aria-hidden="true" title={attentionLabel} /></>;
+  const content = <><img src={serverIconPath(target)} alt="" /><span>{target.name}</span><i className={`server-switcher-attention ${attention}`} aria-hidden="true" title={attentionLabel} /></>;
   if (current) return <button type="button" className={`${className} attention-${attention}`} aria-current="page" aria-label={label} onClick={onSelectCurrent}>{content}</button>;
   return <a href={target.url} className={`${className} attention-${attention}`} aria-label={label}>{content}</a>;
 }
@@ -2518,7 +2518,7 @@ function ServerSelector() {
   const rename = () => { setOpen(false); settingsSplit?.renameServer(); };
   // close the selector before opening the update review
   const showUpdate = () => { setOpen(false); settings?.openServerUpdate(); };
-  return <><button ref={anchorRef} type="button" className={`server-switcher-button server-selector${updateAvailable ? ' updates-available' : ''}${updateInProgress ? ' updates-in-progress progress-border progress-mauve' : ''}`} aria-busy={updateInProgress || undefined} aria-label={selectorLabel} aria-description={shownLabel} title={selectorLabel} data-context-flyout aria-expanded={open} onClick={() => setOpen(value => !value)}><ProgressRing busy={updateInProgress} /><span className="flyout-caret" aria-hidden="true" /><img src={serverIconPath(server.icon)} alt="" /><span className="server-selector-name">{server.name}</span><svg className="server-selector-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg><i className={`server-switcher-attention ${shownAttention}`} aria-hidden="true" title={shownLabel} /></button>{open && <FlyoutPortal onDismiss={() => setOpen(false)}><div className="more-menu flyout-menu server-menu" ref={flyoutRef} style={style} role="group" aria-label="Remote Agents servers"><div className="server-menu-details" role="group" aria-label="Current server details"><small>CURRENT SERVER</small><strong>{settings?.serverName ?? server.name}</strong><span>{serverHostLabel(settings?.serverUrl ?? server.url)}</span><span className="server-menu-revision" role={revisionLoading ? 'status' : undefined} aria-busy={revisionLoading || undefined} aria-label={revisionLoading ? 'Loading server revision' : revision === undefined ? 'Server revision unavailable' : `Server revision ${revision.sha.slice(0, 7)}, committed ${updateCommitDate(revision.committedAt)}`}><span className={revisionLoading ? 'server-menu-revision-skeleton' : undefined}>{revisionLoading ? <><Skeleton /><Skeleton /></> : revisionLabel}</span></span><span className={`server-menu-update-state${updateAvailable ? ' available' : ''}`}>{updateLabel}</span>{settings !== undefined && <div className="server-menu-actions"><button type="button" aria-label="Rename Server" onClick={rename}>Rename</button>{updateAvailable && <button type="button" className={`server-menu-update${updateInProgress ? " progress-border progress-mauve" : " update-attention"}`} aria-busy={updateInProgress || undefined} aria-label={settings.serverUpdateMinimized ? 'Reopen server update' : 'View upstream update'} onClick={showUpdate}><ProgressRing busy={updateInProgress} />{settings.serverUpdateMinimized ? 'Reopen update' : 'View update'}</button>}</div>}</div><hr className="more-menu-divider" />{targets.map(target => <ServerTargetLink key={target.url} target={target} current={target.url === server.url} className="server-menu-item" onSelectCurrent={() => setOpen(false)} />)}</div></FlyoutPortal>}</>;
+  return <><button ref={anchorRef} type="button" className={`server-switcher-button server-selector${updateAvailable ? ' updates-available' : ''}${updateInProgress ? ' updates-in-progress progress-border progress-mauve' : ''}`} aria-busy={updateInProgress || undefined} aria-label={selectorLabel} aria-description={shownLabel} title={selectorLabel} data-context-flyout aria-expanded={open} onClick={() => setOpen(value => !value)}><ProgressRing busy={updateInProgress} /><span className="flyout-caret" aria-hidden="true" /><img src={serverIconPath(server)} alt="" /><span className="server-selector-name">{server.name}</span><svg className="server-selector-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg><i className={`server-switcher-attention ${shownAttention}`} aria-hidden="true" title={shownLabel} /></button>{open && <FlyoutPortal onDismiss={() => setOpen(false)}><div className="more-menu flyout-menu server-menu" ref={flyoutRef} style={style} role="group" aria-label="Remote Agents servers"><div className="server-menu-details" role="group" aria-label="Current server details"><small>CURRENT SERVER</small><strong>{settings?.serverName ?? server.name}</strong><span>{serverHostLabel(settings?.serverUrl ?? server.url)}</span><span className="server-menu-revision" role={revisionLoading ? 'status' : undefined} aria-busy={revisionLoading || undefined} aria-label={revisionLoading ? 'Loading server revision' : revision === undefined ? 'Server revision unavailable' : `Server revision ${revision.sha.slice(0, 7)}, committed ${updateCommitDate(revision.committedAt)}`}><span className={revisionLoading ? 'server-menu-revision-skeleton' : undefined}>{revisionLoading ? <><Skeleton /><Skeleton /></> : revisionLabel}</span></span><span className={`server-menu-update-state${updateAvailable ? ' available' : ''}`}>{updateLabel}</span>{settings !== undefined && <div className="server-menu-actions"><button type="button" aria-label="Rename Server" onClick={rename}>Rename</button>{updateAvailable && <button type="button" className={`server-menu-update${updateInProgress ? " progress-border progress-mauve" : " update-attention"}`} aria-busy={updateInProgress || undefined} aria-label={settings.serverUpdateMinimized ? 'Reopen server update' : 'View upstream update'} onClick={showUpdate}><ProgressRing busy={updateInProgress} />{settings.serverUpdateMinimized ? 'Reopen update' : 'View update'}</button>}</div>}</div><hr className="more-menu-divider" />{targets.map(target => <ServerTargetLink key={target.url} target={target} current={target.url === server.url} className="server-menu-item" onSelectCurrent={() => setOpen(false)} />)}</div></FlyoutPortal>}</>;
 }
 
 // lead the tab row with the server selector and listening control
@@ -12384,9 +12384,9 @@ function App() {
         const local = snapshot.servers.find(candidate => candidate.url === serverInfo.url);
         // refresh names and icons published by every server
         if (local !== undefined) {
-          const remotes = snapshot.servers.filter(candidate => candidate.url !== serverInfo.url).map(({ name, url, icon, defaultName, defaultIcon }) => ({ name, url, ...(icon === undefined ? {} : { icon }), ...(defaultName === undefined ? {} : { defaultName }), ...(defaultIcon === undefined ? {} : { defaultIcon }) }));
+          const remotes = snapshot.servers.filter(candidate => candidate.url !== serverInfo.url).map(({ name, url, iconHash, defaultName }) => ({ name, url, ...(iconHash === undefined ? {} : { iconHash }), ...(defaultName === undefined ? {} : { defaultName }) }));
           setServerInfo(current => {
-            const unchanged = current.name === local.name && current.url === local.url && current.icon === local.icon && current.remotes.length === remotes.length && remotes.every((remote, index) => current.remotes[index]?.name === remote.name && current.remotes[index]?.url === remote.url && current.remotes[index]?.icon === remote.icon && current.remotes[index]?.defaultName === remote.defaultName && current.remotes[index]?.defaultIcon === remote.defaultIcon);
+            const unchanged = current.name === local.name && current.url === local.url && current.icon === local.icon && current.remotes.length === remotes.length && remotes.every((remote, index) => current.remotes[index]?.name === remote.name && current.remotes[index]?.url === remote.url && current.remotes[index]?.iconHash === remote.iconHash && current.remotes[index]?.defaultName === remote.defaultName);
             return unchanged ? current : { name: local.name, url: local.url, ...(local.icon === undefined ? {} : { icon: local.icon }), remotes };
           });
         }

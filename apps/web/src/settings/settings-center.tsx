@@ -1312,7 +1312,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   // replace raw ordered collection editing with the model policy control
   if (adapterAllowedModels) return <AgentModelsField source={source} schema={schema} value={value} path={path} issues={issues} disabled={disabled} onPatch={stagePatch} />;
   // replace numbered remote objects with permanent inherited identity controls
-  if (source.id === 'app' && path.length === 2 && path[0] === 'remoteServers' && /^\d+$/u.test(path[1]!)) return <RemoteServerFields value={value} path={path} defaults={remoteServers} icons={instanceIcons} disabled={disabled} onPatch={next => { /* stage remote overrides in the same application transaction */ onPatch(source, next); }} renderIssues={fieldPath => <FieldIssues issues={issues} sourceId={source.id} path={fieldPath} />} renderProtected={key => {
+  if (source.id === 'app' && path.length === 2 && path[0] === 'remoteServers' && /^\d+$/u.test(path[1]!)) return <RemoteServerFields value={value} path={path} defaults={remoteServers} disabled={disabled} onPatch={next => { /* stage remote overrides in the same application transaction */ onPatch(source, next); }} renderIssues={fieldPath => <FieldIssues issues={issues} sourceId={source.id} path={fieldPath} />} renderProtected={key => {
     const fieldValue = valueAt(value, [key]);
     // keep server-classified credentials behind the existing disclosure boundary
     if (!isProtectedValue(fieldValue)) return undefined;

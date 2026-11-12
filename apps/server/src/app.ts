@@ -99,8 +99,8 @@ import { configuredWorktreeForWorkspace, projectIdOf, worktreeBranch, worktreeBy
 import { previewFileBytes, WorkspaceFileService } from './workspace-files/service.js';
 import { ComparisonService, type ComparisonScope } from './git/comparison-service.js';
 import { mergeBaseChoices, saveMergeBase } from './git/comparison.js';
-import { listInstanceIcons, loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instance-icon.js';
-import { instanceAttention, RemoteInstanceStatusPoller, validInstanceStatusRequest, type InstanceStatus } from './instance-status.js';
+import { instanceIconHashPattern, instanceIconSvg, listInstanceIcons, loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instance-icon.js';
+import { instanceAttention, instanceIconHash, RemoteInstanceStatusPoller, validPeerRequest, type InstanceStatus } from './instance-status.js';
 import { createHmac, randomBytes } from 'node:crypto';
 import { integrationConfigForRemotes, parseDavoSettings, resolveAgentProgram, reviewConfig } from './config/schema.js';
 import { OrchestrationService, type AgentStatusV1, type PlaceScope } from './orchestration/index.js';
@@ -165,7 +165,7 @@ import { registerGoogleCalendarRoutes } from './google-calendar/routes.js';
 import { calendarLabelsForAgent } from './google-calendar/labels.js';
 import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
 
-export type Dependencies = { replySuggestions?: ReplySuggestionService; googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; pushDiagnostics?: PushDiagnostics; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; dashboardTimingFile?: string };
+export type Dependencies = { replySuggestions?: ReplySuggestionService; googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; pushDiagnostics?: PushDiagnostics; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses' | 'artwork'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; dashboardTimingFile?: string };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use, and with the
 // structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
@@ -506,17 +506,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     reply.hijack();
     temporaryPreviewProxy.handle(request.raw, reply.raw, target, upstreamPath, prefix, accessCookie);
   };
-  type PublishedServer = { name: string; url: string; icon?: InstanceIcon; defaultName?: string; defaultIcon?: InstanceIcon };
-  type PublishedRemoteServer = PublishedServer & { icon: InstanceIcon; defaultName: string; defaultIcon: InstanceIcon };
+  // a remote's icon is only the artwork it publishes (iconHash); the local server's is a library name
+  type PublishedRemoteServer = { name: string; url: string; defaultName: string; iconHash?: string };
   type PublishedRemoteStatus = PublishedRemoteServer & Pick<InstanceStatus, 'attention'>;
-  type PublishedServerNavigation = PublishedServer & { remotes: PublishedServer[] };
+  type PublishedServerNavigation = { name: string; url: string; icon?: InstanceIcon; remotes: PublishedRemoteServer[] };
   const remotesByOrigin = new Map(config.remoteServers.map(remote => [remote.url.origin, remote]));
-  // apply local display overrides without mutating peer-published status cache entries
-  const publishedRemote = (status: Pick<InstanceStatus, 'url' | 'name' | 'icon'>): PublishedRemoteServer => {
-    const configured = remotesByOrigin.get(status.url);
-    const defaultIcon: InstanceIcon = status.icon ?? 'terminal';
-    return { url: status.url, defaultName: status.name, defaultIcon, name: configured?.name ?? status.name, icon: configured?.icon ?? defaultIcon };
-  };
+  // apply the local name override without mutating peer-published status cache entries
+  const publishedRemote = (status: Pick<InstanceStatus, 'url' | 'name' | 'iconHash'>): PublishedRemoteServer => ({ url: status.url, defaultName: status.name, name: remotesByOrigin.get(status.url)?.name ?? status.name, ...(status.iconHash === undefined ? {} : { iconHash: status.iconHash }) });
   // retain remote attention while overlaying only the browser-facing identity
   const publishedRemoteStatus = (status: InstanceStatus): PublishedRemoteStatus => ({ ...publishedRemote(status), attention: status.attention });
   // publish configured navigation before peer checks
@@ -774,7 +770,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       github,
       loadInstances: async () => {
         await refreshRemoteServers();
-        return [{ id: server.url, name: server.name, url: server.url, local: true, ...(server.icon === undefined ? {} : { icon: server.icon }) }, ...server.remotes.map(remote => ({ id: remote.url, name: remote.name, url: remote.url, local: false, ...(remote.icon === undefined ? {} : { icon: remote.icon }) }))];
+        return [{ id: server.url, name: server.name, url: server.url, local: true, ...(server.icon === undefined ? {} : { icon: server.icon }) }, ...server.remotes.map(remote => ({ id: remote.url, name: remote.name, url: remote.url, local: false }))];
       },
       launchWorktree: worktreeId => launch.launch(worktreeId),
       launchScratch: () => launch.launchHome(),
@@ -1019,8 +1015,17 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.get('/api/instance-status', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     browser(request);
     // require an authenticated peer signature
-    if (!validInstanceStatusRequest(instanceStatusSecret, config.publicOrigin.origin, request.headers['x-rac-status-timestamp'], request.headers['x-rac-status-signature'])) return reply.code(401).send({ error: 'unauthorized' });
-    return { name: server.name, ...(server.icon === undefined ? {} : { icon: server.icon }), attention: await localInstanceAttention() };
+    if (!validPeerRequest(instanceStatusSecret, 'status', config.publicOrigin.origin, request.headers['x-rac-status-timestamp'], request.headers['x-rac-status-signature'])) return reply.code(401).send({ error: 'unauthorized' });
+    // older viewers draw their own file of a named icon and drop the whole identity for a name outside
+    // terminal, potato and heart, so only those names are sent; unreadable artwork omits only the hash
+    const artwork = await loadInstanceIconSvg(server.icon).catch(() => undefined);
+    return { name: server.name, ...(server.icon === 'potato' || server.icon === 'heart' || server.icon === 'terminal' ? { icon: server.icon } : {}), ...(artwork === undefined ? {} : { iconHash: instanceIconHash(artwork) }), attention: await localInstanceAttention() };
+  });
+  // hand the chosen artwork to a signed peer, which verifies it against the announced iconHash
+  app.get('/api/instance-icon', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
+    browser(request);
+    if (!validPeerRequest(instanceStatusSecret, 'icon', config.publicOrigin.origin, request.headers['x-rac-status-timestamp'], request.headers['x-rac-status-signature'])) return reply.code(401).send({ error: 'unauthorized' });
+    return reply.type('image/svg+xml').send(await loadInstanceIconSvg(server.icon));
   });
   // serve the configured favicon before authentication
   app.get('/favicon.svg', async (request, reply) => { browser(request); return reply.type('image/svg+xml').send(await loadInstanceIconSvg(config.icon)); });
@@ -1031,6 +1036,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // reject names outside the library pattern
     if (!isInstanceIcon(icon)) return reply.code(404).send({ error: 'icon unavailable' });
     return reply.type('image/svg+xml').send(await loadInstanceIconSvg(icon));
+  });
+  // serve a peer's verified artwork from this origin so the page CSP stays 'self'
+  app.get('/instance-icons/remote/:hash.svg', async (request, reply) => {
+    browser(request);
+    const hash = (request.params as { hash: string }).hash;
+    if (!instanceIconHashPattern.test(hash)) return reply.code(404).send({ error: 'icon unavailable' });
+    return reply.type('image/svg+xml').send(instanceStatusPoller.artwork(hash) ?? instanceIconSvg());
   });
   // list the icon library as records so per-icon details can be added later
   app.get('/api/instance-icons', async request => { session(request); return { icons: (await listInstanceIcons()).map(name => ({ name })) }; });

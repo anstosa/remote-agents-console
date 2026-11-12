@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { PanelIcon } from '../panel-header.js';
-import { isInstanceIcon, type InstanceIcon } from '../../../server/src/instance-icon-name.js';
+import { instanceIconHashPattern, isInstanceIcon, type InstanceIcon } from '../../../server/src/instance-icon-name.js';
 import type { SettingsRequest, SettingsSource } from './contracts.js';
 
 export const editableIconSources = new Set(['icon-heart', 'icon-potato']);
@@ -9,6 +9,7 @@ const staticTags = new Set(['svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'li
 const imageGlyph = 'M3 3h18v18H3zM3 16l6-6 6 6 3-3 3 3M16 7h.01';
 
 export const isInstanceIconName = (value: unknown): value is InstanceIconName => typeof value === 'string' && isInstanceIcon(value);
+export const isInstanceIconHash = (value: unknown): value is string => typeof value === 'string' && instanceIconHashPattern.test(value);
 
 // read the server's icon library; the built-in terminal stands in when it cannot be read
 export async function fetchInstanceIcons(request: SettingsRequest): Promise<InstanceIconName[]> {

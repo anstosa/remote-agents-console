@@ -184,8 +184,10 @@ When `remoteServers` connects multiple console instances, configure the same
 separately generated `RAC_INSTANCE_STATUS_SECRET` on every peer. Keep each
 instance's `RAC_SESSION_SECRET` unique: it signs browser sessions and must not
 be reused as the federation credential. The status API exposes only the
-server's published name and icon plus aggregate question, completed, idle, or
-unavailable attention. It rejects unsigned or stale peer requests.
+server's published name and icon (its name and the hash of its artwork) plus
+aggregate question, completed, idle, or unavailable attention; a second signed
+peer endpoint returns that artwork. Each endpoint's signature is bound to it, and
+both reject unsigned or stale peer requests.
 
 To run the console and its managed tmux/Codex sessions in Docker instead, see
 [the Docker Compose guide](docker.md).
