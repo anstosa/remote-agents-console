@@ -76,7 +76,7 @@ import { normalizeGithubRepository, type GithubNewWorktreeContext } from './gith
 import { CodeLoading } from './code-panel/loading.js';
 import { ModelChip, type AgentModel } from './model-picker.js';
 import { WatchesButton, type WatchSummary } from './watches-button.js';
-import { commitAgentUpdateFingerprint, commitRacUpdateFingerprint, reserveAgentUpdateFingerprint, reserveRacUpdateFingerprint, releaseUpdateFingerprint, clearAgentUpdateFingerprint, clearRacUpdateFingerprint } from './notification-fingerprints.js';
+import { commitAgentUpdateFingerprint, commitRacUpdateFingerprint, reserveAgentUpdateFingerprint, reserveRacUpdateFingerprint, releaseUpdateFingerprint, clearAgentUpdateFingerprint, clearRacUpdateFingerprint, type UpdateFingerprintReservation } from './notification-fingerprints.js';
 import { captureNotificationInventory, closeNotificationEvent, displayNotificationEvent, disposeNotificationCoordinator, isBrowserNotificationEvent, listenForWorkerNotificationDisplays, reconcileNotificationSnapshot, type CapturedNotificationInventory } from './notification-coordinator.js';
 import { flushNotificationJournal, recordNotificationJournal } from './notification-journal.js';
 import { PushSubscriptionLifecycle, type PushEnrollmentHealth } from './push-subscription-lifecycle.js';
@@ -1022,41 +1022,76 @@ const currentNotificationRegistration = async (): Promise<ServiceWorkerRegistrat
     void lookup.then(finish, () => finish(undefined));
   });
 };
-// show alerts with durable worktree metadata
-const showNotification = async (kind: 'question' | 'finished' | 'system', title: string, body: string, tag: string, url = '/', worktreeId?: string, notificationEvent?: NotificationEvent): Promise<boolean> => {
+// show alerts with durable metadata and optional live ownership
+const showNotification = async (kind: 'question' | 'finished' | 'system', title: string, body: string, tag: string, url = '/', worktreeId?: string, notificationEvent?: NotificationEvent, ownership?: { id: string; isCurrent: () => boolean; onStaleDisplay?: () => void | Promise<void> }): Promise<boolean> => {
   // stop before any notification or sound work without permission
   if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+  // skip notifications whose owner was superseded before display work began
+  if (ownership !== undefined && !ownership.isCurrent()) return false;
   const sounds = notificationSoundsEnabled();
   // route strict agent events through the active worker arbiter
   if (notificationEvent !== undefined && isBrowserNotificationEvent(notificationEvent)) {
     return await boundedNotificationDisplay(displayNotificationEvent({ event: notificationEvent, title, body, soundRequested: sounds && kind !== 'system', soundStillRequested: () => notificationSoundsEnabled(), playCustomSound: () => playNotificationSound(kind, `${notificationEvent.entityId}:${notificationEvent.eventEpoch}:${notificationEvent.eventSequence}`) }));
   }
   const customSoundPlayed = sounds && await playNotificationSound(kind, tag);
-  const options = { body, tag, icon: '/favicon.svg', badge: '/notification-badge.png', requireInteraction: kind === 'question', silent: !sounds || customSoundPlayed, data: { url, kind, worktreeId } };
+  // stop after an asynchronous sound preference boundary changes ownership
+  if (ownership !== undefined && !ownership.isCurrent()) return false;
+  const options = { body, tag, icon: '/favicon.svg', badge: '/notification-badge.png', requireInteraction: kind === 'question', silent: !sounds || customSoundPlayed, data: { url, kind, worktreeId, ...(ownership === undefined ? {} : { ownerId: ownership.id }) } };
   // preserve legacy registration display behavior
   if ('serviceWorker' in navigator) {
     const registration = await currentNotificationRegistration();
     // report a missing or stalled registration as not displayed
     if (registration === undefined) return false;
+    // verify ownership after awaiting the registration lookup
+    if (ownership !== undefined && !ownership.isCurrent()) return false;
     try {
-      return await boundedNotificationDisplay(registration.showNotification(title, options).then(() => true));
+      // recheck ownership when the browser finishes delivery
+      const display = registration.showNotification(title, options).then(async () => {
+        // close only this late display if its request was superseded
+        if (ownership !== undefined && !ownership.isCurrent()) {
+          await dismissNotification(tag, ownership.id);
+          // restore the current owner's same-tag display after replacement
+          ownership.onStaleDisplay?.();
+        }
+        return true;
+      });
+      return await boundedNotificationDisplay(display);
     } catch {
       return false;
     }
   }
+  // verify ownership immediately before creating a native notification
+  if (ownership !== undefined && !ownership.isCurrent()) return false;
   try {
-    new Notification(title, options);
+    const notification = new Notification(title, options);
+    // close and replace a notification superseded during native construction
+    if (ownership !== undefined && !ownership.isCurrent()) {
+      notification.close();
+      ownership.onStaleDisplay?.();
+      return false;
+    }
     return true;
   } catch {
     return false;
   }
 };
 
-const dismissNotification = async (tag: string) => {
+// dismiss only notifications still owned by the requesting lifecycle
+const dismissNotification = async (tag: string, ownerId?: string, isCurrent?: () => boolean) => {
   if (!('serviceWorker' in navigator)) return;
   try {
     const registration = await navigator.serviceWorker.ready;
-    (await registration.getNotifications({ tag })).forEach(notification => notification.close());
+    // stop an old clear request after registration recovery
+    if (isCurrent !== undefined && !isCurrent()) return;
+    const notifications = await registration.getNotifications({ tag });
+    // keep a newer availability owner after notification enumeration
+    if (isCurrent !== undefined && !isCurrent()) return;
+    // close each matching notification without affecting a newer owner
+    notifications.forEach(notification => {
+      // retain notifications owned by a different availability request
+      if (ownerId !== undefined && (notification.data as { ownerId?: unknown } | null)?.ownerId !== ownerId) return;
+      notification.close();
+    });
   } catch { /* Notification access must not interfere with tab navigation. */ }
 };
 
@@ -1469,13 +1504,15 @@ function EmbeddedAgentOutput({ id, onMetadata }: { id: string; onMetadata: (resp
 }
 
 // review and launch one exact server update
-function ServerUpdateDialog({ open, minimized, onMinimize, onClose }: { open: boolean; minimized: boolean; onMinimize: () => void; onClose: () => void }) {
+function ServerUpdateDialog({ open, minimized, onMinimize, onClose, onUpdateFailed }: { open: boolean; minimized: boolean; onMinimize: () => void; onClose: () => void; onUpdateFailed: () => Promise<void> }) {
   const dialog = useRef<HTMLDivElement | null>(null);
   const [preview, setPreview] = useState<ServerUpdatePreview>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [updateId, setUpdateId] = useState<string>();
   const [updateState, setUpdateState] = useState<ServerUpdateState>();
+  // avoid refreshing retry availability more than once per failed operation
+  const failedUpdateRefresh = useRef<string | undefined>(undefined);
   const [updateSubmitting, setUpdateSubmitting] = useState(false);
   const [advisorId, setAdvisorId] = useState<string>();
   const [advisorState, setAdvisorState] = useState<AgentState>();
@@ -1596,13 +1633,24 @@ function ServerUpdateDialog({ open, minimized, onMinimize, onClose }: { open: bo
       // tolerate the rebuild outage
       if (!active || !response.ok) return;
       const payload = await response.json().catch(() => undefined) as { state?: unknown } | undefined;
+      // cleanup may happen while the response body is being read
+      if (!active) return;
       // accept one canonical lifecycle state
-      if (payload?.state === 'queued' || payload?.state === 'running' || payload?.state === 'complete' || payload?.state === 'failed') setUpdateState(payload.state);
+      if (payload?.state === 'queued' || payload?.state === 'running' || payload?.state === 'complete' || payload?.state === 'failed') {
+        const nextState = payload.state;
+        // retain terminal results when older status reads settle in the same batch
+        setUpdateState(current => current === 'complete' || current === 'failed' ? current : nextState);
+        // refresh the durable retry entry after one failed operation
+        if (payload.state === 'failed' && failedUpdateRefresh.current !== updateId) {
+          failedUpdateRefresh.current = updateId;
+          void onUpdateFailed();
+        }
+      }
     };
     void poll();
     const interval = window.setInterval(() => { void poll(); }, 1_000);
     return () => { active = false; window.clearInterval(interval); };
-  }, [open, updateId, updateState]);
+  }, [onUpdateFailed, open, updateId, updateState]);
   // answer one advisor choice or free-form question
   const answerAdvisor = async (selection: number | string) => {
     // require one current question
@@ -11689,6 +11737,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
 }
 
 // coordinate console session and update lifecycle
+// coordinate the authenticated console and its durable update notifications
 function App() {
   const { action, begin: beginFullscreenAction, finish: finishFullscreenAction, entered: fullscreenActionEntered } = useFullscreenAction();
   const [state, setState] = useState<'checking' | 'login' | 'naming' | 'ready' | 'inactive'>('checking');
@@ -11698,6 +11747,10 @@ function App() {
   const [error, setError] = useState('');
   const [clientUpdateAvailable, setClientUpdateAvailable] = useState(false);
   const [serverUpdateAvailable, setServerUpdateAvailable] = useState(false);
+  // order overlapping availability reads and terminal retry refreshes
+  const serverUpdateAvailabilityRequest = useRef(0);
+  // retain the latest RAC notification for a late same-tag replacement
+  const currentRacUpdateNotification = useRef<{ id: string; title: string; body: string; target: string; pending?: UpdateFingerprintReservation; isCurrent: () => boolean; onStaleDisplay: () => Promise<void> } | undefined>(undefined);
   const [serverUpdateOpen, setServerUpdateOpen] = useState(false);
   const [piUpdateTarget, setPiUpdateTarget] = useState<PiUpdateTarget>();
   const [serverUpdateMinimized, setServerUpdateMinimized] = useState(false);
@@ -11982,6 +12035,75 @@ function App() {
     if (location.hash === '#server-update') history.replaceState(null, '', `${location.pathname}${location.search}`);
     focusServerUpdateEntry();
   }, [focusServerUpdateEntry]);
+  // reconcile one authoritative availability result across polling and terminal refreshes
+  const reconcileServerUpdateAvailability = useCallback(async (payload: ServerUpdateAvailability, requestId: number, isActive: () => boolean) => {
+    // ignore a response superseded before its body was validated
+    if (!isActive() || requestId !== serverUpdateAvailabilityRequest.current) return;
+    setServerUpdateAvailable(payload.available);
+    // retain rebuild retry visibility without advertising already installed commits
+    if (!payload.available || payload.commitCount === undefined || payload.commitCount === 0) {
+      currentRacUpdateNotification.current = undefined;
+      clearRacUpdateFingerprint(notificationFingerprintScope, agentKinds);
+      void dismissNotification('rac-update', undefined, () => isActive() && currentRacUpdateNotification.current === undefined);
+      return;
+    }
+    const target = payload.targetSha ?? `count:${payload.commitCount}`;
+    const previous = currentRacUpdateNotification.current;
+    // retain a live same-target display or transfer its exact stale reservation
+    if (previous?.target === target && previous.pending !== undefined) {
+      // coalesce a failure refresh without orphaning registration or display work
+      if (previous.isCurrent()) return;
+      releaseUpdateFingerprint(previous.pending);
+    }
+    const title = 'Remote Agent Console update available';
+    const body = `${payload.commitCount} ${payload.commitCount === 1 ? 'commit' : 'commits'} upstream`;
+    // restore the latest confirmed owner after an obsolete same-tag display finishes
+    const onStaleDisplay = async () => {
+      const current = currentRacUpdateNotification.current;
+      // retain the last confirmed notification through failed or malformed availability reads
+      if (current === undefined || !current.isCurrent()) return;
+      const restored = await showNotification('system', current.title, current.body, 'rac-update', '/#server-update', undefined, undefined, current).catch(() => false);
+      // preserve a newer owner while the repair was awaiting the browser
+      if (!current.isCurrent()) return;
+      // replace pending reservations so any successful repair is durably recorded
+      clearRacUpdateFingerprint(notificationFingerprintScope, agentKinds);
+      // leave failed repairs eligible for the next availability poll
+      if (!restored) return;
+      const reservation = reserveRacUpdateFingerprint(notificationFingerprintScope, current.target, agentKinds);
+      // commit only this still-current successful repair
+      if (reservation !== undefined) commitRacUpdateFingerprint(notificationFingerprintScope, reservation, agentKinds);
+    };
+    const reservation = reserveRacUpdateFingerprint(notificationFingerprintScope, target, agentKinds);
+    // bind display ownership to the latest confirmed availability result
+    const notificationOwner = { id: `rac-update:${crypto.randomUUID()}`, title, body, target, pending: reservation, isCurrent: (): boolean => isActive() && currentRacUpdateNotification.current === notificationOwner, onStaleDisplay };
+    currentRacUpdateNotification.current = notificationOwner;
+    // suppress durable and concurrently pending targets
+    if (reservation === undefined) return;
+    const displayed = await showNotification('system', title, body, 'rac-update', '/#server-update', undefined, undefined, notificationOwner).catch(() => false);
+    notificationOwner.pending = undefined;
+    // abandon display work only after a newer confirmed availability owner takes over
+    if (!notificationOwner.isCurrent()) {
+      // close only the notification owned by this stale response
+      if (displayed) void dismissNotification('rac-update', notificationOwner.id);
+      releaseUpdateFingerprint(reservation);
+      return;
+    }
+    // commit only a confirmed still-current display
+    if (displayed) commitRacUpdateFingerprint(notificationFingerprintScope, reservation, agentKinds);
+    else releaseUpdateFingerprint(reservation);
+  }, [notificationFingerprintScope]);
+  // preserve retry visibility while confirming the failed operation's current availability
+  const refreshServerUpdateAfterFailure = useCallback(async () => {
+    const requestId = ++serverUpdateAvailabilityRequest.current;
+    setServerUpdateAvailable(true);
+    const response = await request('/api/server/update-available', { signal: AbortSignal.timeout(30_000) }, false);
+    // keep the retry visible when the authoritative check is unavailable
+    if (!response.ok) return;
+    const payload: unknown = await response.json().catch(() => undefined);
+    // reject stale responses and malformed availability data
+    if (!isServerUpdateAvailability(payload)) return;
+    await reconcileServerUpdateAvailability(payload, requestId, () => true);
+  }, [reconcileServerUpdateAvailability]);
   // open the update review from its notification route
   useEffect(() => {
     const openFromHash = () => {
@@ -12218,36 +12340,23 @@ function App() {
     // avoid host fetches before authentication
     if (state !== 'ready') return;
     let closed = false;
+    // publish only the latest valid availability response
     const checkForServerUpdate = async () => {
+      const requestId = ++serverUpdateAvailabilityRequest.current;
       const response = await request('/api/server/update-available', { signal: AbortSignal.timeout(30_000) }, false);
       // retry unavailable checks later
       if (!response.ok || closed) return;
       const payload: unknown = await response.json().catch(() => undefined);
       // reject malformed availability data
-      if (!isServerUpdateAvailability(payload)) return;
-      // latch a discovered upstream update or rebuild retry
-      if (payload.available) setServerUpdateAvailable(true);
-      // notify only for commits missing from local main
-      if (!payload.available || payload.commitCount === undefined || payload.commitCount === 0) {
-        clearRacUpdateFingerprint(notificationFingerprintScope, agentKinds);
-        void dismissNotification('rac-update');
-        return;
-      }
-      const target = payload.targetSha ?? `count:${payload.commitCount}`;
-      const reservation = reserveRacUpdateFingerprint(notificationFingerprintScope, target, agentKinds);
-      // suppress durable and concurrently pending targets
-      if (reservation === undefined) return;
-      const displayed = await showNotification('system', 'Remote Agent Console update available', `${payload.commitCount} ${payload.commitCount === 1 ? 'commit' : 'commits'} upstream`, 'rac-update', '/#server-update').catch(() => false);
-      // commit only a confirmed still-current display
-      if (displayed) commitRacUpdateFingerprint(notificationFingerprintScope, reservation, agentKinds);
-      else releaseUpdateFingerprint(reservation);
+      if (closed || requestId !== serverUpdateAvailabilityRequest.current || !isServerUpdateAvailability(payload)) return;
+      await reconcileServerUpdateAvailability(payload, requestId, () => !closed);
     };
     const stopPolling = pollWhileVisible(checkForServerUpdate, 300_000, true, 1_800_000);
     return () => {
       closed = true;
       stopPolling();
     };
-  }, [notificationFingerprintScope, reconnectAttempt, state]);
+  }, [reconcileServerUpdateAvailability, reconnectAttempt, state]);
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -12291,7 +12400,7 @@ function App() {
   // share the current launch settings with every flyout
   // keep retry availability separate from provider and operation failures
   const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, loading: agentVersionsLoading, updating: updatingAgent, errors: Array.from(new Set([versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), retryVersions: versionCheckError ? () => { /* retry through the existing request owner */ refreshAgentVersions.current?.(); } : undefined, updateAgent: dispatchAgentUpdate }), [agentUpdateStatuses, agentVersionsLoading, updatingAgent, versionCheckError, dispatchAgentUpdate]);
-  return <SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents />{piUpdateTarget !== undefined && <PiUpdateDialog target={piUpdateTarget} request={request} onClose={closePiUpdate} onSubmitted={submittedPiUpdate} />}<ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
+  return <SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents />{piUpdateTarget !== undefined && <PiUpdateDialog target={piUpdateTarget} request={request} onClose={closePiUpdate} onSubmitted={submittedPiUpdate} />}<ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} onUpdateFailed={refreshServerUpdateAfterFailure} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
 }
 // register without surfacing legacy or private-mode failures as unhandled rejections
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => undefined);

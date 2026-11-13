@@ -274,6 +274,25 @@ test('opens the commit review before starting and retains update failures in the
   let updateStarts = 0;
   let updateStatusChecks = 0;
   let updateState: 'running'|'failed' = 'running';
+  let holdNextUpdateStatus = false;
+  let signalHeldUpdateStatus!: () => void;
+  let releaseHeldUpdateStatus!: () => void;
+  // coordinate one delayed status response
+  const heldUpdateStatusStarted = new Promise<void>(resolve => {
+    // expose the held request start
+    signalHeldUpdateStatus = resolve;
+  });
+  const heldUpdateStatusReleased = new Promise<void>(resolve => {
+    // expose the held request release
+    releaseHeldUpdateStatus = resolve;
+  });
+  let updateAvailable = true;
+  let availabilityChecks = 0;
+  let holdNextAvailability = false;
+  let signalHeldAvailability!: () => void;
+  let releaseHeldAvailability!: () => void;
+  const heldAvailabilityStarted = new Promise<void>(resolve => { signalHeldAvailability = resolve; });
+  const heldAvailabilityReleased = new Promise<void>(resolve => { releaseHeldAvailability = resolve; });
   let advisorLaunches = 0;
   const targetSha = '2'.repeat(40);
   await page.route('**/api/**', async route => {
@@ -283,8 +302,18 @@ test('opens the commit review before starting and retains update failures in the
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // render one stable agent tab
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready' }], projects: [] } });
-    // report remote commits on main
-    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: true } });
+    // report remote commits or a completed rebuild retry
+    if (url.pathname === '/api/server/update-available') {
+      availabilityChecks += 1;
+      const payload = { available: updateAvailable, commitCount: updateAvailable ? 1 : 0 };
+      // hold one older response to verify that terminal refresh wins
+      if (holdNextAvailability) {
+        holdNextAvailability = false;
+        signalHeldAvailability();
+        await heldAvailabilityReleased;
+      }
+      return route.fulfill({ json: payload });
+    }
     // preview one exact fast-forward update
     if (url.pathname === '/api/server/update-preview') return route.fulfill({ json: { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha, fastForwardable: true, commitCount: 1, commits: [{ sha: targetSha, subject: 'Add safer update review', author: 'Ansel', authoredAt: '2026-08-27T12:00:00-07:00' }], commitsTruncated: false, filesTruncated: false, advisory: { required: false, reasons: [] } } });
     // reject unexpected advisor launches
@@ -300,7 +329,14 @@ test('opens the commit review before starting and retains update failures in the
     // follow one host update while hidden
     if (url.pathname === '/api/server/update/server_update_operation_1234') {
       updateStatusChecks += 1;
-      return route.fulfill({ json: { id: 'server_update_operation_1234', kind: 'update', state: updateState } });
+      const state = updateState;
+      // delay one older status while a newer poll reaches failure
+      if (holdNextUpdateStatus) {
+        holdNextUpdateStatus = false;
+        signalHeldUpdateStatus();
+        await heldUpdateStatusReleased;
+      }
+      return route.fulfill({ json: { id: 'server_update_operation_1234', kind: 'update', state } });
     }
     // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
@@ -332,6 +368,12 @@ test('opens the commit review before starting and retains update failures in the
   await viewUpdate.click();
 
   const dialog = page.getByRole('dialog', { name: 'Review update' });
+  // synchronize forced refreshes with the endpoint instead of its long interval
+  const pollAvailability = async () => {
+    const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname === '/api/server/update-available');
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await response;
+  };
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText('Add safer update review')).toBeVisible();
   await expect(selector).toHaveAccessibleName(/update review open$/u);
@@ -361,6 +403,9 @@ test('opens the commit review before starting and retains update failures in the
   expect((await updateAttention(updatingAction)).name).toBe('none');
   await expect(dialog.getByText('Pulling the reviewed revision, rebuilding, and restarting…')).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Close server update' })).toBeDisabled();
+  updateAvailable = false;
+  await pollAvailability();
+  await expect(selector).toHaveAccessibleName(/update review open$/u);
   await dialog.getByRole('button', { name: 'Minimize server update' }).click();
   await expect(dialog).toBeHidden();
   await expect(selector).toHaveAccessibleName(/update review minimized$/u);
@@ -368,6 +413,8 @@ test('opens the commit review before starting and retains update failures in the
   const visibleStatusChecks = updateStatusChecks;
   await expect.poll(() => updateStatusChecks).toBeGreaterThan(visibleStatusChecks);
   await expect(selector).toBeFocused();
+  await expect(selector).toHaveAccessibleName(/update review minimized$/u);
+  await pollAvailability();
   await expect(selector).toHaveAccessibleName(/update review minimized$/u);
   await selector.click();
   const reopen = page.getByRole('group', { name: 'Current server details' }).getByRole('button', { name: 'Reopen server update' });
@@ -377,11 +424,29 @@ test('opens the commit review before starting and retains update failures in the
   await expect(selector).toHaveAccessibleName(/update review open$/u);
   await expect(dialog.getByRole('button', { name: 'Close server update' })).toBeDisabled();
   expect(updateStarts).toBe(1);
+  const checksBeforeStalePoll = availabilityChecks;
+  holdNextAvailability = true;
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(() => availabilityChecks).toBeGreaterThan(checksBeforeStalePoll);
+  await heldAvailabilityStarted;
+  // hold one running response before the failed status arrives
+  const checksBeforeHeldStatus = updateStatusChecks;
+  holdNextUpdateStatus = true;
+  await expect.poll(() => updateStatusChecks).toBeGreaterThan(checksBeforeHeldStatus);
+  await heldUpdateStatusStarted;
   updateState = 'failed';
+  updateAvailable = true;
   await expect(dialog.getByRole('status').filter({ hasText: 'Update failed. Check the server update log.' })).toBeVisible();
+  await expect.poll(() => updateStatusChecks).toBeGreaterThan(checksBeforeHeldStatus + 1);
+  await expect.poll(() => availabilityChecks).toBeGreaterThan(checksBeforeStalePoll + 1);
+  // release the older result after terminal failure renders
+  releaseHeldUpdateStatus();
+  await expect(dialog.getByRole('status').filter({ hasText: 'Update failed. Check the server update log.' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Close server update' })).toBeEnabled();
   await dialog.getByRole('button', { name: 'Close server update' }).click();
   await expect(dialog).toHaveCount(0);
   await expect(selector.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  releaseHeldAvailability();
   await expect(selector).toHaveAccessibleName(/update available$/u);
 });
 

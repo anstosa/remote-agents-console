@@ -26,6 +26,9 @@ const openUpstreamUpdate = async (page: Page) => {
 const installUpdateFixture = async (page: Page) => {
   let advisorLaunched = false;
   let updateStarts = 0;
+  let availabilityStatus = 200;
+  let availabilityPayload: unknown = { available: true, commitCount: commits.length };
+  let nextAvailabilityGate: { started: () => void; released: Promise<void> } | undefined;
   await installPaneMock(page);
   // fulfill every dashboard request locally
   await page.route('**/api/**', async route => {
@@ -40,8 +43,17 @@ const installUpdateFixture = async (page: Page) => {
     }
     // authorize dashboard streaming
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
-    // advertise one upstream update
-    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: true } });
+    // report the mutable upstream state or a controlled failure
+    if (url.pathname === '/api/server/update-available') {
+      const gate = nextAvailabilityGate;
+      nextAvailabilityGate = undefined;
+      // hold a poll until the test confirms the previous poll completed
+      if (gate !== undefined) {
+        gate.started();
+        await gate.released;
+      }
+      return route.fulfill({ status: availabilityStatus, json: availabilityPayload });
+    }
     // publish the installed revision
     if (url.pathname === '/api/server/revision') return route.fulfill({ json: { sha: '1'.repeat(40), committedAt: '2026-09-06T14:22:31-07:00' } });
     // return long review content
@@ -65,7 +77,24 @@ const installUpdateFixture = async (page: Page) => {
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
   return {
-    // expose the mutation counter
+    // expose update response controls and counters
+    setUpdateAvailable: (available: boolean) => {
+      availabilityStatus = 200;
+      availabilityPayload = { available, commitCount: available ? commits.length : 0 };
+    },
+    setAvailabilityResponse: (status: number, payload: unknown) => {
+      availabilityStatus = status;
+      availabilityPayload = payload;
+    },
+    // hold one response to observe serialized poll completion
+    holdNextAvailabilityResponse: () => {
+      let started!: () => void;
+      let release!: () => void;
+      const startedPromise = new Promise<void>(resolve => { started = resolve; });
+      const released = new Promise<void>(resolve => { release = resolve; });
+      nextAvailabilityGate = { started, released };
+      return { started: startedPromise, release };
+    },
     updateStarts: () => updateStarts
   };
 };
@@ -104,6 +133,49 @@ const installVisualViewportMock = (page: Page) => page.addInitScript(() => {
 const setVisualViewport = (page: Page, height: number, offsetTop: number) => page.evaluate(metrics => {
   (window as unknown as { __setUpdateVisualViewport: (next: { height: number; offsetTop: number }) => void }).__setUpdateVisualViewport(metrics);
 }, { height, offsetTop });
+
+// preserve confirmed availability through failures before clearing a stale state
+test('clears stale availability only after a valid current response', async ({ page }) => {
+  const fixture = await installUpdateFixture(page);
+  await page.goto('/');
+  const selector = page.getByRole('button', { name: /^Switch server/u });
+  await expect(selector).toHaveAccessibleName(/update available/u);
+
+  // serialize one poll and hold its successor to prove client completion
+  const pollAvailability = async () => {
+    const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname === '/api/server/update-available');
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await (await response).finished();
+    const gate = fixture.holdNextAvailabilityResponse();
+    const barrierResponse = page.waitForResponse(candidate => new URL(candidate.url()).pathname === '/api/server/update-available');
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await gate.started;
+    // the held successor starts only after the previous response was processed
+    return async () => {
+      gate.release();
+      await (await barrierResponse).finished();
+    };
+  };
+  fixture.setAvailabilityResponse(503, { available: false, commitCount: 0 });
+  const releaseFailedBarrier = await pollAvailability();
+  await expect(selector).toHaveAccessibleName(/update available/u);
+  await releaseFailedBarrier();
+
+  // reject malformed successful data without clearing the confirmed state
+  fixture.setAvailabilityResponse(200, { available: 'false', commitCount: 0 });
+  const releaseMalformedBarrier = await pollAvailability();
+  await expect(selector).toHaveAccessibleName(/update available/u);
+  await releaseMalformedBarrier();
+
+  // clear the indicator after upstream confirms that the branch is current
+  fixture.setUpdateAvailable(false);
+  const releaseCurrentBarrier = await pollAvailability();
+  await expect(selector).toHaveAccessibleName('Switch server (Test server)');
+  await releaseCurrentBarrier();
+
+  await selector.click();
+  await expect(page.getByRole('group', { name: 'Current server details' }).getByText('Up to date')).toBeVisible();
+});
 
 // read the visible and rendered bounds
 const readViewportBounds = (dialog: Locator) => dialog.evaluate(element => {
