@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import type { DavoSettings, ValidatedConfig } from '../config/schema.js';
 import type { AgentKind } from '../adapters/types.js';
 import { serverCheckout, serverCheckoutOnHost } from '../workspaces/server-checkout.js';
-import { run, tmuxFormatLiteral } from '../tmux/command.js';
+import { run, tmuxFormatLiteral, tmuxLiteralArg } from '../tmux/command.js';
 import { isFullGitSha } from '../git/revision.js';
 import { HostSettingsTransport, settingsControlRoot } from '../settings/transport.js';
 
@@ -184,7 +184,11 @@ export class ServerAdminService {
     // source the updater lock locator only from immutable installer metadata
     const installation = await new HostSettingsTransport(settingsControlRoot()).installation();
     const controlEnvironment = installation?.hostControlRoot === undefined ? [] : ['-e', `RAC_SETTINGS_CONTROL_ROOT=${installation.hostControlRoot}`];
-    const result = await this.runCommand(this.tmuxBinary, ['-S', this.tmuxSocket, 'new-session', '-d', '-s', session, '-c', tmuxFormatLiteral(this.hostRepository), ...controlEnvironment, '/bin/bash', script, id, targetSha], undefined, 5_000);
+    // restore host tools missing from the tmux daemon's default path
+    const hostPath = process.env.RAC_HOST_PATH?.trim();
+    // keep terminal semicolons inside the environment argument
+    const hostEnvironment = hostPath ? ['-e', tmuxLiteralArg(`PATH=${hostPath}`)] : [];
+    const result = await this.runCommand(this.tmuxBinary, ['-S', this.tmuxSocket, 'new-session', '-d', '-s', session, '-c', tmuxFormatLiteral(this.hostRepository), ...controlEnvironment, ...hostEnvironment, '/bin/bash', script, id, targetSha], undefined, 5_000);
     // replace queued state after launch failure
     if (result.code !== 0) {
       const failed: ServerUpdateStatus = { ...status, state: 'failed' };

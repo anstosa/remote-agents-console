@@ -14,6 +14,8 @@ describe('server administration', () => {
   let root: string | undefined;
   // remove isolated state
   afterEach(async () => {
+    // restore stubbed host environment
+    vi.unstubAllEnvs();
     // clean only a created fixture
     if (root !== undefined) await rm(root, { recursive: true, force: true });
   });
@@ -68,6 +70,7 @@ describe('server administration', () => {
 
   it('launches only the fixed updater through the host tmux bridge', async () => {
     root = await mkdtemp(join(tmpdir(), 'rac-server-admin-'));
+    vi.stubEnv('RAC_HOST_PATH', '   ');
     const runCommand = vi.fn(async () => ({ code: 0, stdout: '', stderr: '' }));
     const service = new ServerAdminService(config, { configWritePath: join(root, 'config.json'), hostRepository: '/home/ubuntu/remoteagents', statusDirectory: root, tmuxBinary: '/usr/local/bin/host-tmux', tmuxSocket: '/host-tmux/default', runCommand });
 
@@ -78,6 +81,23 @@ describe('server administration', () => {
     expect(runCommand).toHaveBeenCalledWith('/usr/local/bin/host-tmux', ['-S', '/host-tmux/default', 'new-session', '-d', '-s', expect.stringMatching(/^rac-update-/u), '-c', '/home/ubuntu/remoteagents', '/bin/bash', '/home/ubuntu/remoteagents/scripts/update-server.sh', update?.id, targetSha], undefined, 5_000);
     expect(await service.updateStatus(update!.id)).toEqual(update);
     expect(await service.updateStatus('../../config')).toBeUndefined();
+  });
+
+  // preserve literal configured paths and tmux defaults
+  it.each([
+    { scenario: 'configured', hostPath: '  /home/host/node bin:/home/host/docker bin;$HOME/tools;  ', environment: ['-e', 'PATH=/home/host/node bin:/home/host/docker bin;$HOME/tools\\;'] },
+    { scenario: 'unset', hostPath: undefined, environment: [] }
+  ])('launches the updater with $scenario host PATH', async ({ hostPath, environment }) => {
+    root = await mkdtemp(join(tmpdir(), 'rac-server-admin-'));
+    vi.stubEnv('RAC_HOST_PATH', hostPath);
+    // accept the fixed launch
+    const runCommand = vi.fn(async () => ({ code: 0, stdout: '', stderr: '' }));
+    const service = new ServerAdminService(config, { hostRepository: '/home/ubuntu/remoteagents', statusDirectory: root, tmuxBinary: '/usr/local/bin/host-tmux', tmuxSocket: '/host-tmux/default', runCommand });
+
+    const update = await service.startUpdate(targetSha);
+
+    expect(update).toMatchObject({ kind: 'update', state: 'queued' });
+    expect(runCommand).toHaveBeenCalledWith('/usr/local/bin/host-tmux', ['-S', '/host-tmux/default', 'new-session', '-d', '-s', expect.stringMatching(/^rac-update-/u), '-c', '/home/ubuntu/remoteagents', ...environment, '/bin/bash', '/home/ubuntu/remoteagents/scripts/update-server.sh', update?.id, targetSha], undefined, 5_000);
   });
 
   // the retired `/workspace` fallback: updates run in the server's own checkout, resolved
