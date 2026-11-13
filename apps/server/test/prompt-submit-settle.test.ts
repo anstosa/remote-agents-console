@@ -15,6 +15,14 @@ const resetBackground = '\x1b[49m';
 const animatedSparkle = (dot: string) => `\x1b[38;2;255;220;96m${dot}\x1b[39m`;
 // wrap one rgb composer row
 const composerRow = (text: string) => `${composerBackground}${text}${resetBackground}`;
+// reproduce the current three-row narrow codex footer
+const composerWithWrappedFooter = (text: string) => [
+  `› ${text}`,
+  '',
+  '  GPT-6.1-Sol xhigh Fast · ~/ferry.fyi · production · Main',
+  '  [default]',
+  '  ← for agents · ? for shortcuts  ⚠ 2 warnings · f2 to view'
+].join('\n');
 
 // Regression for the reported bug: Codex's Tab submit was intermittently swallowed
 // by a composer that had not yet rendered the paste. The prompt then never started,
@@ -149,6 +157,50 @@ describe('interactive submit settle', () => {
       await expect(history.list(`agent:${agent.id}`)).resolves.toMatchObject([{ text: pasted[0]!.trimEnd() }]);
     } finally {
       // remove the staged file and durable stores
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  const wrappedFooterPrompt = 'Use a limited number of packages for PostgreSQL and TLS';
+  // share setup while preserving distinct delivery and edit-retention contracts
+  it.each([
+    {
+      scenario: 'dispatches a queued prompt beneath the wrapped native footer', draft: wrappedFooterPrompt,
+      keys: [['Enter']], queued: [], history: [wrappedFooterPrompt]
+    },
+    {
+      scenario: 'retains a queued prompt when its wrapped-footer draft was edited', draft: `${wrappedFooterPrompt} plus operator changes`,
+      keys: [], queued: [wrappedFooterPrompt], history: []
+    }
+  ])('$scenario', async ({ draft, keys: expectedKeys, queued: expectedQueued, history: expectedHistory }) => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-submit-wrapped-footer-'));
+    const queue = new QueuedPromptService(join(directory, 'queue.json'));
+    const history = new PromptHistoryService(join(directory, 'history.json'));
+    const agent = stated({ id: 'socket:%1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: directory, title: 'Ready' });
+    const sent: string[][] = [];
+    let submitted = false;
+    // retain one idle pane through delivery
+    const discovery = { worktreesNow: () => [], target: async () => ({ agent, socket }) };
+    const tmux = {
+      // accept the durable bracketed paste
+      pastePrompt: async () => true,
+      // preserve the exact narrow footer seen in ferry and weather
+      capture: async () => composerWithWrappedFooter(submitted ? 'Ask Codex to do anything' : draft),
+      // expose native acceptance through the empty composer
+      sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => { sent.push(keys); submitted = true; return true; }
+    };
+    const service = new PromptService(discovery as never, tmux as never, history, queue);
+    try {
+      await queue.enqueue(`agent:${agent.id}`, wrappedFooterPrompt);
+      await service.observe(agent);
+
+      expect(sent).toEqual(expectedKeys);
+      // compare every durable queue entry without weakening empty-array assertions
+      expect((await service.listQueued(agent.id))?.map(prompt => prompt.text)).toEqual(expectedQueued);
+      // retain exact history presence and absence for each scenario
+      expect((await history.list(`agent:${agent.id}`))?.map(prompt => prompt.text)).toEqual(expectedHistory);
+    } finally {
+      // remove the isolated durable stores
       await rm(directory, { recursive: true, force: true });
     }
   });

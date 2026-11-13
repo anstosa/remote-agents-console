@@ -23,6 +23,8 @@ const composerShortcutsLine = /^ {2}(?:(?:← for agents · )?\? for shortcuts|�
 const composerWarningLine = /^ {2,}⚠ \d+(?: warnings? · \S+ to view| · \S+)?\s*$/u;
 // filled working composers expose queue hints with optional native context counters
 const composerQueueLine = /^ {2}(?:\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode)(?:\s{2,}(?:\d+% context left|[\d.,]+[kKmMbB]? used))?\s*$/u;
+// narrow panes wrap the native agent label below the workspace status
+const composerAgentLabelContinuation = /^ {2}\[default\]\s*$/u;
 // terminal modifier resets may clear more than one style bit
 const modifierResets: Partial<Record<number, readonly number[]>> = {
   22: [1, 2], 23: [3], 24: [4, 21], 25: [5, 6], 27: [7], 28: [8], 29: [9]
@@ -91,8 +93,10 @@ function activeComposerFromCapture(value: string): string | undefined {
   while (finalVisibleRow >= 0 && !lines[finalVisibleRow]!.trim()) finalVisibleRow -= 1;
   let footerStart = finalVisibleRow;
   const auxiliary = lines[footerStart] ?? '';
-  // require the native blank separator before excluding a two-row footer
-  if ((composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary)) && composerWorkspaceStatusLine.test(lines[footerStart - 1] ?? '') && lines[footerStart - 2]?.trim() === '') footerStart -= 1;
+  const statusEnd = composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) ? footerStart - 1 : footerStart;
+  const statusStart = composerAgentLabelContinuation.test(lines[statusEnd] ?? '') ? statusEnd - 1 : statusEnd;
+  // require the native workspace and blank separator before excluding auxiliary or wrapped rows
+  if (composerWorkspaceStatusLine.test(lines[statusStart] ?? '') && lines[statusStart - 1]?.trim() === '') footerStart = statusStart;
   // absent native chrome must not hide an authored shortcuts row
   if (!composerStatusLine.test(lines[footerStart] ?? '')) footerStart = lines.length;
   // inspect composer markers newest first

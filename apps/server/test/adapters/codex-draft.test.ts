@@ -53,6 +53,28 @@ describe('Codex draft observation', () => {
     expect(codexOwnsDraft(pane.replace('owned draft', 'owned draft plus edits'), 'owned draft ')).toBe(false);
   });
 
+  // narrow weather and ferry panes wrap the native agent label below the workspace
+  it.each([
+    '  ← for agents · ? for shortcuts  ⚠ 2 warnings · f2 to view',
+    '                           ⚠ 2 warnings · f2 to view',
+    '  tab to queue message',
+    ''
+  ])('owns a draft beneath a wrapped agent label and auxiliary row %s', auxiliary => {
+    const pane = ['› owned draft', '', '  GPT-6.1-Sol xhigh Fast · ~/ferry.fyi · production · Main', '  [default]', auxiliary].join('\n');
+    expect(codexDraftState(pane, 'owned draft ')).toBe('visible');
+    expect(codexOwnsDraft(pane, 'owned draft ')).toBe(true);
+    expect(codexOwnsDraft(pane.replace('owned draft', 'owned draft plus edits'), 'owned draft ')).toBe(false);
+    expect(codexDraftState(pane, '[default]')).toBe('cleared');
+  });
+
+  // arbitrary authored continuations and missing separators must retain exact ownership checks
+  it.each([
+    '› owned draft\n\n  GPT-6.1-Sol xhigh Fast · ~/ferry.fyi · production · Main\n  operator text\n  ? for shortcuts',
+    '› owned draft\n  GPT-6.1-Sol xhigh Fast · ~/ferry.fyi · production · Main\n  [default]\n  ? for shortcuts'
+  ])('preserves footer-shaped operator additions in %s', pane => {
+    expect(codexOwnsDraft(pane, 'owned draft ')).toBe(false);
+  });
+
   // workspace-shaped authored text must not hide arbitrary operator additions
   it('preserves an authored status row followed by non-native text', () => {
     const prompt = 'first line\n\nGPT-6.1-Sol · ~/repo · main\noperator text';
