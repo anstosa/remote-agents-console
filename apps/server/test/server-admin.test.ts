@@ -1,14 +1,38 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ValidatedConfig } from '../src/config/schema.js';
 import { ServerAdminService } from '../src/server-admin/service.js';
+import { run } from '../src/tmux/command.js';
 import { testProject } from './helpers/config.js';
 
 const config: ValidatedConfig = { name: 'Framework', remoteServers: [], listen: { host: '127.0.0.1', port: 8787 }, publicOrigin: new URL('https://framework.example.com'), trustedProxyIps: new Set(['127.0.0.1']), pollIntervalMs: 500, projects: [] };
 const baseSha = '1'.repeat(40);
 const targetSha = '2'.repeat(40);
+// locate the optional real tmux boundary
+const tmux = execFileSync('/bin/sh', ['-c', 'command -v tmux || true'], { encoding: 'utf8' }).trim();
+// probe the optional private-socket boundary before running the integration case
+const tmuxSocketsWork = (() => {
+  // skip unsupported hosts before allocating a fixture
+  if (tmux === '' || process.platform !== 'linux') return false;
+  let root = '';
+  try {
+    root = mkdtempSync(join(tmpdir(), 'rac-server-admin-probe-'));
+    const socket = join(root, 'sock');
+    const started = spawnSync(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'probe', '/bin/sleep', '1'], { encoding: 'utf8' });
+    spawnSync(tmux, ['-S', socket, 'kill-server']);
+    return started.status === 0;
+  } catch {
+    // treat unavailable sockets as a missing integration prerequisite
+    return false;
+  } finally {
+    // remove only this private capability probe
+    if (root !== '') rmSync(root, { recursive: true, force: true });
+  }
+})();
 
 describe('server administration', () => {
   let root: string | undefined;
@@ -85,7 +109,7 @@ describe('server administration', () => {
 
   // preserve literal configured paths and tmux defaults
   it.each([
-    { scenario: 'configured', hostPath: '  /home/host/node bin:/home/host/docker bin;$HOME/tools;  ', environment: ['-e', 'PATH=/home/host/node bin:/home/host/docker bin;$HOME/tools\\;'] },
+    { scenario: 'configured', hostPath: '  /home/host/node bin:/home/host/docker bin;$HOME/tools;  ', environment: ['/usr/bin/env', 'PATH=/home/host/node bin:/home/host/docker bin;$HOME/tools\\;'] },
     { scenario: 'unset', hostPath: undefined, environment: [] }
   ])('launches the updater with $scenario host PATH', async ({ hostPath, environment }) => {
     root = await mkdtemp(join(tmpdir(), 'rac-server-admin-'));
@@ -98,6 +122,28 @@ describe('server administration', () => {
 
     expect(update).toMatchObject({ kind: 'update', state: 'queued' });
     expect(runCommand).toHaveBeenCalledWith('/usr/local/bin/host-tmux', ['-S', '/host-tmux/default', 'new-session', '-d', '-s', expect.stringMatching(/^rac-update-/u), '-c', '/home/ubuntu/remoteagents', ...environment, '/bin/bash', '/home/ubuntu/remoteagents/scripts/update-server.sh', update?.id, targetSha], undefined, 5_000);
+  });
+
+  // prove the initial updater receives the literal host path rather than the tmux client's path
+  it.skipIf(!tmuxSocketsWork)('preserves the configured host PATH in the first real tmux process', async () => {
+    root = await mkdtemp(join(tmpdir(), 'rac-server-admin-'));
+    const socket = join(root, 'tmux');
+    const output = join(root, 'updater-path');
+    const hostPath = '/host/node bin:/host/docker bin;$HOME/tools;';
+    vi.stubEnv('RAC_HOST_PATH', hostPath);
+    await mkdir(join(root, 'scripts'));
+    await writeFile(join(root, 'scripts', 'update-server.sh'), `#!/bin/bash\nprintf '%s' "$PATH" > ${JSON.stringify(output)}\n`);
+    // isolate the server and keep it alive until cleanup
+    expect((await run(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'fixture', '/bin/sleep', '30'])).code).toBe(0);
+    try {
+      const service = new ServerAdminService(config, { hostRepository: root, statusDirectory: root, tmuxBinary: tmux, tmuxSocket: socket });
+      expect(await service.startUpdate(targetSha)).toMatchObject({ state: 'queued' });
+      // observe the launched script rather than its mocked argument list
+      await vi.waitFor(async () => { expect(await readFile(output, 'utf8')).toBe(hostPath); });
+    } finally {
+      // stop only this test's private server
+      await run(tmux, ['-S', socket, 'kill-server']);
+    }
   });
 
   // the retired `/workspace` fallback: updates run in the server's own checkout, resolved

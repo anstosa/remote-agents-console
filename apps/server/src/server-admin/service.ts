@@ -184,11 +184,11 @@ export class ServerAdminService {
     // source the updater lock locator only from immutable installer metadata
     const installation = await new HostSettingsTransport(settingsControlRoot()).installation();
     const controlEnvironment = installation?.hostControlRoot === undefined ? [] : ['-e', `RAC_SETTINGS_CONTROL_ROOT=${installation.hostControlRoot}`];
-    // restore host tools missing from the tmux daemon's default path
+    // restore host tools after tmux applies its client path to the initial pane
     const hostPath = process.env.RAC_HOST_PATH?.trim();
     // keep terminal semicolons inside the environment argument
-    const hostEnvironment = hostPath ? ['-e', tmuxLiteralArg(`PATH=${hostPath}`)] : [];
-    const result = await this.runCommand(this.tmuxBinary, ['-S', this.tmuxSocket, 'new-session', '-d', '-s', session, '-c', tmuxFormatLiteral(this.hostRepository), ...controlEnvironment, ...hostEnvironment, '/bin/bash', script, id, targetSha], undefined, 5_000);
+    const hostCommandPrefix = hostPath ? ['/usr/bin/env', tmuxLiteralArg(`PATH=${hostPath}`)] : [];
+    const result = await this.runCommand(this.tmuxBinary, ['-S', this.tmuxSocket, 'new-session', '-d', '-s', session, '-c', tmuxFormatLiteral(this.hostRepository), ...controlEnvironment, ...hostCommandPrefix, '/bin/bash', script, id, targetSha], undefined, 5_000);
     // replace queued state after launch failure
     if (result.code !== 0) {
       const failed: ServerUpdateStatus = { ...status, state: 'failed' };
