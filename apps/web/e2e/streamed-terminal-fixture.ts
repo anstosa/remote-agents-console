@@ -29,11 +29,12 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
   }
 };
 
-type FixtureOptions = { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; captureExit?: boolean; loadingKind?: 'agent' | 'terminal'; preferNativeMouseSelection?: boolean; keep?: TerminalKeep };
+type FixtureOptions = { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; captureExit?: boolean; loadingKind?: 'agent' | 'terminal'; preferNativeMouseSelection?: boolean; trackAtlasRemovals?: boolean; keep?: TerminalKeep };
 let lastOptions: FixtureOptions = {};
 // each mount's disposals, by its keep's workspace and panel, so a spec can see exactly-once
 const disposals = new Map<string, number>();
 const counted = new WeakSet<StreamedTerminalHandle>();
+let atlasRemovals = 0;
 
 // mount the scripted pane with optional codex transcript controls
 export const renderStreamedTerminal = async (container: HTMLElement, options: FixtureOptions = {}): Promise<void> => {
@@ -43,6 +44,16 @@ export const renderStreamedTerminal = async (container: HTMLElement, options: Fi
   connectCount = 0;
   closeCount = 0;
   lastOptions = options;
+  // observe real public atlas events before the renderer activates
+  if (options.trackAtlasRemovals) {
+    const { WebglAddon } = await import('@xterm/addon-webgl');
+    const activate = WebglAddon.prototype.activate;
+    // preserve the real renderer while counting shared page removals
+    WebglAddon.prototype.activate = function (terminal) {
+      activate.call(this, terminal);
+      this.onRemoveTextureAtlasCanvas(() => { atlasRemovals += 1; });
+    };
+  }
   mountInto(container, options);
   const mounted = handle!;
   // a reclaimed kept terminal is already counted
@@ -180,6 +191,8 @@ export const trackWebglAtlasResets = async () => {
 };
 // expose only the public operation count to the regression
 export const webglAtlasResets = () => atlasResets;
+// prove the pressure regression actually crossed the public atlas-merge boundary
+export const webglAtlasRemovals = () => atlasRemovals;
 export const viewportY = () => terminal().buffer.active.viewportY;
 export const baseY = () => terminal().buffer.active.baseY;
 export const alternateScreen = () => terminal().buffer.active.type === 'alternate';

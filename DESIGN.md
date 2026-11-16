@@ -198,6 +198,8 @@ attachment and automatic reconnects, retaining the mounted terminal underneath.
 Keep loading artwork until the current seed has painted in the selected renderer,
 not merely finished parsing. Load terminal font faces before WebGL activation and
 never reset its shared glyph atlas when another panel mounts or unrelated fonts load.
+Redraw each owner after shared glyph-atlas page merges so ongoing editor output
+does not need a manual resize or text selection to repair stale glyph coordinates.
 When available, agent skeletons replay the last visible text geometry for that pane,
 preserving widths, indentation and blank rows without storing transcript text.
 The geometry is cached in the current tab, scales with the terminal font size and is

@@ -1391,6 +1391,53 @@ test('keeps an existing WebGL agent intact when another terminal loads', async (
   await expect.poll(async () => (await screen.screenshot()).equals(before)).toBe(true);
 });
 
+// dense syntax highlighting must not leave stale glyph coordinates after an atlas merge
+test('redraws WebGL editor output after shared glyph atlas pages merge', async ({ page }) => {
+  // exercise real page merging quickly on a lower-capacity gpu
+  await page.addInitScript(() => {
+    const getParameter = WebGL2RenderingContext.prototype.getParameter;
+    // change only the public texture-unit limit, not atlas state or drawing
+    WebGL2RenderingContext.prototype.getParameter = function (parameter: number) {
+      return parameter === this.MAX_TEXTURE_IMAGE_UNITS ? 4 : getParameter.call(this, parameter);
+    };
+  });
+  await setup(page, { width: '1120px', height: '720px', trackAtlasRemovals: true }, true);
+  await drive(page, 'pushSize', 100, 40);
+  await drive(page, 'pushBytes', '\x1b[?1049h\x1b[?25lEDITOR-SEED');
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  const screen = page.locator('#term .xterm-screen');
+
+  // fill successive frames with new glyph/color keys until a real merge occurs
+  for (let batch = 0; batch < 12 && await drive<number>(page, 'webglAtlasRemovals') === 0; batch += 1) {
+    let output = '\x1b[H';
+    // reserve the last rows for a parsed-frame marker
+    for (let row = 1; row <= 36; row += 1) {
+      output += `\x1b[${row};1H`;
+      // vary truecolor and printable glyphs like dense editor highlight groups
+      for (let column = 0; column < 90; column += 1) {
+        const id = batch * 3240 + (row - 1) * 90 + column + 1;
+        output += `\x1b[38;2;${id & 255};${id >> 8 & 255};${id >> 16 & 255}m${String.fromCharCode(33 + id % 90)}`;
+      }
+    }
+    await drive(page, 'pushBytes', `${output}\x1b[0m\x1b[40;1HMERGE-FRAME-${batch}`);
+    await expect.poll(() => drive(page, 'screenText')).toContain(`MERGE-FRAME-${batch}`);
+    // wait for the pressure frame and any event-driven follow-up repaint
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  }
+  expect(await drive<number>(page, 'webglAtlasRemovals')).toBeGreaterThan(0);
+  const text = await drive(page, 'screenText');
+  const automatic = await screen.screenshot();
+  await drive(page, 'refreshViewport');
+  // the manual resize-equivalent redraw must have nothing left to repair
+  expect((await screen.screenshot()).equals(automatic)).toBe(true);
+  expect(await drive(page, 'screenText')).toBe(text);
+  expect(await drive(page, 'rendererKind')).toBe('webgl');
+  expect(await drive(page, 'connectCalls')).toBe(1);
+  await drive(page, 'sendInputRaw', 'j');
+  expect(await drive(page, 'inputData')).toBe('j');
+});
+
 test('renders with WebGL on a desktop browser by default', async ({ page }) => {
   await setup(page, {}, true);
   await drive(page, 'pushSize', 40, 10);

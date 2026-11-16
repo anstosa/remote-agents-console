@@ -64,6 +64,13 @@ export const attachWebglRenderer = (terminal: Terminal, onRendererChange: () => 
       onRendererChange();
       return;
     }
+    // addon 0.19 moves cached glyph coordinates mid-frame when shared atlas pages merge (#6038)
+    // xterm defers and coalesces full refreshes; remove after a fixed stable addon ships
+    next.onRemoveTextureAtlasCanvas(() => {
+      // disposed terminals must not schedule another renderer frame
+      if (released) return;
+      terminal.refresh(0, terminal.rows - 1);
+    });
     // Disposing the addon restores xterm's DOM renderer; the stream is untouched.
     next.onContextLoss(() => {
       next.dispose();
