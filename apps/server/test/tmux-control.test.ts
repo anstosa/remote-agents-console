@@ -42,6 +42,8 @@ type ScriptedScenario = {
   foreground?: string;
   captureLines?: string[];
   metaError?: boolean;
+  savedCaptureError?: boolean;
+  normalCaptureError?: boolean;
   outputWrite?: 'same' | 'next';
   postCaptureOutput?: string;
   preCaptureOutput?: string;
@@ -78,9 +80,11 @@ process.stdin.on('data', chunk => {
   let newline = input.indexOf('\\n');
   // drain complete client commands
   while (newline >= 0) {
-    const command = input.slice(0, newline);
+    const commandLine = input.slice(0, newline);
     input = input.slice(newline + 1);
-    appendFileSync(commands, \`${'${command}'}\\n\`);
+    appendFileSync(commands, \`${'${commandLine}'}\\n\`);
+    // tmux emits a distinct block for every command in the group
+    for (const command of commandLine.split(' ; ')) {
     // detach ends the fixture
     if (command === 'detach') process.exit(0);
     // subscriptions are unrelated to the seed sequence
@@ -91,12 +95,19 @@ process.stdin.on('data', chunk => {
     // metadata selects the requested screen mode
     else if (command.startsWith('display-message ')) {
       process.stdout.write(block(scenario.metaError ? ['metadata failed'] : ['0 2 3 1 0 0 0 1'], !scenario.metaError));
+      // a failed command aborts only the rest of this group
+      if (scenario.metaError) break;
     // capture controls the atomic reply/output boundary
     } else if (command.startsWith('capture-pane ')) {
-      if (scenario.preCaptureOutput !== undefined) process.stdout.write(\`%output %1 ${'${scenario.preCaptureOutput}'}\\n\`);
-      if (!scenario.stallCapture) {
-        const reply = block(scenario.captureError ? ['capture failed'] : (scenario.captureLines ?? ['captured']), !scenario.captureError);
-        const output = scenario.postCaptureOutput === undefined ? '' : \`%output %1 ${'${scenario.postCaptureOutput}'}\\n\`;
+      const saved = command.includes(' -a ');
+      const normal = command.includes(' -S ');
+      const finalCapture = !saved && !normal;
+      // only the final capture owns the snapshot/live-output boundary
+      if (finalCapture && scenario.preCaptureOutput !== undefined) process.stdout.write(\`%output %1 ${'${scenario.preCaptureOutput}'}\\n\`);
+      if (!scenario.stallCapture || !finalCapture) {
+        const failed = saved ? scenario.savedCaptureError : normal ? scenario.normalCaptureError : scenario.captureError;
+        const reply = block(failed ? ['capture failed'] : (scenario.captureLines ?? ['captured']), !failed);
+        const output = !finalCapture || scenario.postCaptureOutput === undefined ? '' : \`%output %1 ${'${scenario.postCaptureOutput}'}\\n\`;
         // one write reproduces the parser's same-chunk drain
         if (scenario.outputWrite === 'same') process.stdout.write(\`${'${reply}'}${'${output}'}\`);
         else {
@@ -104,8 +115,11 @@ process.stdin.on('data', chunk => {
           // the next write must preserve the same boundary
           if (output !== '') process.stdout.write(output);
         }
+        // later command lines remain available after a capture failure
+        if (failed) break;
       }
     } else process.stdout.write(block([]));
+    }
     newline = input.indexOf('\\n');
   }
 });
@@ -296,6 +310,8 @@ describe('tmux control client seed boundary', () => {
 
   it.each([
     ['metadata', { metaError: true }],
+    ['saved screen', { savedCaptureError: true }],
+    ['normal screen', { normalCaptureError: true }],
     ['capture', { captureError: true }]
   ] as const)('does not deliver after a %s error', async (_label, scenario) => {
     const { client } = await scriptedClient(scenario);
@@ -303,6 +319,24 @@ describe('tmux control client seed boundary', () => {
     try {
       expect(await client.seed('%1', 100, deliver)).toBe(false);
       expect(deliver).not.toHaveBeenCalled();
+    } finally {
+      client.dispose();
+    }
+  });
+
+  // a disappearing pane must not disconnect its session's other live viewers
+  it('preserves subscribers and following command replies after a grouped capture fails', async () => {
+    const { client } = await scriptedClient({ normalCaptureError: true });
+    const exited = vi.fn();
+    try {
+      client.subscribe('%2', { onReseed: () => {}, onResize: () => {}, onExit: exited });
+      const seed = client.seed('%1', 100, () => true);
+      // queue an independent command after the seed's first ready await
+      await Promise.resolve();
+      const following = client.command('list-panes');
+      await expect(seed).resolves.toBe(false);
+      await expect(following).resolves.toMatchObject({ ok: true });
+      expect(exited).not.toHaveBeenCalled();
     } finally {
       client.dispose();
     }
@@ -764,6 +798,26 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
     await expect.poll(async () => (await run(tmux, ['-S', socket, 'capture-pane', '-p', '-t', pane])).stdout.match(/managed draft/gu)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });
 
+  // a gone target aborts its snapshot group without retiring the shared control client
+  it('keeps real command replies aligned after seeding a pane that disappeared', async () => {
+    const { ref, pane } = await fixtureSession();
+    const client = new TmuxControlClient(tmux, ref.path, 'fixture', () => {});
+    const exited = vi.fn();
+    try {
+      await client.ready;
+      client.subscribe(pane, { onReseed: () => {}, onResize: () => {}, onExit: exited });
+      const seed = client.seed('%999999', 100, () => true);
+      // a healthy pane read shares the wire behind the failing group
+      await Promise.resolve();
+      const following = client.command(`display-message -p -t ${pane} '#{pane_id}'`);
+      await expect(seed).resolves.toBe(false);
+      await expect(following).resolves.toEqual({ ok: true, lines: [pane] });
+      expect(exited).not.toHaveBeenCalled();
+    } finally {
+      client.dispose();
+    }
+  });
+
   // restore the first input position after painting trailing blank rows
   it('reconstructs a normal-screen seed and restores its prompt cursor', async () => {
     const { ref, socket, pane } = await fixtureSession();
@@ -838,6 +892,34 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
     }
   });
 
+  // retain both screens when a new console reconnects to a surviving native ui
+  it('restores the saved primary screen before the active alternate screen after reconnect', async () => {
+    const { ref, socket, pane } = await fixtureSession();
+    const before = new TmuxControlClient(tmux, ref.path, 'fixture', () => {});
+    let after: TmuxControlClient | undefined;
+    try {
+      await before.ready;
+      // submit both screens so cat emits native escapes rather than just tty echo
+      expect(await before.sendInput(pane, Buffer.from('PRIMARY HISTORY\n\x1b[3;5H\x1b[?1049h\x1b[H\x1b[2JALTERNATE HISTORY\n'))).toBe(true);
+      await expect.poll(async () => (await run(tmux, ['-S', socket, 'capture-pane', '-p', '-t', pane])).stdout).toContain('ALTERNATE HISTORY');
+      // tty echo can expose the marker before cat enters alternate mode and saves its cursor
+      await expect.poll(async () => (await run(tmux, ['-S', socket, 'display-message', '-p', '-t', pane, '#{alternate_on} #{alternate_saved_x} #{alternate_saved_y}'])).stdout.trim()).toBe('1 4 2');
+      before.dispose();
+
+      // a new control client mirrors the process boundary of a console restart
+      after = new TmuxControlClient(tmux, ref.path, 'fixture', () => {});
+      const seed = (await seedBytes(after, pane, 100)).toString('latin1');
+      const alternateAt = seed.indexOf('\x1b[?1049h');
+      expect(alternateAt).toBeGreaterThan(0);
+      expect(seed.slice(0, alternateAt)).toContain('PRIMARY HISTORY');
+      expect(seed.slice(0, alternateAt)).toContain('\x1b[3;5H');
+      expect(seed.slice(alternateAt)).toContain('ALTERNATE HISTORY');
+    } finally {
+      before.dispose();
+      after?.dispose();
+    }
+  });
+
   // verify cursor restoration without confusing tty echo with program output
   it('paints an alternate-screen seed with absolute positioning and the cursor restored', async () => {
     const { ref, socket, pane } = await fixtureSession();
@@ -852,8 +934,9 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       // wait for tmux to parse the screen, reporting protocol and coordinate encoding
       await expect.poll(async () => (await run(tmux, ['-S', socket, 'display-message', '-p', '-t', pane, '#{alternate_on} #{mouse_all_flag} #{mouse_sgr_flag}'])).stdout.trim()).toBe('1 1 1');
       const seed = (await seedBytes(client, pane, 100)).toString('latin1');
-      // enters the alt screen, clears, paints row one absolutely and restores the cursor
-      expect(seed.startsWith('\x1b[?1049h\x1b[H\x1b[2J')).toBe(true);
+      // retain the saved primary then enter and paint the alternate screen
+      expect(seed.startsWith('\x1b[H\x1b[2J')).toBe(true);
+      expect(seed).toContain('\x1b[?1049h\x1b[H\x1b[2J');
       expect(seed).toContain('\x1b[1;1H');
       expect(seed).toContain('ALT SCREEN');
       expect(seed).toContain('\x1b[?1003h');

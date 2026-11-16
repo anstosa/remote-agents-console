@@ -104,7 +104,7 @@ async function openPane(fixture: Awaited<ReturnType<typeof fixtureSession>>, pan
   const paneSocket = await openPaneSocket(port, tickets, { ack: true });
   openSockets.push(paneSocket.ws);
   const conn = paneSocket.stream(1, 'agent-1', pane);
-  return { ...conn, seedText: () => Buffer.concat(conn.binary).toString('utf8') };
+  return { ...conn, app, ws: paneSocket.ws, seedText: () => Buffer.concat(conn.binary).toString('utf8') };
 }
 
 const encode = (data: string) => Buffer.from(data, 'utf8').toString('base64url');
@@ -121,6 +121,31 @@ describe.skipIf(!tmuxSocketsWork)('/ws/panes (real tmux)', () => {
     await eventually(() => conn.frames.some(frame => frame.type === 'size') && conn.binary.length > 0);
     expect(conn.frames.find(frame => frame.type === 'size')).toEqual({ type: 'size', cols: 80, rows: 24 });
     expect(conn.seedText()).toContain('seeded line');
+  });
+
+  // reconnect surviving native screens after the whole console has stopped and restarted
+  it('restores both native buffers across console app lifetimes', async () => {
+    const fixture = await fixtureSession();
+    const first = await openPane(fixture);
+    first.send({ type: 'viewport', cols: 80, rows: 24, scrollback: 200 });
+    await eventually(() => first.binary.length > 0);
+    first.send({ type: 'input', data: encode('PRIMARY HISTORY\n\x1b[3;5H\x1b[?1049h\x1b[H\x1b[2JALTERNATE HISTORY\n') });
+    await expect.poll(async () => (await run(tmux, ['-S', fixture.socketPath, 'display-message', '-p', '-t', fixture.pane, '#{alternate_on}'])).stdout.trim()).toBe('1');
+    first.ws.close();
+    await first.app.close();
+
+    // a fresh app and websocket must reconstruct the pane without native redraw input
+    const second = await openPane(fixture);
+    second.send({ type: 'viewport', cols: 80, rows: 24, scrollback: 200 });
+    await eventually(() => second.binary.length > 0);
+    const seed = second.seedText();
+    const alternateAt = seed.indexOf('\x1b[?1049h');
+    expect(alternateAt).toBeGreaterThan(0);
+    expect(seed.slice(0, alternateAt)).toContain('PRIMARY HISTORY');
+    expect(seed.slice(alternateAt)).toContain('ALTERNATE HISTORY');
+    expect(second.order.filter(event => event === 'frame:size' || event === 'binary').slice(0, 2)).toEqual(['frame:size', 'binary']);
+    // the native pane still owns the same active buffer after console reattachment
+    expect((await run(tmux, ['-S', fixture.socketPath, 'display-message', '-p', '-t', fixture.pane, '#{alternate_on}'])).stdout.trim()).toBe('1');
   });
 
   it('echoes typed input back as raw bytes and resizes the pane to the viewport', async () => {

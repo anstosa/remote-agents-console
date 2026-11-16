@@ -166,24 +166,48 @@ export class TmuxControlClient implements PaneClient {
     return setTimeout(() => this.fail('control client lost'), this.options.timeoutMs ?? commandTimeoutMs);
   }
 
-  // map a reply synchronously at its parser boundary
-  private async commandMapped<T>(text: string, map: (reply: CommandReply) => T): Promise<T> {
+  // enqueue one command group without round trips between its snapshot reads
+  private async commandsMapped<T>(commands: readonly string[], map: (replies: CommandReply[]) => T): Promise<T> {
     // reject commands after teardown
     if (this.disposed) throw new Error('control client disposed');
     return await new Promise<T>((resolve, reject) => {
-      // contain mapper failures inside the command promise
-      const complete = (reply: CommandReply): void => {
-        try { resolve(map(reply)); }
-        catch (error) { reject(error instanceof Error ? error : new Error('control command mapper failed')); }
-      };
-      this.blockWaiters.push({ complete, reject, timer: this.armTimeout() });
-      this.child.stdin.write(`${text}\n`);
+      const replies: CommandReply[] = [];
+      const group = new Set<BlockWaiter>();
+      // tmux emits one reply block per command in a semicolon-separated group
+      for (let index = 0; index < commands.length; index += 1) {
+        // deliver only at the final reply boundary before later pane output
+        const complete = (reply: CommandReply): void => {
+          // tmux aborts the rest of a command group on error so retire its pending replies
+          if (!reply.ok && commands.length > 1) {
+            // unrelated command lines and other panes keep their live connection
+            for (let pending = this.blockWaiters.length - 1; pending >= 0; pending -= 1) {
+              const waiter = this.blockWaiters[pending]!;
+              // remove only commands tmux skipped in this group
+              if (!group.has(waiter)) continue;
+              this.blockWaiters.splice(pending, 1);
+              clearTimeout(waiter.timer);
+            }
+            reject(new Error('control command group failed'));
+            return;
+          }
+          replies.push(reply);
+          // retain intermediate replies until the snapshot is complete
+          if (replies.length !== commands.length) return;
+          // contain mapper failures inside the command promise
+          try { resolve(map(replies)); }
+          catch (error) { reject(error instanceof Error ? error : new Error('control command mapper failed')); }
+        };
+        const waiter = { complete, reject, timer: this.armTimeout() };
+        group.add(waiter);
+        this.blockWaiters.push(waiter);
+      }
+      this.child.stdin.write(`${commands.join(' ; ')}\n`);
     });
   }
 
   // send a command and await its reply block; rejects if the client is gone or stalls
   async command(text: string): Promise<CommandReply> {
-    return await this.commandMapped(text, reply => reply);
+    return await this.commandsMapped([text], replies => replies[0]!);
   }
 
   /**
@@ -346,6 +370,8 @@ export class TmuxControlClient implements PaneClient {
    * byte-preserving (latin1); the ASCII control prefixes stay ASCII, so latin1 reproduces the
    * exact bytes a spawned capture would print. the delivery callback runs synchronously
    * when the final capture reply closes, before the parser advances to later `%output`.
+   * an active alternate screen also retains its saved primary screen and cursor: xterm
+   * resets both on reconnect, and a later native screen switch must not reveal an empty buffer.
    */
   async seed(pane: string, depth: number, deliver: (bytes: Buffer) => boolean): Promise<boolean> {
     // reject invalid capture boundaries
@@ -353,31 +379,31 @@ export class TmuxControlClient implements PaneClient {
     await this.ready.catch(() => undefined);
     // stop after connection loss
     if (this.disposed) return false;
-    const meta = await this.command(`display-message -p -t ${pane} '#{alternate_on} #{cursor_x} #{cursor_y} #{mouse_standard_flag} #{mouse_button_flag} #{mouse_all_flag} #{mouse_utf8_flag} #{mouse_sgr_flag}'`).catch(() => undefined);
-    // metadata failure cannot produce a faithful seed
-    if (meta?.ok !== true) return false;
-    const [alt, cursorX, cursorY, mouseStandard, mouseButton, mouseAll, mouseUtf8, mouseSgr] = (meta.lines[0] ?? '').trim().split(' ');
-    // restore the live cursor after either screen capture
-    const x = Number(cursorX);
-    const y = Number(cursorY);
-    const cursor = Number.isInteger(x) && Number.isInteger(y) ? `\x1b[${y + 1};${x + 1}H` : '';
-    // restore only the reporting and encoding modes tmux currently has enabled
-    const mouseModes = `${mouseStandard === '1' ? '\x1b[?1000h' : ''}${mouseButton === '1' ? '\x1b[?1002h' : ''}${mouseAll === '1' ? '\x1b[?1003h' : ''}${mouseUtf8 === '1' ? '\x1b[?1005h' : ''}${mouseSgr === '1' ? '\x1b[?1006h' : ''}`;
-    // alternate screens require absolute row painting
-    if (alt === '1') {
-      return await this.commandMapped(`capture-pane -e -p -N -t ${pane}`, capture => {
-        // failed captures never reach the socket
-        if (!capture.ok) return false;
-        let out = '\x1b[?1049h\x1b[H\x1b[2J';
-        // paint each row without newline wrapping
-        capture.lines.forEach((line, index) => { out += `\x1b[${index + 1};1H${line}`; });
+    // capture both buffers and their mode together so a picker cannot switch screens between reads
+    return await this.commandsMapped([
+      `display-message -p -t ${pane} '#{alternate_on} #{cursor_x} #{cursor_y} #{mouse_standard_flag} #{mouse_button_flag} #{mouse_all_flag} #{mouse_utf8_flag} #{mouse_sgr_flag} #{alternate_saved_x} #{alternate_saved_y}'`,
+      `capture-pane -a -q -e -p -J -t ${pane}`,
+      `capture-pane -e -p -J -t ${pane} -S -${depth}`,
+      `capture-pane -e -p -N -t ${pane}`
+    ], replies => {
+      // failed metadata or captures never authorize a partial snapshot
+      if (replies.some(reply => !reply.ok)) return false;
+      const [meta, saved, normal, active] = replies;
+      const [alt, cursorX, cursorY, mouseStandard, mouseButton, mouseAll, mouseUtf8, mouseSgr, savedX, savedY] = (meta!.lines[0] ?? '').trim().split(' ');
+      // restore each buffer's cursor without inventing an unavailable saved position
+      const cursorAt = (x: string | undefined, y: string | undefined): string =>
+        x !== undefined && y !== undefined && /^\d+$/u.test(x) && /^\d+$/u.test(y) ? `\x1b[${Number(y) + 1};${Number(x) + 1}H` : '';
+      const cursor = cursorAt(cursorX, cursorY);
+      // restore only the reporting and encoding modes tmux currently has enabled
+      const mouseModes = `${mouseStandard === '1' ? '\x1b[?1000h' : ''}${mouseButton === '1' ? '\x1b[?1002h' : ''}${mouseAll === '1' ? '\x1b[?1003h' : ''}${mouseUtf8 === '1' ? '\x1b[?1005h' : ''}${mouseSgr === '1' ? '\x1b[?1006h' : ''}`;
+      // rebuild the primary before entering alternate mode so a later native exit restores it
+      if (alt === '1') {
+        let out = `\x1b[H\x1b[2J${saved!.lines.join('\r\n')}\x1b[0m${cursorAt(savedX, savedY)}\x1b[?1049h\x1b[H\x1b[2J`;
+        // paint alternate rows without newline wrapping
+        active!.lines.forEach((line, index) => { out += `\x1b[${index + 1};1H${line}`; });
         return deliver(Buffer.from(`${out}\x1b[0m${mouseModes}${cursor}`, 'latin1'));
-      }).catch(() => false);
-    }
-    return await this.commandMapped(`capture-pane -e -p -J -t ${pane} -S -${depth}`, capture => {
-      // failed captures never reach the socket
-      if (!capture.ok) return false;
-      return deliver(Buffer.from(`\x1b[H\x1b[2J${capture.lines.join('\r\n')}\x1b[0m${mouseModes}${cursor}`, 'latin1'));
+      }
+      return deliver(Buffer.from(`\x1b[H\x1b[2J${normal!.lines.join('\r\n')}\x1b[0m${mouseModes}${cursor}`, 'latin1'));
     }).catch(() => false);
   }
 

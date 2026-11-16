@@ -614,6 +614,36 @@ test('a socket loss reconnects and re-seeds without keeping a stale line', async
   await expect(status).toBeHidden();
 });
 
+// verify both supported desktop renderers rebuild tmux's saved primary behind its active alternate screen
+for (const [renderer, defaultWebgl] of [['dom', false], ['webgl', true]] as const) {
+  test(`a reconnect restores the saved primary screen and cursor under ${renderer}`, async ({ page }, testInfo) => {
+    await setup(page, { reconnectDelayMs: 25 }, defaultWebgl);
+    await expect.poll(() => drive(page, 'rendererKind')).toBe(renderer);
+    await drive(page, 'pushSize', 40, 10);
+    await drive(page, 'pushBytes', 'OLD-SCREEN\r\n');
+    await expect.poll(() => drive(page, 'screenText')).toContain('OLD-SCREEN');
+
+    // replace the old parser state as a console restart does
+    await drive(page, 'pushClose', 1006, 'console restart');
+    await expect.poll(() => drive(page, 'connectCalls')).toBe(2);
+    await drive(page, 'pushSize', 40, 10);
+    const primary = `\x1b[H\x1b[2JRESUMED STATUS\r\n$ ${'\r\n'.repeat(8)}\x1b[2;3H\x1b[0m`;
+    const alternate = `\x1b[?1049h\x1b[H\x1b[2J\x1b[1;1HRESTORED HISTORY\x1b[10;1H› Ask Codex to do anything\x1b[0m\x1b[10;1H`;
+    await drive(page, 'pushBytes', `${primary}${alternate}`);
+    await expect.poll(() => drive(page, 'screenText')).toContain('RESTORED HISTORY');
+    expect(await drive(page, 'alternateScreen')).toBe(true);
+
+    // leaving the alternate screen must reveal tmux's saved primary, not a blank reset buffer
+    await drive(page, 'pushBytes', '\x1b[?1049l');
+    await expect.poll(() => drive(page, 'alternateScreen')).toBe(false);
+    await drive(page, 'pushBytes', 'echo first\r\nfirst\r\n$ ');
+    await expect.poll(() => drive(page, 'screenText')).toBe(`RESUMED STATUS\n$ echo first\nfirst\n$ ${'\n'.repeat(6)}`);
+    // retain optional review evidence beside the test artifact
+    if (process.env.SHOT_DIR) await page.locator('#term .xterm-screen').screenshot({ path: `${process.env.SHOT_DIR}/reconnected-saved-primary-${renderer}.png` });
+    await page.locator('#term .xterm-screen').screenshot({ path: testInfo.outputPath(`reconnected-saved-primary-${renderer}.png`) });
+  });
+}
+
 test('a stream that stayed up reconnects at once and other failures wait unless the page returns', async ({ page }) => {
   await setup(page, { reconnectDelayMs: 1000 });
   const status = page.locator('#term .streamed-terminal-status');
