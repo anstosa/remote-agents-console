@@ -280,6 +280,17 @@ describe('settings schema metadata', () => {
     expect(terminal?.properties?.reuse).toMatchObject({ type: 'boolean', optional: true, default: false });
   });
 
+  // expose the opt-in default and usage warning beside the toggle
+  it('warns that reply suggestions use additional agent requests', () => {
+    expect(applicationSettingsSchema().properties?.replySuggestions).toMatchObject({
+      type: 'boolean',
+      default: false,
+      label: 'Reply suggestions',
+      apply: 'rac-restart',
+      description: expect.stringMatching(/suggestion pills.*current model and account\. Warning:.*additional agent requests.*increases agent usage.*extra cost/u)
+    });
+  });
+
   // present omission behavior on the field rather than inside explanatory copy
   it('publishes grounded application and review placeholders', () => {
     const schema = applicationSettingsSchema({ scratchDirectory: '/home/operator' });

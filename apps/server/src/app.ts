@@ -13,6 +13,12 @@ import { ControlService } from './auth/control.js';
 import { DeviceService } from './auth/devices.js';
 import { TicketStore } from './auth/tickets.js';
 import { DiscoveryService } from './discovery/service.js';
+import { ReplySuggestionService } from './reply-suggestions/service.js';
+import { PiReplySuggestionRuntime } from './reply-suggestions/pi-runtime.js';
+import { NativeReplySuggestionRuntime } from './reply-suggestions/native-runtime.js';
+import { TmuxReplySuggestionSources } from './reply-suggestions/tmux-sources.js';
+import { ClaudeReplySourcePolicyTracker } from './reply-suggestions/claude-observer.js';
+import { registerReplySuggestionRoutes } from './reply-suggestions/routes.js';
 import { adapterFor, launchTransport, structuredAdapterFor } from './adapters/registry.js';
 import { agentChoiceProblem, agentEffort, agentEfforts, agentModel } from './launch/agent-choice.js';
 import type { ModelSetting } from './transports/structured.js';
@@ -159,7 +165,7 @@ import { registerGoogleCalendarRoutes } from './google-calendar/routes.js';
 import { calendarLabelsForAgent } from './google-calendar/labels.js';
 import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
 
-export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; pushDiagnostics?: PushDiagnostics; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; dashboardTimingFile?: string };
+export type Dependencies = { replySuggestions?: ReplySuggestionService; googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; pushDiagnostics?: PushDiagnostics; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; dashboardTimingFile?: string };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use, and with the
 // structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
@@ -242,6 +248,44 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const selected = resolveReviewLaunchModel(request.kind, config.adapters[request.kind], request);
     return selected === undefined ? request : { ...request, model: selected.model, ...(selected.effort === undefined ? {} : { effort: selected.effort }) };
   }); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS), github); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
+  // keep source and account observation off with the feature
+  const replySuggestionsEnabled = config.replySuggestions === true;
+  // watch the approved native profile before any managed Claude settings render
+  const claudeReplyHome = config.adapters.claude?.env.HOME ?? config.launchHome ?? (process.env.RAC_HOST_TMUX_DIR === undefined ? process.env.HOME : undefined);
+  const claudeReplyProfile = config.adapters.claude?.env.CLAUDE_CONFIG_DIR ?? (claudeReplyHome === undefined ? undefined : join(claudeReplyHome, '.claude'));
+  const claudeReplyPolicy = replySuggestionsEnabled && deps.replySuggestions === undefined && config.adapters.claude?.launchable === true && claudeReplyProfile !== undefined && isAbsolute(claudeReplyProfile)
+    ? new ClaudeReplySourcePolicyTracker({
+      configDir: process.env.RAC_CLAUDE_CONFIG_DIR ?? claudeReplyProfile,
+      sourceConfigDir: claudeReplyProfile,
+      observerDir: join(process.env.RAC_HOST_REPOSITORY ?? serverCheckout(), '.data', 'reply-sources'),
+      reporterPath: join(process.env.RAC_HOST_REPOSITORY ?? serverCheckout(), 'scripts', 'hooks', 'rac-reply-source')
+    })
+    : undefined;
+  // unavailable native policy suppresses only its affordance rather than application readiness
+  if (claudeReplyPolicy !== undefined) await claudeReplyPolicy.initialize().catch(() => false);
+  // source observation never starts inference or selects another account
+  const replyRuntime = replySuggestionsEnabled && deps.replySuggestions === undefined && config.adapters.pi !== undefined ? new PiReplySuggestionRuntime(config.adapters.pi, config.launchHome ?? undefined) : undefined;
+  const nativeReplyRuntime = replySuggestionsEnabled && deps.replySuggestions === undefined ? new NativeReplySuggestionRuntime() : undefined;
+  const tmuxReplySources = replySuggestionsEnabled && deps.replySuggestions === undefined && typeof discovery.replySuggestionTarget === 'function'
+    ? new TmuxReplySuggestionSources(discovery, { ...(claudeReplyPolicy === undefined ? {} : { claudePolicy: claudeReplyPolicy }) })
+    : undefined;
+  const replySuggestions = replySuggestionsEnabled
+    ? (deps.replySuggestions ?? new ReplySuggestionService({
+      source: async id => await structuredAgents.replySuggestionSource(id) ?? await tmuxReplySources?.source(id),
+      // each vendor resolves only its own private account and capability route
+      routeFingerprint: async source => source.kind === 'pi' ? await replyRuntime?.routeFingerprint(source) : await nativeReplyRuntime?.routeFingerprint(source),
+      // native sources require fresh selection evidence at dispatch and publication
+      validate: async (source, signal) => source.kind === 'pi' ? true : source.transport === 'tmux'
+        ? await tmuxReplySources?.validate(source, signal) ?? false
+        : (await structuredAgents.replySuggestionSource(source.agentId))?.identity === source.identity,
+      // an unavailable runner never falls through to another vendor or pi login
+      generate: async (source, signal, fingerprint) => source.kind === 'pi'
+        ? await replyRuntime?.generate(source, signal, fingerprint) ?? []
+        : await nativeReplyRuntime?.generate(source, signal, fingerprint) ?? []
+    }))
+    : undefined;
+  // publish source keys only while suggestions are enabled
+  if (replySuggestions !== undefined) discovery.useReplySuggestions?.(replySuggestions);
   // preserve the launch account even with a partial injected service
   const nativeHome = (projectId?: string): string | undefined => config.launchHome === null ? undefined : typeof launch.agentHome === 'function' ? launch.agentHome(projectId) : config.launchHome ?? accountHome(config.projects, projectId);
   // keep picker discovery separate from launch side effects
@@ -413,6 +457,29 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // require explicit takeover when no controller has been established
     if (!control.connect(s.id)) throw inactiveClient();
     return s;
+  }
+  // generation uses the existing session and a non-renewing reservation fence
+  // hide generation routes entirely while suggestions are disabled
+  if (replySuggestions !== undefined) {
+    registerReplySuggestionRoutes(app, {
+      service: replySuggestions,
+      admit: request => {
+        const admitted = controlled(request, true);
+        const reservation = control.reservationGeneration(admitted.id);
+        // signed session validity and unchanged ownership never reacquire control
+        return () => auth.get(admitted)?.id === admitted.id && reservation !== undefined && control.reservationGeneration(admitted.id) === reservation;
+      },
+      exists: async id => (await discovery.dashboard()).agents.some(agent => agent.id === id),
+      rateKey: request => auth.get(auth.unsign(request.cookies[cookieName]))?.id ?? request.ip
+    });
+  }
+  // stop only isolated suggestion work when the application closes
+  if (replySuggestions !== undefined) {
+    app.addHook('onClose', async () => {
+      replySuggestions.stop();
+      nativeReplyRuntime?.stop();
+      claudeReplyPolicy?.close();
+    });
   }
   // serve one authenticated expiring preview
   const temporaryPreview = async (request: FastifyRequest<{ Params: { token: string } }>, reply: FastifyReply) => {

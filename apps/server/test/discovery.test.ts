@@ -383,7 +383,11 @@ describe('DiscoveryService dashboard', () => {
 
       attention = 'finished';
       const asking = (await service.dashboard(false, true)).agents[0]!;
-      expect(asking).toMatchObject({ attention: 'finished', hasMessageQuestion: true });
+      expect(asking).toMatchObject({
+        attention: 'finished',
+        hasMessageQuestion: true
+      });
+      expect(asking).not.toHaveProperty('messageReplySuggestions');
       expect(asking).not.toHaveProperty('question');
       expect(latestMessage).toHaveBeenCalledWith({ pid: 123, cwd: '/tmp', conversationId: 'conversation-1' });
       notifications.observe(asking);
@@ -392,13 +396,24 @@ describe('DiscoveryService dashboard', () => {
       expect(delivered).toHaveBeenCalledWith(expect.objectContaining({ kind: 'question' }));
       expect(notifications.isUnread(asking)).toBe(false);
 
-      // a new prompt or newer response clears the previous question
+      // a newer question preserves attention without guessing a reply
+      latestMessage.mockResolvedValue('Should I use staging?');
+      now += 2_000;
+      const newer = (await service.dashboard(false, true)).agents[0]!;
+      expect(newer).toMatchObject({ hasMessageQuestion: true });
+      expect(newer).not.toHaveProperty('messageReplySuggestions');
+
+      // a new prompt or newer statement clears the previous question
       latestMessage.mockResolvedValue(undefined);
       now += 2_000;
-      expect((await service.dashboard(false, true)).agents[0]).not.toHaveProperty('hasMessageQuestion');
+      const answered = (await service.dashboard(false, true)).agents[0]!;
+      expect(answered).not.toHaveProperty('hasMessageQuestion');
+      expect(answered).not.toHaveProperty('messageReplySuggestions');
       latestMessage.mockResolvedValue('The change is complete.');
       now += 2_000;
-      expect((await service.dashboard(false, true)).agents[0]).not.toHaveProperty('hasMessageQuestion');
+      const complete = (await service.dashboard(false, true)).agents[0]!;
+      expect(complete).not.toHaveProperty('hasMessageQuestion');
+      expect(complete).not.toHaveProperty('messageReplySuggestions');
 
       // unavailable transcripts must not break the dashboard
       latestMessage.mockRejectedValueOnce(new Error('transcript unavailable'));
@@ -408,6 +423,44 @@ describe('DiscoveryService dashboard', () => {
       latestMessage.mockRestore();
       clock.mockRestore();
       notifications.stop();
+    }
+  });
+
+  // conversation replacement clears the old question before the new transcript resolves
+  it('does not publish a prose question from a replaced conversation', async () => {
+    let conversationId = 'conversation-1';
+    const latestMessage = vi.spyOn(adapterFor('codex')!.conversations!, 'latestMessage').mockResolvedValue('Should I deploy now?');
+    const tmux = {
+      markSessionPlace: async () => true,
+      listPanes: async () => [{ paneId: '%1', sessionId: '$0', pid: 123, path: '/tmp', title: 'Ready', reportedSession: conversationId }]
+    };
+    const service = new DiscoveryService(socketFinder(), tmux as never, processInspector());
+    try {
+      const original = (await service.dashboard(false, true)).agents[0]!;
+      expect(original).toMatchObject({ hasMessageQuestion: true });
+      expect(original).not.toHaveProperty('messageReplySuggestions');
+
+      conversationId = 'conversation-2';
+      latestMessage.mockReturnValueOnce(new Promise(() => {}));
+      const replacement = (await service.dashboard(false, true)).agents[0]!;
+      expect(replacement).not.toHaveProperty('hasMessageQuestion');
+      expect(replacement).not.toHaveProperty('messageReplySuggestions');
+      expect(latestMessage).toHaveBeenLastCalledWith({ pid: 123, cwd: '/tmp', conversationId: 'conversation-2' });
+    } finally {
+      latestMessage.mockRestore();
+    }
+  });
+
+  // unavailable generation never suppresses the canonical prose-question signal
+  it('retains a message question without fallback replies for an oversized response', async () => {
+    const latestMessage = vi.spyOn(adapterFor('codex')!.conversations!, 'latestMessage').mockResolvedValue(`${'Context '.repeat(3_000)}\nWhich target should I use?`);
+    const service = new DiscoveryService(socketFinder(), paneLister([{ paneId: '%1', sessionId: '$0', pid: 123, path: '/tmp', title: 'Ready' }]) as never, processInspector());
+    try {
+      const asking = (await service.dashboard(false, true)).agents[0]!;
+      expect(asking).toMatchObject({ hasMessageQuestion: true });
+      expect(asking).not.toHaveProperty('messageReplySuggestions');
+    } finally {
+      latestMessage.mockRestore();
     }
   });
 
@@ -536,13 +589,18 @@ describe('DiscoveryService dashboard', () => {
     try {
       await service.dashboard(false, true);
       nativeQuestion.mockResolvedValue({ id: 'native-question', text: 'Which target?', choices: ['Staging', 'Production'] });
-      expect((await service.dashboard(false, true)).agents[0]).toMatchObject({ attention: 'question', question: { id: 'native-question' } });
+      const native = (await service.dashboard(false, true)).agents[0]!;
+      expect(native).toMatchObject({ attention: 'question', question: { id: 'native-question' } });
+      expect(native).not.toHaveProperty('hasMessageQuestion');
+      expect(native).not.toHaveProperty('messageReplySuggestions');
       finishRead('Deploy where?');
       await pending;
       nativeQuestion.mockResolvedValue(undefined);
       // keep the next read pending so only stale cached results could revive the flag
       latestMessage.mockReturnValue(new Promise(() => {}));
-      expect((await service.dashboard(false, true)).agents[0]).not.toHaveProperty('hasMessageQuestion');
+      const resumed = (await service.dashboard(false, true)).agents[0]!;
+      expect(resumed).not.toHaveProperty('hasMessageQuestion');
+      expect(resumed).not.toHaveProperty('messageReplySuggestions');
     } finally {
       finishRead('');
       latestMessage.mockRestore();

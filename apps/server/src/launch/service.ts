@@ -11,8 +11,9 @@ import { holderAgentOption, holderPaneRole, processPaneRole } from '../tmux/stac
 import { ProcSocketFinder, workspaceRoot, type SocketFinder } from '../discovery/service.js';
 import { projectIdOf, worktreeHostRoot, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
 import { adapterCapabilities, adapterFor, launchTransport, structuredAdapterFor } from '../adapters/registry.js';
-import { adapterFileContext, hostVisibleRepoRoot, renderAdapterFiles, type RenderedAdapterFiles } from '../adapters/files.js';
+import { adapterFileContext, hostVisibleRepoRoot, renderAdapterFiles } from '../adapters/files.js';
 import { hostPiRuntime, verifyHostPiNode } from '../adapters/pi-runtime.js';
+import { hostHolderRuntime, verifyHostNode } from '../adapters/host-runtime.js';
 import { canonical, staticPolicy } from '../adapters/pi-sandbox.js';
 import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode, type ReplacedFlagValue } from '../adapters/types.js';
 import { resolveLaunchProfile, type LaunchResolution, type LaunchScope } from './resolution.js';
@@ -28,6 +29,7 @@ import { inheritedHomeEnvironment, resolveLaunchUserHome } from '../places/launc
 import { compileNativeLaunch } from './native-options.js';
 import { resolveAllowedLaunchModel } from './options.js';
 import type { NativeLaunchSecurity, PreparedLaunchChoice } from './options-types.js';
+import { claudeReplyObserverConfiguration } from '../reply-suggestions/claude-observer.js';
 
 /** How a structured Agent launches: resuming one Conversation, continuing the latest, or a new one on a chosen model; Sandboxed or not. */
 export type StructuredLaunchOptions = { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; security?: NativeLaunchSecurity; nativeDefaultValidated?: true };
@@ -75,6 +77,8 @@ export function composeLaunch(program: string, adapterArgs: string[], operatorAr
 export type ReviewRunLaunch = { runId: string; label: string; extraArgs: string[]; replacedFlags: ReadonlyMap<string, ReplacedFlagValue>; conversationId?: string };
 // a Review run id: the random token the pane mark carries
 const reviewRunIdPattern = /^[A-Za-z0-9_-]{8,64}$/u;
+type AdapterFileRender = { ok: true; files?: Record<string, string>; key: string } | { ok: false; key: string };
+type AdapterFileCache = { promise: Promise<AdapterFileRender> };
 
 // Drop the replaced flags from the operator's arguments, each with its value (a following
 // token that is not itself a flag, or an attached `--flag=value`/`-fvalue`), so a run's own flag
@@ -187,8 +191,14 @@ export class LaunchService implements HolderWindows {
     return resolveAgentProgram(this.config, 'codex');
   }
 
-  private adapterFilesPromise: Promise<RenderedAdapterFiles> | undefined;
+  private readonly adapterFileCache = new Map<AgentKind, AdapterFileCache>();
   private expectedPiPolicy: string | undefined;
+  // identify only observer settings that change rendered claude hooks
+  private adapterFileKey(kind: AgentKind): string {
+    if (kind !== 'claude') return kind;
+    const observer = claudeReplyObserverConfiguration();
+    return observer === undefined ? 'claude:null' : JSON.stringify(['claude', observer.observerDir, observer.policyNonce]);
+  }
   // validate host policy ancestry before any renderer can create or replace a file
   private async prepareHostAdapterDirectory(): Promise<void> {
     const context = adapterFileContext();
@@ -252,20 +262,49 @@ export class LaunchService implements HolderWindows {
     // deny the executable and its directory so writable Places cannot replace host launch code
     const consoleRuntime = hostCheckout === undefined ? [] : [join(hostCheckout, 'apps/server/dist'), join(hostCheckout, 'node_modules'), join(hostCheckout, 'apps/server/node_modules'), ...(hostNode === undefined || !isAbsolute(hostNode) ? [] : [hostNode, dirname(hostNode)])];
     const consoleHosts = [this.config.publicOrigin?.hostname, this.config.listen?.host].filter((host): host is string => host !== undefined);
-    this.adapterFilesPromise ??= renderAdapterFiles(process.env, candidate => {
-      const settings = this.config.adapters[candidate]?.sandbox ?? { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
-      const repositories = [checkout, ...(hostCheckout === undefined ? [] : [hostCheckout]), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory, ...(project.hostPath === undefined ? [] : [project.hostPath])])];
-      const effective = { ...settings, deniedDomains: [...settings.deniedDomains, ...consoleHosts], denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState, ...consoleRuntime], repositories };
-      // retain expected policy bytes independently of mutable on-disk configuration
-      if (candidate === 'pi') this.expectedPiPolicy = JSON.stringify(staticPolicy(effective), null, 2);
-      return effective;
-    }).catch(error => {
-      this.adapterFilesPromise = undefined;
-      this.expectedPiPolicy = undefined;
-      console.error('[launch] adapter files not rendered:', error instanceof Error ? error.message : 'unknown error');
-      return {} as RenderedAdapterFiles;
-    });
-    return (await this.adapterFilesPromise)[kind];
+    // serialize each kind so an older render cannot overwrite a newer observer policy
+    while (true) {
+      const key = this.adapterFileKey(kind);
+      const existing = this.adapterFileCache.get(kind);
+      // a changed claude policy waits for the in-flight render before replacing it
+      if (existing !== undefined) {
+        const result = await existing.promise;
+        const currentKey = this.adapterFileKey(kind);
+        // failed files are never handed to a launch
+        if (!result.ok) {
+          if (this.adapterFileCache.get(kind) === existing) this.adapterFileCache.delete(kind);
+          if (currentKey !== result.key) continue;
+          return undefined;
+        }
+        // a completed stale observer render is replaced before this launch continues
+        if (result.key !== currentKey) {
+          if (this.adapterFileCache.get(kind) === existing) this.adapterFileCache.delete(kind);
+          continue;
+        }
+        return result.files;
+      }
+      let renderedKey = key;
+      const promise = renderAdapterFiles(process.env, candidate => {
+        const settings = this.config.adapters[candidate]?.sandbox ?? { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
+        const repositories = [checkout, ...(hostCheckout === undefined ? [] : [hostCheckout]), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory, ...(project.hostPath === undefined ? [] : [project.hostPath])])];
+        const effective = { ...settings, deniedDomains: [...settings.deniedDomains, ...consoleHosts], denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState, ...consoleRuntime], repositories };
+        // retain expected policy bytes independently of mutable on-disk configuration
+        if (candidate === 'pi') this.expectedPiPolicy = JSON.stringify(staticPolicy(effective), null, 2);
+        return effective;
+      }, [kind], candidate => {
+        // capture the exact observer configuration used by synchronous file generation
+        if (candidate === 'claude') renderedKey = this.adapterFileKey(candidate);
+      }).then(rendered => {
+        return { ok: true as const, files: rendered[kind], key: renderedKey };
+      }).catch(error => {
+        // only a failed pi render invalidates its runtime policy proof
+        if (kind === 'pi') this.expectedPiPolicy = undefined;
+        console.error(`[launch] ${kind} adapter files not rendered:`, error instanceof Error ? error.message : 'unknown error');
+        return { ok: false as const, key: renderedKey };
+      });
+      const cache: AdapterFileCache = { promise };
+      this.adapterFileCache.set(kind, cache);
+    }
   }
 
   // bind bridged holders to the policy and trusted runtime they actually loaded
@@ -948,6 +987,7 @@ export class LaunchService implements HolderWindows {
   // through the operator's login shell, with its environment and setup, as a pane launch does.
   async openHolderWindow(place: Place, agentId: string, launch: HolderLaunch): Promise<HolderRef | undefined> {
     const host = this.hostSocket !== undefined;
+    const kind = launch.kind ?? 'pi';
     // bridged structured sessions require one canonical path for history and sandbox policy
     if (host && place.home !== placeHostRoot(place)) { console.warn(`[launch] ${place.home}: structured Agents cannot launch through an aliased host path`); return undefined; }
     // a blank override inherits the proven launch account, never Docker's HOME
@@ -955,12 +995,14 @@ export class LaunchService implements HolderWindows {
     // legacy callers without validated runtime defaults still resolve the actual account
     if (environment.HOME === undefined) Object.assign(environment, inheritedHomeEnvironment({}, await resolveLaunchUserHome()));
     // a bridged shell must protect and load the host account rather than the container account
-    if (host && (environment.HOME === undefined || !isAbsolute(environment.HOME) || /[\u0000-\u001f\u007f]/u.test(environment.HOME))) throw new Error('Pi host bridge requires a proven host home or an absolute adapters.pi.env.HOME');
-    const runtime = host ? hostPiRuntime() : undefined;
+    if (host && (environment.HOME === undefined || !isAbsolute(environment.HOME) || /[\u0000-\u001f\u007f]/u.test(environment.HOME))) throw new Error(`Host bridge requires a proven host home or an absolute adapters.${kind}.env.HOME`);
+    const runtime = host ? kind === 'pi' ? hostPiRuntime() : hostHolderRuntime() : undefined;
     // a bridged launch must never fall back to container-only runtime paths
-    if (host && runtime === undefined) throw new Error('Pi host bridge runtime is unavailable');
-    // revalidate executable topology before every holder and Watch launch
-    const sandboxGeneration = host ? await this.holderGeneration('pi', place) : undefined;
+    if (host && runtime === undefined) throw new Error(`${kind === 'pi' ? 'Pi host bridge' : 'Host bridge'} runtime is unavailable`);
+    // revalidate executable topology before every holder launch
+    const sandboxGeneration = host && kind === 'pi' ? await this.holderGeneration('pi', place) : undefined;
+    // generic holders still require one immutable verified host node
+    if (host && kind !== 'pi') await verifyHostNode(runtime!.node);
     // bridged holder sockets need one path visible unchanged on both sides
     const privateRoot = host ? join(process.env.RAC_HOST_REPOSITORY!.trim(), '.data', 'structured') : this.root;
     const socket = join(privateRoot, 'holders', `${agentId}.sock`);

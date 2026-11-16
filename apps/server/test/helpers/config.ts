@@ -17,6 +17,7 @@ export function testConfig(overrides: Partial<ValidatedConfig> = {}): ValidatedC
     trustedProxyIps: new Set(['127.0.0.1']),
     pollIntervalMs: 500,
     adapters: {},
+    replySuggestions: false,
     projects: [],
     ...overrides,
   };

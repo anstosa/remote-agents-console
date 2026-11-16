@@ -13,6 +13,20 @@ const maxOutputBytes = 900 * 1024;
 const maxProtocolSessionBytes = 2 * maxOutputBytes;
 const maxPages = 10;
 const maxModels = 500;
+const claudeIsolationArgs = [
+  "--safe-mode", "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+  "--permission-prompts", "none", "--permission-mode", "dontAsk", "--no-session-persistence",
+  "--disable-slash-commands", "--no-chrome", "--setting-sources", ""
+];
+const claudeIsolationFlags = ["--safe-mode", "--tools", "--strict-mcp-config", "--mcp-config", "--permission-prompts", "--permission-mode", "--no-session-persistence", "--disable-slash-commands", "--no-chrome", "--setting-sources"];
+const claudeEnvironmentNames = new Set([
+  "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+  "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+  "ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
+  "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+]);
 const safeErrors = new Set([
   "invalid_request",
   "omx_unproven",
@@ -21,6 +35,9 @@ const safeErrors = new Set([
   "codex_unavailable",
   "codex_capabilities_unproven",
   "codex_protocol_invalid",
+  "claude_unavailable",
+  "claude_capabilities_unproven",
+  "claude_protocol_invalid",
   "discovery_timeout"
 ]);
 
@@ -41,7 +58,7 @@ export async function readDiscoveryRequest(path) {
   let value;
   try { value = JSON.parse(await readFile(path, "utf8")); } catch { throw failure("invalid_request"); }
   // reject malformed request fields
-  if (value === null || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || value.kind !== undefined && value.kind !== "omx" && value.kind !== "codex" || typeof value.program !== "string" || !isAbsolute(value.program) || value.program.length > 4096 || value.program.includes("\0") || !Array.isArray(value.args) || value.args.length > 128 || !value.args.every(arg => typeof arg === "string" && arg.length <= 8192 && !arg.includes("\0")) || typeof value.cwd !== "string" || !isAbsolute(value.cwd) || value.cwd.length > 4096 || value.cwd.includes("\0") || value.home !== undefined && (typeof value.home !== "string" || !isAbsolute(value.home) || value.home.length > 4096 || value.home.includes("\0")) || value.env === null || typeof value.env !== "object" || Array.isArray(value.env) || Object.keys(value.env).length > 128 || !Object.entries(value.env).every(([key, entry]) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) && typeof entry === "string" && entry.length <= 32_768 && !entry.includes("\0")) || !Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1 || value.timeoutMs > 10_000 || value.expiresAt !== undefined && (!Number.isSafeInteger(value.expiresAt) || value.expiresAt < 1) || Object.keys(value).some(key => !["version", "kind", "program", "args", "cwd", "home", "env", "timeoutMs", "expiresAt"].includes(key))) throw failure("invalid_request");
+  if (value === null || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || value.kind !== undefined && value.kind !== "omx" && value.kind !== "codex" && value.kind !== "claude" || typeof value.program !== "string" || !isAbsolute(value.program) || value.program.length > 4096 || value.program.includes("\0") || !Array.isArray(value.args) || value.args.length > 128 || !value.args.every(arg => typeof arg === "string" && arg.length <= 8192 && !arg.includes("\0")) || typeof value.cwd !== "string" || !isAbsolute(value.cwd) || value.cwd.length > 4096 || value.cwd.includes("\0") || value.home !== undefined && (typeof value.home !== "string" || !isAbsolute(value.home) || value.home.length > 4096 || value.home.includes("\0")) || value.env === null || typeof value.env !== "object" || Array.isArray(value.env) || Object.keys(value.env).length > 128 || !Object.entries(value.env).every(([key, entry]) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) && typeof entry === "string" && entry.length <= 32_768 && !entry.includes("\0")) || !Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1 || value.timeoutMs > 10_000 || value.expiresAt !== undefined && (!Number.isSafeInteger(value.expiresAt) || value.expiresAt < 1) || Object.keys(value).some(key => !["version", "kind", "program", "args", "cwd", "home", "env", "timeoutMs", "expiresAt"].includes(key))) throw failure("invalid_request");
   return value;
 }
 
@@ -158,16 +175,16 @@ export async function resolveCodexProgram(path, cwd = process.cwd()) {
   throw failure("codex_unavailable");
 }
 
-// verify one exact configured Codex executable
-async function configuredCodexProgram(program) {
+// verify one exact configured native executable
+async function configuredProgram(program, unavailable = "codex_unavailable") {
   const identity = await lstat(program).catch(() => undefined);
   // require one file or symlink identity
-  if (identity === undefined || !identity.isFile() && !identity.isSymbolicLink()) throw failure("codex_unavailable");
-  try { await access(program, fsConstants.X_OK); } catch { throw failure("codex_unavailable"); }
+  if (identity === undefined || !identity.isFile() && !identity.isSymbolicLink()) throw failure(unavailable);
+  try { await access(program, fsConstants.X_OK); } catch { throw failure(unavailable); }
   const target = await realpath(program).catch(() => undefined);
   const targetIdentity = target === undefined ? undefined : await lstat(target).catch(() => undefined);
   // require one executable file target
-  if (targetIdentity === undefined || !targetIdentity.isFile()) throw failure("codex_unavailable");
+  if (targetIdentity === undefined || !targetIdentity.isFile()) throw failure(unavailable);
   return program;
 }
 
@@ -198,7 +215,7 @@ async function setupScope(cwd) {
 }
 
 // run one bounded native help surface without publishing diagnostics
-async function help(program, args, env, cwd, remaining) {
+async function help(program, args, env, cwd, remaining, unavailable = "codex_unavailable") {
   return await new Promise((resolveHelp, reject) => {
     const child = spawn(program, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
@@ -209,7 +226,7 @@ async function help(program, args, env, cwd, remaining) {
     // collect both help streams
     child.stdout.on("data", collect); child.stderr.on("data", collect);
     // map spawn failures safely
-    child.on("error", () => { clearTimeout(timer); reject(failure("codex_unavailable")); });
+    child.on("error", () => { clearTimeout(timer); reject(failure(unavailable)); });
     // resolve bounded help text
     child.on("close", () => { clearTimeout(timer); resolveHelp(output.slice(0, 256 * 1024)); });
   });
@@ -312,6 +329,113 @@ async function queryCodex(program, contextArgs, env, cwd, remaining) {
   }
 }
 
+// retain only launch aliases and effort levels from claude initialize
+function claudeModels(value) {
+  const models = value?.models;
+  // require one bounded catalog
+  if (!Array.isArray(models) || models.length < 1 || models.length > 100) throw failure("claude_protocol_invalid");
+  const projected = [];
+  // validate every advertised alias before returning any metadata
+  for (const model of models) {
+    // require one safe launch token
+    if (model === null || typeof model !== "object" || Array.isArray(model) || typeof model.value !== "string" || !/^[A-Za-z0-9~][A-Za-z0-9._:/@[\]~-]{0,199}$/u.test(model.value)) throw failure("claude_protocol_invalid");
+    const displayName = typeof model.displayName === "string" && model.displayName.length <= 240 && !/[\u0000-\u001f\u007f]/u.test(model.displayName) ? model.displayName : undefined;
+    const efforts = model.supportsEffort === true ? model.supportedEffortLevels : [];
+    // advertised effort support must be complete and bounded
+    if (!Array.isArray(efforts) || efforts.length > 20 || efforts.some(effort => typeof effort !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/u.test(effort))) throw failure("claude_protocol_invalid");
+    projected.push({ value: model.value, ...(displayName === undefined ? {} : { displayName }), supportsEffort: model.supportsEffort === true, supportedEffortLevels: [...new Set(efforts)] });
+  }
+  return projected;
+}
+
+// query only claude's initialize metadata without sending a user message
+async function queryClaude(program, env, cwd, remaining) {
+  const args = ["-p", ...claudeIsolationArgs, "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
+  return await new Promise((resolveQuery, rejectQuery) => {
+    const child = spawn(program, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    let settled = false;
+    let buffer = "";
+    let protocolBytes = 0;
+    let stderrBytes = 0;
+    let timer;
+    const requestId = "rac-model-discovery";
+    // finish once and stop the metadata-only process
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      // clear only an armed deadline
+      if (timer !== undefined) clearTimeout(timer);
+      child.kill("SIGKILL");
+      child.stdin.destroy();
+      if (error === undefined) resolveQuery(value); else rejectQuery(error);
+    };
+    // map every protocol failure to one fixed error
+    const abort = code => finish(failure(code));
+    // accept only the matching initialize response
+    const receive = line => {
+      // reject oversized records
+      if (Buffer.byteLength(line) > maxProtocolLineBytes) { abort("claude_protocol_invalid"); return; }
+      let record;
+      try { record = JSON.parse(line); } catch { abort("claude_protocol_invalid"); return; }
+      const envelope = record?.type === "control_response" && record.response?.request_id === requestId ? record.response : undefined;
+      // no prompt means no other native event is expected
+      if (envelope?.subtype !== "success" || envelope.response === null || typeof envelope.response !== "object" || Array.isArray(envelope.response)) { abort("claude_protocol_invalid"); return; }
+      try { finish(undefined, claudeModels(envelope.response)); } catch (error) { finish(error); }
+    };
+    timer = setTimeout(() => { abort("discovery_timeout"); }, Math.max(1, remaining()));
+    timer.unref();
+    child.stdout.setEncoding("utf8");
+    // consume one bounded JSONL response
+    child.stdout.on("data", chunk => {
+      protocolBytes += Buffer.byteLength(chunk);
+      // bound the whole metadata session
+      if (protocolBytes > maxProtocolSessionBytes) { abort("claude_protocol_invalid"); return; }
+      buffer += chunk;
+      let newline;
+      // consume complete records immediately
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline).replace(/\r$/u, "");
+        buffer = buffer.slice(newline + 1);
+        receive(line);
+        // stop after completion or failure
+        if (settled) return;
+      }
+      // reject oversized partial records
+      if (Buffer.byteLength(buffer) > maxProtocolLineBytes) abort("claude_protocol_invalid");
+    });
+    // discard but bound native diagnostics
+    child.stderr.on("data", chunk => {
+      stderrBytes += Buffer.byteLength(chunk);
+      // diagnostics never enter the returned contract
+      if (stderrBytes > 256 * 1024) abort("claude_protocol_invalid");
+    });
+    child.on("error", () => { abort("claude_unavailable"); });
+    child.stdin.on("error", () => { abort("claude_protocol_invalid"); });
+    child.on("close", () => {
+      // an early exit cannot authorize partial metadata
+      if (!settled) abort("claude_protocol_invalid");
+    });
+    // initialize is metadata-only and never starts a provider turn
+    child.stdin.write(`${JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "initialize", sdkMcpServers: [] } })}\n`, error => {
+      // reject native write failures
+      if (error) abort("claude_protocol_invalid");
+    });
+  });
+}
+
+// retain only reviewed Claude account and runtime inputs
+function claudeEnvironment(effective) {
+  const env = {};
+  // unknown vendor selectors must not silently choose a different account route
+  for (const [name, value] of Object.entries(effective)) {
+    // preserve audited selectors
+    if (claudeEnvironmentNames.has(name)) { env[name] = value; continue; }
+    // reject unreviewed vendor routes rather than silently retargeting them
+    if (/^(?:ANTHROPIC_|CLAUDE_)/u.test(name) && value !== "" && value !== "0") throw failure("claude_capabilities_unproven");
+  }
+  return { ...env, DISABLE_AUTOUPDATER: "1", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" };
+}
+
 // prepare one bounded native discovery context
 async function prepareDiscovery(request, inherited) {
   const started = Date.now();
@@ -376,16 +500,36 @@ export async function discoverOmxModels(request, inherited = process.env) {
 export async function discoverCodexModels(request, inherited = process.env) {
   const { cwd, env, remaining } = await prepareDiscovery(request, inherited);
   const contextArgs = normalizeCodexContextArgs(request.args);
-  const codex = await configuredCodexProgram(request.program);
+  const codex = await configuredProgram(request.program);
   return await discoverMetadata(codex, contextArgs, env, cwd, remaining);
+}
+
+// discover one exact configured claude catalog without a provider request
+export async function discoverClaudeModels(request, inherited = process.env) {
+  const { cwd, env: effective, remaining } = await prepareDiscovery(request, inherited);
+  const env = claudeEnvironment(effective);
+  const claude = await configuredProgram(request.program, "claude_unavailable");
+  // prove the launch grammar from the installed executable
+  const output = await help(claude, ["-p", ...claudeIsolationArgs, "--help"], env, cwd, remaining, "claude_unavailable");
+  const model = output.includes("--model");
+  const effort = output.includes("--effort");
+  const permissionValues = ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"];
+  const permissions = output.includes("--permission-mode") && output.includes("--dangerously-skip-permissions") && permissionValues.every(value => output.includes(value));
+  // unsupported isolation cannot fall back to source customizations
+  if (!model || claudeIsolationFlags.some(flag => !output.includes(flag))) throw failure("claude_capabilities_unproven");
+  // preserve the shared deadline after help
+  if (remaining() <= 0) throw failure("discovery_timeout");
+  const models = await queryClaude(claude, env, cwd, remaining);
+  return { version: 1, models, capabilities: { model: true, ...(effort ? { effort: true } : {}), ...(permissions ? { permissions: true } : {}) } };
 }
 
 // dispatch the private descriptor without adapter borrowing
 export async function discoverNativeModels(request, inherited = process.env) {
   const kind = request.kind ?? "omx";
-  // accept only the two supported native adapters
-  if (kind !== "omx" && kind !== "codex") throw failure("invalid_request");
-  return kind === "codex" ? await discoverCodexModels(request, inherited) : await discoverOmxModels(request, inherited);
+  // accept only supported native metadata adapters
+  if (kind !== "omx" && kind !== "codex" && kind !== "claude") throw failure("invalid_request");
+  if (kind === "codex") return await discoverCodexModels(request, inherited);
+  return kind === "claude" ? await discoverClaudeModels(request, inherited) : await discoverOmxModels(request, inherited);
 }
 
 // keep imports side-effect free for unit tests

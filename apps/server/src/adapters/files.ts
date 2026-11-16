@@ -87,18 +87,24 @@ export function adapterFileContext(env: NodeJS.ProcessEnv = process.env): { cont
  * name, for `LaunchInput.files`. Returns `{}` when no host-visible repo root exists
  * (a bridge without `RAC_HOST_REPOSITORY`), matching the launchability gate.
  */
-export async function renderAdapterFiles(env: NodeJS.ProcessEnv = process.env, sandbox: (kind: AgentKind) => SandboxSettings | undefined = () => undefined): Promise<RenderedAdapterFiles> {
+export async function renderAdapterFiles(env: NodeJS.ProcessEnv = process.env, sandbox: (kind: AgentKind) => SandboxSettings | undefined = () => undefined, kinds?: readonly AgentKind[], observe?: (kind: AgentKind) => void): Promise<RenderedAdapterFiles> {
   const resolved = adapterFileContext(env);
   if (resolved === undefined) return {};
   const { context, filesDir } = resolved;
   const rendered: RenderedAdapterFiles = {};
+  const selected = kinds === undefined ? undefined : new Set(kinds);
+  // render only requested kinds when a caller maintains per-kind caches
   for (const adapter of [...adapters, ...structuredAdapters]) {
+    // preserve unselected rendered files and their inodes
+    if (selected !== undefined && !selected.has(adapter.kind)) continue;
     if (adapter.files === undefined) continue;
     const dir = join(filesDir, adapter.kind);
     await mkdir(dir, { recursive: true });
     const paths: Record<string, string> = {};
     const settings = sandbox(adapter.kind);
-    for (const [name, content] of Object.entries(adapter.files({ ...context, ...(settings === undefined ? {} : { sandbox: settings }) }))) {
+    observe?.(adapter.kind);
+    const files = adapter.files({ ...context, ...(settings === undefined ? {} : { sandbox: settings }) });
+    for (const [name, content] of Object.entries(files)) {
       const path = join(dir, name);
       await replaceRenderedFile(path, content);
       paths[name] = path;

@@ -47,7 +47,7 @@ export type CompactRequest = { instructions?: string; state?: string };
  * A model an Agent can run on: the kind's id for it, its display name and provider, its price per 1M
  * input and output tokens, its context window, and the Efforts it supports.
  */
-export type ModelInfo = { id: string; name: string; provider: string; inputPrice?: number; outputPrice?: number; contextWindow?: number; efforts: string[] };
+export type ModelInfo = { id: string; name: string; provider: string; api?: string; baseUrl?: string; inputPrice?: number; outputPrice?: number; contextWindow?: number; efforts: string[] };
 /** A model, by the kind's own id for it, and the Effort to run it at. */
 export type ModelSetting = { model: string; effort?: string };
 /**
@@ -67,12 +67,12 @@ export type StructuredEvent =
   | { type: 'turn'; turn: TurnEvent }
   | { type: 'transcript'; item: TranscriptItem }
   // the Conversation's transcript as loaded from its history, replacing what was shown
-  | { type: 'history'; items: TranscriptItem[] }
+  | { type: 'history'; items: TranscriptItem[]; conversationId?: string }
   // a status line the Agent's extension set, or cleared (no `text`)
   | { type: 'status'; key: string; text?: string }
   | { type: 'usage'; usage: AgentUsage }
   | { type: 'conversation'; id: string; name?: string }
-  | { type: 'model'; current: ModelSetting }
+  | { type: 'model'; current: ModelSetting; native?: ModelInfo }
   | { type: 'steers'; pending: string[] }
   | { type: 'question'; question: StructuredQuestion }
   | { type: 'question-closed'; id: string }
@@ -211,7 +211,7 @@ export const holderArgv = (socket: string, argv: readonly string[]): string[] =>
  * The holder's answer to a connection, before any of its child's lines: the line it replays from,
  * and how many lines past the client's cursor it no longer had (the protocol client resyncs then).
  */
-export type HolderHello = { holder: 1; pid: number; from: number; dropped: number };
+export type HolderHello = { holder: 1; pid: number; startTime?: string; from: number; dropped: number };
 
 /**
  * Connect to a holder's socket, retrying while the holder starts, having read `from` of its

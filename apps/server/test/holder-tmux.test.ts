@@ -107,14 +107,14 @@ const nextLine = (lines: string[], channel: LineChannel) => new Promise<string>(
   const poll = setInterval(() => { if (lines.length > 0) { clearTimeout(timer); clearInterval(poll); resolve(lines.shift()!); } }, 20);
   channel.onClose(() => { clearTimeout(timer); clearInterval(poll); reject(new Error('closed')); });
 });
-async function connect(socket: string, from = 0): Promise<{ channel: LineChannel; lines: string[]; dropped: number; closed: Promise<void> }> {
+async function connect(socket: string, from = 0): Promise<{ channel: LineChannel; lines: string[]; dropped: number; startTime?: string; closed: Promise<void> }> {
   const connected = await connectHolder(socket, { from });
   expect(connected).toBeDefined();
   const lines: string[] = [];
   connected!.channel.onLine(line => lines.push(line));
   const closed = new Promise<void>(resolve => connected!.channel.onClose(resolve));
   channels.push(connected!.channel);
-  return { channel: connected!.channel, lines, dropped: connected!.hello.dropped, closed };
+  return { channel: connected!.channel, lines, dropped: connected!.hello.dropped, startTime: connected!.hello.startTime, closed };
 }
 
 describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('the holder in a Workspace session', () => {
@@ -126,6 +126,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('the holder in a W
     expect(holder).toBeDefined();
 
     const first = await connect(holder!.socket);
+    expect(first.startTime).toMatch(/^\d+$/u);
     first.channel.send('{"type":"ping","text":"a\u2028b"}');
     expect(await nextLine(first.lines, first.channel)).toBe('{"type":"ping","text":"a\u2028b"}');
 

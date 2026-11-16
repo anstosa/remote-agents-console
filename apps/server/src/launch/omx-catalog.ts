@@ -9,6 +9,7 @@ import { inheritedHomeEnvironment } from '../places/launch-home.js';
 
 export type OmxCatalogContext = { cwd: string; hostCwd?: string; home?: string };
 export type OmxCatalogProbe = { version: 1; config: unknown; pages: unknown[]; args: string[]; capabilities: { model?: true; effort?: true }; identity?: string };
+export type ClaudeCatalogProbe = { version: 1; models: unknown[]; capabilities: { model?: true; effort?: true; permissions?: true }; identity?: string };
 type ProbeDependencies = { command?: typeof run; environment?: NodeJS.ProcessEnv; checkout?: string };
 
 const maxProbeBytes = 900 * 1024;
@@ -25,8 +26,15 @@ export async function probeCodexCatalog(config: AdapterLaunchConfig, context: Om
   return await probeNativeCatalog('codex', config, context, timeoutMs, dependencies);
 }
 
+/** query installed Claude initialize metadata without sending a prompt. */
+export async function probeClaudeCatalog(config: AdapterLaunchConfig, context: OmxCatalogContext, timeoutMs = 5_000, dependencies: ProbeDependencies = {}): Promise<ClaudeCatalogProbe> {
+  return await probeNativeCatalog('claude', config, context, timeoutMs, dependencies);
+}
+
 // share the bounded private transport while keeping each native context independent
-async function probeNativeCatalog(kind: 'codex' | 'omx', config: AdapterLaunchConfig, context: OmxCatalogContext, timeoutMs: number, dependencies: ProbeDependencies): Promise<OmxCatalogProbe> {
+async function probeNativeCatalog(kind: 'codex' | 'omx', config: AdapterLaunchConfig, context: OmxCatalogContext, timeoutMs: number, dependencies: ProbeDependencies): Promise<OmxCatalogProbe>;
+async function probeNativeCatalog(kind: 'claude', config: AdapterLaunchConfig, context: OmxCatalogContext, timeoutMs: number, dependencies: ProbeDependencies): Promise<ClaudeCatalogProbe>;
+async function probeNativeCatalog(kind: 'codex' | 'omx' | 'claude', config: AdapterLaunchConfig, context: OmxCatalogContext, timeoutMs: number, dependencies: ProbeDependencies): Promise<OmxCatalogProbe | ClaudeCatalogProbe> {
   const env = dependencies.environment ?? process.env;
   const command = dependencies.command ?? run;
   const bridged = env.RAC_HOST_TMUX_DIR !== undefined;
@@ -61,10 +69,14 @@ async function probeNativeCatalog(kind: 'codex' | 'omx', config: AdapterLaunchCo
       : await command('/bin/sh', ['-c', script], undefined, duration + 2_000);
     // never accept truncated metadata, shell diagnostics, or incomplete helpers
     if (result.code !== 0 || result.timedOut || result.stdoutTruncated || Buffer.byteLength(result.stdout) > maxProbeBytes) throw new Error('omx_discovery_unavailable');
-    const value = JSON.parse(result.stdout) as Partial<OmxCatalogProbe>;
+    const value = JSON.parse(result.stdout) as Partial<OmxCatalogProbe & ClaudeCatalogProbe>;
     // validate framing before the catalog parser handles native records
-    if (value === null || value.version !== 1 || !Array.isArray(value.pages) || value.pages.length < 1 || value.pages.length > 10 || !Array.isArray(value.args) || value.args.length > 128 || !value.args.every(argument => typeof argument === 'string' && argument.length <= 16_384) || value.capabilities === null || typeof value.capabilities !== 'object' || Object.entries(value.capabilities).some(([key, flag]) => !['model', 'effort'].includes(key) || flag !== true)) throw new Error('omx_discovery_unavailable');
-    return value as OmxCatalogProbe;
+    const payload = kind === 'claude'
+      ? Array.isArray(value.models) && value.models.length > 0 && value.models.length <= 100
+      : Array.isArray(value.pages) && value.pages.length > 0 && value.pages.length <= 10 && Array.isArray(value.args) && value.args.length <= 128 && value.args.every(argument => typeof argument === 'string' && argument.length <= 16_384);
+    const capabilityKeys = kind === 'claude' ? ['model', 'effort', 'permissions'] : ['model', 'effort'];
+    if (value === null || value.version !== 1 || !payload || value.capabilities === null || typeof value.capabilities !== 'object' || Object.entries(value.capabilities).some(([key, flag]) => !capabilityKeys.includes(key) || flag !== true)) throw new Error('omx_discovery_unavailable');
+    return value as OmxCatalogProbe | ClaudeCatalogProbe;
   } finally {
     // the helper also unlinks its input immediately; clean only this owned request
     await rm(directory, { recursive: true, force: true });

@@ -4,7 +4,9 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gte, valid } from 'semver';
-import { run, tmuxFormatLiteral } from '../tmux/command.js';
+import { hostHolderRuntime, verifyHostPiNode } from './host-runtime.js';
+
+export { verifyHostPiNode } from './host-runtime.js';
 
 const piPackage = '@earendil-works/pi-coding-agent';
 const runtimeFiles = ['adapters/pi-extension.js', 'adapters/ask-user.js', 'adapters/pi-sandbox.js', 'git/overrides.js', 'transports/holder.js', 'watches/sandboxed-command.js'];
@@ -26,36 +28,6 @@ type RuntimeSources = { modules: string; packageRoot: (name: string) => string }
 
 // compare an installed dependency with its bundled minimum
 const meetsMinimumVersion = (installed: unknown, minimum: unknown): installed is string => typeof installed === 'string' && typeof minimum === 'string' && valid(installed) !== null && valid(minimum) !== null && gte(installed, minimum);
-
-// execute the configured Node on the host, never inside the container namespace
-export async function verifyHostPiNode(node: string, env: NodeJS.ProcessEnv = process.env, command: typeof run = run, writeRoots: readonly string[] = []): Promise<string> {
-  // quote trusted configuration before passing it through the host shell
-  const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-  // never guess the home used by an authored write root
-  if (env.HOME === undefined && writeRoots.some(root => root === '~' || root.startsWith('~/'))) throw new Error('Pi host bridge requires HOME to resolve writable roots');
-  // resolve home-relative roots exactly as the host Pi policy does
-  const roots = writeRoots.map(root => root === '~' ? env.HOME! : root.startsWith('~/') ? join(env.HOME!, root.slice(2)) : root);
-  // glob write roots cannot prove an immutable executable boundary
-  if (roots.some(root => /[*?\[]/u.test(root))) throw new Error('Pi host bridge requires non-glob writable roots around its Node runtime');
-  const inspect = `set -eu
-node=$(/usr/bin/readlink -e -- ${quote(node)})
-test "$(/usr/bin/stat -Lc '%h' -- "$node")" = 1
-# canonicalize each writable root before any Node execution
-for root in ${roots.map(quote).join(' ')}; do
-  root=$(/usr/bin/realpath -m -- "$root")
-  test "$root" != /
-  case "$node" in "$root"|"$root"/*) exit 125;; esac
-done
-digest=$(/usr/bin/sha256sum -- "$node")
-printf '%s\\n%.64s\\n' "$node" "$digest"
-exec "$node" -p 'process.versions.node'`;
-  const result = await command(env.RAC_TMUX_BIN ?? '/usr/bin/tmux', ['-S', join(env.RAC_HOST_TMUX_DIR!, 'default'), 'run-shell', tmuxFormatLiteral(inspect)], undefined, 5_000);
-  const [canonical, digest, observed] = result.stdout.trim().split('\n');
-  const version = /^(\d+)\.(\d+)\.(\d+)$/u.exec(observed ?? '');
-  // reject hard-link aliases and writable canonical targets before executing any Node code
-  if (result.code !== 0 || canonical === undefined || !isAbsolute(canonical) || !/^[a-f0-9]{64}$/u.test(digest ?? '') || version === null || Number(version[1]) < 22 || Number(version[1]) === 22 && Number(version[2]) < 19) throw new Error(`Pi host bridge requires single-link Node.js >=22.19.0 outside writable Places and sandbox roots (observed ${version?.[0] ?? 'unavailable'}; exit ${result.code}${result.timedOut === true ? ', timed out' : ''}: ${`${result.stdout}${result.stderr}`.trim().slice(-500)})`);
-  return createHash('sha256').update(JSON.stringify([canonical, digest, observed])).digest('hex');
-}
 
 // refuse incomplete or stale host runtimes rather than bypass the bridge's sandbox
 export function hostPiRuntime(env: NodeJS.ProcessEnv = process.env, sources?: RuntimeSources): HostPiRuntime | undefined {
@@ -88,5 +60,7 @@ export function hostPiRuntime(env: NodeJS.ProcessEnv = process.env, sources?: Ru
     if (!matches) throw new Error(`Pi host bridge build mismatch: ${name}; build @rac/server on the host from the deployed revision`);
     fingerprint.update(name).update(readFileSync(join(hostModules, name)));
   }
-  return { node, cli: join(hostPackage(piPackage), 'dist/bundle/cli.js'), extension: join(hostModules, 'adapters/pi-extension.js'), holder: join(hostModules, 'transports/holder.js'), command: join(hostModules, 'watches/sandboxed-command.js'), fingerprint: fingerprint.digest('hex') };
+  // reuse only the generic holder proof after every pi-specific check
+  const holderRuntime = hostHolderRuntime(env, { modules: local.modules }, runtimeFiles.filter(name => name !== 'transports/holder.js'))!;
+  return { node, cli: join(hostPackage(piPackage), 'dist/bundle/cli.js'), extension: join(hostModules, 'adapters/pi-extension.js'), holder: holderRuntime.holder, command: join(hostModules, 'watches/sandboxed-command.js'), fingerprint: fingerprint.digest('hex') };
 }

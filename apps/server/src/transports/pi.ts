@@ -170,6 +170,7 @@ const modelInfo = (model: unknown): ModelInfo | undefined => {
   const cost = isObject(model.cost) ? model.cost : {};
   return {
     id: `${model.provider}/${model.id}`, name: typeof model.name === 'string' && model.name !== '' ? model.name : model.id, provider: model.provider,
+    ...(typeof model.api === 'string' && model.api !== '' ? { api: model.api } : {}), ...(typeof model.baseUrl === 'string' && model.baseUrl !== '' ? { baseUrl: model.baseUrl } : {}),
     ...(typeof cost.input === 'number' ? { inputPrice: cost.input } : {}), ...(typeof cost.output === 'number' ? { outputPrice: cost.output } : {}),
     ...(typeof model.contextWindow === 'number' ? { contextWindow: model.contextWindow } : {}), efforts: modelEfforts(model)
   };
@@ -229,10 +230,31 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
   });
   // the Conversation's transcript from its history: on a launch only when it has one, and after
   // a Conversation change always, so a new one starts empty
-  const history = (always: boolean) => request({ type: 'get_messages' }).then(response => {
-    const messages = isObject(response.data) && Array.isArray(response.data.messages) ? response.data.messages : undefined;
-    if (messages !== undefined && (always || messages.length > 0)) emit({ type: 'history', items: piHistory(messages, { running: working === true }) });
-  });
+  let currentConversationId: string | undefined;
+  let conversationGeneration = 0;
+  let historyTurnGeneration = 0;
+  let historyRequests = 0;
+  let latestHistoryRequest = 0;
+  const pendingHistoryRequests = new Set<number>();
+  let historyRefreshNeeded = false;
+  const history = (ready: Promise<void> = Promise.resolve()) => {
+    const requestId = latestHistoryRequest = historyRequests += 1;
+    const requestedTurnGeneration = historyTurnGeneration;
+    pendingHistoryRequests.add(requestId);
+    const response = request({ type: 'get_messages' });
+    return ready.then(async () => {
+      const conversationId = currentConversationId;
+      const requestedConversationGeneration = conversationGeneration;
+      const received = await response;
+      const messages = isObject(received.data) && Array.isArray(received.data.messages) ? received.data.messages : undefined;
+      // ignore a superseded read or one overtaken by a Turn or Conversation change
+      if (requestId !== latestHistoryRequest || requestedTurnGeneration !== historyTurnGeneration || requestedConversationGeneration !== conversationGeneration || conversationId !== currentConversationId) return;
+      // an invalid latest read retries after the current Turn settles
+      if (conversationId === undefined || messages === undefined) { historyRefreshNeeded = true; return; }
+      historyRefreshNeeded = false;
+      emit({ type: 'history', conversationId, items: piHistory(messages, { running: working === true }) });
+    }).finally(() => { pendingHistoryRequests.delete(requestId); });
+  };
   let current: ModelSetting | undefined;
   let consoleTaken = false;
   // report the Conversation and the model Pi is on now
@@ -241,13 +263,28 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
     if (!isObject(state)) return;
     if (working === undefined) {
       working = state.isStreaming === true || state.isCompacting === true;
-      if (working) { prompted = true; emit({ type: 'turn', turn: { type: 'started' } }); }
+      if (working) {
+        historyTurnGeneration += 1;
+        // a reattached working Turn also retires its pre-state history read
+        if (pendingHistoryRequests.has(latestHistoryRequest)) historyRefreshNeeded = true;
+        prompted = true;
+        emit({ type: 'turn', turn: { type: 'started' } });
+      }
     }
-    if (typeof state.sessionId === 'string' && state.sessionId !== '') emit({ type: 'conversation', id: state.sessionId, ...(typeof state.sessionName === 'string' ? { name: state.sessionName } : {}) });
+    if (typeof state.sessionId === 'string' && state.sessionId !== '') {
+      // retire reads bound to another Conversation
+      if (currentConversationId !== state.sessionId) conversationGeneration += 1;
+      currentConversationId = state.sessionId;
+      emit({ type: 'conversation', id: state.sessionId, ...(typeof state.sessionName === 'string' ? { name: state.sessionName } : {}) });
+    }
     const model = modelInfo(state.model);
-    if (model === undefined) return;
+    // clear an earlier native route when Pi can no longer confirm its model
+    if (model === undefined) {
+      if (current !== undefined) emit({ type: 'model', current });
+      return;
+    }
     current = { model: model.id, ...(typeof state.thinkingLevel === 'string' ? { effort: state.thinkingLevel } : {}) };
-    emit({ type: 'model', current });
+    emit({ type: 'model', current, native: model });
   };
   // the model switched counts, whatever becomes of the Effort: the next `model` event says which it is on
   const apply = async ({ model, effort }: ModelSetting): Promise<boolean> => {
@@ -313,8 +350,8 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
           if (reported) return;
           reported = true;
         }
-        void refresh();
-        void history(false);
+        const refreshed = refresh();
+        void history(refreshed);
         void usage();
         return;
       case 'queue_update':
@@ -322,6 +359,9 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
         return;
       case 'agent_start':
         if (working === true) return;
+        historyTurnGeneration += 1;
+        // a history read started before this Turn must be replaced once it settles
+        if (pendingHistoryRequests.has(latestHistoryRequest)) historyRefreshNeeded = true;
         working = true; prompted = false; answer = ''; errored = false; cost = 0; toolCalls = 0;
         emit({ type: 'turn', turn: { type: 'started' } });
         return;
@@ -401,6 +441,8 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
         for (const id of [...dialogs.keys()]) closeDialog(id);
         transcript({ id: next('e'), kind: 'settled', outcome: outcome(record.aborted === true, errored), cost, toolCalls });
         emit({ type: 'turn', turn: record.aborted === true ? { type: 'aborted' } : errored ? { type: 'failed' } : { type: 'settled', message: answer } });
+        // recover readiness when a live Turn retired the startup history read
+        if (historyRefreshNeeded) { historyRefreshNeeded = false; void history(); }
         return;
     }
   });
@@ -414,8 +456,8 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
 
   // reattached to a process that reported in to an earlier console: read its state afresh
   if (attached !== undefined) {
-    void refresh();
-    void history(false);
+    const refreshed = refresh();
+    void history(refreshed);
     void usage();
   }
 
@@ -433,7 +475,7 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
       // a new session starts on the launch's model at no thinking; keep the current ones
       if (keep !== undefined) await apply(keep);
       await refresh();
-      void history(true);
+      void history();
       void usage();
       return true;
     },
@@ -444,7 +486,7 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
       const own = sessionModel(isObject(entries) ? entries.entries : undefined);
       if (own !== undefined) await apply(own);
       await refresh();
-      void history(true);
+      void history();
       void usage();
       return true;
     },

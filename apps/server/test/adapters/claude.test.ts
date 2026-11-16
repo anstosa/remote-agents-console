@@ -72,7 +72,7 @@ describe('structured claude launch', () => {
   const argsIn = async (home: string) => (await launched({}, {}, { ...place, home })).args;
 
   it('runs claude -p over stream-json with the console\'s MCP server, inline settings and nonce, never sandboxed or pinned by the console', async () => {
-    expect(await launched({})).toEqual({ program: '/usr/local/bin/claude', args: protocol, env: { SOME: '1', CLAUDE_CONFIG_DIR: config, RAC_LAUNCH_NONCE: 'n0nce' } });
+    expect(await launched({})).toEqual({ kind: 'claude', program: '/usr/local/bin/claude', args: protocol, env: { SOME: '1', CLAUDE_CONFIG_DIR: config, RAC_LAUNCH_NONCE: 'n0nce' } });
     expect(claudeStructuredAdapter.sandbox).toBeUndefined();
     expect(claudeStructuredAdapter.pinned()).toBeUndefined();
     expect(structuredAdapterFor('claude')?.client).toBe(claudeClient);
@@ -149,8 +149,8 @@ describe('structured claude launch', () => {
     expect((await launched({ security: { permissions: 'bypassPermissions' } }, { args })).args).toEqual([...protocol, '--dangerously-skip-permissions', '--model', 'haiku', '--add-dir', '/data']);
   });
 
-  it('runs no structured Claude under the host bridge, where its holder would need Pi\'s host runtime', async () => {
+  it('routes structured Claude to a kind-specific generic holder under the host bridge', async () => {
     vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/tmux');
-    expect(await launched({})).toBeUndefined();
+    expect(await launched({})).toMatchObject({ kind: 'claude', program: '/usr/local/bin/claude' });
   });
 });

@@ -9,7 +9,7 @@ export interface HostProcessInspector { listProcesses(): Promise<HostProcess[]>;
 
 // One recognised agent beneath a pane: its kind, its own pid, and whether a
 // bwrap/srt sandbox wrapper was seen on the way to it (a generic cross-check).
-export type RecognizedAgent = { kind: AgentKind; pid: number; wrapped: boolean };
+export type RecognizedAgent = { kind: AgentKind; pid: number; startTime?: string; wrapped: boolean };
 
 export type RecognitionOptions = { reusePositive?: boolean };
 export interface ProcessInspector { recognizeAgent(pid: number, options?: RecognitionOptions): Promise<RecognizedAgent | undefined>; }
@@ -119,7 +119,13 @@ export class ProcInspector implements ProcessInspector {
         const adapter = recognizeProcess({ comm, argv: cmdline.split('\0').filter(Boolean) });
         const lineage = [...path, { pid, comm, cmdline }];
         // keep the command evidence only along the winning ancestor path
-        if (adapter !== undefined) return { agent: { kind: adapter.kind, pid, wrapped: wrappedAbove }, path: lineage };
+        if (adapter !== undefined) {
+          const rawStat = await readFile(`${this.procRoot}/${pid}/stat`, 'utf8').catch(() => undefined);
+          const fields = rawStat?.slice(rawStat.lastIndexOf(')') + 2).trim().split(/\s+/u);
+          const startTime = fields?.[19];
+          // retain reply identity when proc exposes a valid lifetime, without weakening dashboard recognition
+          return { agent: { kind: adapter.kind, pid, ...(startTime !== undefined && /^\d+$/u.test(startTime) ? { startTime } : {}), wrapped: wrappedAbove }, path: lineage };
+        }
         const wrappedBelow = wrappedAbove || sandboxWrapper.test(comm);
         const children = (await readFile(`${this.procRoot}/${pid}/task/${pid}/children`, 'utf8')).trim().split(/\s+/).filter(Boolean).map(Number);
         // descendants share their already-read ancestor commands

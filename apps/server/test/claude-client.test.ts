@@ -133,14 +133,44 @@ describe('the Claude client', () => {
     expect(await connection.deliver('Next')).toBe('started');
   });
 
-  it('reports the Effort a Turn ran at from the session JSONL, which the stream never names', async () => {
+  it('does not infer current Effort from the last Turn session JSONL', async () => {
     await sessionFrom('session-interrupt.jsonl');
     const { connection, claude, of } = await launched();
     expect(await connection.deliver('Go')).toBe('started');
     claude({ ...fixture('turn-steer.jsonl')[0]!, model: 'claude-haiku-5-5' });
-    expect(of('model').at(-1)).toEqual({ type: 'model', current: { model: 'haiku' } });
+    expect(of('model').at(-1)).toMatchObject({ type: 'model', current: { model: 'haiku' }, native: { id: 'claude-haiku-5-5', provider: 'anthropic' } });
+    const models = of('model').length;
     claude(result());
-    await vi.waitFor(() => expect(of('model').at(-1)).toEqual({ type: 'model', current: { model: 'haiku', effort: 'medium' } }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(of('model')).toHaveLength(models);
+    expect(of('model').at(-1)?.current.effort).toBeUndefined();
+  });
+
+  it('retires effort after delivered native selection commands until a fresh client launch', async () => {
+    const first = await launched({ model: { model: 'haiku', effort: 'high' } });
+    expect(first.of('model').at(-1)?.current).toEqual({ model: 'haiku', effort: 'high' });
+
+    expect(await first.connection.deliver('/effort low')).toBe('started');
+    expect(first.sent.at(-1)).toMatchObject({ type: 'user', message: { content: '/effort low' } });
+    expect(first.of('model').at(-1)?.current).toEqual({ model: 'haiku' });
+    first.claude({ ...fixture('turn-steer.jsonl')[0]!, model: 'claude-haiku-5-5' });
+    expect(first.of('model').at(-1)).toMatchObject({ current: { model: 'haiku' }, native: { id: 'claude-haiku-5-5' } });
+    expect(first.of('model').at(-1)?.current.effort).toBeUndefined();
+
+    const relaunched = await launched({ model: { model: 'haiku', effort: 'high' } });
+    expect(relaunched.of('model').at(-1)?.current).toEqual({ model: 'haiku', effort: 'high' });
+  });
+
+  it('retires effort without blocking a working steer selection command', async () => {
+    const { connection, sent, claude, of } = await launched({ model: { model: 'haiku', effort: 'high' } });
+    expect(await connection.deliver('Keep working')).toBe('started');
+
+    expect(await connection.steer('/model sonnet')).toBe(true);
+    expect(sent.at(-1)).toMatchObject({ type: 'user', message: { content: '/model sonnet' } });
+    expect(of('model').at(-1)?.current).toEqual({ model: 'haiku' });
+    claude({ ...fixture('turn-steer.jsonl')[0]!, model: 'claude-sonnet-5-5' });
+    expect(of('model').at(-1)).toMatchObject({ current: { model: 'sonnet' }, native: { id: 'claude-sonnet-5-5' } });
+    expect(of('model').at(-1)?.current.effort).toBeUndefined();
   });
 
   it('has the CLI title a new Conversation from its first prompt once a Turn ends, as print mode writes no title', async () => {
@@ -346,7 +376,7 @@ describe('the Claude client', () => {
     expect(sent.at(-1)).toMatchObject({ type: 'control_request', request: { subtype: 'set_model', model: 'sonnet' } });
     play(fixture('set-model.jsonl'));
     expect(await switched).toBe(true);
-    expect(of('model').at(-1)).toEqual({ type: 'model', current: { model: 'sonnet', effort: 'low' } });
+    expect(of('model').at(-1)).toMatchObject({ type: 'model', current: { model: 'sonnet', effort: 'low' }, native: { id: 'claude-sonnet-5-5', provider: 'anthropic' } });
     expect(items()).toEqual([]);
     // a Turn's start names the model by its full id: the same one says nothing, another by its alias
     const init = fixture('turn-steer.jsonl')[0]!;
@@ -354,7 +384,10 @@ describe('the Claude client', () => {
     claude({ ...init, model: 'claude-sonnet-5-5' });
     claude(result());
     claude({ ...init, model: 'claude-haiku-5-5' });
-    expect(of('model').slice(before)).toEqual([{ type: 'model', current: { model: 'haiku', effort: 'low' } }]);
+    expect(of('model').slice(before)).toEqual([
+      expect.objectContaining({ type: 'model', current: { model: 'sonnet', effort: 'low' }, native: expect.objectContaining({ id: 'claude-sonnet-5-5' }) }),
+      expect.objectContaining({ type: 'model', current: { model: 'haiku', effort: 'low' }, native: expect.objectContaining({ id: 'claude-haiku-5-5' }) })
+    ]);
   });
 
   it('waits for the Turn to end before switching a model asked for mid-Turn', async () => {
@@ -581,7 +614,7 @@ describe('the Claude client', () => {
     await vi.waitFor(() => expect(of('history')).toHaveLength(2));
     // the session the SessionStart hook and `init` name, not the reset's own id
     expect(of('conversation').at(-1)).toEqual({ type: 'conversation', id: 'e2614e20-a1a6-409c-b55a-f6e8e6d806ff' });
-    expect(of('history').at(-1)).toEqual({ type: 'history', items: [] });
+    expect(of('history').at(-1)).toEqual({ type: 'history', conversationId: 'e2614e20-a1a6-409c-b55a-f6e8e6d806ff', items: [] });
     expect(of('turn')).toEqual([]);
   });
 

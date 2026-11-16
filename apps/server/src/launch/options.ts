@@ -10,7 +10,7 @@ import { ConductorModelCatalog, type PiModelSource } from '../settings/conductor
 import type { ModelSetting } from '../transports/structured.js';
 import { nativeSecurityManifest, nativeSecurityProblem, type NativeLaunchCapabilities } from './native-options.js';
 import type { LaunchCatalogModel, LaunchKindManifest, LaunchModelPolicy, LaunchOptionsResponse, LaunchSecurityManifest, ManualLaunchChoice, ModelSelection, NativeLaunchSecurity, PreparedLaunchChoice } from './options-types.js';
-import { probeCodexCatalog, probeOmxCatalog, type OmxCatalogProbe } from './omx-catalog.js';
+import { probeClaudeCatalog, probeCodexCatalog, probeOmxCatalog, type ClaudeCatalogProbe, type OmxCatalogProbe } from './omx-catalog.js';
 import { inheritedHomeEnvironment } from '../places/launch-home.js';
 
 /** the server-resolved launch context used for catalog and restart defaults. */
@@ -27,6 +27,7 @@ type LaunchOptionsDependencies = {
   capabilities?: (kind: AgentKind, config: AdapterLaunchConfig, cwd: string, home?: string) => Promise<NativeLaunchCapabilities>;
   omxProbe?: typeof probeOmxCatalog;
   codexHostProbe?: typeof probeCodexCatalog;
+  claudeProbe?: typeof probeClaudeCatalog;
 };
 
 type HostSnapshot = { catalog: LaunchCatalogSnapshot; capabilities: NativeLaunchCapabilities };
@@ -41,6 +42,8 @@ const DEFAULT_TTL_MS = 5 * 60_000;
 const DEFAULT_DEADLINE_MS = 5_000;
 const MAX_CATALOG_PAGES = 10;
 const MAX_CATALOG_MODELS = 500;
+const MAX_CLAUDE_MODELS = 100;
+const MAX_MODEL_EFFORTS = 20;
 const MAX_CONTEXT_CACHE = 256;
 
 const manualLaunchChoiceSchema = z.object({
@@ -279,6 +282,31 @@ function projectHostCatalog(probe: OmxCatalogProbe): LaunchCatalogSnapshot {
   return { status: 'ready', models, ...(defaultModel === undefined ? {} : { defaultModel }) };
 }
 
+// project only bounded initialize metadata the installed claude process advertised
+function projectClaudeCatalog(probe: ClaudeCatalogProbe): LaunchCatalogSnapshot {
+  // require one bounded nonempty native catalog
+  if (probe.models.length < 1 || probe.models.length > MAX_CLAUDE_MODELS) throw new Error('invalid native catalog');
+  const models: LaunchCatalogModel[] = [];
+  const seen = new Set<string>();
+  let defaultModel: ModelSetting | undefined;
+  // validate every launch alias and its advertised efforts
+  for (const raw of probe.models) {
+    const candidate = object(raw);
+    // require one safe unique alias
+    if (candidate === undefined || typeof candidate.value !== 'string' || !agentModel.safeParse(candidate.value).success || seen.has(candidate.value)) throw new Error('invalid native catalog');
+    const advertised = candidate.supportsEffort === true ? candidate.supportedEffortLevels : [];
+    // require complete bounded effort metadata when support is advertised
+    if (!Array.isArray(advertised) || advertised.length > MAX_MODEL_EFFORTS || advertised.some(effort => typeof effort !== 'string' || !effortToken.test(effort))) throw new Error('invalid native catalog');
+    const efforts = [...new Set(advertised as string[])];
+    const name = typeof candidate.displayName === 'string' && candidate.displayName.trim() !== '' && candidate.displayName.length <= 240 && !/[\u0000-\u001f\u007f]/u.test(candidate.displayName) ? candidate.displayName : candidate.value;
+    seen.add(candidate.value);
+    models.push({ id: candidate.value, name, provider: 'anthropic', efforts });
+    // claude's recommended alias is its only initialize-level default identity
+    if (candidate.value === 'default') defaultModel = { model: candidate.value };
+  }
+  return { status: 'ready', models, ...(defaultModel === undefined ? {} : { defaultModel }) };
+}
+
 // execute one configured native help probe without a shell
 function nativeHelp(config: AdapterLaunchConfig, cwd: string, args: readonly string[], deadlineMs: number, launchHome?: string): Promise<string | undefined> {
   return new Promise(resolve => {
@@ -450,8 +478,10 @@ export class LaunchOptionsService {
   private readonly ttlMs: number;
   private readonly deadlineMs: number;
   private readonly capabilitiesLoader: NonNullable<LaunchOptionsDependencies['capabilities']>;
+  private readonly capabilitiesInjected: boolean;
   private readonly omxProbe: typeof probeOmxCatalog;
   private readonly codexHostProbe: typeof probeCodexCatalog;
+  private readonly claudeProbe: typeof probeClaudeCatalog;
   private readonly hostSnapshots = new Map<string, Cached<HostSnapshot>>();
   private readonly hostFlights = new Map<string, Promise<HostSnapshot>>();
   private readonly catalogs = new Map<string, Cached<LaunchCatalogSnapshot>>();
@@ -470,20 +500,22 @@ export class LaunchOptionsService {
     this.now = dependencies.now ?? Date.now;
     this.ttlMs = dependencies.ttlMs ?? DEFAULT_TTL_MS;
     this.deadlineMs = dependencies.deadlineMs ?? DEFAULT_DEADLINE_MS;
+    this.capabilitiesInjected = dependencies.capabilities !== undefined;
     this.capabilitiesLoader = dependencies.capabilities ?? (async (kind, config, cwd, home) => await probeNativeCapabilities(kind, config, cwd, this.deadlineMs, home));
     this.omxProbe = dependencies.omxProbe ?? probeOmxCatalog;
     this.codexHostProbe = dependencies.codexHostProbe ?? probeCodexCatalog;
+    this.claudeProbe = dependencies.claudeProbe ?? probeClaudeCatalog;
   }
 
   // share discovery within the same account and native directory
   private key(kind: AgentKind, context: LaunchOptionsContext): string {
     const config = this.configs[kind];
-    const native = kind === 'omx' || kind === 'codex' && process.env.RAC_HOST_TMUX_DIR !== undefined ? createHash('sha256').update(JSON.stringify([config?.program, config?.args, config?.env, process.env.RAC_HOST_PATH, process.env.RAC_HOST_NODE_BIN, process.env.RAC_HOST_REPOSITORY, process.env.RAC_HOST_TMUX_DIR])).digest('hex') : '';
+    const native = kind === 'omx' || kind === 'claude' || kind === 'codex' && process.env.RAC_HOST_TMUX_DIR !== undefined ? createHash('sha256').update(JSON.stringify([config?.program, config?.args, config?.env, process.env.RAC_HOST_PATH, process.env.RAC_HOST_NODE_BIN, process.env.RAC_HOST_REPOSITORY, process.env.RAC_HOST_TMUX_DIR])).digest('hex') : '';
     return `${kind}\u0000${context.cwd}\u0000${context.home ?? ''}\u0000${context.hostCwd ?? ''}\u0000${native}`;
   }
 
   // share exact host discovery between the catalog and model grammar checks
-  private async hostSnapshot(kind: 'codex' | 'omx', config: AdapterLaunchConfig, context: LaunchOptionsContext): Promise<HostSnapshot> {
+  private async hostSnapshot(kind: 'codex' | 'omx' | 'claude', config: AdapterLaunchConfig, context: LaunchOptionsContext): Promise<HostSnapshot> {
     const key = this.key(kind, context);
     const cached = this.hostSnapshots.get(key);
     // cache successful metadata only; retry temporary bridge failures
@@ -492,8 +524,10 @@ export class LaunchOptionsService {
     // deduplicate the catalog and capability consumers
     if (active !== undefined) return await active;
     const generation = this.invalidations.get(kind) ?? 0;
-    const probe = kind === 'codex' ? this.codexHostProbe : this.omxProbe;
-    const pending = probe(config, context, this.deadlineMs).then(value => ({ catalog: projectHostCatalog(value), capabilities: value.capabilities })).catch(() => ({ catalog: unavailable(`Live model discovery could not be read from the configured ${kind === 'codex' ? 'Codex' : 'OMX'} context. Retry discovery.`), capabilities: {} }));
+    const pending = (kind === 'claude'
+      ? this.claudeProbe(config, context, this.deadlineMs).then(value => ({ catalog: projectClaudeCatalog(value), capabilities: value.capabilities }))
+      : (kind === 'codex' ? this.codexHostProbe : this.omxProbe)(config, context, this.deadlineMs).then(value => ({ catalog: projectHostCatalog(value), capabilities: value.capabilities })))
+      .catch(() => ({ catalog: unavailable(`Live model discovery could not be read from the configured ${kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : 'OMX'} context. Retry discovery.`), capabilities: {} }));
     this.hostFlights.set(key, pending);
     try {
       const snapshot = await pending;
@@ -522,7 +556,7 @@ export class LaunchOptionsService {
     }
     // OMX resolves its own Codex account and namespace through the proven wrapper
     if (kind === 'omx') return (await this.hostSnapshot(kind, config, context)).catalog;
-    if (kind === 'claude') return unavailable('Live model discovery is unavailable without a documented installed discovery integration.');
+    if (kind === 'claude') return (await this.hostSnapshot(kind, config, context)).catalog;
     return { status: 'unsupported', models: [], message: 'Model discovery is not implemented for this Agent.' };
   }
 
@@ -557,7 +591,7 @@ export class LaunchOptionsService {
   // cache successful help probes and deduplicate active loads
   private async nativeCapabilities(kind: AgentKind, config: AdapterLaunchConfig, context: LaunchOptionsContext): Promise<NativeLaunchCapabilities> {
     // the host probe proves model grammar without implying security capabilities
-    if (kind === 'omx' || kind === 'codex' && process.env.RAC_HOST_TMUX_DIR !== undefined) return (await this.hostSnapshot(kind, config, context)).capabilities;
+    if (kind === 'omx' || kind === 'claude' && !this.capabilitiesInjected || kind === 'codex' && process.env.RAC_HOST_TMUX_DIR !== undefined) return (await this.hostSnapshot(kind, config, context)).capabilities;
     const key = this.key(kind, context);
     const generation = this.invalidations.get(kind) ?? 0;
     const cached = this.capabilities.get(key);
@@ -584,7 +618,7 @@ export class LaunchOptionsService {
     // preserve truthful settled baselines by kind
     if (kind === 'opencode') return { status: 'unsupported', models: [], message: 'Model discovery is not implemented for this Agent.' };
     if (kind === 'omx') return unavailable('Live model discovery has not been requested for this configured OMX context.');
-    if (kind === 'claude') return unavailable('Live model discovery is unavailable without a documented installed discovery integration.');
+    if (kind === 'claude') return unavailable('Live model discovery has not been requested for this configured Claude context.');
     if (kind === 'pi') return unavailable('Live model discovery has not been requested for the configured Pi providers.');
     return unavailable('Live model discovery has not been requested for this configured Codex context.');
   }
@@ -677,7 +711,14 @@ export class LaunchOptionsService {
     const explicitPolicy = config.allowedModels !== undefined;
     const needsExplicitIdentity = choice.model?.mode === 'model' && !explicitPolicy;
     const needsEffortMetadata = choice.effort?.mode === 'effort';
-    const discover = rememberedDiscovery ?? (needsExplicitIdentity || needsEffortMetadata);
+    const freshDefault = context.restart !== true || context.currentKind !== kind || context.currentModel === undefined;
+    const requestedModel = choice.model?.mode === 'model' ? choice.model.id : undefined;
+    const configuredSelection = requestedModel !== undefined
+      ? config.allowedModels?.find(entry => entry.model === requestedModel)
+      : choice.model === undefined && freshDefault ? config.allowedModels?.[0] : undefined;
+    // claude saved efforts require native proof even for untouched fresh launches
+    const needsClaudeDefaultEffortMetadata = kind === 'claude' && configuredSelection?.effort !== undefined;
+    const discover = rememberedDiscovery ?? (needsExplicitIdentity || needsEffortMetadata || needsClaudeDefaultEffortMetadata);
     const manifest = await this.manifest(kind, context, discover);
     this.rememberRevision(manifest.optionsRevision, discover);
     // detect stale browser state without trusting a matching revision
@@ -720,6 +761,8 @@ export class LaunchOptionsService {
       // emit saved defaults only when current metadata still supports them
       if (configured !== undefined && catalogModel?.efforts.includes(configured) === true) effort = configured;
     }
+    // saved defaults also require installed effort grammar proof
+    if (effort !== undefined && choice.effort?.mode !== 'effort' && kind !== 'pi' && capabilities.effort !== true) effort = undefined;
     const nominalNativeDefault = policy.state === 'native-default' && config.allowedModels === undefined && resolvedModel !== undefined && allowedEntry(policy, resolvedModel) !== undefined;
     const needsModelOverride = resolvedModel !== undefined && ((!keepCurrent && !nominalNativeDefault) || effort !== undefined);
     // require installed grammar proof only for an emitted native model override

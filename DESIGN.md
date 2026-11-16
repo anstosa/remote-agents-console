@@ -1,11 +1,14 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-11-01. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls, workspace toolbar decorators, main toolbar controls, public homepage and policies, independent file previews, conversation browsing.
+Status: Active. Updated: 2026-11-14. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls and reply suggestions, workspace toolbar decorators, main toolbar controls, public homepage and policies, independent file previews, conversation browsing.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
 Toolbar evidence: `apps/web/src/styles.css`, browser layout regressions, and the
 requirement to retain mobile decorator placement at every viewport width.
+Reply-suggestion evidence: the canonical latest-message question detection in
+`apps/server/src/discovery/service.ts`, the shared prompt composer in
+`apps/web/src/main.tsx`, and `apps/web/e2e/reply-suggestions.spec.ts`.
 Homepage evidence: Google's [homepage requirements](https://support.google.com/cloud/answer/13807376)
 and [OAuth branding requirements](https://support.google.com/cloud/answer/15549049).
 
@@ -117,6 +120,33 @@ Toasts overlap Settings content like other splits; only the wrapped Settings
 toolbar reserves space. Showing or dismissing notices must not move the tab.
 
 ## Interaction states
+Completed assistant replies that ask a prose question may offer a single row of tailored
+reply suggestions at the top of the active prompt. The console-wide Reply suggestions
+toggle lives in Settings > Interface and is off by default. Its description warns about
+additional agent requests, increased agent usage and possible extra cost. When disabled,
+do not observe suggestion sources or expose the generation endpoint. Generate them on demand from bounded
+current-conversation context using the exact selected model and the Agent's own existing
+login. Never select another model or account, invent user facts/preferences/approval, or
+substitute generic replies when generation fails. Hide pills when the current model,
+credential provenance, conversation or output cannot be verified. Supported verified
+routes are Codex and OMX over tmux, controlled local Claude over tmux or the structured
+transport, and managed structured Pi. Each route uses only its own verified native login
+or stored credential; unverified routes remain unavailable rather than borrowing another
+Agent's account. Dashboard polling never starts inference, and typing/Send remain
+available while suggestions are pending or unavailable.
+Native model discovery uses a vendor-scoped environment and inert startup controls.
+Unreviewed Claude account routes stay unavailable rather than selecting a fallback.
+
+Labels contain at most three words. Each pill exposes its full editable draft in its
+tooltip and accessible description. Suggestions are never selected, inserted or sent by
+default. Every tap or keyboard activation appends to and focuses the existing draft without
+submitting a prompt, answering a question or sending terminal input. Preserve typed text
+and earlier selections. Pills use half the standard control height with sufficient target
+separation, without shrinking Send or answer-mode controls. Keep them in one horizontally
+scrollable row on narrow screens without page overflow. Hide stale results during work,
+conversation/model/account changes, non-question replies or native question/permission
+presentation. Native answer-mode questions and permissions continue submitting on click.
+
 Prompt dictation toggles with a deliberate single-finger upward swipe on the prompt
 box. Taps, long presses and scrolling an overflowing draft remain native text editing. Each logical start or stop
 gets one brief bounce and a distinct local recording cue; silent service restarts

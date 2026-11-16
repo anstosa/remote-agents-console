@@ -7,6 +7,7 @@ import { TmuxAdapter } from '../tmux/adapter.js';
 import { ProcInspector, type ProcessInspector } from './processes.js';
 import { GithubService } from '../github/service.js';
 import { messageAsksQuestion, parseReportedAttention, resolveAttention } from '../adapters/attention.js';
+import type { ReplySuggestionService } from '../reply-suggestions/service.js';
 import { adapterCapabilities, adapterFor, adapters, paneExcluded, structuredAdapters } from '../adapters/registry.js';
 import { projectIdOf, worktreeMatchesWorkspace, worktreePathOf, worktreeWireId } from '../workspaces/resolver.js';
 import { gitCommonDir, listWorktrees, type WorktreeEntry } from '../git/worktrees.js';
@@ -24,6 +25,17 @@ import { implicitProject } from '../config/schema.js';
 import { timed } from '../dashboard/timing.js';
 
 export interface SocketFinder { find(): Promise<SocketRef[]>; }
+/** one atomic recognized tmux source target, kept private from dashboard payloads */
+export type TmuxReplySuggestionTarget = {
+  id: string;
+  kind: 'codex' | 'omx' | 'claude';
+  attention: AttentionState;
+  panePid: number;
+  cwd: string;
+  conversationId?: string;
+  process: { pid: number; startTime: string };
+  generation: number;
+};
 export class ProcSocketFinder implements SocketFinder {
   private async socket(path: string, uid: number): Promise<SocketRef | undefined> {
     try {
@@ -136,6 +148,9 @@ export class DiscoveryService {
   private panePids = new Map<string, number>();
   // distinguish native agent replacement beneath an unchanged tmux shell
   private agentPids = new Map<string, number>();
+  // atomically published native reply targets never trigger dashboard refreshes
+  private replyTargets = new Map<string, TmuxReplySuggestionTarget>();
+  private replyTargetCounter = 0;
   // raw `#{pane_current_path}` per agent id, so the Adapter can match a sandboxed
   // pane's rollout by its working directory without readlink-ing its descriptors
   private paneCwds = new Map<string, string>();
@@ -200,6 +215,8 @@ export class DiscoveryService {
   private structuredAgents: () => Promise<readonly Agent[]> = async () => [];
   // a structured Agent's final message, which its Transport holds
   private structuredAnswer: (agentId: string) => Promise<string | undefined> = async () => undefined;
+  // inference remains demand-only and separate from question attention
+  private replySuggestions?: ReplySuggestionService;
   private static readonly refreshCacheMs = 2_000;
   private static readonly gitMetadataCacheMs = 30_000;
   private static readonly closedGitMetadataCacheMs = 10 * 60_000;
@@ -209,8 +226,10 @@ export class DiscoveryService {
   useStructuredAgents(source: { agents(): Promise<readonly Agent[]>; onChange(listener: () => void): void; turns: { latestAnswer(agentId: string): Promise<string | undefined> } }): void {
     this.structuredAgents = () => source.agents();
     this.structuredAnswer = agentId => source.turns.latestAnswer(agentId);
-    source.onChange(() => { this.dashboardSnapshot = undefined; });
+    source.onChange(() => { this.dashboardSnapshot = undefined; this.replySuggestions?.refresh(); });
   }
+  // attach only the source-key projection and invalidation boundary
+  useReplySuggestions(source: ReplySuggestionService): void { this.replySuggestions = source; this.dashboardSnapshot = undefined; }
   // every Project the console knows right now; the list may change between calls, so callers
   // read it each time rather than keeping it
   projectsNow(): readonly Project[] { return this.projectList ?? this.configuredProjects; }
@@ -384,6 +403,7 @@ export class DiscoveryService {
     const paneCwds = new Map<string, string>();
     const paneReported = new Map<string, AttentionState>();
     const paneQuestionPayloads = new Map<string, string>();
+    const replyCandidates = new Map<string, Omit<TmuxReplySuggestionTarget, 'generation'>>();
     const places = await this.places(this.worktreeSnapshot);
     // a holder's pane runs a structured Agent's process, never a recognised Agent's
     const discovered: Agent[] = (await Promise.all(panes.filter(pane => pane.role !== holderPaneRole && !paneExcluded(pane)).map(async (pane): Promise<Agent | undefined> => {
@@ -408,6 +428,18 @@ export class DiscoveryService {
       const conversationId = pane.reportedSession !== undefined && pane.reportedSession.length > 0 ? pane.reportedSession : undefined;
       const agentPane: AgentPane = { paneId: pane.paneId, sessionId: `${pane.socket.fingerprint}:${pane.sessionId}`, socketFingerprint: pane.socket.fingerprint, ...(pane.paneMode === undefined ? {} : { paneMode: pane.paneMode }) };
       const agent: Agent = { id, home, title: pane.title, kind: recognized.kind, attention, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), ...(pane.spawnedBy === undefined ? {} : { spawnedBy: pane.spawnedBy }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
+      // reply inference requires a closed native kind and a proven process lifetime
+      if ((recognized.kind === 'codex' || recognized.kind === 'omx' || recognized.kind === 'claude') && recognized.startTime !== undefined) {
+        replyCandidates.set(id, {
+          id,
+          kind: recognized.kind,
+          attention,
+          panePid: pane.pid,
+          cwd: pane.path,
+          ...(conversationId === undefined ? {} : { conversationId }),
+          process: { pid: recognized.pid, startTime: recognized.startTime }
+        });
+      }
       return agent;
     }))).filter((agent): agent is Agent => agent !== undefined);
     const sessionKey = (pane: Pane) => `${pane.socket.fingerprint}:${pane.sessionId}`;
@@ -429,6 +461,7 @@ export class DiscoveryService {
     this.paneCwds = paneCwds;
     this.paneReported = paneReported;
     this.paneQuestionPayloads = paneQuestionPayloads;
+    this.publishReplyTargets(replyCandidates);
     // discard removed panes so late transcript reads cannot restore their state
     for (const id of this.messageQuestions.keys()) {
       // detach absent panes from both cached and in-flight reads
@@ -463,6 +496,44 @@ export class DiscoveryService {
   // expose the recognized native descendant rather than its persistent pane shell
   agentProcessId(id: string): number | undefined {
     return this.agentPids.get(id);
+  }
+
+  // preserve target generations across identical scans and advance every observed replacement
+  private publishReplyTargets(candidates: ReadonlyMap<string, Omit<TmuxReplySuggestionTarget, 'generation'>>): void {
+    const published = new Map<string, TmuxReplySuggestionTarget>();
+    // compare only concrete target fields, never discovery's scan generation
+    for (const [id, candidate] of candidates) {
+      const previous = this.replyTargets.get(id);
+      const previousKey = previous === undefined ? undefined : this.replyTargetKey(previous);
+      const candidateKey = this.replyTargetKey(candidate);
+      const generation = previousKey === candidateKey ? previous!.generation : ++this.replyTargetCounter;
+      published.set(id, { ...candidate, process: { ...candidate.process }, generation });
+    }
+    this.replyTargets = published;
+  }
+
+  // identify one target without object-identity or ordinary-scan churn
+  private replyTargetKey(target: Omit<TmuxReplySuggestionTarget, 'generation'> | TmuxReplySuggestionTarget): string {
+    return JSON.stringify([target.id, target.kind, target.attention, target.panePid, target.cwd, target.conversationId, target.process.pid, target.process.startTime]);
+  }
+
+  // return a defensive copy from the last atomic pane scan
+  replySuggestionTarget(id: string): TmuxReplySuggestionTarget | undefined {
+    const target = this.replyTargets.get(id);
+    return target === undefined ? undefined : { ...target, process: { ...target.process } };
+  }
+
+  // freshly validate the recognized lifetime without dashboard, target or refresh recursion
+  async validateReplySuggestionTarget(expected: TmuxReplySuggestionTarget): Promise<boolean> {
+    const before = this.replyTargets.get(expected.id);
+    // require the exact published generation before the proc read
+    if (before === undefined || before.generation !== expected.generation || this.replyTargetKey(before) !== this.replyTargetKey(expected)) return false;
+    const recognized = await this.processes.recognizeAgent(expected.panePid, { reusePositive: false }).catch(() => undefined);
+    // require the same native process lifetime and kind
+    if (recognized === undefined || recognized.kind !== expected.kind || recognized.pid !== expected.process.pid || recognized.startTime !== expected.process.startTime) return false;
+    const after = this.replyTargets.get(expected.id);
+    // a concurrent scan replacement invalidates the completed proc proof
+    return after !== undefined && after.generation === expected.generation && this.replyTargetKey(after) === this.replyTargetKey(expected);
   }
 
   // the raw reported Inline question payload one pane carries, for the answer path
@@ -730,6 +801,7 @@ export class DiscoveryService {
     // dashboard builds may still hold this mutable observation
     if (state !== undefined) state.hasQuestion = false;
     this.messageQuestions.delete(agentId);
+    this.replySuggestions?.invalidate(agentId);
     this.dashboardSnapshot = undefined;
   }
 
@@ -756,7 +828,9 @@ export class DiscoveryService {
       state.pending = true;
       void read(pane).catch(() => undefined).then(message => {
         // ignore replies from removed panes, older conversations or resumed work
-        if (this.messageQuestions.get(agent.id) === state) state.hasQuestion = messageAsksQuestion(message);
+        if (this.messageQuestions.get(agent.id) === state) {
+          state.hasQuestion = messageAsksQuestion(message);
+        }
       }).finally(() => {
         state.pending = false;
         state.nextReadAt = Date.now() + DiscoveryService.refreshCacheMs;
@@ -837,7 +911,7 @@ export class DiscoveryService {
     // the stable tab order follows configured checkout order and discovery defaults
     const orderOf = new Map(worktrees.map((worktree, index) => [worktree.id, index] as const));
     // retain mutable observations until all panes and places finish enrichment
-    const messageQuestionStates = new Map<string, { hasQuestion: boolean }>();
+    const messageQuestionStates = new Map<string, { hasQuestion: boolean; sourceKey?: string }>();
     const agents = await timed(steps, 'discovery.agentDetails', () => Promise.all(discovered.map(async (discoveredAgent) => {
       const place = this.placeOf(discoveredAgent, places);
       const agent = place === undefined ? discoveredAgent : { ...discoveredAgent, placeId: place.id, home: place.home };
@@ -853,8 +927,22 @@ export class DiscoveryService {
       ]);
       // native questions replace prose state without starting another transcript read
       if (question !== undefined) this.invalidateMessageQuestion(agent.id);
-      // a structured Agent's final message is read directly, from the Transport that holds it
-      messageQuestionStates.set(agent.id, question !== undefined ? { hasQuestion: false } : agent.transport === 'structured' ? { hasQuestion: agent.attention === 'finished' && messageAsksQuestion(await timed(steps, 'discovery.agent.structuredAnswer', () => this.structuredAnswer(agent.id))) } : this.agentMessageQuestion(agent));
+      let messageQuestionState: { hasQuestion: boolean };
+      // native questions suppress prose reply suggestions
+      if (question !== undefined) messageQuestionState = { hasQuestion: false };
+      // a structured Agent's final message is read directly from its Transport
+      else if (agent.transport === 'structured') {
+        const answer = agent.attention === 'finished'
+          ? await timed(steps, 'discovery.agent.structuredAnswer', () => this.structuredAnswer(agent.id))
+          : undefined;
+        const hasQuestion = messageAsksQuestion(answer);
+        messageQuestionState = { hasQuestion };
+      // tmux transcripts retain their existing guarded cache
+      } else messageQuestionState = this.agentMessageQuestion(agent);
+      // resumed work and ordinary answers retire background results immediately
+      if (!messageQuestionState.hasQuestion) this.replySuggestions?.invalidate(agent.id);
+      // retain tmux observations by reference until concurrent transcript reads settle
+      messageQuestionStates.set(agent.id, messageQuestionState);
       const branch = meta.branch ?? agent.branch;
       const pullRequest = await timed(steps, 'discovery.agent.pullRequest', () => this.pullRequestOf(meta, branch));
       const gitPrStatus = await timed(steps, 'discovery.agent.prComparison', () => this.gitPrComparisonForBase(meta, branch, pullRequest?.baseBranch, defaultBranch));
@@ -898,9 +986,13 @@ export class DiscoveryService {
     const listed = this.listPlaces(places, [...discovered.flatMap(agent => this.placeOf(agent, places) ?? []), ...shellPlaces, ...await timed(steps, 'discovery.scratchPlaces', () => this.pinnedScratchPlaces(places))]);
     this.listedPlaces = new Map(listed.map(place => [place.id, place]));
     // materialize flags only at publication so concurrent replies can invalidate earlier panes
-    const presentedAgents = agents.map(agent => agent.attention === 'finished' && agent.question === undefined && messageQuestionStates.get(agent.id)?.hasQuestion === true
-      ? { ...agent, hasMessageQuestion: true as const }
-      : agent);
+    const presentedAgents = await Promise.all(agents.map(async agent => {
+      const state = messageQuestionStates.get(agent.id);
+      // only a final question can expose a key and source observation never starts inference
+      if (agent.attention !== 'finished' || agent.question !== undefined || state?.hasQuestion !== true) return agent;
+      const sourceKey = state.sourceKey ?? await this.replySuggestions?.observe(agent.id);
+      return { ...agent, hasMessageQuestion: true as const, ...(sourceKey === undefined ? {} : { messageReplySuggestionKey: sourceKey }) };
+    }));
     return { generation: this.generation, serverStartedAt: this.serverStartedAt, adapters: adapterCapabilities(this.adapters), agents: presentedAgents, projects, places: listed.map(place => this.placeView(place, shellCounts)) };
   }
 

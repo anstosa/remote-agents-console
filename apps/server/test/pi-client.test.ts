@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { piClient } from '../src/transports/pi.js';
+import { piClient, piReportStatusKey } from '../src/transports/pi.js';
 import type { LineChannel, StructuredEvent } from '../src/transports/structured.js';
 
 // The Pi client over an in-memory channel: the test plays Pi, feeding it RPC records shaped as
@@ -159,6 +159,35 @@ describe('the Pi client', () => {
     pi({ type: 'agent_settled', aborted: false });
     expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }, { type: 'turn', turn: { type: 'settled', message: 'Done' } }]);
     expect(events.some(event => event.type === 'report')).toBe(false);
+  });
+
+  it('marks a fresh Conversation history ready even when it is empty', async () => {
+    const { sent, events, pi } = piOverChannel();
+    pi({ type: 'extension_ui_request', id: 'report', method: 'setStatus', statusKey: piReportStatusKey, statusText: JSON.stringify({ loaded: true, nonce: 'nonce', version: '1.5.2', sandbox: { engaged: false } }) });
+    const state = sent.find(record => record.type === 'get_state')!;
+    const messages = sent.find(record => record.type === 'get_messages')!;
+    pi({ type: 'response', id: messages.id, command: 'get_messages', success: true, data: { messages: [] } });
+    pi({ type: 'response', id: state.id, command: 'get_state', success: true, data: { sessionId: 'fresh', model: { provider: 'openai', id: 'gpt-test', name: 'GPT test', api: 'openai-responses', baseUrl: 'https://api.openai.com/v1' } } });
+    await vi.waitFor(() => expect(events).toContainEqual({ type: 'history', conversationId: 'fresh', items: [] }));
+    expect(events).toContainEqual({ type: 'model', current: { model: 'openai/gpt-test' }, native: expect.objectContaining({ id: 'openai/gpt-test', provider: 'openai', api: 'openai-responses', baseUrl: 'https://api.openai.com/v1' }) });
+  });
+
+  it('ignores startup history that resolves after a same-Conversation Turn starts', async () => {
+    const { sent, events, pi } = piOverChannel();
+    pi({ type: 'extension_ui_request', id: 'report', method: 'setStatus', statusKey: piReportStatusKey, statusText: JSON.stringify({ loaded: true, nonce: 'nonce', version: '1.5.2', sandbox: { engaged: false } }) });
+    const state = sent.find(record => record.type === 'get_state')!;
+    const stale = sent.find(record => record.type === 'get_messages')!;
+    pi({ type: 'response', id: state.id, command: 'get_state', success: true, data: { sessionId: 'same', model: { provider: 'openai', id: 'gpt-test', api: 'openai-responses', baseUrl: 'https://api.openai.com/v1' } } });
+    await vi.waitFor(() => expect(events).toContainEqual({ type: 'conversation', id: 'same' }));
+    pi({ type: 'agent_start' });
+    pi({ type: 'message_end', message: { role: 'user', content: 'New prompt' } });
+    pi({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'New question?' }], stopReason: 'stop' } });
+    pi({ type: 'response', id: stale.id, command: 'get_messages', success: true, data: { messages: [{ role: 'assistant', content: [{ type: 'text', text: 'Stale question?' }], stopReason: 'stop' }] } });
+    pi({ type: 'agent_settled', aborted: false });
+    const refreshed = sent.filter(record => record.type === 'get_messages').at(-1)!;
+    expect(refreshed.id).not.toBe(stale.id);
+    pi({ type: 'response', id: refreshed.id, command: 'get_messages', success: true, data: { messages: [{ role: 'user', content: 'New prompt' }, { role: 'assistant', content: [{ type: 'text', text: 'New question?' }], stopReason: 'stop' }] } });
+    await vi.waitFor(() => expect(events.filter(event => event.type === 'history')).toEqual([{ type: 'history', conversationId: 'same', items: [{ id: 'h0', kind: 'message', role: 'user', text: 'New prompt' }, { id: 'h1', kind: 'message', role: 'assistant', text: 'New question?' }, { id: 'h2', kind: 'settled', outcome: 'done', cost: 0, toolCalls: 0 }] }]));
   });
 
   it('after an overflowed replay, settles a Turn whose start it missed', async () => {

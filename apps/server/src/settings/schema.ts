@@ -18,6 +18,11 @@ export function keyboardSettingsSchema(): SettingsSchema { return { type: 'recor
 export function applicationSettingsSchema(presentation: ApplicationSettingsPresentation = {}): SettingsSchema {
   const schema = settingsSchema(sourceSchema);
   schema.properties!.keys = keyboardSettingsSchema();
+  // explain the additional request cost at the source setting
+  Object.assign(schema.properties!.replySuggestions!, {
+    label: 'Reply suggestions',
+    description: 'Show tailored, editable suggestion pills using each Agent\'s current model and account. Warning: this makes additional agent requests, increases agent usage, and may incur extra cost.'
+  });
   // keep legacy source compatibility without publishing an obsolete control
   delete schema.properties!.integrations!.properties!.multiInstance;
   // capitalize product acronyms only in presentation metadata

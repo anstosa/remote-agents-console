@@ -192,7 +192,7 @@ function CleanupSkeletons() {
 // `worktreeLabel`/`worktreeOrder` are no longer on the wire (the server carries them on the
 // Worktree); they remain as optional read-only fallbacks the tab bar consults when an Agent's
 // Worktree is not present in the payload, absent from the real server.
-type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; notificationSuppressed?: boolean; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
+type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; messageReplySuggestionKey?: string; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; notificationSuppressed?: boolean; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
 type Worktree = { id: string; projectId: string; label: string; customLabel?: boolean; path: string; main: boolean; detached: boolean; locked: boolean; branch?: string; sha?: string; consoleShells?: number; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; available: boolean; pinned: boolean; order: number; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; stack?: Stack; launch?: LaunchResolution };
 // `mode: 'directory'` marks a non-git Project the console launches in place (like Scratch);
 // `launch` is its resolved Launch profile for the Project-level Launch button. A git
@@ -325,6 +325,8 @@ function placeTabState(agents: readonly Agent[]): { state: AgentState; unread: b
   if (states.includes('working')) return { state: 'working', unread: false };
   return { state: states.length === 0 ? 'closed' : 'prompt-done', unread: false };
 }
+// draft-only replies on the dashboard's agent payload
+type ReplySuggestion = { label: string; text: string };
 type ChoiceOption = { label: string; number: number; answerIndex: number; description?: string };
 // a question as the composer renders it: its choices, or a text answer; whether it may be
 // dismissed, when it lapses, and which page of several open questions it is
@@ -806,6 +808,79 @@ const request = async (url: string, init: RequestInit = {}, observeReachability 
     });
   }
 };
+// accept only the bounded server reply shape before exposing model output to the composer
+function parseReplySuggestions(raw: string, sourceKey: string): ReplySuggestion[] | undefined {
+  // reject oversized responses before parsing them
+  if (new TextEncoder().encode(raw).byteLength > 8_192) return undefined;
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return undefined; }
+  // require the exact response envelope and current opaque key
+  if (value === null || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'sourceKey,suggestions') return undefined;
+  if (!('sourceKey' in value) || value.sourceKey !== sourceKey || !('suggestions' in value) || !Array.isArray(value.suggestions) || value.suggestions.length > 4) return undefined;
+  const suggestions: ReplySuggestion[] = [];
+  const drafts = new Set<string>();
+  // validate the complete set instead of publishing partial model output
+  for (const suggestion of value.suggestions) {
+    // require exact suggestion fields
+    if (suggestion === null || typeof suggestion !== 'object' || Object.keys(suggestion).sort().join(',') !== 'label,text') return undefined;
+    // narrow both model strings before normalization
+    if (!('label' in suggestion) || typeof suggestion.label !== 'string' || !('text' in suggestion) || typeof suggestion.text !== 'string') return undefined;
+    const label = suggestion.label.trim();
+    const text = suggestion.text.trim();
+    // keep labels short and drafts bounded, printable, and distinct
+    if (label !== suggestion.label || text !== suggestion.text || label.length === 0 || label.length > 60 || label.split(/\s+/u).length > 3 || text.length === 0 || text.length > 600 || /[\u0000-\u001f\u007f]/u.test(label) || /[\u0000-\u0008\u000b-\u001f\u007f]/u.test(text)) return undefined;
+    const key = text.replace(/\s+/gu, ' ').toLocaleLowerCase();
+    // reject duplicate drafts as one malformed result
+    if (drafts.has(key)) return undefined;
+    drafts.add(key);
+    suggestions.push({ label, text });
+  }
+  return suggestions;
+}
+// request suggestions only for the current visible eligible composer
+function useReplySuggestions(agentId: string, sourceKey: string | undefined, eligible: boolean): readonly ReplySuggestion[] | undefined {
+  const [visible, setVisible] = useState(() => document.visibilityState === 'visible');
+  const [resolved, setResolved] = useState<{ agentId: string; sourceKey: string; suggestions: ReplySuggestion[] }>();
+  useEffect(() => {
+    // mirror the page lifecycle without polling hidden panels
+    const update = () => setVisible(document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', update);
+    return () => document.removeEventListener('visibilitychange', update);
+  }, []);
+  const admitted = eligible && visible && sourceKey !== undefined;
+  useEffect(() => {
+    setResolved(undefined);
+    // hidden, stale, or unsupported composers make no background request
+    if (!admitted || sourceKey === undefined) return;
+    const controller = new AbortController();
+    let current = true;
+    // keep suggestion failures silent and independent of console reachability state
+    void request(`/api/agents/${encodeURIComponent(agentId)}/reply-suggestions`, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sourceKey }), signal: controller.signal }, false).then(async response => {
+      // hide authorization, capacity, and generation failures
+      if (!response.ok) return undefined;
+      return parseReplySuggestions(await response.text(), sourceKey);
+    }).then(suggestions => {
+      // publish only the request still owned by this hook generation
+      if (current && suggestions !== undefined) setResolved({ agentId, sourceKey, suggestions });
+    }).catch(() => undefined);
+    return () => { current = false; controller.abort(); };
+  }, [admitted, agentId, sourceKey]);
+  // dependency mismatches hide old results synchronously before effect cleanup
+  return admitted && resolved?.agentId === agentId && resolved.sourceKey === sourceKey ? resolved.suggestions : undefined;
+}
+// report only a composer that intersects the rendered viewport
+function useComposerInView(ref: React.RefObject<HTMLElement | null>): boolean {
+  const [inView, setInView] = useState(false);
+  useEffect(() => {
+    const element = ref.current;
+    // stay closed until a mounted composer can be observed
+    if (element === null) return;
+    const observer = new IntersectionObserver(([entry]) => setInView(entry?.isIntersecting === true));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref]);
+  return inView;
+}
 // refresh signed session and csrf without taking console control
 const refreshNotificationAuthentication = async (signal: AbortSignal): Promise<boolean> => {
   const response = await request('/api/auth/session', { cache: 'no-store', signal }, false);
@@ -2785,7 +2860,7 @@ function MobileTerminalKeys({ id }: { id: string }) {
 
 // render the agent panel's composer: prompt history above attach on the left, the prompt, and
 // queued prompts above send on the right; a detected question swaps in the answer layout
-function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, onOperationFeedback, question, turnBlocked = false, worktreeId, placeId, historyControl, steering, offeredDraft }: { turnBlocked?: boolean; steering?: { pending: string[] }; offeredDraft?: { id: number; text: string }; id: string; ready?: boolean; history: PromptHistoryEntry[]; onHistoryChanged: () => Promise<void>; onPromptFocus: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; question?: ChoiceQuestion; worktreeId?: string; placeId?: string; historyControl?: ReactNode }) {
+function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, onOperationFeedback, question, turnBlocked = false, worktreeId, placeId, historyControl, steering, offeredDraft, replySuggestionKey, replySuggestionEligible = false }: { replySuggestionKey?: string; replySuggestionEligible?: boolean; turnBlocked?: boolean; steering?: { pending: string[] }; offeredDraft?: { id: number; text: string }; id: string; ready?: boolean; history: PromptHistoryEntry[]; onHistoryChanged: () => Promise<void>; onPromptFocus: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; question?: ChoiceQuestion; worktreeId?: string; placeId?: string; historyControl?: ReactNode }) {
   // the notes this composer saves into, and the notes fly-out to refresh: the Place's (a Worktree's
   // Place id is its Worktree id), keyed as the Workspace's notes are
   const notesPlaceId = placeId ?? worktreeId;
@@ -2795,6 +2870,18 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   // use the shared mobile text-editing breakpoint
   const phone = usePhoneLayout();
   const promptInputMode = useContext(PromptInputModeContext);
+  const panelExpansion = usePanelExpand('agent');
+  const composerVisibilityRef = useRef<HTMLElement | null>(null);
+  const composerInView = useComposerInView(composerVisibilityRef);
+  const replyRequestSignature = replySuggestionEligible && replySuggestionKey !== undefined ? replySuggestionKey : undefined;
+  const [settledReplyRequest, setSettledReplyRequest] = useState<string>();
+  useEffect(() => {
+    // let retained panel layout settle before admitting a newly eligible key
+    setSettledReplyRequest(replyRequestSignature);
+  }, [replyRequestSignature]);
+  // both carousel selection and sibling expansion hide mounted composers synchronously
+  const panelVisible = promptInputMode && (panelExpansion === undefined || !panelExpansion.anyExpanded || panelExpansion.expanded) && composerInView;
+  const replySuggestions = useReplySuggestions(id, replySuggestionKey, replyRequestSignature !== undefined && settledReplyRequest === replyRequestSignature && panelVisible);
   const [commandToken, setCommandToken] = useState<CommandToken>();
   const [activeCommand, setActiveCommand] = useState(0);
   const [promptCommands, setPromptCommands] = useState<PromptCommand[]>([]);
@@ -3099,6 +3186,21 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     appliedDraftOffers.set(id, offeredDraft.id);
     setValue(current => current === '' ? offeredDraft.text : current);
   }, [id, offeredDraft?.id]);
+  // append and focus the draft without invoking prompt or question submission
+  const selectSuggestedReply = (text: string) => {
+    const next = appendTextBlock(value, text);
+    // preserve the composer's submission and draft-length boundaries
+    if (!ready || pending || next.length > 32_000) return;
+    historyIndex.current = undefined;
+    historyDraft.current = '';
+    setCommandToken(undefined);
+    focusPromptAtEnd.current = true;
+    setValue(next);
+    exitTerminalInput.get(id)?.();
+    onPromptFocus();
+    promptInput.current?.focus();
+    promptInput.current?.setSelectionRange(next.length, next.length);
+  };
   // redirect the working Agent with the draft at once; a steer is not queued
   const steerPrompt = async () => {
     if (steering === undefined || pending || !value.trim() || attachments.length > 0) return;
@@ -3466,13 +3568,15 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const questionNotesId = `question-notes-${id}`;
   const questionNotes = questionNotesOpen ? <div className="question-notes" id={questionNotesId}><textarea aria-label="Reply" maxLength={32_000} placeholder="Answer in your own words…" value={value} onFocus={() => { /* leave terminal input */ exitTerminalInput.get(id)?.(); onPromptFocus(); }} onChange={event => { /* update note draft */ setValue(event.target.value); }} /><div className="question-notes-actions"><button type="button" className={pending ? 'progress-border progress-blue' : undefined} aria-busy={pending || undefined} disabled={pending || !value.trim()} aria-label="Send reply" onClick={() => { /* answer the active question directly */ void answer(value); }}><ProgressRing busy={pending} />{pending ? 'Sending' : 'Send reply'}</button></div></div> : null;
   // render numbered answers
-  if (question && answerMode) return <section className="prompt question-prompt" aria-label="Agent question" onDragEnter={dragAttachments} onDragOver={dragAttachments} onDragLeave={leaveAttachmentDrag} onDragEnd={clearAttachmentDrag} onDrop={dropAttachments}><div className="question-heading"><div className="question-copy"><strong>{question.permission ? 'Permission request' : 'Agent question'}{question.page !== undefined && <span className="question-page"> · {question.page.index + 1} of {question.page.count} · <button type="button" className="question-page-next" onClick={question.page.next}>next</button></span>}{question.expiresAt !== undefined && <QuestionCountdown key={question.id} expiresAt={question.expiresAt} />}</strong><span>{question.text}</span>{question.detail !== undefined && <pre className="question-detail">{question.detail}</pre>}</div><div className="question-tools"><button type="button" className="question-notes-toggle" aria-controls={questionNotesId} data-context-flyout aria-expanded={questionNotesOpen} onClick={() => { /* toggle answer notes */ setNotesQuestionId(questionNotesOpen ? undefined : question.id); }}>{questionNotesOpen ? 'Hide reply' : 'Reply in your own words'}</button>{questionModeToggle}</div></div>{question.textAnswer !== undefined && <QuestionTextAnswer key={question.id} field={question.textAnswer} pending={pending} onAnswer={text => void answer(text)} />}{question.dismissable && <button type="button" className="question-dismiss" disabled={pending} onClick={() => void answer({ dismiss: true })}>Dismiss</button>}<div className="question-choices">{question.choices.map(choice => <button key={`${choice.answerIndex}-${choice.label}`} className="question-choice" disabled={pending} onClick={() => void answer(choice.answerIndex)}><b aria-hidden="true">{choice.number}</b><span>{choice.label}{choice.description && <small>{choice.description}</small>}</span></button>)}</div>{questionNotes}{attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}</section>;
+  if (question && answerMode) return <section ref={composerVisibilityRef} className="prompt question-prompt" aria-label="Agent question" onDragEnter={dragAttachments} onDragOver={dragAttachments} onDragLeave={leaveAttachmentDrag} onDragEnd={clearAttachmentDrag} onDrop={dropAttachments}><div className="question-heading"><div className="question-copy"><strong>{question.permission ? 'Permission request' : 'Agent question'}{question.page !== undefined && <span className="question-page"> · {question.page.index + 1} of {question.page.count} · <button type="button" className="question-page-next" onClick={question.page.next}>next</button></span>}{question.expiresAt !== undefined && <QuestionCountdown key={question.id} expiresAt={question.expiresAt} />}</strong><span>{question.text}</span>{question.detail !== undefined && <pre className="question-detail">{question.detail}</pre>}</div><div className="question-tools"><button type="button" className="question-notes-toggle" aria-controls={questionNotesId} data-context-flyout aria-expanded={questionNotesOpen} onClick={() => { /* toggle answer notes */ setNotesQuestionId(questionNotesOpen ? undefined : question.id); }}>{questionNotesOpen ? 'Hide reply' : 'Reply in your own words'}</button>{questionModeToggle}</div></div>{question.textAnswer !== undefined && <QuestionTextAnswer key={question.id} field={question.textAnswer} pending={pending} onAnswer={text => void answer(text)} />}{question.dismissable && <button type="button" className="question-dismiss" disabled={pending} onClick={() => void answer({ dismiss: true })}>Dismiss</button>}<div className="question-choices">{question.choices.map(choice => <button key={`${choice.answerIndex}-${choice.label}`} className="question-choice" disabled={pending} onClick={() => void answer(choice.answerIndex)}><b aria-hidden="true">{choice.number}</b><span>{choice.label}{choice.description && <small>{choice.description}</small>}</span></button>)}</div>{questionNotes}{attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}</section>;
   const queueLabel = pending ? 'Queueing' : 'Queue';
   const queuePanel = queuedPromptsOpen && <FlyoutPortal onDismiss={() => setQueuedPromptsOpen(false)}><section className="queued-prompts-panel more-menu flyout-menu" ref={queuedPromptFlyoutRef} style={queuedPromptFlyoutStyle} aria-label="Queued prompts"><header><strong>Queued prompts</strong></header>{pendingSteers.length > 0 && <div className="pending-steers" aria-label="Pending steers"><small>Steers pending: held by the agent, not in the queue</small><ul>{pendingSteers.map((steer, index) => <li key={index}>{steer}</li>)}</ul></div>}{queuedPromptError && <p className="queued-prompt-error" role="alert">{queuedPromptError}</p>}<div className="queued-prompts-list">{queuedPrompts.map((queued, index) => { const label = queued.text || queued.attachments?.map(attachment => attachment.name).join(', ') || 'Attachments only'; const editing = queuedPromptEdit?.id === queued.id; const busy = queuedPromptAction !== undefined; return <div className={`queued-prompt-item${editing ? ' editing' : ''}`} key={queued.id}><span className="queued-prompt-order"><strong className="queued-prompt-position" aria-label={`Queue position ${index + 1}`}>{index + 1}</strong><span className="queued-prompt-order-buttons"><button type="button" disabled={busy || index === 0} aria-label={`Move queued prompt earlier: ${label}`} title="Move earlier" onClick={() => void moveQueuedPrompt(queued, 'earlier')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg></button><button type="button" disabled={busy || index === queuedPrompts.length - 1} aria-label={`Move queued prompt later: ${label}`} title="Move later" onClick={() => void moveQueuedPrompt(queued, 'later')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg></button></span></span>{editing ? <textarea aria-label={`Edit queued prompt: ${label}`} value={queuedPromptEdit.text} maxLength={32_000} autoFocus onChange={event => setQueuedPromptEdit({ id: queued.id, text: event.target.value })} /> : <span className="prompt-with-sender"><PromptSenderChips sender={queued} /><button className="queued-prompt-copy" type="button" disabled={busy} title={label} onClick={() => setQueuedPromptEdit({ id: queued.id, text: queued.text })}><span>{queued.text || 'Attachments only'}</span>{queued.attachments?.length ? <small>{queued.attachments.map(attachment => attachment.name).join(', ')}</small> : null}</button></span>}<span className="queued-prompt-actions">{editing ? <><button type="button" disabled={busy || !queuedPromptEdit.text.trim() && queued.attachments === undefined} aria-label={`Save queued prompt changes: ${label}`} title="Save changes" onClick={() => void saveQueuedPromptEdit(queued)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg></button><button type="button" disabled={busy} aria-label={`Stop editing queued prompt: ${label}`} title="Stop editing" onClick={() => setQueuedPromptEdit(undefined)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></> : <button type="button" className={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save' ? 'progress-border progress-blue' : undefined} aria-busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save' || undefined} disabled={busy} aria-label={`Save queued prompt as note: ${label}`} title="Save as note" onClick={() => void saveQueuedPromptAsNote(queued)}><ProgressRing busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save'} /><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="notes-icon-sheet" d="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M15 21v-6h6" /></svg></button>}<button className={`queued-prompt-cancel${progressBorder(queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel', 'red')}`} type="button" aria-busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel' || undefined} disabled={busy} aria-label={`Cancel queued prompt: ${label}`} title="Cancel queued prompt" onClick={() => void cancelQueuedPrompt(queued)}><ProgressRing busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel'} /><svg className="action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg></button></span></div>; })}</div></section></FlyoutPortal>;
   // the queued prompts stay one tap away: counted, and disabled while the queue is empty
   const queuedToggle = <button className={`queued-prompts-toggle icon-button${queuedPromptsOpen ? ' active' : ''}`} type="button" disabled={pending || queuedPrompts.length === 0 && pendingSteers.length === 0} aria-label={`Queued prompts (${queuedPrompts.length})`} data-context-flyout aria-expanded={queuedPromptsOpen} title={queuedPrompts.length === 0 ? 'No queued prompts' : `${queuedPrompts.length} queued prompt${queuedPrompts.length === 1 ? '' : 's'}`} onClick={() => setQueuedPromptsOpen(open => !open)}><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.queue} /></svg>{queuedPrompts.length > 0 && <span className="saved-prompts-count queued-prompts-count" aria-hidden="true">{queuedPrompts.length}</span>}</button>;
   const sendButton = <button className={`queue icon-button${progressBorder(pending, 'blue')}`} aria-busy={pending || undefined} disabled={!ready || pending || (!value && attachments.length === 0)} aria-label={queueLabel} title={queueLabel} onClick={() => void submit()}><ProgressRing busy={pending} /><svg viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.send} /></svg></button>;
-  return <section className="prompt agent-composer" aria-label="Prompt composer" onDragEnter={dragAttachments} onDragOver={dragAttachments} onDragLeave={leaveAttachmentDrag} onDragEnd={clearAttachmentDrag} onDrop={dropAttachments}>{draggingAttachments && <div className="prompt-drop-overlay" role="status">Drop files to attach</div>}<div className="agent-composer-column" aria-label="Prompt shortcuts">{historyControl}{attachmentButton}</div><div className="prompt-content">{composer}{attachments.length > 0 && <div className="prompt-attachments" aria-label="Selected attachments">{attachments.map((file, index) => <span key={`${file.name}-${index}`} title={file.name}>{file.name}<button type="button" disabled={pending} aria-label={`Remove ${file.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><PanelIcon path={panelIcons.close} /></button></span>)}</div>}{attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}{queuedPromptError && !queuedPromptsOpen && <p className="queued-prompt-error" role="alert">{queuedPromptError}</p>}<input ref={attachmentInput} className="attachment-input" type="file" multiple onChange={event => { chooseAttachments(event.target.files); event.target.value = ''; }} />{questionModeToggle && <div className="prompt-actions">{questionModeToggle}</div>}</div><div className="agent-composer-column" ref={queuedPromptAnchorRef} role="group" aria-label="Prompt submission controls">{queuedToggle}{sendButton}</div>{queuePanel}</section>;
+  // keep every shortcut draft-only and available before the editable prompt
+  const suggestedReplies = !replySuggestions?.length ? null : <div className="prompt-reply-suggestions" role="group" aria-label="Suggested replies">{replySuggestions.map(suggestion => <button type="button" key={suggestion.text} title={suggestion.text} aria-description={suggestion.text} disabled={!ready || pending || appendTextBlock(value, suggestion.text).length > 32_000} onClick={() => selectSuggestedReply(suggestion.text)}>{suggestion.label}</button>)}</div>;
+  return <section ref={composerVisibilityRef} className="prompt agent-composer" aria-label="Prompt composer" onDragEnter={dragAttachments} onDragOver={dragAttachments} onDragLeave={leaveAttachmentDrag} onDragEnd={clearAttachmentDrag} onDrop={dropAttachments}>{suggestedReplies}{draggingAttachments && <div className="prompt-drop-overlay" role="status">Drop files to attach</div>}<div className="agent-composer-column" aria-label="Prompt shortcuts">{historyControl}{attachmentButton}</div><div className="prompt-content">{composer}{attachments.length > 0 && <div className="prompt-attachments" aria-label="Selected attachments">{attachments.map((file, index) => <span key={`${file.name}-${index}`} title={file.name}>{file.name}<button type="button" disabled={pending} aria-label={`Remove ${file.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><PanelIcon path={panelIcons.close} /></button></span>)}</div>}{attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}{queuedPromptError && !queuedPromptsOpen && <p className="queued-prompt-error" role="alert">{queuedPromptError}</p>}<input ref={attachmentInput} className="attachment-input" type="file" multiple onChange={event => { chooseAttachments(event.target.files); event.target.value = ''; }} />{questionModeToggle && <div className="prompt-actions">{questionModeToggle}</div>}</div><div className="agent-composer-column" ref={queuedPromptAnchorRef} role="group" aria-label="Prompt submission controls">{queuedToggle}{sendButton}</div>{queuePanel}</section>;
 }
 
 // a text answer to an Agent's question: one line or several, starting from its prefill
@@ -8424,7 +8528,9 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const modelChip = model === undefined ? undefined : <ModelChip agentId={agent.id} model={model} switchable={agent.structured?.switchable === true} working={active} request={request} onError={detail => onOperationFeedback({ tone: 'error', message: 'Model not switched', detail, worktreeId: agent.worktreeId })} />;
   const watchesButton = conductor ? <WatchesButton agentId={agent.id} watches={agent.watches ?? []} request={request} onError={detail => onOperationFeedback({ tone: 'error', message: 'Watch not removed', detail })} /> : undefined;
   const header = (connection: string, menuContent?: (closeMenu: () => void) => ReactNode) => <PanelHeader panelKey="agent" label="agent output" menuContent={menuContent} title={<AgentPanelTitle kind={agent.kind} sandboxed={agent.sandboxed} title={title} switcher={switcher} state={panelState} connection={connection} chip={<>{modelChip}{watchesButton}{agent.spawnedBy !== undefined && <PromptSenderChips sender={{ from: agent.spawnedBy }} />}</>} />} actions={<>{workspace.conversations.control}</>} close={<>{cancelButton}{power}<button type="button" className="panel-header-action pane-minimize" aria-label="Minimize agent output" title="Minimize agent (it keeps running)" onClick={() => { /* reject minimizing the last visible split */ workspace.minimizePanel('agent', () => setAgentSplitHidden(workspace.viewKey, true)); }}><PanelIcon path="M5 12h14" /></button></>} />;
-  const prompt = <Prompt id={agent.id} steering={steering} offeredDraft={agent.structured?.draft} history={promptHistory.history} onHistoryChanged={promptHistory.refresh} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} question={dashboardQuestion ?? question} turnBlocked={agent.attention === 'question'} worktreeId={agent.worktreeId} placeId={workspace.place.id} historyControl={<PromptHistoryControl agentId={agent.id} history={promptHistory.history} refreshHistory={promptHistory.refresh} notes={workspace.notes} open={historyOpen} onOpenChange={onHistoryOpenChange} />} />;
+  // wait for retained split restoration before admitting the visible prose composer
+  const replySuggestionEligible = workspace.notes.initialNotesSettled && !active && agent.attention === 'finished' && agent.hasMessageQuestion === true && dashboardQuestion === undefined && question === undefined && !startingNewTask;
+  const prompt = <Prompt id={agent.id} replySuggestionKey={agent.messageReplySuggestionKey} replySuggestionEligible={replySuggestionEligible} steering={steering} offeredDraft={agent.structured?.draft} history={promptHistory.history} onHistoryChanged={promptHistory.refresh} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} question={dashboardQuestion ?? question} turnBlocked={agent.attention === 'question'} worktreeId={agent.worktreeId} placeId={workspace.place.id} historyControl={<PromptHistoryControl agentId={agent.id} history={promptHistory.history} refreshHistory={promptHistory.refresh} notes={workspace.notes} open={historyOpen} onOpenChange={onHistoryOpenChange} />} />;
   const paneMode = agent.pane?.paneMode;
   const composer = paneMode === undefined ? prompt : <><PaneModeNotice agentId={agent.id} mode={paneMode} worktreeId={agent.worktreeId} onOperationFeedback={onOperationFeedback} />{prompt}</>;
   // a transcript Agent has no pane to stream: its Panel shows its transcript

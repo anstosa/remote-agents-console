@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { askUser, askUserReply } from '../adapters/ask-user.js';
-import { claudeConversationEffort, claudeConversationName, claudeHookNonce, claudeTranscriptRecords, validClaudeSessionId } from '../adapters/claude-conversations.js';
+import { claudeConversationName, claudeHookNonce, claudeTranscriptRecords, validClaudeSessionId } from '../adapters/claude-conversations.js';
 import type { QuestionField } from '../adapters/types.js';
 import { bounded, count, isObject, oneLine, outcome, strings, summary, text, thousands, waitingForAnswer, type Json, type ModelInfo, type ModelSetting, type ProtocolClient, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
 
@@ -356,9 +356,8 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
   const showSteers = () => emit({ type: 'steers', pending: steers.map(steer => steer.text) });
   const usage = () => emit({ type: 'usage', usage: { cost: total ?? 0, ...(tokens === undefined ? {} : { contextTokens: tokens, ...(window === undefined ? {} : { contextPercent: tokens / window * 100 }) }) } });
 
-  // the Conversation and its history, read from its session JSONL: on a launch only when it has
-  // one, and after a Conversation change always, so a new one starts empty
-  const resync = async (always: boolean): Promise<void> => {
+  // the Conversation and its history, including a fresh empty launch epoch
+  const resync = async (): Promise<void> => {
     const id = sessionId;
     if (id === undefined) return;
     const [name, lines] = await Promise.all([claudeConversationName(id, cwd), claudeTranscriptRecords(id, cwd)]);
@@ -366,7 +365,7 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     conversationName = name;
     emit({ type: 'conversation', id, ...(name === undefined ? {} : { name }) });
     const items = lines === undefined ? [] : claudeHistory(lines, { running: working === true });
-    if (always || items.length > 0) emit({ type: 'history', items });
+    emit({ type: 'history', conversationId: id, items });
   };
   // print mode writes no `ai-title` of its own: once the session JSONL holds a Conversation's first
   // prompt, the CLI titles it as interactive Claude does (persisted as its `ai-title`, a title it
@@ -388,7 +387,7 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
   const session = (id: unknown) => {
     if (typeof id !== 'string' || !validClaudeSessionId(id) || id === sessionId) return;
     sessionId = id;
-    if (reported) void resync(true);
+    if (reported) void resync();
   };
   // the launch report, once the CLI has said its version: one for each nonce a SessionStart hook
   // printed, of which the console keeps the one its launch minted
@@ -401,8 +400,10 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     }
     if (reported || told.size === 0) return;
     reported = true;
-    if (current !== undefined) emit({ type: 'model', current });
-    void resync(false);
+    const native = nativeModel();
+    // publish resolved metadata only after a native event supplied it
+    if (current !== undefined) emit({ type: 'model', current, ...(native === undefined ? {} : { native }) });
+    void resync();
   };
   // the kind's id for a model the CLI names by its full id: itself when listed so, else the one
   // alias listed under it (`default` when it is the only one), else the full id
@@ -412,22 +413,34 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     const named = listed.filter(entry => entry.value !== 'default');
     return named.length === 1 ? named[0]!.value as string : named.length === 0 ? 'default' : id;
   };
+  // project one authoritative full claude model id from a native event
+  const nativeModel = (): ModelInfo | undefined => {
+    // no catalog alias can substitute for a native resolved id
+    if (resolved === undefined) return undefined;
+    const listed = models?.find(entry => entry.value === resolved || entry.resolvedModel === resolved);
+    return {
+      id: resolved,
+      name: typeof listed?.displayName === 'string' && listed.displayName !== '' ? listed.displayName : resolved,
+      provider: 'anthropic',
+      efforts: listed?.supportsEffort === true ? strings(listed.supportedEffortLevels) : []
+    };
+  };
+  // local selection commands make the active effort unobservable until relaunch
+  const retireEffortForSelection = (prompt: string): void => {
+    // match only a whole native model or effort command
+    if (!/^\s*\/(?:model|effort)(?:\s+.*)?\s*$/u.test(prompt) || current?.effort === undefined) return;
+    current = { model: current.model };
+    const native = nativeModel();
+    emit({ type: 'model', current, ...(native === undefined ? {} : { native }) });
+  };
+  // retain the selected alias while publishing the native resolved id
   const observeModel = (model: unknown) => {
-    if (typeof model !== 'string' || model === '' || model === resolved) return;
+    // malformed native events cannot change current identity
+    if (typeof model !== 'string' || model === '') return;
     resolved = model;
     // the model it was on already, by its alias
-    if (current !== undefined && (current.model === model || models?.some(entry => entry.value === current!.model && entry.resolvedModel === model) === true)) return;
-    current = { model: alias(model), ...(current?.effort === undefined ? {} : { effort: current.effort }) };
-    emit({ type: 'model', current });
-  };
-  // the Effort a Turn ran at, which only the session JSONL names: with no `--effort`, Claude's default
-  const observeEffort = async () => {
-    const id = sessionId;
-    if (id === undefined) return;
-    const effort = await claudeConversationEffort(id, cwd);
-    if (id !== sessionId || current === undefined || effort === undefined || effort === current.effort || !(claudeEfforts as readonly string[]).includes(effort)) return;
-    current = { ...current, effort };
-    emit({ type: 'model', current });
+    if (current === undefined || current.model !== model && models?.some(entry => entry.value === current!.model && entry.resolvedModel === model) !== true) current = { model: alias(model), ...(current?.effort === undefined ? {} : { effort: current.effort }) };
+    emit({ type: 'model', current, native: nativeModel()! });
   };
   const turnStarted = () => {
     working = true;
@@ -534,7 +547,6 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     transcript({ id: turnPrompt !== undefined ? `${turnPrompt}:end` : typeof record.uuid === 'string' ? record.uuid : randomUUID(), kind: 'settled', outcome: outcome(aborted, failed), ...(cost === undefined ? {} : { cost }), toolCalls });
     usage();
     emit({ type: 'turn', turn: aborted ? { type: 'aborted' } : failed ? { type: 'failed' } : { type: 'settled', message: typeof record.result === 'string' ? record.result : answer } });
-    void observeEffort();
     void observeName();
     wake();
   };
@@ -709,12 +721,13 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     if (working === undefined) {
       if (response === undefined || response.session_state === 'idle') { working = false; wake(); } else turnStarted();
     }
-    if (attached !== undefined) void resync(false);
+    if (attached !== undefined) void resync();
   };
   void initialize();
 
   const deliver = async (prompt: string) => {
     if (!idle()) return 'busy' as const;
+    retireEffortForSelection(prompt);
     turnStarted();
     const id = randomUUID();
     turnPrompt = id;
@@ -750,13 +763,16 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
       const response = await control({ subtype: 'set_model', model });
       op.finish();
       if (response === undefined) return false;
-      if (typeof response.model === 'string') resolved = response.model;
+      // a successful response without its native id cannot retain the old route
+      resolved = typeof response.model === 'string' && response.model !== '' ? response.model : undefined;
       current = { model, ...(current?.effort === undefined ? {} : { effort: current.effort }) };
-      emit({ type: 'model', current });
+      const native = nativeModel();
+      emit({ type: 'model', current, ...(native === undefined ? {} : { native }) });
       return true;
     },
     async steer(prompt) {
       if (working !== true) return await deliver(prompt) === 'started';
+      retireEffortForSelection(prompt);
       const id = randomUUID();
       transcript({ id, kind: 'message', role: 'user', text: prompt, steer: true });
       steers.push({ id, text: prompt });

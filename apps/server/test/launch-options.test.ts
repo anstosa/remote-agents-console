@@ -19,6 +19,84 @@ function piService(allowedModels?: Array<{ model: string; effort?: string }>, de
 }
 
 describe('launch model policy', () => {
+  // fresh one-click claude preparation proves its saved effort without a prior list request
+  it('discovers a supported saved Claude effort for ordinary kind-only preparation', async () => {
+    const claudeProbe = vi.fn(async () => ({
+      version: 1 as const,
+      models: [{ value: 'opus', displayName: 'Opus', supportsEffort: true, supportedEffortLevels: ['low', 'high'] }],
+      capabilities: { model: true as const, effort: true as const, permissions: true as const }
+    }));
+    const service = new LaunchOptionsService({ claude: {
+      program: '/opt/claude', args: [], env: {}, launchable: true, allowedModels: [{ model: 'opus', effort: 'high' }]
+    } }, { claudeProbe });
+
+    const prepared = await service.prepare('claude', { kind: 'claude' }, { cwd: '/repo' });
+
+    expect(prepared.model).toEqual({ model: 'opus', effort: 'high' });
+    expect(claudeProbe).toHaveBeenCalledOnce();
+  });
+
+  // unavailable metadata cannot turn saved syntax into an effort argument
+  it('never guesses a saved Claude effort when ordinary discovery is unavailable', async () => {
+    const claudeProbe = vi.fn(async () => { throw new Error('metadata unavailable'); });
+    const service = new LaunchOptionsService({ claude: {
+      program: '/opt/claude', args: [], env: {}, launchable: true, allowedModels: [{ model: 'opus', effort: 'high' }]
+    } }, { claudeProbe, capabilities: vi.fn(async () => ({ model: true, effort: true })) });
+
+    const prepared = await service.prepare('claude', { kind: 'claude' }, { cwd: '/repo' });
+
+    expect(prepared.model).toEqual({ model: 'opus' });
+    expect(claudeProbe).toHaveBeenCalledOnce();
+  });
+
+  // require installed initialize metadata before emitting a saved claude effort
+  it('prepares a supported saved Claude effort from native initialize metadata', async () => {
+    const claudeProbe = vi.fn(async () => ({
+      version: 1 as const,
+      models: [
+        { value: 'default', displayName: 'Default', supportsEffort: true, supportedEffortLevels: ['low', 'high'] },
+        { value: 'sonnet', displayName: 'Sonnet', supportsEffort: true, supportedEffortLevels: ['low', 'high'] }
+      ],
+      capabilities: { model: true as const, effort: true as const }
+    }));
+    const service = new LaunchOptionsService({ claude: {
+      program: '/opt/claude', args: [], env: { HOME: '/accounts/claude' }, launchable: true,
+      allowedModels: [{ model: 'sonnet', effort: 'high' }]
+    } }, { claudeProbe });
+    const context = { cwd: '/repo', hostCwd: '/host/repo', home: '/accounts/claude' };
+
+    const manifest = (await service.list(context)).kinds[0]!;
+    const prepared = await service.prepare('claude', { kind: 'claude', optionsRevision: manifest.optionsRevision }, context);
+
+    expect(manifest.modelPolicy).toMatchObject({
+      state: 'explicit', defaultSelection: { mode: 'model', id: 'sonnet' }, catalogStatus: 'ready', effortDefaults: { sonnet: 'high' },
+      catalog: [{ id: 'default', provider: 'anthropic', efforts: ['low', 'high'] }, { id: 'sonnet', provider: 'anthropic', efforts: ['low', 'high'] }]
+    });
+    expect(prepared.model).toEqual({ model: 'sonnet', effort: 'high' });
+    await expect(service.revalidate(prepared, context)).resolves.toBeUndefined();
+    expect(claudeProbe).toHaveBeenCalledOnce();
+    expect(claudeProbe).toHaveBeenCalledWith(expect.objectContaining({ program: '/opt/claude' }), context, 5_000);
+  });
+
+  // unsupported saved syntax cannot become an installed launch argument
+  it('omits an unproven saved Claude effort', async () => {
+    const claudeProbe = vi.fn(async () => ({
+      version: 1 as const,
+      models: [{ value: 'sonnet', displayName: 'Sonnet', supportsEffort: true, supportedEffortLevels: ['low', 'high'] }],
+      capabilities: { model: true as const }
+    }));
+    const service = new LaunchOptionsService({ claude: {
+      program: '/opt/claude', args: [], env: {}, launchable: true, allowedModels: [{ model: 'sonnet', effort: 'high' }]
+    } }, { claudeProbe });
+    const context = { cwd: '/repo' };
+    const manifest = (await service.list(context)).kinds[0]!;
+
+    const prepared = await service.prepare('claude', { kind: 'claude', optionsRevision: manifest.optionsRevision }, context);
+
+    expect(manifest.modelPolicy.effortDefaults).toEqual({ sonnet: 'high' });
+    expect(prepared.model).toEqual({ model: 'sonnet' });
+  });
+
   // untouched card and primary launch share configured default semantics
   it('revalidates a model-default choice with a supported saved effort', async () => {
     const service = piService([{ model: 'openai/b', effort: 'high' }]);

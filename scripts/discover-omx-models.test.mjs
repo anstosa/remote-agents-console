@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
-import { discoverCodexModels, discoverNativeModels, discoverOmxModels, normalizeCodexContextArgs, normalizeOmxContextArgs, proveOmxPackage, readDiscoveryRequest, resolveCodexProgram } from "./discover-omx-models.mjs";
+import { discoverClaudeModels, discoverCodexModels, discoverNativeModels, discoverOmxModels, normalizeCodexContextArgs, normalizeOmxContextArgs, proveOmxPackage, readDiscoveryRequest, resolveCodexProgram } from "./discover-omx-models.mjs";
 
 const script = resolve("scripts/discover-omx-models.mjs");
 
@@ -37,9 +37,49 @@ else {
 }
 `);
   await chmod(codex, 0o700);
+  const claude = join(bin, "claude");
+  // configure the fake independently of the child environment
+  const configureClaude = async value => await writeFile(`${claude}.fixture.json`, JSON.stringify(value));
+  await configureClaude({});
+  await writeFile(claude, `#!${process.execPath}
+const fs = require("node:fs");
+const controls = JSON.parse(fs.readFileSync(__filename + ".fixture.json", "utf8"));
+const args = process.argv.slice(2);
+const isolated = args.includes("--safe-mode") && args.includes("--disable-slash-commands") && args.includes("--setting-sources") && args[args.indexOf("--setting-sources") + 1] === "";
+// simulate forbidden source startup effects
+if (controls.startupSentinel && !isolated) fs.writeFileSync(controls.startupSentinel, "source startup ran");
+// help remains local metadata
+if (args.includes("--help")) process.stdout.write(controls.unsupportedIsolation ? "--model MODEL\\n" : "--model MODEL --effort LEVEL --permission-mode default acceptEdits plan dontAsk bypassPermissions --dangerously-skip-permissions --safe-mode --tools --strict-mcp-config --mcp-config --no-session-persistence --disable-slash-commands --no-chrome --setting-sources --permission-prompts\\n");
+else {
+  // record the full actual native environment
+  if (controls.observed) fs.writeFileSync(controls.observed, JSON.stringify({ args, env: process.env, cwd: process.cwd() }));
+  let buffer = "";
+  process.stdin.setEncoding("utf8");
+  // consume only metadata initialization
+  process.stdin.on("data", chunk => {
+    buffer += chunk;
+    let newline;
+    // accept complete protocol records
+    while ((newline = buffer.indexOf("\\n")) >= 0) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      // skip empty records
+      if (!line) continue;
+      const message = JSON.parse(line);
+      // expose any accidental provider turn
+      if (message.type === "user" && controls.providerSentinel) fs.writeFileSync(controls.providerSentinel, "called");
+      // reject non-initialize work
+      if (message.request?.subtype !== "initialize") continue;
+      const models = controls.malformed ? [{ value: "--unsafe", supportsEffort: true, supportedEffortLevels: ["high"] }] : [{ value: "default", displayName: "Default", supportsEffort: true, supportedEffortLevels: ["low", "high"] }, { value: "sonnet", displayName: "Sonnet", supportsEffort: true, supportedEffortLevels: ["low", "high"] }];
+      process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: { models, account: "never-return-this" } } }) + "\\n");
+    }
+  });
+}
+`);
+  await chmod(claude, 0o700);
   const program = join(bin, "omx");
   await symlink(entry, program);
-  return { root, packageRoot, program, codex, bin, cwd, async cleanup() { await rm(root, { recursive: true, force: true }); } };
+  return { root, packageRoot, program, codex, claude, configureClaude, bin, cwd, async cleanup() { await rm(root, { recursive: true, force: true }); } };
 }
 
 // form one exact helper request
@@ -189,6 +229,93 @@ test("discovers Codex through only the exact configured account and executable",
     assert.equal(Object.hasOwn(result.config.config, "observedCodexHome"), false);
     assert.deepEqual(result.pages[0].data[0], { model: "model-0", displayName: "Model 0", supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high", isDefault: true });
     await assert.rejects(access(sentinel), error => error.code === "ENOENT");
+  } finally { await fx.cleanup(); }
+});
+
+test("discovers Claude aliases and efforts without sending a provider prompt", async () => {
+  const fx = await fixture();
+  const observed = join(fx.root, "claude-observed.json");
+  const provider = join(fx.root, "claude-provider-called");
+  const home = join(fx.root, "claude-home");
+  try {
+    await fx.configureClaude({ observed, providerSentinel: provider });
+    const result = await discoverClaudeModels(request(fx, {
+      kind: "claude", program: fx.claude, home: join(fx.root, "fallback-home"),
+      env: { PATH: fx.bin, HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude-work"), CLAUDE_CODE_OAUTH_TOKEN: "claude-account" }
+    }), { OUTSIDE_SECRET: "never-return-this" });
+
+    assert.deepEqual(result, {
+      version: 1,
+      models: [
+        { value: "default", displayName: "Default", supportsEffort: true, supportedEffortLevels: ["low", "high"] },
+        { value: "sonnet", displayName: "Sonnet", supportsEffort: true, supportedEffortLevels: ["low", "high"] }
+      ],
+      capabilities: { model: true, effort: true, permissions: true }
+    });
+    const child = JSON.parse(await readFile(observed, "utf8"));
+    assert.equal(child.cwd, fx.cwd);
+    assert.equal(child.env.HOME, home);
+    assert.equal(child.env.CLAUDE_CONFIG_DIR, join(home, ".claude-work"));
+    assert.equal(child.env.CLAUDE_CODE_OAUTH_TOKEN, "claude-account");
+    assert.ok(child.args.includes("--no-session-persistence"));
+    await assert.rejects(access(provider), error => error.code === "ENOENT");
+    assert.doesNotMatch(JSON.stringify(result), /never-return-this/u);
+  } finally { await fx.cleanup(); }
+});
+
+// keep foreign credentials and source startup effects outside metadata discovery
+test("isolates Claude catalog environment and startup extensions", async () => {
+  const fx = await fixture();
+  const observed = join(fx.root, "claude-isolated.json");
+  const startup = join(fx.root, "source-startup");
+  const loader = join(fx.root, "source-loader");
+  const preload = join(fx.root, "source-preload.cjs");
+  const profile = join(fx.root, "claude-profile");
+  try {
+    await writeFile(preload, `require("node:fs").writeFileSync(${JSON.stringify(loader)}, "loaded");`);
+    await fx.configureClaude({ observed, startupSentinel: startup });
+    const foreign = { OPENAI_API_KEY: "openai-secret", CODEX_API_KEY: "codex-secret", CODEX_HOME: "/foreign/codex", PI_CODING_AGENT_DIR: "/foreign/pi", PI_API_KEY: "pi-secret", OUTSIDE_SECRET: "outside-secret", NODE_OPTIONS: `--require ${preload}`, BASH_ENV: preload };
+    await discoverClaudeModels(request(fx, { kind: "claude", program: fx.claude, env: { PATH: fx.bin, CLAUDE_CONFIG_DIR: profile, ANTHROPIC_API_KEY: "claude-key", ...foreign } }), { ...foreign, CLAUDE_CODE_OAUTH_TOKEN: "claude-token" });
+    const child = JSON.parse(await readFile(observed, "utf8"));
+    // preserve only this vendor's configured authority
+    assert.equal(child.env.CLAUDE_CONFIG_DIR, profile);
+    assert.equal(child.env.ANTHROPIC_API_KEY, "claude-key");
+    assert.equal(child.env.CLAUDE_CODE_OAUTH_TOKEN, "claude-token");
+    // verify every foreign selector is absent from the real child
+    for (const key of Object.keys(foreign)) assert.equal(child.env[key], undefined, key);
+    // enforce inert native startup without a provider prompt
+    for (const flag of ["--safe-mode", "--disable-slash-commands", "--no-chrome", "--strict-mcp-config", "--no-session-persistence"]) assert.ok(child.args.includes(flag), flag);
+    for (const [flag, value] of [["--tools", ""], ["--setting-sources", ""], ["--permission-prompts", "none"], ["--permission-mode", "dontAsk"], ["--mcp-config", '{"mcpServers":{}}']]) assert.equal(child.args[child.args.indexOf(flag) + 1], value, flag);
+    await assert.rejects(access(startup), error => error.code === "ENOENT");
+    await assert.rejects(access(loader), error => error.code === "ENOENT");
+  } finally { await fx.cleanup(); }
+});
+
+// unsupported native controls cannot fall back to normal source startup
+test("rejects Claude without proven startup isolation controls", async () => {
+  const fx = await fixture();
+  try {
+    await fx.configureClaude({ unsupportedIsolation: true });
+    await assert.rejects(discoverClaudeModels(request(fx, { kind: "claude", program: fx.claude }), {}), error => error.code === "claude_capabilities_unproven");
+  } finally { await fx.cleanup(); }
+});
+
+// unreviewed backends remain unavailable instead of selecting a native fallback
+test("rejects an unreviewed Claude account route without starting it", async () => {
+  const fx = await fixture();
+  const observed = join(fx.root, "unsupported-route.json");
+  try {
+    await fx.configureClaude({ observed });
+    await assert.rejects(discoverClaudeModels(request(fx, { kind: "claude", program: fx.claude, env: { CLAUDE_CODE_USE_BEDROCK: "1", AWS_ACCESS_KEY_ID: "backend-key" } }), {}), error => error.code === "claude_capabilities_unproven");
+    await assert.rejects(access(observed), error => error.code === "ENOENT");
+  } finally { await fx.cleanup(); }
+});
+
+test("fails closed on malformed Claude initialize metadata", async () => {
+  const fx = await fixture();
+  try {
+    await fx.configureClaude({ malformed: true });
+    await assert.rejects(discoverClaudeModels(request(fx, { kind: "claude", program: fx.claude, env: { PATH: fx.bin } }), {}), error => error.code === "claude_protocol_invalid");
   } finally { await fx.cleanup(); }
 });
 

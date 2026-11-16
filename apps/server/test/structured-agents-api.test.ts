@@ -2382,9 +2382,11 @@ describe('the Conductor\'s dispatches', () => {
     const target = await worker();
     let messages = 0;
     // a Turn whose final message is `message`, as a client reports it
-    const turn = async (id: string, message: string) => {
+    const turn = async (id: string, message: string, started?: () => Promise<void>) => {
       fake.emitTo(id, { type: 'turn', turn: { type: 'started' } });
       await tick();
+      // expose the live turn when this test needs an intermediate assertion
+      if (started !== undefined) await started();
       fake.emitTo(id, { type: 'transcript', item: { id: `a${messages += 1}`, kind: 'message', role: 'assistant', text: message } });
       fake.emitTo(id, { type: 'turn', turn: { type: 'settled', message } });
       await tick();
@@ -2396,11 +2398,24 @@ describe('the Conductor\'s dispatches', () => {
     expect((await app.inject({ method: 'POST', url: `/api/agents/${target}/prompt`, headers, payload: { prompt: 'Set up the store', attachments: [] } })).statusCode).toBe(204);
     await turn(target, 'Which database should I use?');
     expect(pushes('question')).toEqual([`/#agent=${target}`]);
-    expect((await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === target)).toMatchObject({ attention: 'finished', hasMessageQuestion: true });
+    const asking = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === target);
+    expect(asking).toMatchObject({
+      attention: 'finished',
+      hasMessageQuestion: true
+    });
+    expect(asking).not.toHaveProperty('messageReplySuggestions');
 
     // the report Turn the Conductor starts itself: quiet, unless it ends asking
     await call('queue_prompt', { agent_id: target, prompt: 'Use Postgres' });
-    await turn(target, 'Done.');
+    await turn(target, 'Done.', async () => {
+      const working = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === target);
+      expect(working).toMatchObject({ attention: 'working' });
+      expect(working).not.toHaveProperty('hasMessageQuestion');
+      expect(working).not.toHaveProperty('messageReplySuggestions');
+    });
+    const complete = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === target);
+    expect(complete).not.toHaveProperty('hasMessageQuestion');
+    expect(complete).not.toHaveProperty('messageReplySuggestions');
     await turn(conductor, 'Shall I merge it?');
     expect(pushes('question')).toEqual([`/#agent=${target}`, `/#agent=${conductor}`]);
     await call('queue_prompt', { agent_id: target, prompt: 'Add a test' });

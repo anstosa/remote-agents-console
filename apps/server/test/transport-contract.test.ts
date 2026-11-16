@@ -12,8 +12,9 @@ import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { run } from '../src/tmux/command.js';
 import { cleanWorkingTree } from '../src/git/worktree-state.js';
 import { interactiveShellName } from '../src/tmux/interactive-shell.js';
-import { holderProcesses, type StructuredProcess, type StructuredProcesses } from '../src/transports/structured-agents.js';
+import { holderProcesses, StructuredAgents, type StructuredProcess, type StructuredProcesses } from '../src/transports/structured-agents.js';
 import type { StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
+import * as nativeScope from '../src/reply-suggestions/native-scope.js';
 import type { SocketRef } from '../src/domain/models.js';
 import { testConfig } from './helpers/config.js';
 import { socketFinder } from './helpers/discovery-stubs.js';
@@ -363,7 +364,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(reasoning?.efforts).toContain('high');
 
     expect(await connection.setModel({ model: client.models.reasoning, effort: 'high' })).toBe(true);
-    expect(await next('model')).toEqual({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
+    expect(await next('model')).toMatchObject({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
     expect(await connection.setModel({ model: 'nowhere/nothing' })).toBe(false);
   }, 60_000);
 
@@ -380,7 +381,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     // a new Conversation keeps the current model and Effort
     expect(await connection.newConversation()).toBe(true);
     const second = (await next('conversation', event => event.type === 'conversation' && event.id !== first) as Extract<StructuredEvent, { type: 'conversation' }>).id;
-    expect(await next('model')).toEqual({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
+    expect(await next('model')).toMatchObject({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
     expect(await connection.setModel({ model: client.models.start, effort: 'off' })).toBe(true);
 
     // switching back restores the first Conversation's own model and name, and its store lists it
@@ -388,7 +389,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(reference).toBeDefined();
     expect(await connection.switchConversation(reference!)).toBe(true);
     await next('conversation', event => event.type === 'conversation' && event.id === first && event.name === 'First');
-    expect(await next('model')).toEqual({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
+    expect(await next('model')).toMatchObject({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
     expect((await client.adapter.conversations.list([home])).map(row => row.id)).toEqual([first]);
     expect(second).not.toBe(first);
   }, 60_000);
@@ -613,4 +614,40 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(existsSync(join(agent.home, 'inside-write.txt'))).toBe(true);
     expect(scriptOutput(agent)).toContain('outside the paths the sandbox may write');
   }, 60_000);
+});
+
+describe('structured claude reply selection contract', () => {
+  it('treats a saved effort as a launch default while requiring current native effort', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-claude-source-contract-'));
+    let emit: (event: StructuredEvent) => void = () => undefined;
+    const connection: StructuredConnection = {
+      deliver: async () => 'started', newConversation: async () => true, switchConversation: async () => true, renameConversation: async () => true,
+      compact: async () => undefined, models: async () => [{ id: 'sonnet', name: 'Sonnet', provider: 'anthropic', efforts: ['high', 'max'] }],
+      setModel: async () => true, steer: async () => true, cancel: async () => [], answer: async () => true, close: () => undefined
+    };
+    const processes: StructuredProcesses = {
+      start: async (launch, events) => {
+        emit = events;
+        queueMicrotask(() => events({ type: 'report', report: { loaded: true, nonce: launch.nonce, sandbox: { engaged: false }, version: 'test' } }));
+        return { holder: { agentId: launch.id, socket: join(root, 'holder.sock'), pane: '%1', pid: 4321, startTime: '100' }, connection };
+      },
+      attach: async () => undefined, stderr: async () => undefined, stop: async () => undefined
+    };
+    const agents = new StructuredAgents(processes, { file: join(root, 'agents.json'), allowedModels: kind => kind === 'claude' ? [{ model: 'sonnet', effort: 'high' }] : undefined });
+    const scope = vi.spyOn(nativeScope, 'nativeReplyScope').mockResolvedValue({ kind: 'claude', program: '/usr/bin/claude', home: '/home/test', configDir: '/home/test/.claude', process: { pid: 4321, startTime: '100' }, fingerprint: 'scope-1' });
+    cleanups.push(async () => { scope.mockRestore(); await agents.saved(); await rm(root, { recursive: true, force: true }); });
+    const id = await agents.launch({ id: 'scratch:test', kind: 'scratch', projectId: 'scratch', label: 'Scratch', home: root } as never, 'claude', { model: { model: 'sonnet', effort: 'max' } });
+    expect(id).toBeDefined();
+    await vi.waitFor(async () => expect((await agents.agent(id!))?.structured.lifecycle).toBe('live'));
+    emit({ type: 'conversation', id: 'conversation-1' });
+    emit({ type: 'model', current: { model: 'sonnet', effort: 'max' }, native: { id: 'claude-sonnet-5-5', name: 'Sonnet', provider: 'anthropic', efforts: ['high', 'max'] } });
+    emit({ type: 'history', conversationId: 'conversation-1', items: [{ id: 'a1', kind: 'message', role: 'assistant', text: 'Proceed?' }] });
+
+    await vi.waitFor(async () => expect(await agents.replySuggestionSource(id!)).toMatchObject({ kind: 'claude', model: { model: 'sonnet', effort: 'max' } }));
+
+    emit({ type: 'model', current: { model: 'sonnet' }, native: { id: 'claude-sonnet-5-5', name: 'Sonnet', provider: 'anthropic', efforts: ['high', 'max'] } });
+    expect(await agents.replySuggestionSource(id!)).toBeUndefined();
+    emit({ type: 'model', current: { model: 'sonnet', effort: 'max' } });
+    expect(await agents.replySuggestionSource(id!)).toBeUndefined();
+  });
 });

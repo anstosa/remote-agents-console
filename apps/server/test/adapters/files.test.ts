@@ -42,6 +42,19 @@ describe('adapter file rendering', () => {
     expect(rendered.codex).toBeUndefined();
   });
 
+  it('renders one selected kind without replacing another kind\'s files', async () => {
+    const dir = await filesDir();
+    const env = { RAC_ADAPTER_FILES_DIR: dir, RAC_HOST_REPOSITORY: '/srv/remoteagents' } as NodeJS.ProcessEnv;
+    const initial = await renderAdapterFiles(env);
+    const pi = initial.pi!['sandbox.json']!;
+    const before = await stat(pi);
+    const bytes = await readFile(pi);
+
+    expect(await renderAdapterFiles(env, () => undefined, ['claude'])).toEqual({ claude: { 'hooks.json': join(dir, 'claude', 'hooks.json') } });
+    expect((await stat(pi)).ino).toBe(before.ino);
+    expect(await readFile(pi)).toEqual(bytes);
+  });
+
   // repair both content and permissions left by an earlier boot
   it('rewrites the file every boot, restoring content and permissions that drifted', async () => {
     const dir = await filesDir();

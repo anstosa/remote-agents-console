@@ -11,9 +11,10 @@
 # start. It never blocks the agent: it exits 0 in every case, doing nothing unless
 # it is running inside a tmux pane and a tmux binary resolves.
 #
-# Usage: rac-attention <working|finished|question> [--session <id>] [--payload] [--main-only] [ignored...]
+# Usage: rac-attention <working|finished|question> [--session <id>] [--hook-input] [--payload] [--main-only] [ignored...]
 #
-# The session defaults to $CLAUDE_CODE_SESSION_ID. With --payload, the hook's stdin
+# The session defaults to $CLAUDE_CODE_SESSION_ID. With --hook-input, a valid native
+# top-level session_id overrides that environment fallback. With --payload, hook stdin
 # (a PreToolUse JSON body) is base64-encoded into @rac_question so the console can
 # render the question the Agent is asking. A working/finished report (no --payload)
 # clears @rac_question, dropping a stale question once the Agent moves on; a bare
@@ -26,8 +27,8 @@
 # With --main-only, a report whose hook stdin comes from a Claude subagent (its
 # top-level fields carry `agent_id`) is dropped unless the pane shows a question:
 # a background subagent keeps running tools after the main agent's Stop, and its
-# PostToolUse must not flip a finished pane back to working. Not combined with
-# --payload or --lifecycle, which read stdin themselves.
+# PostToolUse must not flip a finished pane back to working. The question exception
+# can clear attention after an answer, but it never rebinds the pane's session.
 
 state=$1
 [ -n "$state" ] || exit 0
@@ -38,14 +39,17 @@ esac
 shift 2>/dev/null || true
 
 session=${CLAUDE_CODE_SESSION_ID:-}
+explicit_session=
+hook_input=
 payload_flag=
 lifecycle_event=
 main_only=
-# read an explicit --session <id> and the --payload flag; ignore every other extra argument
+# read explicit reporter flags and ignore every other extra argument
 while [ "$#" -gt 0 ]; do
   case $1 in
-    --session) session=${2:-}; shift 2 2>/dev/null || shift ;;
-    --session=*) session=${1#--session=}; shift ;;
+    --session) session=${2:-}; explicit_session=1; shift 2 2>/dev/null || shift ;;
+    --session=*) session=${1#--session=}; explicit_session=1; shift ;;
+    --hook-input) hook_input=1; shift ;;
     --payload) payload_flag=1; shift ;;
     --main-only) main_only=1; shift ;;
     --lifecycle) lifecycle_event=${2:-}; shift 2 2>/dev/null || shift ;;
@@ -64,15 +68,36 @@ else
 fi
 [ -n "$tmux_bin" ] || exit 0
 
-# the common hook fields (agent_id among them) precede hook_event_name; drain the
-# rest of stdin so Claude never writes into a closed pipe
-if [ -n "$main_only" ]; then
-  head_json=$(head -c 4096)
+# every opt-in consumer shares one bounded read, then drains the producer
+raw_b64=
+raw_bytes=0
+if [ -n "$hook_input" ] || [ -n "$payload_flag" ] || [ -n "$lifecycle_event" ] || [ -n "$main_only" ]; then
+  raw_b64=$(head -c 65537 | base64 | tr -d '\n')
   cat >/dev/null
-  case ${head_json%%\"hook_event_name\"*} in
-    *[{,]'"agent_id":'*)
-      [ "$("$tmux_bin" display-message -p -t "$TMUX_PANE" '#{@rac_attention}')" = question ] || exit 0 ;;
-  esac
+  raw_bytes=$(printf %s "$raw_b64" | base64 -d | wc -c | tr -d ' ')
+fi
+
+# parse only accepted native hook metadata through the silent stdlib helper
+hook_session=
+if [ "$raw_bytes" -le 65536 ] && { [ -n "$hook_input" ] || [ -n "$main_only" ]; }; then
+  hook_session=$(printf %s "$raw_b64" | base64 -d | "$(dirname "$0")/rac-claude-session.mjs" ${main_only:+--main-only} 2>/dev/null)
+  metadata_status=$?
+  # subagents can clear an existing question but never rebind its session
+  if [ "$metadata_status" -eq 2 ]; then
+    [ "$("$tmux_bin" display-message -p -t "$TMUX_PANE" '#{@rac_attention}')" = question ] || exit 0
+    session=
+  elif [ -n "$main_only" ] && [ "$metadata_status" -ne 0 ]; then
+    # failed main-only metadata checks never mutate this pane
+    exit 0
+  fi
+elif [ -n "$main_only" ]; then
+  # oversize main-only payloads cannot prove main-agent provenance
+  exit 0
+fi
+
+# explicit arguments win, then native payload metadata, then the environment fallback
+if [ -z "$explicit_session" ] && [ -n "$hook_session" ]; then
+  session=$hook_session
 fi
 
 # @rac_question carries the reported payload (base64, newlines stripped so the
@@ -80,19 +105,16 @@ fi
 # hook body. An oversize payload (over 64 KiB) is dropped; the state still reports.
 question=
 if [ -n "$payload_flag" ] || [ -n "$lifecycle_event" ]; then
-  # retain at most one byte beyond the accepted hook payload bound
-  raw=$(head -c 65537)
-  raw_bytes=$(printf %s "$raw" | wc -c | tr -d ' ')
   if [ "$raw_bytes" -le 65536 ]; then
-    question=$(printf %s "$raw" | base64 | tr -d '\n')
+    question=$raw_b64
   else
-    raw=
+    raw_b64=
   fi
 fi
 
 # lifecycle correlation is opt-in through a short-lived opaque pane arm
 if [ -n "$lifecycle_event" ]; then
-  printf %s "$raw" | "$(dirname "$0")/rac-claude-lifecycle.mjs" "$lifecycle_event" >/dev/null 2>&1 || :
+  printf %s "$raw_b64" | base64 -d | "$(dirname "$0")/rac-claude-lifecycle.mjs" "$lifecycle_event" >/dev/null 2>&1 || :
 fi
 
 # one tmux invocation sets @rac_attention, plus @rac_session when known. @rac_question

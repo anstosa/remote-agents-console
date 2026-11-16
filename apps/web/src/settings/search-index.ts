@@ -55,6 +55,7 @@ const applicationDedicatedPaths = new Set([
   'tmux',
   'projects',
   'buttons',
+  'replySuggestions',
   'review',
   'googleCalendar',
   'proxy',
@@ -343,6 +344,10 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
   const buttons = baseSchema.properties?.buttons;
   // button definitions retain their application paths on Interface
   if (buttons !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'interface', buttons, childValue(source.value, 'buttons'), ['buttons'], []);
+
+  const replySuggestions = baseSchema.properties?.replySuggestions;
+  // keep the console-wide generation setting searchable on Interface
+  if (replySuggestions !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'interface', replySuggestions, childValue(source.value, 'replySuggestions'), ['replySuggestions'], []);
 
   const review = baseSchema.properties?.review;
   // keep permanent Review controls searchable without creating omitted configuration

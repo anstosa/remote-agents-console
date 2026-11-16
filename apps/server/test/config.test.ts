@@ -421,13 +421,22 @@ describe('project configuration', () => {
 
 describe('configuration safety', () => {
   const scratch = { publicOrigin: 'https://agents.example.com', projects: [] as unknown[] };
-  it('defaults the listener, name and integrations for a scratch-only console', async () => {
+  it('defaults the listener, name, integrations and reply suggestions for a scratch-only console', async () => {
     const config = await validateConfig(scratch);
     expect(config.projects).toEqual([]);
     expect(config.listen.host).toBe('127.0.0.1');
     expect(config.name).toBe('Remote Agents');
     expect(config.defaultAgent).toBeUndefined();
+    expect(config.replySuggestions).toBe(false);
     expect(config.integrations).toEqual({ enabled: false, mcp: { readEnabled: true, writeEnabled: false, dangerousEnabled: false }, realtime: { enabled: false, name: 'Davo', context: defaultDavoContext, writeToolsEnabled: false }, multiInstance: { enabled: false } });
+  });
+  // preserve explicit opt-in and opt-out values
+  it.each([true, false])('preserves explicit reply suggestions enablement: %s', async replySuggestions => {
+    expect((await validateConfig({ ...scratch, replySuggestions })).replySuggestions).toBe(replySuggestions);
+  });
+  // reject truthy nonboolean values instead of spending unexpectedly
+  it.each(['true', 'false', 1, null])('rejects invalid reply suggestions enablement: %s', async replySuggestions => {
+    await expect(validateConfig({ ...scratch, replySuggestions })).rejects.toThrow();
   });
   it('accepts a known default agent and rejects unknown kinds', async () => {
     expect((await validateConfig({ ...scratch, defaultAgent: 'claude' })).defaultAgent).toBe('claude');
@@ -690,15 +699,15 @@ describe('claude adapter Transport', () => {
     expect(structured).toEqual(['adapters.claude: ignoring reserved argument --resume', 'adapters.claude: structured launches ignore the arguments --verbose, --tools']);
   });
 
-  it('launches Claude over tmux under the host bridge, whose holder comes with Pi\'s host runtime', async () => {
+  it('preserves structured Claude under the host bridge for the generic holder runtime', async () => {
     const claude = await program();
     vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/tmux');
     vi.stubEnv('RAC_HOST_REPOSITORY', '/srv/remoteagents');
     const warnings: string[] = [];
     const config = await validateConfig({ ...scratch, adapters: { claude: { program: claude, transport: 'structured' } } }, { warn: m => warnings.push(m), checkExecutables: false });
     vi.unstubAllEnvs();
-    expect(config.adapters.claude?.transport).toBeUndefined();
-    expect(warnings).toContain('adapters.claude.transport: structured is not supported under the host bridge; claude launches over tmux');
+    expect(config.adapters.claude?.transport).toBe('structured');
+    expect(warnings).not.toContain(expect.stringContaining('structured is not supported'));
   });
 });
 

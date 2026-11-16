@@ -1,0 +1,234 @@
+#!/usr/bin/env node
+import { createHash, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { chmod, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
+
+const maximumInputBytes = 64 * 1024;
+const maximumStateBytes = 64 * 1024;
+const maximumStateFiles = 256;
+const lockAttempts = 500;
+
+// wait without producing observer output
+const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+// read one bounded native metadata payload from stdin
+async function inputPayload() {
+  const chunks = [];
+  let length = 0;
+  // stop before native input can grow without bound
+  for await (const chunk of process.stdin) {
+    length += chunk.length;
+    // reject oversized hook or status metadata
+    if (length > maximumInputBytes) throw new Error('observer input too large');
+    chunks.push(chunk);
+  }
+  const parsed = JSON.parse(Buffer.concat(chunks, length).toString('utf8'));
+  // accept one object payload only
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid observer input');
+  return parsed;
+}
+
+// constrain native identifiers before using them in observer state
+function identifier(value, maximum = 256) {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/u.test(value) ? value : undefined;
+}
+
+// read the native Claude ancestor's pid and kernel start time
+async function nativeProcess() {
+  const injected = process.env.NODE_ENV === 'test' ? /^(\d+):(\d+)$/u.exec(process.env.RAC_REPLY_TEST_PROCESS ?? '') : undefined;
+  // tests use one explicit synthetic lifetime without weakening production
+  if (injected !== undefined) return { pid: Number(injected[1]), startTime: injected[2] };
+  let pid = process.ppid;
+  // walk only the short command-runner ancestry
+  for (let depth = 0; depth < 8 && Number.isSafeInteger(pid) && pid > 1; depth += 1) {
+    const [rawStat, rawCommand, rawName] = await Promise.all([
+      readFile(`/proc/${pid}/stat`, 'utf8').catch(() => undefined),
+      readFile(`/proc/${pid}/cmdline`).catch(() => undefined),
+      readFile(`/proc/${pid}/comm`, 'utf8').catch(() => undefined)
+    ]);
+    // unreadable ancestry cannot bind observer metadata
+    if (rawStat === undefined || rawCommand === undefined || rawName === undefined || rawCommand.length > 128 * 1024) return undefined;
+    const close = rawStat.lastIndexOf(')');
+    const fields = close < 0 ? [] : rawStat.slice(close + 2).trim().split(/\s+/u);
+    const parentPid = Number(fields[1]);
+    const startTime = fields[19];
+    const argv = rawCommand.toString('utf8').split('\0').filter(Boolean);
+    const name = rawName.trim();
+    const command = argv[0]?.split('/').at(-1);
+    const claude = name === 'claude' || command === 'claude' || argv.some(argument => argument.endsWith('/@anthropic-ai/claude-code/cli.js'));
+    // return only one live well-formed Claude identity
+    if (claude && /^\d+$/u.test(startTime ?? '')) return { pid, startTime };
+    // malformed parent links fail closed
+    if (!Number.isSafeInteger(parentPid) || parentPid <= 0) return undefined;
+    pid = parentPid;
+  }
+  return undefined;
+}
+
+// acquire one bounded cross-process state lock
+async function acquireLock(path) {
+  // serialize every read-modify-write generation
+  for (let attempt = 0; attempt < lockAttempts; attempt += 1) {
+    try {
+      await mkdir(path, { mode: 0o700 });
+      return;
+    } catch (error) {
+      // only an existing contender may be retried
+      if (error?.code !== 'EEXIST') throw error;
+      const info = await stat(path).catch(() => undefined);
+      // remove only a lock left past two hook timeout windows
+      if (info !== undefined && Date.now() - info.mtimeMs > 15_000) await rm(path, { recursive: true, force: true }).catch(() => undefined);
+      await delay(10);
+    }
+  }
+  throw new Error('observer lock unavailable');
+}
+
+// read one exact fixed observer state
+async function readState(path) {
+  const bytes = await readFile(path).catch(() => undefined);
+  // reject missing and oversized state
+  if (bytes === undefined || bytes.length === 0 || bytes.length > maximumStateBytes) return undefined;
+  const parsed = JSON.parse(bytes.toString('utf8'));
+  // require the state object written by this script
+  return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.version === 1 ? parsed : undefined;
+}
+
+// atomically replace one private fixed state file
+async function writeState(path, state) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  let retained = true;
+  try {
+    await handle.writeFile(`${JSON.stringify(state)}\n`);
+    await handle.sync();
+    await handle.close();
+    await rename(temporary, path);
+    retained = false;
+    await chmod(path, 0o600);
+  } finally {
+    await handle.close().catch(() => undefined);
+    // remove only this invocation's unpublished temporary
+    if (retained) await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+// update one session state under the contention lock
+async function updateState(directory, sessionId, policyNonce, mutate) {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+  const name = `${createHash('sha256').update(sessionId).digest('hex')}.json`;
+  const path = join(directory, name);
+  const lock = `${path}.lock`;
+  await acquireLock(lock);
+  try {
+    const current = await readState(path);
+    const next = mutate(current);
+    // a missing causal predecessor fails the hook explicitly
+    if (next === undefined) throw new Error('observer state unavailable');
+    await writeState(path, next);
+  } finally {
+    await rm(lock, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+// cap private observer state without touching unknown directory entries
+async function pruneStates(directory, retainedPath) {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  const candidates = [];
+  // inspect only exact observer state filenames
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/u.test(entry.name)) continue;
+    const path = join(directory, entry.name);
+    const info = await stat(path).catch(() => undefined);
+    // skip the active state and unreadable entries
+    if (path !== retainedPath && info !== undefined) candidates.push({ path, mtimeMs: info.mtimeMs });
+  }
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  // retain the active file plus the newest bounded remainder
+  for (const candidate of candidates.slice(maximumStateFiles - 1)) await rm(candidate.path, { force: true }).catch(() => undefined);
+}
+
+// apply one Claude lifecycle event to monotonic source counters
+function hookState(event, current, sessionId, policyNonce, processIdentity, payload) {
+  // every process begins a new boot generation at SessionStart
+  if (event === 'SessionStart') return {
+    version: 1,
+    sessionId,
+    policyNonce,
+    bootNonce: randomUUID(),
+    processPid: processIdentity.pid,
+    processStartTime: processIdentity.startTime,
+    heartbeatSeq: 0,
+    sourceEpoch: 1,
+    hookSeq: 1,
+    statusHookSeq: 0,
+    transcriptSignalSeq: 0,
+    pendingModelSwitch: false,
+    model: '',
+    effort: ''
+  };
+  // later hooks must follow this process's exact session and launch policy
+  if (current?.sessionId !== sessionId || current.policyNonce !== policyNonce || current.processPid !== processIdentity.pid || current.processStartTime !== processIdentity.startTime) return undefined;
+  const next = { ...current, hookSeq: current.hookSeq + 1, sourceEpoch: current.sourceEpoch + 1 };
+  // bracket model selection until a matching fresh status line arrives
+  if (event === 'PreModelSwitch') next.pendingModelSwitch = true;
+  if (event === 'PostModelSwitch') {
+    next.pendingModelSwitch = false;
+    const model = identifier(payload.to_model);
+    // retain the resolved post-switch model when supplied
+    if (model !== undefined) next.model = model;
+  }
+  // transcript-producing lifecycle edges receive their own append signal
+  if (event === 'UserPromptSubmit' || event === 'Stop' || event === 'StopFailure') next.transcriptSignalSeq += 1;
+  return next;
+}
+
+// apply one status line tuple without churning source identity on heartbeats
+function statusState(current, sessionId, policyNonce, processIdentity, payload) {
+  // status cannot create a process generation ahead of SessionStart
+  if (current?.sessionId !== sessionId || current.policyNonce !== policyNonce || current.processPid !== processIdentity.pid || current.processStartTime !== processIdentity.startTime) return undefined;
+  const model = identifier(payload.model?.id);
+  const effort = identifier(payload.effort?.level, 64);
+  // both exact current fields are mandatory
+  if (model === undefined || effort === undefined) return undefined;
+  const changed = current.model !== model || current.effort !== effort;
+  return {
+    ...current,
+    heartbeatSeq: current.heartbeatSeq + 1,
+    sourceEpoch: current.sourceEpoch + (changed ? 1 : 0),
+    statusHookSeq: current.hookSeq,
+    model,
+    effort
+  };
+}
+
+// run one fixed metadata-only observer action
+async function main() {
+  const [mode, event] = process.argv.slice(2);
+  const directory = process.env.RAC_REPLY_SOURCE_DIR;
+  const policyNonce = identifier(process.env.RAC_REPLY_POLICY_NONCE, 128);
+  // reject incomplete generated settings
+  if ((mode !== 'status' && mode !== 'hook') || !isAbsolute(directory ?? '') || policyNonce === undefined) throw new Error('observer configuration unavailable');
+  const payload = await inputPayload();
+  const sessionId = identifier(payload.session_id ?? process.env.CLAUDE_CODE_SESSION_ID, 128);
+  // every update is bound to one native session
+  if (sessionId === undefined) throw new Error('observer session unavailable');
+  const processIdentity = await nativeProcess();
+  // every hook and status update must come from one exact native process lifetime
+  if (processIdentity === undefined) throw new Error('observer process unavailable');
+  if (mode === 'status') {
+    await updateState(directory, sessionId, policyNonce, current => statusState(current, sessionId, policyNonce, processIdentity, payload));
+    return;
+  }
+  const allowed = new Set(['SessionStart', 'PreModelSwitch', 'PostModelSwitch', 'UserPromptSubmit', 'Stop', 'StopFailure']);
+  // generated hook settings name only supported causal events
+  if (!allowed.has(event)) throw new Error('unsupported observer hook');
+  await updateState(directory, sessionId, policyNonce, current => hookState(event, current, sessionId, policyNonce, processIdentity, payload));
+  // new process generations also enforce the fixed state-file bound
+  if (event === 'SessionStart') await pruneStates(directory, join(directory, `${createHash('sha256').update(sessionId).digest('hex')}.json`));
+}
+
+// keep native hook failures nonsecret and explicit
+main().catch(() => { process.exitCode = 1; });

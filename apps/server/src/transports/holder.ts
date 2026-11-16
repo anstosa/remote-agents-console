@@ -8,7 +8,7 @@
  * (8 MiB, or `RAC_HOLDER_REPLAY_BYTES`). A line either way longer than `maxLine` characters (64 Mi,
  * or `RAC_HOLDER_MAX_LINE`) is cut there, the rest of it dropped.
  * A client's first line says how many it has read, `{"from":<n>}`; the holder answers
- * `{"holder":1,"pid":<child pid>,"from":<m>,"dropped":<m - n>}`, where `m` is the first line it
+ * `{"holder":1,"pid":<child pid>,"startTime":<linux start time>,"from":<m>,"dropped":<m - n>}`, where `m` is the first line it
  * still has, replays every kept line from there, then passes the child's lines on as they come.
  * Every later line from the client goes whole to the child's stdin. One client at a time: a new
  * connection replaces the old. The child's stderr is the window's, so it stays readable there
@@ -18,7 +18,7 @@
  * stay trivial: a running holder keeps its code across console deploys.
  */
 import { spawn } from 'node:child_process';
-import { chmodSync, rmSync } from 'node:fs';
+import { chmodSync, readFileSync, rmSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 
 const replayBytes = Number(process.env.RAC_HOLDER_REPLAY_BYTES) > 0 ? Number(process.env.RAC_HOLDER_REPLAY_BYTES) : 8 * 1024 * 1024;
@@ -30,6 +30,26 @@ if (socketPath === undefined || separator !== '--' || program === undefined) {
 }
 
 const child = spawn(program, args, { stdio: ['pipe', 'pipe', 'inherit'] });
+// capture one immutable linux process lifetime before any client attaches
+const childStartTime = (() => {
+  // a missing pid cannot establish a native process lifetime
+  if (child.pid === undefined) return undefined;
+  // read one exact live proc record
+  const read = (): string | undefined => {
+    let value: string;
+    try { value = readFileSync(`/proc/${child.pid}/stat`, 'utf8'); } catch { return undefined; }
+    const open = value.indexOf('(');
+    const close = value.lastIndexOf(')');
+    // reject malformed, replaced or exited process records
+    if (open < 0 || close <= open || Number(value.slice(0, open).trim()) !== child.pid) return undefined;
+    const fields = value.slice(close + 2).trim().split(/\s+/u);
+    const startTime = fields[19];
+    return startTime !== undefined && /^\d+$/u.test(startTime) && fields[0] !== 'Z' && fields[0] !== 'X' ? startTime : undefined;
+  };
+  const before = read();
+  const after = read();
+  return before !== undefined && before === after ? before : undefined;
+})();
 let client: Socket | undefined;
 // the kept lines are numbered `first` up to `first + kept.length - 1`
 const kept: string[] = [];
@@ -82,7 +102,7 @@ const server = createServer(socket => {
     if (client !== undefined) { client.destroy(); client = undefined; resume(); }
     client = socket;
     const from = Math.min(Math.max(read, first), first + kept.length);
-    socket.write(`${JSON.stringify({ holder: 1, pid: child.pid ?? 0, from, dropped: Math.max(0, from - read) })}\n`);
+    socket.write(`${JSON.stringify({ holder: 1, pid: child.pid ?? 0, ...(childStartTime === undefined ? {} : { startTime: childStartTime }), from, dropped: Math.max(0, from - read) })}\n`);
     for (const line of kept.slice(from - first)) send(socket, line);
   });
   // only whole lines reach the child, so a client that drops mid-line corrupts nothing

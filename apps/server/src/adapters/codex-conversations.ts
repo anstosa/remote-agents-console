@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { readFileHead, readFileTail } from './bounded-file.js';
 import { queueReadyPrompt } from './codex-turns.js';
 import { FileChangeCache } from './file-change-cache.js';
+import { boundedReplyMessages, readStableJsonlTail, type AuthoredReplyMessage } from './reply-conversation.js';
 import type { CompletionBaseline, CompletionEvent, Conversation, ConversationSummary, ManagedPromptLifecycleEvidence } from './types.js';
 
 /**
@@ -30,6 +31,7 @@ const maxTitleScanBytes = 4 * 1024 * 1024;
 const maxCompletionScanBytes = 4 * 1024 * 1024;
 // discovery polls this reader, so keep each pane read small and fail safe on an oversized record
 const maxLatestMessageScanBytes = 512 * 1024;
+const maxReplySourceScanBytes = 8 * 1024 * 1024;
 // bound the account-global session-index read to its recent tail. The sidecar is
 // append-only and last-write-wins, so the current name is at the file's end; a
 // smaller-than-cap file is read whole (a true forward read). `readName`'s callers
@@ -272,6 +274,108 @@ async function* walkRollouts(home: string): AsyncGenerator<{ file: string; metad
 async function paneRollout(pane: { pid: number; cwd?: string }): Promise<{ id: string; file: string } | undefined> {
   return await selectTopLevelRollout(await openRollouts(pane.pid))
     ?? (pane.cwd === undefined ? undefined : await rolloutByCwd(pane.cwd));
+}
+
+/** one exact live Codex rollout's current reply-suggestion evidence */
+export type CodexReplyConversation = {
+  conversationId: string;
+  model: string;
+  provider: string;
+  effort: string;
+  messages: AuthoredReplyMessage[];
+  transcriptGeneration: string;
+};
+
+// exclude context records injected into the user role by the host runtime
+function codexInjectedContext(text: string): boolean {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith('# AGENTS.md instructions')
+    || trimmed.startsWith('<environment_context>')
+    || trimmed.startsWith('<permissions instructions>')
+    || trimmed.startsWith('<apps_instructions>')
+    || trimmed.startsWith('<skills_instructions>')
+    || trimmed.startsWith('<hook_prompt')
+    || trimmed.startsWith('Message Type: NEW_TASK')
+    || trimmed.startsWith('Message Type: MESSAGE');
+}
+
+// read one authored message record without tool, attachment or reasoning blocks
+function codexReplyMessage(record: { ordinal?: unknown; payload?: unknown }): AuthoredReplyMessage | undefined {
+  // require one stable rollout ordinal and structured response item
+  if (!Number.isSafeInteger(record.ordinal) || record.payload === null || typeof record.payload !== 'object') return undefined;
+  const payload = record.payload as { type?: unknown; id?: unknown; role?: unknown; content?: unknown; internal_chat_message_metadata_passthrough?: unknown };
+  // ignore every nonmessage payload
+  if (payload.type !== 'message' || (payload.role !== 'user' && payload.role !== 'assistant') || !Array.isArray(payload.content)) return undefined;
+  const allowed = payload.role === 'user' ? new Set(['input_text']) : new Set(['output_text', 'text']);
+  // copy only authored text while dropping attachments, tools and reasoning
+  const text = payload.content.flatMap(block => block !== null && typeof block === 'object' && allowed.has((block as { type?: unknown }).type as string)
+    && typeof (block as { text?: unknown }).text === 'string' ? [(block as { text: string }).text] : []).join('\n');
+  // omit empty and injected context records
+  if (text.trim() === '' || (payload.role === 'user' && codexInjectedContext(text))) return undefined;
+  if (payload.role === 'user' && payload.internal_chat_message_metadata_passthrough !== undefined) {
+    const metadata = payload.internal_chat_message_metadata_passthrough;
+    // require metadata to acknowledge the authored text even when attachments accompany it
+    if (metadata === null || typeof metadata !== 'object' || !Array.isArray((metadata as { content_item_kinds?: unknown }).content_item_kinds)
+      || !(metadata as { content_item_kinds: unknown[] }).content_item_kinds.includes('user.text')) return undefined;
+  }
+  const nativeId = typeof payload.id === 'string' && payload.id !== '' ? payload.id : payload.role;
+  return { id: `${record.ordinal}:${nativeId}`, role: payload.role, text };
+}
+
+// parse the newest exact-thread settings and bounded authored messages
+function codexReplyRecords(lines: readonly string[], conversationId: string, truncated: boolean): Omit<CodexReplyConversation, 'transcriptGeneration'> | undefined {
+  let settings: { model: string; provider: string; effort: string } | undefined;
+  const messages: AuthoredReplyMessage[] = [];
+  let reachedBoundary = !truncated;
+  // preserve rollout order while selecting the last current-settings event
+  for (const line of lines) {
+    let parsed: unknown;
+    // malformed complete records make the source ambiguous
+    try { parsed = JSON.parse(line) as unknown; } catch { return undefined; }
+    // reject primitive rollout records
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const record = parsed as { type?: unknown; ordinal?: unknown; payload?: unknown };
+    if (record.type === 'event_msg' && record.payload !== null && typeof record.payload === 'object' && (record.payload as { type?: unknown }).type === 'thread_settings_applied') {
+      const payload = record.payload as { thread_id?: unknown; thread_settings?: unknown };
+      // another thread's copied settings do not describe this rollout
+      if (typeof payload.thread_id !== 'string' || payload.thread_id.toLowerCase() !== conversationId.toLowerCase()) continue;
+      const selected = payload.thread_settings;
+      // the pinned native event nests its authoritative settings rather than flattening them
+      if (selected === null || typeof selected !== 'object' || Array.isArray(selected)) return undefined;
+      const current = selected as { model?: unknown; model_provider_id?: unknown; reasoning_effort?: unknown };
+      // malformed matching settings fail closed rather than falling back
+      if (typeof current.model !== 'string' || current.model === '' || typeof current.model_provider_id !== 'string' || current.model_provider_id === ''
+        || typeof current.reasoning_effort !== 'string' || current.reasoning_effort === '') return undefined;
+      settings = { model: current.model, provider: current.model_provider_id, effort: current.reasoning_effort };
+      continue;
+    }
+    // only response items can contribute authored context
+    if (record.type !== 'response_item') continue;
+    const message = codexReplyMessage(record);
+    // nonmessage response items and excluded context stay outside inference
+    if (message === undefined) continue;
+    // a typed user record is the first safe boundary after a truncated prefix
+    if (!reachedBoundary && message.role === 'user') reachedBoundary = true;
+    if (reachedBoundary) messages.push(message);
+  }
+  // require current exact settings and a complete post-boundary context
+  if (settings === undefined || !reachedBoundary) return undefined;
+  const bounded = boundedReplyMessages(messages);
+  return bounded === undefined ? undefined : { conversationId, ...settings, messages: bounded };
+}
+
+/** read the exact pane rollout, current settings and authored reply context */
+export async function codexReplyConversation(pane: { pid: number; cwd?: string; conversationId?: string }): Promise<CodexReplyConversation | undefined> {
+  // reject a malformed reported thread before filesystem discovery
+  if (pane.conversationId !== undefined && !validCodexThreadId(pane.conversationId)) return undefined;
+  const selected = await paneRollout(pane).catch(() => undefined);
+  // require one exact selected rollout and any reported id to match it
+  if (selected === undefined || (pane.conversationId !== undefined && selected.id !== pane.conversationId)) return undefined;
+  const tail = await readStableJsonlTail(selected.file, maxReplySourceScanBytes).catch(() => undefined);
+  // unstable and unreadable generations are not source evidence
+  if (tail === undefined) return undefined;
+  const parsed = codexReplyRecords(tail.lines, selected.id, tail.truncated);
+  return parsed === undefined ? undefined : { ...parsed, transcriptGeneration: tail.generation };
 }
 
 // retain visible assistant text from one native message payload

@@ -61,10 +61,10 @@ describe('established agent recognition', () => {
     // visit non-agent siblings before the winning agent in stack order
     for (const pid of siblings) processNode(pid, 100, 'sleep');
     const inspector = new ProcInspector();
-    expect(await recognize(inspector)).toEqual({ kind: 'codex', pid: 101, wrapped: false });
+    expect(await recognize(inspector)).toEqual({ kind: 'codex', pid: 101, startTime: '100', wrapped: false });
     expect(childReads()).toBe(201);
     readFile.mockClear();
-    expect(await recognize(inspector)).toEqual({ kind: 'codex', pid: 101, wrapped: false });
+    expect(await recognize(inspector)).toEqual({ kind: 'codex', pid: 101, startTime: '100', wrapped: false });
     expect(childReads()).toBe(0);
     expect(readFile.mock.calls.length).toBeLessThanOrEqual(6);
     expect(readFile.mock.calls.every(([path]) => /^\/proc-fixture\/10[01]\//u.test(String(path)))).toBe(true);
@@ -87,7 +87,7 @@ describe('established agent recognition', () => {
       try { return await read(path); }
       finally { active -= 1; }
     });
-    expect(await recognize(inspector)).toEqual({ kind: 'codex', pid: 103, wrapped: true });
+    expect(await recognize(inspector)).toEqual({ kind: 'codex', pid: 103, startTime: '100', wrapped: true });
     expect(peak).toBeLessThanOrEqual(2);
   });
 
@@ -100,7 +100,7 @@ describe('established agent recognition', () => {
     now += 1_999;
     expect((await recognize(inspector))?.pid).toBe(101);
     now += 1;
-    expect(await recognize(inspector)).toEqual({ kind: 'claude', pid: 102, wrapped: false });
+    expect(await recognize(inspector)).toEqual({ kind: 'claude', pid: 102, startTime: '100', wrapped: false });
   });
 
   // slow validation cannot extend the permitted off-path staleness
@@ -145,7 +145,7 @@ describe('established agent recognition', () => {
     const inspector = new ProcInspector();
     await recognize(inspector);
     processNode(101, 100, 'MainThread', ['node', '/opt/@anthropic-ai/claude-code/cli.js']);
-    expect(await recognize(inspector)).toEqual({ kind: 'claude', pid: 101, wrapped: false });
+    expect(await recognize(inspector)).toEqual({ kind: 'claude', pid: 101, startTime: '100', wrapped: false });
   });
 
   // an ancestor becoming OMX takes precedence over its surviving Codex child
@@ -156,7 +156,7 @@ describe('established agent recognition', () => {
     processNode(100, 1, 'bash', ['bash'], [101]);
     expect((await recognize(inspector))?.wrapped).toBe(false);
     processNode(100, 1, 'MainThread', ['node', '/usr/bin/omx', '--direct'], [101]);
-    expect(await recognize(inspector)).toEqual({ kind: 'omx', pid: 100, wrapped: false });
+    expect(await recognize(inspector)).toEqual({ kind: 'omx', pid: 100, startTime: '100', wrapped: false });
   });
 
   // the same process must still belong to this pane
@@ -225,7 +225,7 @@ describe('established agent recognition', () => {
   it('coalesces concurrent ordinary recognition', async () => {
     const inspector = new ProcInspector();
     expect(await Promise.all([recognize(inspector), recognize(inspector), recognize(inspector)]))
-      .toEqual(Array(3).fill({ kind: 'codex', pid: 101, wrapped: false }));
+      .toEqual(Array(3).fill({ kind: 'codex', pid: 101, startTime: '100', wrapped: false }));
     expect(childReads()).toBe(1);
   });
 

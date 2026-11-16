@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { hostPiRuntime, verifyHostPiNode, run } = vi.hoisted(() => ({ hostPiRuntime: vi.fn(), verifyHostPiNode: vi.fn(), run: vi.fn() }));
+const { hostPiRuntime, verifyHostPiNode, hostHolderRuntime, verifyHostNode, observerConfiguration, run } = vi.hoisted(() => ({ hostPiRuntime: vi.fn(), verifyHostPiNode: vi.fn(), hostHolderRuntime: vi.fn(), verifyHostNode: vi.fn(), observerConfiguration: vi.fn(), run: vi.fn() }));
 // mock only the process spawner; keep the module's other helpers real
 vi.mock('../src/tmux/command.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/tmux/command.js')>()), run }));
 vi.mock('../src/adapters/pi-runtime.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/adapters/pi-runtime.js')>()), hostPiRuntime, verifyHostPiNode }));
+vi.mock('../src/adapters/host-runtime.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/adapters/host-runtime.js')>()), hostHolderRuntime, verifyHostNode }));
+vi.mock('../src/reply-suggestions/claude-observer.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/reply-suggestions/claude-observer.js')>()), claudeReplyObserverConfiguration: observerConfiguration }));
 
 import { existsSync } from 'node:fs';
 import { chmod, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -48,7 +50,7 @@ const adapterFilesDir = process.env.RAC_ADAPTER_FILES_DIR;
 const processHome = process.env.HOME;
 const tempDirs: string[] = [];
 // default external tmux operations to success
-beforeEach(() => { hostPiRuntime.mockReset(); hostPiRuntime.mockReturnValue(undefined); verifyHostPiNode.mockReset(); verifyHostPiNode.mockResolvedValue('b'.repeat(64)); run.mockResolvedValue({ code: 0, stdout: '', stderr: '' }); });
+beforeEach(() => { hostPiRuntime.mockReset(); hostPiRuntime.mockReturnValue(undefined); verifyHostPiNode.mockReset(); verifyHostPiNode.mockResolvedValue('b'.repeat(64)); hostHolderRuntime.mockReset(); hostHolderRuntime.mockReturnValue(undefined); verifyHostNode.mockReset(); verifyHostNode.mockResolvedValue('c'.repeat(64)); observerConfiguration.mockReset(); observerConfiguration.mockReturnValue(undefined); run.mockResolvedValue({ code: 0, stdout: '', stderr: '' }); });
 afterEach(async () => {
   run.mockReset();
   // restore process-wide launch overrides
@@ -1748,6 +1750,29 @@ describe('the console\'s private directory', () => {
     expect(respawned.at(-1)).toContain("export HOME='/home/ubuntu'");
   });
 
+  it('opens bridged Claude through the generic verified holder without Pi policy generation', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'rac-private-claude-'));
+    tempDirs.push(parent);
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_REPOSITORY = parent;
+    process.env.RAC_HOST_INTERACTIVE_SHELL = '/usr/bin/zsh';
+    hostHolderRuntime.mockReturnValue({ node: '/host/bin/node', holder: '/host/holder.js', modules: '/host/modules', fingerprint: 'a'.repeat(64) });
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%10' : '', stderr: '' }));
+    const worktree = cora({ path: '/host/cora', identity: '/host/cora', hostPath: undefined });
+    const service = new LaunchService({ ...codex, launchHome: '/home/ubuntu' } as never, undefined, undefined, undefined, undefined, () => [worktree]);
+
+    const opened = await service.openHolderWindow(worktreePlace(worktree), 'claude-1', { kind: 'claude', program: '/host/bin/claude', args: ['-p'], env: { HOME: '/home/ubuntu' } });
+
+    expect(opened).toMatchObject({ agentId: 'claude-1', host: true, pane: '%10' });
+    expect(hostHolderRuntime).toHaveBeenCalledOnce();
+    expect(verifyHostNode).toHaveBeenCalledWith('/host/bin/node');
+    expect(hostPiRuntime).not.toHaveBeenCalled();
+    expect(verifyHostPiNode).not.toHaveBeenCalled();
+    const respawned = run.mock.calls.find(call => (call[1] as string[]).includes('respawn-pane'))?.[1] as string[];
+    expect(respawned.join(' ')).toContain('/host/bin/node /host/holder.js');
+    expect(respawned.join(' ')).toContain('/host/bin/claude -p');
+  });
+
   // resolve blank holder homes from proven runtime authority without using Docker's account
   it.each([
     { label: 'missing HOME from launchHome', launchEnv: {}, launchHome: '/runtime/account', expectedLaunch: '/runtime/account', expectedGeneration: '/runtime/account' },
@@ -1812,6 +1837,63 @@ describe('the console\'s private directory', () => {
 });
 
 describe('bridged structured sandbox boundaries', () => {
+  it('rerenders only Claude hooks when observer configuration changes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-observer-render-'));
+    tempDirs.push(root);
+    process.env.RAC_ADAPTER_FILES_DIR = join(root, 'adapters');
+    process.env.RAC_HOST_REPOSITORY = root;
+    observerConfiguration.mockReturnValue({ observerDir: join(root, 'observer'), policyNonce: 'policy-1' });
+    const service = new LaunchService(codex);
+    const claude = (await service.adapterFiles('claude'))!['hooks.json']!;
+    const pi = (await service.adapterFiles('pi'))!['sandbox.json']!;
+    const firstClaude = await stat(claude);
+    const firstPi = await stat(pi);
+    const piBytes = await readFile(pi);
+    expect(await readFile(claude, 'utf8')).toContain('RAC_REPLY_POLICY_NONCE');
+
+    observerConfiguration.mockReturnValue({ observerDir: join(root, 'observer'), policyNonce: 'policy-1' });
+    expect(await service.adapterFiles('claude')).toEqual({ 'hooks.json': claude });
+    expect((await stat(claude)).ino).toBe(firstClaude.ino);
+
+    observerConfiguration.mockReturnValue(undefined);
+    expect(await service.adapterFiles('claude')).toEqual({ 'hooks.json': claude });
+    const ordinary = await readFile(claude, 'utf8');
+    expect(ordinary).toContain('rac-attention finished');
+    expect(ordinary).not.toContain('RAC_REPLY_POLICY_NONCE');
+    expect(ordinary).not.toContain('"statusLine"');
+    expect((await stat(claude)).ino).not.toBe(firstClaude.ino);
+    expect((await stat(pi)).ino).toBe(firstPi.ino);
+    expect(await readFile(pi)).toEqual(piBytes);
+  });
+
+  it('coalesces observer changes during rendering and never returns a failed stale file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-observer-race-'));
+    tempDirs.push(root);
+    process.env.RAC_ADAPTER_FILES_DIR = join(root, 'adapters');
+    process.env.RAC_HOST_REPOSITORY = root;
+    let observer: { observerDir: string; policyNonce: string } | undefined = { observerDir: join(root, 'observer-a'), policyNonce: 'policy-a' };
+    observerConfiguration.mockImplementation(() => observer);
+    const service = new LaunchService(codex);
+
+    const first = service.adapterFiles('claude');
+    observer = { observerDir: join(root, 'observer-b'), policyNonce: 'policy-b' };
+    const second = service.adapterFiles('claude');
+    const [left, right] = await Promise.all([first, second]);
+    expect(left).toEqual(right);
+    const hooks = left!['hooks.json']!;
+    const current = await readFile(hooks, 'utf8');
+    expect(current).toContain('policy-b');
+    expect(current).not.toContain('policy-a');
+
+    observer = undefined;
+    await rm(hooks);
+    await mkdir(hooks);
+    expect(await service.adapterFiles('claude')).toBeUndefined();
+    await rm(hooks, { recursive: true });
+    expect(await service.adapterFiles('claude')).toEqual({ 'hooks.json': hooks });
+    expect(await readFile(hooks, 'utf8')).not.toContain('RAC_REPLY_POLICY_NONCE');
+  });
+
   // a transport error is not evidence that a stale process disappeared
   it.each(['reject', 'nonzero'])('refuses Agent and Watch rotation after an unproven holder lookup: %s', async failure => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';

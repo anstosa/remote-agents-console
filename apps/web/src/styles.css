@@ -1402,6 +1402,12 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 .agent-composer-column .queue:not(:disabled):hover { filter: brightness(1.08); }
 .agent-composer-column .queue svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
 .agent-composer .prompt-composer textarea { min-height: calc(var(--standard-control-size) + var(--standard-control-size) + .375rem); }
+/* keep draft-only replies in one scrollable row above the prompt */
+.prompt-reply-suggestions { grid-column: 1 / -1; display: flex; min-width: 0; gap: .375rem; overflow-x: auto; overscroll-behavior-x: contain; padding: .125rem .125rem .25rem; scrollbar-width: thin; }
+.prompt-reply-suggestions button { box-sizing: border-box; flex: none; height: calc(var(--standard-control-size) / 2); min-height: calc(var(--standard-control-size) / 2); max-width: 100%; padding: 0 .75rem; overflow: hidden; border: 1px solid var(--surface-1); border-radius: 999px; background: var(--mantle); box-shadow: none; color: var(--subtext-0); font: inherit; font-size: .78rem; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-reply-suggestions button:not(:disabled):hover { border-color: var(--lavender); background: color-mix(in srgb, var(--lavender) 13%, var(--mantle)); color: var(--text); }
+.prompt-reply-suggestions button:focus-visible { outline: 2px solid var(--lavender); outline-offset: -2px; }
+.prompt-reply-suggestions button:disabled { opacity: .45; }
 /* the Workspace toolbar beneath the tab row */
 .workspace-toolbar { position: relative; display: grid; min-width: 0; background: var(--crust); }
 :where(.workspace-toolbar) .page-arrow { position: relative; display: grid; width: var(--standard-control-size); height: var(--standard-control-size); min-height: 0; padding: 0; place-items: center; opacity: 1; overflow: visible; }

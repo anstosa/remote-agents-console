@@ -1,4 +1,5 @@
 import { claudeAskUserTool } from '../transports/claude.js';
+import { claudeReplyObserverConfiguration } from '../reply-suggestions/claude-observer.js';
 import type { AdapterFileContext, AttentionState } from './types.js';
 
 /**
@@ -16,6 +17,12 @@ export const claudeHooksFileName = 'hooks.json';
 
 type CommandHandler = { type: 'command'; timeout: number; command: string };
 type HookEntry = { matcher?: string; hooks: CommandHandler[] };
+type StatusLine = { type: 'command'; command: string; padding: number; refreshInterval: number };
+
+// quote one generated shell value without permitting expansion
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
 
 // One reporter invocation for a state: the tmux binary baked in (omitted under the
 // bridge, where the host's PATH tmux is used) and the script named by its host path.
@@ -25,39 +32,58 @@ type HookEntry = { matcher?: string; hooks: CommandHandler[] };
 function report(context: AdapterFileContext, state: AttentionState, payload = false, lifecycle?: 'start' | 'question' | 'terminal', mainOnly = false): CommandHandler {
   const prefix = context.tmuxBin === undefined ? '' : `RAC_TMUX_BIN=${context.tmuxBin} `;
   const lifecyclePrefix = lifecycle === undefined ? '' : `RAC_CALENDAR_LIFECYCLE_SPOOL=${context.repoRoot}/.data/google-calendar-claude-lifecycle.jsonl `;
-  return { type: 'command', timeout: 5, command: `${prefix}${lifecyclePrefix}${context.repoRoot}/scripts/hooks/rac-attention ${state}${payload ? ' --payload' : ''}${mainOnly ? ' --main-only' : ''}${lifecycle === undefined ? '' : ` --lifecycle ${lifecycle}`}` };
+  return { type: 'command', timeout: 5, command: `${prefix}${lifecyclePrefix}${context.repoRoot}/scripts/hooks/rac-attention ${state} --hook-input${payload ? ' --payload' : ''}${mainOnly ? ' --main-only' : ''}${lifecycle === undefined ? '' : ` --lifecycle ${lifecycle}`}` };
 }
 
-// The event → state mapping (ADR 0001). `SessionStart` also registers the session
-// id, which every invocation carries from `$CLAUDE_CODE_SESSION_ID`. `SessionEnd`
+// report one metadata-only source epoch into the private bounded observer
+function sourceReport(context: AdapterFileContext, event: string, configuration: { observerDir: string; policyNonce: string }): CommandHandler {
+  const environment = `RAC_REPLY_SOURCE_DIR=${shellQuote(configuration.observerDir)} RAC_REPLY_POLICY_NONCE=${shellQuote(configuration.policyNonce)}`;
+  return { type: 'command', timeout: 5, command: `${environment} ${shellQuote(`${context.repoRoot}/scripts/hooks/rac-reply-source`)} hook ${event}` };
+}
+
+// observe current model and effort without drawing a status line
+function sourceStatusLine(context: AdapterFileContext, configuration: { observerDir: string; policyNonce: string }): StatusLine {
+  const environment = `RAC_REPLY_SOURCE_DIR=${shellQuote(configuration.observerDir)} RAC_REPLY_POLICY_NONCE=${shellQuote(configuration.policyNonce)}`;
+  // native refreshInterval is seconds, so one supplies the causal idle heartbeat
+  return { type: 'command', command: `${environment} ${shellQuote(`${context.repoRoot}/scripts/hooks/rac-reply-source`)} status`, padding: 0, refreshInterval: 1 };
+}
+
+// The event → state mapping (ADR 0001). Every native handler opts into its bounded
+// hook input so top-level `session_id` can register or replace the pane session. `SessionEnd`
 // deliberately reports nothing (Claude fires it on `/clear` and `/resume`).
 // `PreToolUse` splits by tool (ADR 0006): AskUserQuestion sends its payload so the
 // question renders as an Inline question, while ExitPlanMode only reports the state.
 // The tool-driven `working` reports also fire inside subagents, so they are main-only.
-export function claudeHooksSettings(context: AdapterFileContext): { hooks: Record<string, HookEntry[]> } {
+export function claudeHooksSettings(context: AdapterFileContext): { hooks: Record<string, HookEntry[]>; statusLine?: StatusLine } {
+  const observer = claudeReplyObserverConfiguration();
   const working = [{ hooks: [report(context, 'working', false, undefined, true)] }];
-  const finished = [{ hooks: [report(context, 'finished')] }];
   const question = [{ hooks: [report(context, 'question')] }];
+  const source = (event: string): CommandHandler[] => observer === undefined ? [] : [sourceReport(context, event, observer)];
   return {
     hooks: {
-      SessionStart: finished,
-      UserPromptSubmit: [{ hooks: [report(context, 'working', false, 'start')] }],
+      SessionStart: [{ hooks: [report(context, 'finished'), ...source('SessionStart')] }],
+      UserPromptSubmit: [{ hooks: [report(context, 'working', false, 'start'), ...source('UserPromptSubmit')] }],
       PreToolUse: [
         { matcher: 'AskUserQuestion', hooks: [report(context, 'question', true, 'question')] },
         { matcher: 'ExitPlanMode', hooks: [report(context, 'question')] },
       ],
+      ...(observer === undefined ? {} : {
+        PreModelSwitch: [{ hooks: source('PreModelSwitch') }],
+        PostModelSwitch: [{ hooks: source('PostModelSwitch') }]
+      }),
       Elicitation: question,
       PermissionRequest: question,
       PostToolUse: working,
       PermissionDenied: working,
       ElicitationResult: working,
-      Stop: [{ hooks: [report(context, 'finished', false, 'terminal')] }],
-      StopFailure: [{ hooks: [report(context, 'finished', false, 'terminal')] }],
+      Stop: [{ hooks: [report(context, 'finished', false, 'terminal'), ...source('Stop')] }],
+      StopFailure: [{ hooks: [report(context, 'finished', false, 'terminal'), ...source('StopFailure')] }],
       Notification: [
         { matcher: 'permission_prompt', hooks: [report(context, 'question')] },
         { matcher: 'idle_prompt', hooks: [report(context, 'finished')] },
       ],
     },
+    ...(observer === undefined ? {} : { statusLine: sourceStatusLine(context, observer) })
   };
 }
 

@@ -77,7 +77,7 @@ const pendingSourceFormats = { app: 'json', env: 'env', installation: 'installat
 // reuse the authoritative labels before the installation catalog arrives
 const pendingSourceNavigation: Pick<SettingsSource, 'id' | 'label' | 'format' | 'path'>[] = Object.entries(pendingSourceFormats).map(([id, format]) => ({ id, label: sourceLabels[id] ?? id, format }));
 // keep dedicated and automatically derived controls out of the application field tree
-const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'conductor', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', 'proxy', 'integrations.multiInstance', 'integrations.mcp', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
+const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'conductor', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', 'replySuggestions', 'proxy', 'integrations.multiInstance', 'integrations.mcp', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
 // keep dedicated source selectors with their application and tmux consumers
 const dedicatedInstallationPaths = new Set(['version', 'sources']);
 
@@ -1683,7 +1683,7 @@ const sourceGroup = (source: Pick<SettingsSource, 'id' | 'format'>): string => {
 // flag backing sources and the dedicated pages that own their invalid controls
 function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
   const pages = new Set<string>();
-  const applicationPages: Record<string, string> = { defaultAgent: 'agents', adapters: 'agents', conductor: 'conductor', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
+  const applicationPages: Record<string, string> = { defaultAgent: 'agents', adapters: 'agents', conductor: 'conductor', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', replySuggestions: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
   // route only authoritative issue identities never field values or error text
   for (const { sourceId, path } of issues) {
     pages.add(sourceId);
@@ -2223,8 +2223,8 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'projects' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('projects');
   // keep review edits attached to their original application transaction
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'review' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('reviews');
-  // surface application button drafts on their dedicated Interface page
-  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'buttons' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('interface');
+  // surface application button and reply-suggestion drafts on Interface
+  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'buttons' || next.path[0] === 'replySuggestions' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('interface');
   // retain one browser transaction while marking each preference's visible page
   for (const pageId of browserDraft.dirtyPageIds) changedSourceIds.add(pageId);
   // include setup entries and nested legacy edits in the unified dirty guard
@@ -2531,10 +2531,24 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
             <SchemaField key={`projects:${catalogEditorEpoch}`} source={voiceSource} schema={projectsSchema} value={valueAt(voiceSource.value, ['projects'])} path={['projects']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} installationKind={snapshot?.installationKind} />
           </>}
   </div>;
-  // keep browser appearance and server-owned button definitions on one Interface page
+  // keep browser appearance and console-wide controls on Interface
   const buttonsSchema = voiceSource?.schema?.properties?.buttons;
+  const replySuggestionsSchema = voiceSource?.schema?.properties?.replySuggestions;
   const interfaceEditor = <div className="settings-interface">
     {browserDraft.interfaceContent}
+    <section className="settings-schema-section" aria-label="Reply suggestions"><header><h3>Reply suggestions</h3></header>
+      <p className="settings-preference-description">This setting applies to this console in every browser.</p>
+      {voiceSource === undefined ? <p role="note">Load Application configuration before editing reply suggestions.</p>
+        : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing reply suggestions.</p>
+          : replySuggestionsSchema === undefined ? <p role="note">Reply suggestions are unavailable in this configuration.</p>
+            : <>
+              {!voiceSource.writable && <p role="note">Reply suggestions are read-only in this installation.</p>}
+              {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing reply suggestions.</p>}
+              {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing reply suggestions.</p>}
+              {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing reply suggestions.</p>}
+              <SchemaField key={`reply-suggestions:${catalogEditorEpoch}`} source={voiceSource} schema={replySuggestionsSchema} value={valueAt(voiceSource.value, ['replySuggestions'])} path={['replySuggestions']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} onPatch={patch} onReveal={reveal} onRemask={remask} />
+            </>}
+    </section>
     <section className="settings-schema-section" aria-label="Custom buttons"><header><h3>Custom buttons</h3></header>
       {voiceSource === undefined ? <p role="note">Load Application configuration before editing custom buttons.</p>
         : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing custom buttons.</p>
@@ -2623,7 +2637,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     { id: 'browser', group: 'Console', label: 'This browser', keywords: 'client browser device rename identity name', content: browserDraft.content },
     { id: 'voice', group: 'Console', label: 'Voice', keywords: `davo voice assistant name context enable write tools advanced OpenAI realtime MCP ${[...voiceEnvironmentKeys].join(' ')}`, content: <>{voiceEditor}{voiceFieldsEditor}{voiceEnvironmentEditor}</> },
     { id: 'keyboard', group: 'Console', label: 'Keyboard shortcuts', keywords: 'keyboard shortcuts bindings keys prefix terminal command', content: keyboardSettings },
-    { id: 'interface', group: 'Application', label: 'Interface', keywords: 'custom buttons actions slots shell command agent prompt appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers', content: interfaceEditor },
+    { id: 'interface', group: 'Application', label: 'Interface', keywords: 'reply suggestions agent usage requests costs custom buttons actions slots shell command agent prompt appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers', content: interfaceEditor },
     { id: 'projects', group: 'Application', label: 'Projects', keywords: 'projects repositories directories dynamic worktrees launcher paths overrides commands tasks button overrides', content: projectsEditor },
     { id: 'reviews', group: 'Application', label: 'Reviews', keywords: 'review tours code review presets prompts model effort codex claude headless interactive', content: reviewsEditor },
     { id: 'mcp', group: 'Application', label: 'MCP', keywords: 'mcp capabilities permissions read write tools conductor davo access', content: mcpEditor },

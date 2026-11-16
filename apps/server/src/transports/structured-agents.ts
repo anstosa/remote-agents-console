@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { gte, valid } from 'semver';
-import { adapterFor, structuredAdapterFor } from '../adapters/registry.js';
+import { structuredAdapterFor } from '../adapters/registry.js';
 import type { AdapterConfigs, AgentKind, AllowedModel, StructuredAdapter } from '../adapters/types.js';
 import type { Agent, AgentLifecycle } from '../domain/models.js';
 import type { ShapedQuestion } from '../adapters/types.js';
@@ -20,6 +20,9 @@ import { removeStagedAttachments, stagePromptAttachments, withAttachedFiles } fr
 import type { StructuredTurnTransport } from '../prompts/service.js';
 import type { PromptLabel } from '../prompts/queue.js';
 import { setAside } from '../set-aside.js';
+import type { ReplySuggestionMessage, ReplySuggestionSource } from '../reply-suggestions/types.js';
+import { piReplyRuntimeGeneration } from '../reply-suggestions/pi-runtime.js';
+import { nativeReplyScope } from '../reply-suggestions/native-scope.js';
 
 /**
  * Where a structured Agent's process runs: its holder's socket and tmux pane (ADR 0016), the
@@ -28,11 +31,11 @@ import { setAside } from '../set-aside.js';
  * namespace: its exact tagged window is the only stop authority. `sandboxGeneration` binds a
  * bridged holder to the policy and trusted runtime it loaded.
  */
-export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string; host?: true; sandboxGeneration?: string; pid?: number; read?: number };
+export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string; host?: true; sandboxGeneration?: string; pid?: number; startTime?: string; read?: number };
 /** Whether a holder's process has exited, with its exit status. */
 export type HolderStatus = { dead: boolean; status?: number };
 /** The command a holder runs: the program and its arguments, its environment, and the setup run first. */
-export type HolderLaunch = { program: string; args: string[]; env: Record<string, string>; setup?: string };
+export type HolderLaunch = { kind?: AgentKind; program: string; args: string[]; env: Record<string, string>; setup?: string };
 /**
  * A structured Agent as the console stores it, from launch until Close: its kind, Place, whether
  * it is Sandboxed, its current Conversation, its holder, its lifecycle, who launched it and its
@@ -54,7 +57,7 @@ export type RawLine = { from: 'agent' | 'console'; line: string };
  * latest lines either way (Raw events), and, reattached, how many lines it could not replay.
  */
 // `notice` is what the Agent should show about how its process was launched
-export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number; raw?: () => readonly RawLine[]; dropped?: number; notice?: string };
+export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number; raw?: () => readonly RawLine[]; dropped?: number; notice?: string; replyRuntimeGeneration?: string };
 /** Starts, reads and stops structured Agent processes; the holder in tmux outside tests. */
 export interface StructuredProcesses {
   /** Start the process and connect its protocol client, which reports through `emit`. */
@@ -101,8 +104,8 @@ function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, he
   const keep = (from: RawLine['from'], line: string) => { raw.push({ from, line: line.slice(0, maxRawLine) }); raw.splice(0, raw.length - maxRawLines); };
   const counted: LineChannel = { ...channel, send: line => { keep('console', line); channel.send(line); }, onLine: listener => channel.onLine(line => { read += 1; keep('agent', line); listener(line); }) };
   // the pid is signalled on Close, so only a real one is kept
-  const pid = Number.isSafeInteger(hello.pid) && hello.pid > 1 ? { pid: hello.pid } : {};
-  return { holder: { ...holder, ...pid }, connection: adapter.client(counted, emit, context), cursor: () => read, raw: () => raw, ...(context.attached === undefined ? {} : { dropped: context.attached.dropped }) };
+  const process = Number.isSafeInteger(hello.pid) && hello.pid > 1 ? { pid: hello.pid, ...(typeof hello.startTime === 'string' && /^\d+$/u.test(hello.startTime) ? { startTime: hello.startTime } : {}) } : {};
+  return { holder: { ...holder, ...process }, connection: adapter.client(counted, emit, context), cursor: () => read, raw: () => raw, ...(context.attached === undefined ? {} : { dropped: context.attached.dropped }) };
 }
 
 /**
@@ -117,9 +120,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       const adapter = structuredAdapterFor(kind);
       const configured = configs[kind];
       if (adapter === undefined || configured?.launchable !== true) return undefined;
-      // under the host bridge the holder comes with Pi's host runtime, so a kind that also runs in a
-      // pane (Claude) runs there only (its config falls back at boot), an earlier structured Agent too
-      if (process.env.RAC_HOST_TMUX_DIR !== undefined && adapterFor(kind) !== undefined) { console.warn(`[structured] ${kind} cannot run over the structured Transport under the host bridge; launch it again to run it in a pane`); return undefined; }
+      const replyRuntimeGeneration = kind === 'pi' ? await piReplyRuntimeGeneration(configured, home) : undefined;
       // one path namespace must drive session lookup, policy checks and the host process
       if (process.env.RAC_HOST_TMUX_DIR !== undefined && place.home !== placeHostRoot(place)) { console.warn(`[structured] ${place.home}: aliased host paths cannot launch ${kind}`); return undefined; }
       const located = resume === undefined ? undefined : await adapter.conversations.locate(resume, place.home);
@@ -139,13 +140,13 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       const operatorArgs = [adapter.conflictingArgs, untrusted?.reserved].reduce((args, reserved) => reserved === undefined ? args : withoutFlags(args, reserved), configured.args);
       const compiled = compileNativeLaunch(kind, { mode: resumed !== undefined ? 'resume' : continues ? 'continue' : 'fresh', ...(resumed === undefined ? {} : { conversationId: resumed }) }, operatorArgs, choice, spec).args;
       const args = untrusted === undefined ? compiled : [...compiled, ...untrusted.args];
-      const holder = await windows.openHolderWindow(place, id, { program: configured.program, args, env: { ...configured.env, ...spec.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
+      const holder = await windows.openHolderWindow(place, id, { kind, program: configured.program, args, env: { ...configured.env, ...spec.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
       if (holder === undefined) return undefined;
       // a holder that a slow login shell or setup holds up is waited for as long as its launch
       // report is (30 s), not given up on first
       const connected = await connectHolder(holder.socket, { attempts: 300 });
       if (connected === undefined) { await windows.closeHolder(holder); return undefined; }
-      return { ...clientOver(adapter, holder, connected, emit, { cwd: place.home, ...(model === undefined ? {} : { model }) }), ...(untrusted === undefined ? {} : { notice: untrusted.notice }) };
+      return { ...clientOver(adapter, holder, connected, emit, { cwd: place.home, ...(model === undefined ? {} : { model }) }), ...(untrusted === undefined ? {} : { notice: untrusted.notice }), ...(replyRuntimeGeneration === undefined ? {} : { replyRuntimeGeneration }) };
     },
     async attach(holder, kind, emit, { cwd, conversation }) {
       const adapter = structuredAdapterFor(kind);
@@ -178,7 +179,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
 // by `offers` so the web takes each one once. `nonce` is what the latest process's launch report
 // must echo, and `refusal` why its report refused it. `access` is the console MCP token a
 // Conductor's process is given once it reports in, and `scripts` the deadlines of its scripts running
-type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; observedAt: Map<string, string>; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; modelGuard?: Promise<void>; desiredModel?: ModelSetting; desiredNativeDefault?: true; guarded?: boolean; noticeCount: number; notices: TranscriptItem[]; launchNotice?: string };
+type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; historyConversationId?: string; replyRuntimeGeneration?: string; replySourceGeneration: number; observedAt: Map<string, string>; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; nativeModel?: ModelInfo; models?: ModelInfo[]; modelGuard?: Promise<void>; desiredModel?: ModelSetting; desiredNativeDefault?: true; guarded?: boolean; noticeCount: number; notices: TranscriptItem[]; launchNotice?: string };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -230,6 +231,8 @@ const isStoredRecord = (value: unknown): value is StructuredRecord => {
   const tmuxSocket = holder?.tmuxSocket;
   const validTmuxSocket = tmuxSocket === undefined || typeof tmuxSocket === 'string' && tmuxSocket.length > 0 && !tmuxSocket.includes('\0') && isAbsolute(tmuxSocket);
   const validHost = holder?.host === undefined || holder.host === true;
+  // persist only bounded linux process lifetime identities
+  const validStartTime = holder?.startTime === undefined || typeof holder.startTime === 'string' && /^\d{1,32}$/u.test(holder.startTime);
   const sandboxGeneration = holder?.sandboxGeneration;
   const validSandboxGeneration = sandboxGeneration === undefined || typeof sandboxGeneration === 'string' && sandboxGenerationPattern.test(sandboxGeneration);
   const origin = record?.origin;
@@ -257,7 +260,7 @@ const isStoredRecord = (value: unknown): value is StructuredRecord => {
     && validMarker
     && validSecurity
     && validModel
-    && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && validTmuxSocket && validHost && validSandboxGeneration && (holder.host !== true || typeof tmuxSocket === 'string') && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
+    && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && validTmuxSocket && validHost && validSandboxGeneration && validStartTime && (holder.host !== true || typeof tmuxSocket === 'string') && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
 };
 
 // the Launch menu's security options that loosen an Agent past the operator's own configuration
@@ -626,6 +629,7 @@ export class StructuredAgents {
   // drive the Agent through a process it started or reattached to
   private async adopt(record: StructuredRecord, live: Live, process: StructuredProcess): Promise<void> {
     live.connection = process.connection;
+    live.replyRuntimeGeneration = process.replyRuntimeGeneration;
     live.cursor = process.cursor;
     live.raw = process.raw;
     record.holder = process.holder;
@@ -691,7 +695,7 @@ export class StructuredAgents {
 
   // what this console knows of an Agent it has no process for yet
   private idle(): Live {
-    return { generation: 0, working: false, busy: false, questions: [], steers: [], offers: 0, transcript: [], observedAt: new Map(), revision: 0, status: new Map(), noticeCount: 0, notices: [] };
+    return { generation: 0, working: false, busy: false, questions: [], steers: [], offers: 0, transcript: [], replySourceGeneration: 0, observedAt: new Map(), revision: 0, status: new Map(), noticeCount: 0, notices: [] };
   }
 
 
@@ -794,7 +798,8 @@ export class StructuredAgents {
   private closeQuestion(live: Live, questionId: string): void {
     const before = live.questions.length;
     live.questions = live.questions.filter(candidate => candidate.id !== questionId);
-    if (live.questions.length !== before) this.changed(live);
+    // a brief native dialog cannot resurrect an earlier suggestion source
+    if (live.questions.length !== before) { live.replySourceGeneration += 1; this.changed(live); }
   }
 
   /**
@@ -1007,6 +1012,66 @@ export class StructuredAgents {
     return (await this.agents()).find(agent => agent.id === id);
   }
 
+  /** capture one immutable current structured reply source */
+  async replySuggestionSource(id: string): Promise<ReplySuggestionSource | undefined> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    const live = this.live.get(id);
+    // only one finished exact supported Conversation may leave this boundary
+    if (record === undefined || record.kind !== 'pi' && record.kind !== 'claude' || record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.busy || live.resyncing === true || live.questions.length > 0 || record.conversationId === undefined || live.historyConversationId !== record.conversationId || live.model === undefined || live.nativeModel === undefined) return undefined;
+    const generation = live.replySourceGeneration;
+    const processGeneration = record.processGeneration ?? 0;
+    const conversationId = record.conversationId;
+    const model = { ...live.model };
+    const native = { ...live.nativeModel };
+    const allowed = this.options.allowedModels?.(record.kind);
+    // saved efforts are launch defaults while native state proves the active effort
+    if (allowed === undefined || !allowed.some(entry => entry.model === model.model)) return undefined;
+    const messages = this.replySuggestionMessages(live.transcript);
+    // the latest complete assistant question is the source head
+    if (messages === undefined || messages.at(-1)?.role !== 'assistant') return undefined;
+    const latest = messages.at(-1)!;
+    // pi retains its exact physical route and runtime generation contract
+    if (record.kind === 'pi') {
+      const runtimeGeneration = live.replyRuntimeGeneration;
+      const slash = model.model.indexOf('/');
+      // require current-console provenance and one physical provider-qualified route
+      if (runtimeGeneration === undefined || slash <= 0 || slash === model.model.length - 1 || native.id !== model.model || native.provider !== model.model.slice(0, slash) || native.api === undefined || native.api === 'pi-virtual' || native.baseUrl === undefined) return undefined;
+      const identity = createHash('sha256').update(JSON.stringify([record.id, processGeneration, runtimeGeneration, conversationId, generation, model, native.provider, native.id, native.api, native.baseUrl, latest.id, latest.text])).digest('base64url');
+      return { kind: 'pi', transport: 'structured', agentId: record.id, identity, sourceGeneration: generation, processGeneration, runtimeGeneration, conversationId, model, nativeModel: { provider: native.provider, id: model.model.slice(slash + 1), api: native.api, baseUrl: native.baseUrl }, messages };
+    }
+    const holder = record.holder;
+    const connection = live.connection;
+    // claude requires explicit effort, a resolved native id and one holder process lifetime
+    if (model.effort === undefined || native.provider !== 'anthropic' || native.id === '' || holder?.pid === undefined || holder.startTime === undefined) return undefined;
+    const scope = await nativeReplyScope('claude', { pid: holder.pid, startTime: holder.startTime }, process.env, conversationId, 'structured');
+    const current = (await this.load()).find(candidate => candidate.id === id);
+    const now = this.live.get(id);
+    // asynchronous account proof cannot authorize a changed process or source head
+    if (scope === undefined || current !== record || now !== live || record.lifecycle !== 'live' || live.connection !== connection || live.replySourceGeneration !== generation || (record.processGeneration ?? 0) !== processGeneration || record.conversationId !== conversationId || live.historyConversationId !== conversationId || live.working || live.busy || Boolean(live.resyncing) || live.questions.length > 0 || live.model?.model !== model.model || live.model.effort !== model.effort || live.nativeModel?.provider !== native.provider || live.nativeModel.id !== native.id || record.holder?.pid !== holder.pid || record.holder.startTime !== holder.startTime) return undefined;
+    const runtimeGeneration = scope.fingerprint;
+    const identity = createHash('sha256').update(JSON.stringify([record.id, processGeneration, runtimeGeneration, conversationId, generation, model, native.provider, native.id, holder.pid, holder.startTime, latest.id, latest.text])).digest('base64url');
+    return { kind: 'claude', transport: 'structured', agentId: record.id, identity, sourceGeneration: generation, processGeneration, runtimeGeneration, conversationId, model, nativeModel: { provider: 'anthropic', id: native.id }, nativeScope: scope, messages };
+  }
+
+  // select bounded current-Conversation user and assistant prose
+  private replySuggestionMessages(items: readonly TranscriptItem[]): ReplySuggestionMessage[] | undefined {
+    const messages = items.flatMap((item): ReplySuggestionMessage[] => item.kind === 'message' && (item.role === 'user' || item.role === 'assistant') ? [{ id: item.id, role: item.role, text: item.text }] : []);
+    const latest = messages.at(-1);
+    // never truncate the live question into a different one
+    if (latest?.role !== 'assistant' || latest.text.length === 0 || latest.text.length > 20_000 || Buffer.byteLength(latest.text, 'utf8') > 32 * 1_024) return undefined;
+    const selected: ReplySuggestionMessage[] = [];
+    let bytes = 0;
+    // retain the newest complete messages inside both context limits
+    for (let index = messages.length - 1; index >= 0 && selected.length < 12; index -= 1) {
+      const message = messages[index]!;
+      const size = Buffer.byteLength(message.text, 'utf8');
+      if (bytes + size > 32 * 1_024) break;
+      selected.unshift({ ...message });
+      bytes += size;
+    }
+    return selected.at(-1)?.id === latest.id ? selected : undefined;
+  }
+
   /** The Davo principal that owns a structured worker, if it is a Davo worker. */
   async workerOwner(id: string): Promise<string | undefined> {
     const record = (await this.load()).find(candidate => candidate.id === id);
@@ -1167,6 +1232,8 @@ export class StructuredAgents {
       case 'conversation':
         // the console's own notices belong to the Conversation they were made in
         if (record.conversationId !== undefined && record.conversationId !== event.id) live.notices = [];
+        // a Conversation is unready until its matching history arrives
+        if (record.conversationId !== event.id) { live.historyConversationId = undefined; live.replySourceGeneration += 1; }
         record.conversationId = event.id;
         if (live.launchNotice !== undefined) { this.notice(live, live.launchNotice, 'warning'); delete live.launchNotice; }
         live.conversationName = event.name;
@@ -1175,7 +1242,11 @@ export class StructuredAgents {
         this.restartOffPin(record, live);
         break;
       case 'model':
+        // model identity changes retire prior suggestion sources
+        if (live.model?.model !== event.current.model || live.model.effort !== event.current.effort || live.nativeModel?.id !== event.native?.id || live.nativeModel?.provider !== event.native?.provider || live.nativeModel?.api !== event.native?.api || live.nativeModel?.baseUrl !== event.native?.baseUrl) live.replySourceGeneration += 1;
         live.model = event.current;
+        // an event without authoritative route metadata clears the prior Pi route
+        live.nativeModel = event.native === undefined ? undefined : { ...event.native, efforts: [...event.native.efforts] };
         // kept for the next start of a kind whose resume does not restore it; one the record could
         // not be read back with is not kept, and a model reported again unchanged is not saved again
         if (storableModel(event.current) && (record.model?.model !== event.current.model || record.model.effort !== event.current.effort)) {
@@ -1195,6 +1266,8 @@ export class StructuredAgents {
         }
         break;
       case 'turn':
+        // even a cancelled turn retires the earlier idle source
+        live.replySourceGeneration += 1;
         this.observeTurnEvent(record, event.turn);
         live.working = event.turn.type === 'started';
         if (event.turn.type !== 'started') { live.turn = event.turn; live.resyncing = false; this.endScripts(live); this.idlePoint(record, live); this.restartOffPin(record, live); }
@@ -1203,6 +1276,8 @@ export class StructuredAgents {
         live.steers = event.pending;
         break;
       case 'question':
+        // retire old replies even when a dialog opens and closes between reads
+        live.replySourceGeneration += 1;
         live.questions = [...live.questions.filter(candidate => candidate.id !== event.question.id), event.question];
         break;
       case 'question-closed':
@@ -1230,6 +1305,8 @@ export class StructuredAgents {
           live.observedAt.set(item.id, new Date().toISOString());
           live.transcript.push(item);
         } else live.transcript[index] = item;
+        // only authored prose can change suggestion context
+        if (item.kind === 'message' && (item.role === 'user' || item.role === 'assistant')) live.replySourceGeneration += 1;
         live.transcript.splice(0, live.transcript.length - maxTranscriptItems);
         // prune timestamps for transcript entries no longer retained
         const retained = new Set(live.transcript.map(candidate => candidate.id));
@@ -1237,9 +1314,13 @@ export class StructuredAgents {
         break;
       }
       case 'history':
+        // ignore stale history from a replaced Conversation
+        if (event.conversationId !== undefined && event.conversationId !== record.conversationId) return;
         // a history (loaded on a launch or a Conversation change) replaces the transcript, but not the
         // notices the console made for this Conversation since
         live.transcript = [...event.items, ...live.notices].slice(-maxTranscriptItems);
+        live.historyConversationId = event.conversationId;
+        live.replySourceGeneration += 1;
         // history protocols provide no source time, so record bounded server observation explicitly
         live.observedAt = new Map(live.transcript.map(item => [item.id, live.observedAt.get(item.id) ?? new Date().toISOString()]));
         live.prompt = event.items.filter((item): item is Extract<TranscriptItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'user' && item.steer !== true).at(-1)?.text;

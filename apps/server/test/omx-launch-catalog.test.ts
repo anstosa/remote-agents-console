@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { CodexProtocolClient } from '../src/accounts/protocol.js';
 import type { AdapterConfigs, AdapterLaunchConfig } from '../src/adapters/types.js';
-import { probeOmxCatalog, type OmxCatalogProbe } from '../src/launch/omx-catalog.js';
+import { probeClaudeCatalog, probeOmxCatalog, type ClaudeCatalogProbe, type OmxCatalogProbe } from '../src/launch/omx-catalog.js';
 import { LaunchOptionsService, type LaunchOptionsContext } from '../src/launch/options.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject, testWorktree } from './helpers/config.js';
@@ -52,6 +52,16 @@ function validProbe(overrides: Partial<OmxCatalogProbe> = {}): OmxCatalogProbe {
     args: ['--profile', 'work'],
     capabilities: { model: true, effort: true },
     identity: 'omx-fixture',
+    ...overrides
+  };
+}
+
+// create one complete claude initialize response
+function validClaudeProbe(overrides: Partial<ClaudeCatalogProbe> = {}): ClaudeCatalogProbe {
+  return {
+    version: 1,
+    models: [{ value: 'sonnet', displayName: 'Sonnet', supportsEffort: true, supportedEffortLevels: ['low', 'high'] }],
+    capabilities: { model: true, effort: true },
     ...overrides
   };
 }
@@ -255,6 +265,89 @@ describe('OMX catalog cache boundaries', () => {
 });
 
 describe('OMX fixed-helper transport', () => {
+  // enforce vendor isolation after the private host descriptor is consumed
+  it('isolates the host Claude child from foreign credentials and startup configuration', async () => {
+    const checkout = await mkdtemp(join(tmpdir(), 'rac-claude-isolated-bridge-'));
+    directories.push(checkout);
+    vi.stubEnv('RAC_HOST_INTERACTIVE_SHELL', '/bin/bash');
+    await mkdir(join(checkout, 'scripts'));
+    const helper = join(checkout, 'scripts', 'discover-omx-models.mjs');
+    await writeFile(helper, await readFile(new URL('../../../scripts/discover-omx-models.mjs', import.meta.url)));
+    const observed = join(checkout, 'native-observed.json');
+    const program = join(checkout, 'claude.cjs');
+    await writeFile(program, `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+// expose the independent supported control inventory
+if (args.includes('--help')) process.stdout.write('--model --safe-mode --tools --strict-mcp-config --mcp-config --permission-prompts --permission-mode --no-session-persistence --disable-slash-commands --no-chrome --setting-sources');
+else {
+  fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ env: process.env, args }));
+  let buffer = '';
+  // answer only local initialize metadata
+  process.stdin.on('data', chunk => {
+    buffer += chunk;
+    let newline;
+    // consume complete control records
+    while ((newline = buffer.indexOf('\\n')) >= 0) {
+      const message = JSON.parse(buffer.slice(0, newline));
+      buffer = buffer.slice(newline + 1);
+      // no user prompt is accepted
+      if (message.request?.subtype !== 'initialize') process.exit(2);
+      process.stdout.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: { models: [{ value: 'sonnet' }] } } }) + '\\n');
+    }
+  });
+}
+`, { mode: 0o700 });
+    const command = vi.fn(async () => {
+      const temporary = (await readdir(join(checkout, '.data')))[0]!;
+      const descriptor = join(checkout, '.data', temporary, 'request.json');
+      const result = await executeFile(process.execPath, [helper, '--request', descriptor], {
+        env: { HOME: checkout, OPENAI_API_KEY: 'inherited-openai', PI_CODING_AGENT_DIR: '/foreign/pi' }, timeout: 5_000
+      });
+      return { code: 0, stdout: result.stdout, stderr: result.stderr };
+    });
+    const config: AdapterLaunchConfig = { program, args: [], launchable: true, env: {
+      HOME: checkout, CLAUDE_CONFIG_DIR: join(checkout, 'claude-account'), ANTHROPIC_API_KEY: 'native-only',
+      OPENAI_API_KEY: 'configured-openai', CODEX_HOME: '/foreign/codex', NODE_OPTIONS: '--require /foreign/loader'
+    } };
+    const environment = { RAC_HOST_TMUX_DIR: '/run/tmux', RAC_HOST_NODE_BIN: process.execPath, RAC_HOST_REPOSITORY: checkout };
+    const result = await probeClaudeCatalog(config, { cwd: checkout, hostCwd: checkout, home: checkout }, 5_000, { command: command as never, environment, checkout });
+    expect(result.models).toEqual([{ value: 'sonnet', supportsEffort: false, supportedEffortLevels: [] }]);
+    const child = JSON.parse(await readFile(observed, 'utf8')) as { env: Record<string, string>; args: string[] };
+    expect(child.env).toMatchObject({ HOME: checkout, CLAUDE_CONFIG_DIR: config.env.CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY: 'native-only' });
+    // neither inherited nor descriptor-provided foreign authority reaches Claude
+    for (const name of ['OPENAI_API_KEY', 'PI_CODING_AGENT_DIR', 'CODEX_HOME', 'NODE_OPTIONS']) expect(child.env).not.toHaveProperty(name);
+    expect(child.args).toEqual(expect.arrayContaining(['--safe-mode', '--disable-slash-commands', '--no-chrome']));
+    expect(child.args[child.args.indexOf('--tools') + 1]).toBe('');
+    expect(command).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['-S', '/run/tmux/default', 'run-shell']), undefined, 7_000);
+    expect(JSON.stringify(result)).not.toContain('native-only');
+    expect(await readdir(join(checkout, '.data'))).toEqual([]);
+  });
+
+  // route claude discovery through the same private host descriptor and exact native program
+  it('queries the host Claude program without a container executable fallback', async () => {
+    const checkout = await mkdtemp(join(tmpdir(), 'rac-claude-bridge-'));
+    directories.push(checkout);
+    vi.stubEnv('RAC_HOST_INTERACTIVE_SHELL', '/bin/bash');
+    let request: Record<string, unknown> | undefined;
+    const command = vi.fn(async () => {
+      const temporary = (await readdir(join(checkout, '.data')))[0]!;
+      request = JSON.parse(await readFile(join(checkout, '.data', temporary, 'request.json'), 'utf8')) as Record<string, unknown>;
+      return { code: 0, stdout: JSON.stringify(validClaudeProbe()), stderr: '' };
+    });
+    const config: AdapterLaunchConfig = { program: '/host/bin/claude', args: ['--permission-mode', 'plan'], env: { HOME: '/host/home', CLAUDE_CONFIG_DIR: '/host/claude' }, launchable: true };
+    const environment = {
+      RAC_HOST_TMUX_DIR: '/run/tmux', RAC_HOST_NODE_BIN: '/host/bin/node', RAC_HOST_REPOSITORY: checkout,
+      RAC_HOST_PATH: '/host/bin:/usr/bin', RAC_TMUX_BIN: '/usr/bin/tmux'
+    };
+
+    const result = await probeClaudeCatalog(config, { cwd: '/container/repo', hostCwd: '/host/repo', home: '/host/home' }, 750, { command: command as never, environment, checkout });
+
+    expect(result).toEqual(validClaudeProbe());
+    expect(request).toMatchObject({ version: 1, kind: 'claude', program: '/host/bin/claude', args: config.args, cwd: '/host/repo', home: '/host/home', env: config.env });
+    expect(command).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['-S', '/run/tmux/default', 'run-shell']), undefined, 2_750);
+  });
+
   // pass only an expiring private descriptor while preserving host namespace quoting
   it.each([undefined, '', '   '])('inherits HOME=%s privately and removes the descriptor after success', async home => {
     const checkout = await mkdtemp(join(tmpdir(), 'rac-omx-bridge-'));

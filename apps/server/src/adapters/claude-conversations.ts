@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { readFileHead, readFileTail } from './bounded-file.js';
 import { FileChangeCache } from './file-change-cache.js';
+import { boundedReplyMessages, readStableJsonlTail, type AuthoredReplyMessage } from './reply-conversation.js';
 import type { ConversationSummary } from './types.js';
 
 /**
@@ -43,6 +45,7 @@ const maxFinalMessageScanBytes = 8 * 1024 * 1024;
 const maxHistoryScanBytes = 8 * 1024 * 1024;
 // discovery polls this reader, so keep each pane read small and fail safe on an oversized record
 const maxLatestMessageScanBytes = 512 * 1024;
+const maxReplySourceScanBytes = 8 * 1024 * 1024;
 // a top-level transcript filename is exactly `<session-uuid>.jsonl`
 const transcriptFile = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/iu;
 
@@ -430,6 +433,250 @@ export async function claudeConversationLatestMessage(pane: { pid: number; cwd?:
   // require the reported id and raw pane cwd that key Claude's transcript
   if (pane.conversationId === undefined || !validClaudeSessionId(pane.conversationId) || pane.cwd === undefined) return undefined;
   return latestMessageCache.get(transcriptPath(pane.conversationId, pane.cwd, env)).catch(() => undefined);
+}
+
+/** one exact Claude transcript generation and its authored reply context */
+export type ClaudeReplyConversation = {
+  conversationId: string;
+  messages: AuthoredReplyMessage[];
+  transcriptGeneration: string;
+};
+
+type ClaudeReplyRecord = TranscriptRecord & {
+  uuid?: unknown;
+  parentUuid?: unknown;
+  sessionId?: unknown;
+  session_id?: unknown;
+  subtype?: unknown;
+  isMeta?: unknown;
+  isSidechain?: unknown;
+  preventedContinuation?: unknown;
+  durationMs?: unknown;
+  messageCount?: unknown;
+  leafUuid?: unknown;
+  local_command_source?: unknown;
+  local_command_run?: unknown;
+  message?: { id?: unknown; role?: unknown; content?: unknown };
+};
+
+type ClaudeReplyNode = { index: number; record: ClaudeReplyRecord & Record<string, unknown> };
+type ClaudeReplyAssistantLeaf = { index: number; messageId: string; uuid: string };
+
+// exact pinned native aggregate keys
+const claudeCostStateFields = new Set([
+  'type', 'sessionId', 'totalCostUSD', 'totalAPIDuration', 'totalAPIDurationWithoutRetries',
+  'totalToolDuration', 'totalLinesAdded', 'totalLinesRemoved', 'totalDuration', 'startTime',
+  'modelUsage', 'hasUnknownModelCost'
+]);
+// exact pinned per-model accounting keys
+const claudeCostModelFields = new Set([
+  'inputTokens', 'outputTokens', 'thinkingTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens',
+  'cacheCreationEphemeral5mInputTokens', 'cacheCreationEphemeral1hInputTokens', 'webSearchRequests', 'costUSD'
+]);
+// mandatory pinned aggregate counters
+const requiredClaudeCostFields = [
+  'totalCostUSD', 'totalAPIDuration', 'totalAPIDurationWithoutRetries', 'totalToolDuration',
+  'totalLinesAdded', 'totalLinesRemoved', 'totalDuration', 'startTime'
+] as const;
+// mandatory pinned per-model counters
+const requiredClaudeCostModelFields = [
+  'inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'webSearchRequests', 'costUSD'
+] as const;
+
+// accept one finite nonnegative native accounting value
+function claudeCostNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+// recognize only the pinned native accounting schema as generation-inert
+function claudeInertCostState(record: ClaudeReplyRecord & Record<string, unknown>, sessionId: string): boolean {
+  // reject other record types and incomplete native cost records
+  if (record.type !== 'cost-state' || record.sessionId !== sessionId) return false;
+  // future or selection-bearing fields remain generation-significant
+  for (const key of Object.keys(record)) if (!claudeCostStateFields.has(key)) return false;
+  // every required aggregate must match the pinned numeric schema
+  for (const key of requiredClaudeCostFields) if (!claudeCostNumber(record[key])) return false;
+  // the optional uncertainty marker must retain its native type
+  if (record.hasUnknownModelCost !== undefined && typeof record.hasUnknownModelCost !== 'boolean') return false;
+  const modelUsage = record.modelUsage;
+  // model accounting must remain a plain record
+  if (modelUsage === null || typeof modelUsage !== 'object' || Array.isArray(modelUsage)) return false;
+  // validate each dynamic model accounting entry
+  for (const [model, value] of Object.entries(modelUsage)) {
+    // native model keys exclude control and format characters
+    if (model === '' || /[\p{Cc}\p{Cf}]/u.test(model) || value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+    // future model fields remain generation-significant
+    for (const key of Object.keys(value)) if (!claudeCostModelFields.has(key)) return false;
+    // every required model counter must match the pinned numeric schema
+    for (const key of requiredClaudeCostModelFields) if (!claudeCostNumber((value as Record<string, unknown>)[key])) return false;
+    // optional token counters retain the same numeric bounds
+    for (const key of ['thinkingTokens', 'cacheCreationEphemeral5mInputTokens', 'cacheCreationEphemeral1hInputTokens'] as const) {
+      const counter = (value as Record<string, unknown>)[key];
+      // absent optional counters are valid
+      if (counter !== undefined && !claudeCostNumber(counter)) return false;
+    }
+  }
+  return true;
+}
+
+// accept one bounded noncontrol native transcript identifier
+function claudeReplyUuid(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' && value.length <= 256 && !/[\p{Cc}\p{Cf}]/u.test(value) ? value : undefined;
+}
+
+// require both native session spellings to identify the expected conversation
+function claudeReplySameSession(record: ClaudeReplyRecord, sessionId: string): boolean {
+  return record.sessionId === sessionId && (record.session_id === undefined || record.session_id === sessionId);
+}
+
+// prove the latest physical assistant record reached the native terminal leaf
+function claudeReplyTurnComplete(records: readonly (ClaudeReplyRecord & Record<string, unknown>)[], nodes: ReadonlyMap<string, ClaudeReplyNode>, assistant: ClaudeReplyAssistantLeaf | undefined, sessionId: string): boolean {
+  // no authored assistant leaf means no reply can be terminal
+  if (assistant === undefined) return false;
+  let latestMarker: ClaudeReplyRecord | undefined;
+  // native persistence can place the terminal marker before or after the terminal record
+  for (let index = assistant.index + 1; index < records.length; index += 1) {
+    const record = records[index]!;
+    // only the latest marker from this conversation can corroborate completion
+    if (record.type === 'last-prompt' && claudeReplySameSession(record, sessionId)) latestMarker = record;
+  }
+  const latestLeafUuid = claudeReplyUuid(latestMarker?.leafUuid);
+  // missing or malformed latest markers never fall back to an older leaf
+  if (latestLeafUuid === undefined) return false;
+  let latestTerminal: { attachmentUuid: string; terminalUuid: string } | undefined;
+  // inspect each possible terminal after the latest assistant record
+  for (let index = assistant.index + 1; index < records.length; index += 1) {
+    const terminal = records[index]!;
+    // require the pinned main-thread terminal shape and current session
+    if (terminal.type !== 'system' || terminal.subtype !== 'turn_duration' || terminal.isMeta !== false || terminal.isSidechain !== false
+      || !Number.isInteger(terminal.durationMs) || (terminal.durationMs as number) < 0
+      || !Number.isInteger(terminal.messageCount) || (terminal.messageCount as number) < 0
+      || !claudeReplySameSession(terminal, sessionId)) continue;
+    const terminalUuid = claudeReplyUuid(terminal.uuid);
+    const stopUuid = claudeReplyUuid(terminal.parentUuid);
+    // incomplete terminal links cannot authorize a source
+    if (terminalUuid === undefined || stopUuid === undefined) continue;
+    const stop = nodes.get(stopUuid);
+    // the stop summary must precede the terminal and belong to this main thread
+    if (stop === undefined || stop.index <= assistant.index || stop.index >= index || stop.record.type !== 'system'
+      || stop.record.subtype !== 'stop_hook_summary' || stop.record.isSidechain !== false
+      || stop.record.preventedContinuation !== false || !claudeReplySameSession(stop.record, sessionId)) continue;
+    const attachmentUuid = claudeReplyUuid(stop.record.parentUuid);
+    // a missing attachment endpoint cannot close the native chain
+    if (attachmentUuid === undefined) continue;
+    const attachment = nodes.get(attachmentUuid);
+    // the observed attachment must follow and point directly to the latest assistant leaf
+    if (attachment === undefined || attachment.index <= assistant.index || attachment.index >= stop.index
+      || attachment.record.type !== 'attachment' || attachment.record.isSidechain !== false
+      || !claudeReplySameSession(attachment.record, sessionId) || attachment.record.parentUuid !== assistant.uuid) continue;
+    // retain the newest fully linked terminal for latest-marker corroboration
+    latestTerminal = { attachmentUuid, terminalUuid };
+  }
+  return latestTerminal !== undefined && (latestTerminal.terminalUuid === latestLeafUuid || latestTerminal.attachmentUuid === latestLeafUuid);
+}
+
+// extract only text a person typed, excluding attachments and tool results
+function claudeReplyUserText(record: ClaudeReplyRecord): string | undefined {
+  // require the native typed-human provenance
+  if (record.type !== 'user' || record.isMeta === true || record.isSidechain === true || record.promptSource !== 'typed' || record.origin?.kind !== 'human' || record.message?.role !== 'user') return undefined;
+  const content = record.message.content;
+  // retain direct typed prose
+  if (typeof content === 'string') return content.trim() === '' ? undefined : content;
+  // copy text blocks only when attachments accompany a prompt
+  if (!Array.isArray(content)) return undefined;
+  const text = content.flatMap(block => block !== null && typeof block === 'object' && (block as { type?: unknown }).type === 'text'
+    && typeof (block as { text?: unknown }).text === 'string' ? [(block as { text: string }).text] : []).join('\n');
+  return text.trim() === '' ? undefined : text;
+}
+
+// extract only visible text from a main-thread assistant record
+function claudeReplyAssistantText(content: unknown): string {
+  // retain direct assistant prose
+  if (typeof content === 'string') return content;
+  // nonarray content has no visible prose
+  if (!Array.isArray(content)) return '';
+  return content.flatMap(block => block !== null && typeof block === 'object' && (block as { type?: unknown }).type === 'text'
+    && typeof (block as { text?: unknown }).text === 'string' ? [(block as { text: string }).text] : []).join('\n');
+}
+
+// parse complete current-conversation messages and every generation-significant record
+function claudeReplyRecords(lines: readonly string[], truncated: boolean, fileIdentity: string, sessionId: string): { messages: AuthoredReplyMessage[]; generation: string } | undefined {
+  const messages: AuthoredReplyMessage[] = [];
+  const significant: string[] = [];
+  const records: Array<ClaudeReplyRecord & Record<string, unknown>> = [];
+  const nodes = new Map<string, ClaudeReplyNode>();
+  let reachedBoundary = !truncated;
+  let assistant: { id: string; text: string } | undefined;
+  let assistantLeaf: ClaudeReplyAssistantLeaf | undefined;
+  // flush one assembled streaming assistant message
+  const flushAssistant = (): void => {
+    // omit empty and pre-boundary model records
+    if (assistant !== undefined && reachedBoundary && assistant.text.trim() !== '') messages.push({ id: `assistant:${assistant.id}`, role: 'assistant', text: assistant.text });
+    assistant = undefined;
+  };
+  // apply transcript records in append order
+  for (let index = 0; index < lines.length; index += 1) {
+    let parsed: unknown;
+    // malformed complete records make the source generation unusable
+    try { parsed = JSON.parse(lines[index]!); } catch { return undefined; }
+    // nonrecord JSON cannot be a native transcript entry
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const record = parsed as ClaudeReplyRecord & Record<string, unknown>;
+    records.push(record);
+    const uuid = record.uuid === undefined ? undefined : claudeReplyUuid(record.uuid);
+    // malformed or duplicate native identifiers make the chain ambiguous
+    if ((record.uuid !== undefined && uuid === undefined) || (uuid !== undefined && nodes.has(uuid))) return undefined;
+    // retain one physical append position per native node
+    if (uuid !== undefined) nodes.set(uuid, { index, record });
+    // only the pinned cost schema is inert; every other raw record detects selection ABA
+    if (!claudeInertCostState(record, sessionId)) significant.push(lines[index]!);
+    // a typed main-thread human prompt is the only user context boundary
+    const prompt = claudeReplyUserText(record);
+    if (prompt !== undefined) {
+      flushAssistant();
+      reachedBoundary = true;
+      const id = typeof record.uuid === 'string' && record.uuid !== '' ? record.uuid : `line-${index}`;
+      messages.push({ id: `user:${id}`, role: 'user', text: prompt });
+      continue;
+    }
+    // ignore sidechains, tool results, hooks, metadata and nonassistant records
+    if (record.type !== 'assistant' || record.isSidechain === true || record.local_command_source !== undefined || record.local_command_run !== undefined
+      || record.message?.role !== 'assistant' || typeof record.message.id !== 'string' || record.message.id === '') continue;
+    // the newest accepted assistant record owns terminal availability
+    assistantLeaf = uuid !== undefined && record.isSidechain === false && claudeReplySameSession(record, sessionId)
+      ? { index, messageId: record.message.id, uuid }
+      : undefined;
+    // a new native message id completes the prior assistant reply
+    if (assistant?.id !== record.message.id) {
+      flushAssistant();
+      assistant = { id: record.message.id, text: '' };
+    }
+    const text = claudeReplyAssistantText(record.message.content);
+    // concatenate only visible text blocks from this native message
+    if (text !== '') assistant.text = assistant.text === '' ? text : `${assistant.text}\n${text}`;
+  }
+  flushAssistant();
+  // a truncated tail must reach a typed user boundary before retaining output
+  if (!reachedBoundary) return undefined;
+  // publish only after the native turn terminal links to the latest assistant leaf
+  if (!claudeReplyTurnComplete(records, nodes, assistantLeaf, sessionId)) return undefined;
+  const bounded = boundedReplyMessages(messages);
+  // never publish an older visible question for a newer empty assistant turn
+  if (assistantLeaf === undefined || bounded?.at(-1)?.id !== `assistant:${assistantLeaf.messageId}`) return undefined;
+  // replacement inodes and every ordered nonaccounting record define Claude source identity
+  const generation = createHash('sha256').update(fileIdentity).update('\0').update(significant.join('\n')).digest('base64url');
+  return { messages: bounded, generation };
+}
+
+/** read one exact Claude session without copying tools, hooks or private reasoning */
+export async function claudeReplyConversation(id: string, cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<ClaudeReplyConversation | undefined> {
+  // require the exact reported session and project directory
+  if (!validClaudeSessionId(id) || cwd === '') return undefined;
+  const tail = await readStableJsonlTail(transcriptPath(id, cwd, env), maxReplySourceScanBytes).catch(() => undefined);
+  // reject unstable transcript generations
+  if (tail === undefined) return undefined;
+  const parsed = claudeReplyRecords(tail.lines, tail.truncated, tail.fileIdentity, id);
+  return parsed === undefined ? undefined : { conversationId: id, messages: parsed.messages, transcriptGeneration: parsed.generation };
 }
 
 /**
