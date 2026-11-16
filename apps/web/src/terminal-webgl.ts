@@ -21,48 +21,63 @@ let unavailable = false;
 export const wantsWebglRenderer = (coarsePointer: boolean): boolean =>
   webglTerminals.get() && !coarsePointer && !isSafari() && !unavailable;
 
-// Load the WebGL renderer into an opened terminal, staying on (or returning to) DOM if it
-// fails. `onRendererChange` runs after each swap, since the cell size can differ between
-// renderers. The addon is disposed with the terminal; the returned function only stops
-// pending work.
+// load every terminal face before glyphs enter the shared gpu atlas
+const loadTerminalFonts = async (terminal: Terminal): Promise<void> => {
+  const { fontFamily, fontSize, fontWeight, fontWeightBold } = terminal.options;
+  const face = `${fontSize}px ${fontFamily}`;
+  const glyphs = 'W\ue0b0';
+  const faces = await Promise.allSettled([
+    document.fonts.load(`${fontWeight} ${face}`, glyphs),
+    document.fonts.load(`italic ${fontWeight} ${face}`, glyphs),
+    document.fonts.load(`${fontWeightBold} ${face}`, glyphs),
+    document.fonts.load(`italic ${fontWeightBold} ${face}`, glyphs)
+  ]);
+  await document.fonts.ready;
+  // propagate preload failures only after the remaining faces have settled
+  const failed = faces.find(face => face.status === 'rejected');
+  // failed faces select the dom fallback rather than entering the gpu atlas
+  if (failed) throw failed.reason;
+};
+
+// settle the initial renderer selection and report later fallback swaps
+// the terminal owns addon disposal; release only cancels pending initialization
 export const attachWebglRenderer = (terminal: Terminal, onRendererChange: () => void): (() => void) => {
   let released = false;
-  let addon: WebglAddon | undefined;
-  // Glyphs rasterised before the web font arrived are cached in the fallback font.
-  const refreshGlyphs = () => addon?.clearTextureAtlas();
-  const stopFontWatch = () => document.fonts.removeEventListener('loadingdone', refreshGlyphs);
 
-  import('@xterm/addon-webgl').then(addonModule => {
+  // addon 0.19 shares atlases without safely invalidating sibling glyph models (#6014)
+  // preload instead of clearing shared textures; revisit with a fixed stable addon
+  Promise.allSettled([import('@xterm/addon-webgl'), loadTerminalFonts(terminal)]).then(([addon, fonts]) => {
+    // disposed terminals must not acquire a renderer after async loading
     if (released) return;
+    // a failed download must still wait for font preparation before fallback
+    if (addon.status === 'rejected') throw addon.reason;
+    // a failed face must not create a partially prepared gpu atlas
+    if (fonts.status === 'rejected') throw fonts.reason;
     let next: WebglAddon | undefined;
     try {
-      next = new addonModule.WebglAddon();
+      next = new addon.value.WebglAddon();
       terminal.loadAddon(next);
     } catch (error) {
       unavailable = true;
       try { next?.dispose(); } catch { /* partially activated; the DOM renderer is still in place */ }
       console.warn('WebGL terminal renderer unavailable; using DOM for this page session', error);
+      onRendererChange();
       return;
     }
-    addon = next;
     // Disposing the addon restores xterm's DOM renderer; the stream is untouched.
     next.onContextLoss(() => {
-      stopFontWatch();
-      addon = undefined;
       next.dispose();
       onRendererChange();
     });
-    document.fonts.addEventListener('loadingdone', refreshGlyphs);
-    void document.fonts.ready.then(() => { if (!released) refreshGlyphs(); });
     onRendererChange();
   }).catch((error: unknown) => {
-    // A failed chunk load leaves the DOM renderer in place; a later mount may retry.
+    // ignore late failures after the terminal has been disposed
+    if (released) return;
+    // failed assets leave the dom renderer usable rather than a permanent skeleton
     console.warn('WebGL terminal renderer failed to load', error);
+    onRendererChange();
   });
 
-  return () => {
-    released = true;
-    addon = undefined;
-    stopFontWatch();
-  };
+  // prevent late renderer activation after unmount
+  return () => { released = true; };
 };

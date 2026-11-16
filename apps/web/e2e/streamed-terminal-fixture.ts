@@ -168,6 +168,18 @@ export const jumpHidden = () => root?.querySelector<HTMLButtonElement>('.streame
 export const clickJump = () => root?.querySelector<HTMLButtonElement>('.streamed-terminal-jump')?.click();
 export const cols = () => terminal().cols;
 export const rows = () => terminal().rows;
+// redraw existing cells without changing their contents
+export const refreshViewport = () => terminal().refresh(0, terminal().rows - 1);
+let atlasResets = 0;
+// count public atlas resets that can invalidate a sibling renderer's cached glyphs
+export const trackWebglAtlasResets = async () => {
+  const { WebglAddon } = await import('@xterm/addon-webgl');
+  const clear = WebglAddon.prototype.clearTextureAtlas;
+  // preserve real GPU behavior while observing the shared-cache boundary
+  WebglAddon.prototype.clearTextureAtlas = function () { atlasResets += 1; clear.call(this); };
+};
+// expose only the public operation count to the regression
+export const webglAtlasResets = () => atlasResets;
 export const viewportY = () => terminal().buffer.active.viewportY;
 export const baseY = () => terminal().buffer.active.baseY;
 export const alternateScreen = () => terminal().buffer.active.type === 'alternate';

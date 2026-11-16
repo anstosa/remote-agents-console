@@ -1195,6 +1195,202 @@ test('a real touch swipe over agent output keeps scrolling after the first row r
   }
 });
 
+// hold actual browser paints while xterm's asynchronous parser continues
+const holdTerminalFrames = (page: Page) => page.evaluate(() => {
+  const request = window.requestAnimationFrame.bind(window);
+  const cancel = window.cancelAnimationFrame.bind(window);
+  const pending = new Map<number, FrameRequestCallback>();
+  let next = -1;
+  // collect frames without executing renderer work
+  window.requestAnimationFrame = callback => { const id = next--; pending.set(id, callback); return id; };
+  // preserve cancellation of native and held frames
+  window.cancelAnimationFrame = id => { if (!pending.delete(id)) cancel(id); };
+  // restore the browser before replaying pending paints
+  (window as unknown as { releaseTerminalFrames: () => void }).releaseTerminalFrames = () => {
+    window.requestAnimationFrame = request;
+    window.cancelAnimationFrame = cancel;
+    // preserve each pending callback's ordinary frame boundary
+    for (const callback of pending.values()) request(callback);
+    pending.clear();
+  };
+});
+
+// restore held browser paints even when a readiness assertion fails
+const releaseTerminalFrames = (page: Page) => page.evaluate(() => (window as unknown as { releaseTerminalFrames?: () => void }).releaseTerminalFrames?.());
+
+// parsing the seed alone must not reveal an unpainted GPU canvas
+test('keeps the WebGL agent skeleton until the seed paints', async ({ page }) => {
+  await setup(page, { loadingKind: 'agent' }, true);
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  await drive(page, 'pushSize', 40, 10);
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await holdTerminalFrames(page);
+  try {
+    await drive(page, 'pushBytes', 'PAINTED-SEED\r\n');
+    await expect.poll(() => drive(page, 'screenText')).toContain('PAINTED-SEED');
+    await expect(page.locator('#term .streamed-terminal-status .output-skeleton')).toBeVisible();
+    await expect(page.locator('#term .streamed-terminal-cover')).toHaveCount(1);
+  } finally { await releaseTerminalFrames(page); }
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await expect(page.locator('#term .streamed-terminal-cover')).toHaveCount(0);
+});
+
+// a departed stream cannot reveal a seed that was parsed but never painted
+test('keeps the reconnect skeleton when a pending WebGL seed loses its stream', async ({ page }) => {
+  await setup(page, { loadingKind: 'agent' }, true);
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  await drive(page, 'pushSize', 40, 10);
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await holdTerminalFrames(page);
+  try {
+    await drive(page, 'pushBytes', 'DEPARTED-SEED\r\n');
+    await expect.poll(() => drive(page, 'screenText')).toContain('DEPARTED-SEED');
+    await drive(page, 'pushClose', 1006, 'disconnected');
+  } finally { await releaseTerminalFrames(page); }
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.locator('#term .streamed-terminal-status')).toHaveAttribute('aria-busy', 'true');
+  await expect(page.locator('#term .output-skeleton')).toBeVisible();
+  await expect(page.locator('#term .streamed-terminal-cover')).toHaveCount(1);
+});
+
+// a fast seed cannot expose the temporary DOM renderer before the GPU swap
+test('keeps the agent skeleton while the WebGL addon is loading', async ({ page }) => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  // delay only the renderer module, not the terminal stream
+  await page.route('**/*addon-webgl*', async route => { await pending; await route.continue(); });
+  try {
+    await setup(page, { loadingKind: 'agent' }, true);
+    await drive(page, 'pushSize', 40, 10);
+    await drive(page, 'pushBytes', 'EARLY-SEED\r\n');
+    await expect.poll(() => drive(page, 'screenText')).toContain('EARLY-SEED');
+    await expect(page.locator('#term .output-skeleton')).toBeVisible();
+  } finally { release(); }
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+});
+
+// failed renderer assets must still reveal a painted usable fallback
+test('reveals the DOM seed when the WebGL addon download fails', async ({ page }) => {
+  await page.route('**/*addon-webgl*', route => route.abort('failed'));
+  await setup(page, { loadingKind: 'agent' }, true);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'FALLBACK-SEED\r\n');
+  await expect(page.locator('#term .xterm-rows')).toContainText('FALLBACK-SEED');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await expect(page.locator('#term .streamed-terminal-cover')).toHaveCount(0);
+  expect(await drive(page, 'connectCalls')).toBe(1);
+  await drive(page, 'sendInputRaw', 'still works');
+  expect(await drive(page, 'inputData')).toBe('still works');
+});
+
+// webfont readiness must precede atlas creation and the first visible seed
+test('keeps the WebGL agent skeleton while terminal fonts are pending', async ({ page }) => {
+  await page.addInitScript(() => {
+    let release!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    Object.defineProperty(document.fonts, 'ready', { configurable: true, get: () => ready });
+    (window as unknown as { releaseTerminalFonts: () => void }).releaseTerminalFonts = release;
+  });
+  try {
+    await setup(page, { loadingKind: 'agent' }, true);
+    await drive(page, 'pushSize', 40, 10);
+    await drive(page, 'pushBytes', 'FONT-SEED\r\n');
+    await expect.poll(() => drive(page, 'screenText')).toContain('FONT-SEED');
+    await expect(page.locator('#term .output-skeleton')).toBeVisible();
+    expect(await drive(page, 'rendererKind')).toBe('dom');
+  } finally { await page.evaluate(() => (window as unknown as { releaseTerminalFonts: () => void }).releaseTerminalFonts()); }
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  // normal, bold and italic text/icons must be ready before the atlas can cache them
+  const loaded = await page.locator('#term .xterm').evaluate(element => {
+    const style = getComputedStyle(element);
+    return ['normal', 'bold', 'italic normal', 'italic bold'].every(face => document.fonts.check(`${face} ${style.fontSize} ${style.fontFamily}`, 'W\ue0b0'));
+  });
+  expect(loaded).toBe(true);
+});
+
+// neither failed assets nor failed faces can bypass pending font readiness
+for (const failure of ['addon', 'font face'] as const) {
+  // cover both fail-fast paths with the same painted fallback contract
+  test(`keeps the agent skeleton after ${failure} failure until fonts settle`, async ({ page }) => {
+    // reject one face without preventing the remaining faces from loading
+    await page.addInitScript(failFace => {
+      const load = document.fonts.load.bind(document.fonts);
+      let pendingFailure = failFace;
+      // fail only the first preload in the font-face scenario
+      document.fonts.load = (...args) => {
+        // preserve successful preloads after the simulated failure
+        if (pendingFailure) {
+          pendingFailure = false;
+          return Promise.reject(new Error('simulated font face failure'));
+        }
+        return load(...args);
+      };
+      let release!: () => void;
+      const ready = new Promise<void>(resolve => { release = resolve; });
+      Object.defineProperty(document.fonts, 'ready', { configurable: true, get: () => ready });
+      (window as unknown as { releaseTerminalFonts: () => void }).releaseTerminalFonts = release;
+    }, failure === 'font face');
+    // abort only the renderer module in the download-failure scenario
+    if (failure === 'addon') await page.route('**/*addon-webgl*', route => route.abort('failed'));
+    try {
+      await setup(page, { loadingKind: 'agent' }, true);
+      await drive(page, 'pushSize', 40, 10);
+      await drive(page, 'pushBytes', 'PENDING-FALLBACK\r\n');
+      await expect.poll(() => drive(page, 'screenText')).toContain('PENDING-FALLBACK');
+      await drive(page, 'refreshViewport');
+      // give the temporary DOM renderer a complete paint before checking its cover
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      await expect(page.locator('#term .output-skeleton')).toBeVisible();
+      await expect(page.locator('#term .streamed-terminal-cover')).toHaveCount(1);
+    } finally { await page.evaluate(() => (window as unknown as { releaseTerminalFonts: () => void }).releaseTerminalFonts()); }
+    await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+    await expect(page.locator('#term .streamed-terminal-cover')).toHaveCount(0);
+    await expect(page.locator('#term .xterm-rows')).toContainText('PENDING-FALLBACK');
+    expect(await drive(page, 'rendererKind')).toBe('dom');
+    expect(await drive(page, 'connectCalls')).toBe(1);
+    await drive(page, 'sendInputRaw', 'fallback works');
+    expect(await drive(page, 'inputData')).toBe('fallback works');
+  });
+}
+
+// a newly mounted sibling must not reset the visible terminal's shared glyph atlas
+test('keeps an existing WebGL agent intact when another terminal loads', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await setup(page, { loadingKind: 'agent' }, true);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', '\x1b[1mαβγδεζηθ\x1b[0m\r\n\ue0b0 \uf121 \uf00c Original agent\r\n');
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  const screen = page.locator('#term .xterm-screen');
+  const before = await screen.screenshot();
+  await drive(page, 'trackWebglAtlasResets');
+  await page.evaluate(async () => {
+    const { mountStreamedTerminal } = await import('/src/streamed-terminal.ts');
+    const sibling = document.createElement('div');
+    sibling.id = 'sibling';
+    Object.assign(sibling.style, { position: 'absolute', left: '700px', top: '0', width: '640px', height: '320px' });
+    document.body.append(sibling);
+    mountStreamedTerminal(sibling, { loadingKind: 'agent', connect: handlers => {
+      // deliver a distinct seed after the connection exists
+      setTimeout(() => {
+        handlers.onOpen();
+        handlers.onFrame({ type: 'size', cols: 40, rows: 10 });
+        handlers.onBytes(new TextEncoder().encode('Different ΩЖ glyphs\r\n\x1b[31mSECOND AGENT\x1b[0m\r\n'));
+      }, 0);
+      return { send: () => {}, close: () => {} };
+    } });
+  });
+  await expect(page.locator('#sibling .xterm-screen canvas')).not.toHaveCount(0);
+  await expect(page.locator('#sibling .streamed-terminal-status')).toBeHidden();
+  // an unrelated font event must not wipe shared glyph locations either
+  await page.evaluate(() => document.fonts.dispatchEvent(new Event('loadingdone')));
+  await drive(page, 'refreshViewport');
+  expect(await drive(page, 'webglAtlasResets')).toBe(0);
+  await expect.poll(async () => (await screen.screenshot()).equals(before)).toBe(true);
+});
+
 test('renders with WebGL on a desktop browser by default', async ({ page }) => {
   await setup(page, {}, true);
   await drive(page, 'pushSize', 40, 10);
@@ -1308,6 +1504,8 @@ const seedAndLeave = async (page: Page, workspace: string, text: string) => {
   await drive(page, 'pushSize', 40, 10);
   await drive(page, 'pushBytes', `${text}\r\n`);
   await expect.poll(() => drive(page, 'screenText')).toContain(text);
+  // only a painted viewport is an immediately reusable retained screen
+  await expect(page.locator(`#term-${workspace} .streamed-terminal-status`)).toBeHidden();
   await drive(page, 'leavePanel');
 };
 
@@ -1316,6 +1514,8 @@ test('a kept terminal shows its last screen at once when shown again, then resee
   await drive(page, 'pushSize', 40, 10);
   await drive(page, 'pushBytes', 'OLD-SCREEN\r\n');
   await expect.poll(() => drive(page, 'screenText')).toContain('OLD-SCREEN');
+  // establish the retained painted screen before leaving its workspace
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
   await drive(page, 'leavePanel');
   // leaving closes the stream at once, so the server releases the pane's Size claim
   expect(await drive(page, 'closeCalls')).toBe(1);
@@ -1349,6 +1549,8 @@ test('a parked terminal stays closed through visibilitychange, online and a late
   await setup(page, keepIn('A'));
   await drive(page, 'pushSize', 40, 10);
   await drive(page, 'pushBytes', 'LIVE\r\n');
+  // establish a painted live screen before testing its parked reconnect behavior
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
   // a lost stream has its retry pending when the Workspace is left
   await drive(page, 'pushClose', 1006, 'lost');
   await expect(page.locator('#term .streamed-terminal-status')).toContainText('Reconnecting…');

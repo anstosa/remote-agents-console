@@ -195,6 +195,9 @@ must not look successful. Activity rows are silent, excluded from model context,
 and share the existing three-day retention window.
 Agent and terminal connections use output-line skeletons for initial
 attachment and automatic reconnects, retaining the mounted terminal underneath.
+Keep loading artwork until the current seed has painted in the selected renderer,
+not merely finished parsing. Load terminal font faces before WebGL activation and
+never reset its shared glyph atlas when another panel mounts or unrelated fonts load.
 When available, agent skeletons replay the last visible text geometry for that pane,
 preserving widths, indentation and blank rows without storing transcript text.
 The geometry is cached in the current tab, scales with the terminal font size and is

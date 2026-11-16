@@ -123,6 +123,8 @@ const createOutputSkeletonGroup = (kind: 'agent' | 'terminal'): HTMLElement => {
 export const mountStreamedTerminal = (container: HTMLElement, options: StreamedTerminalOptions): StreamedTerminalHandle => {
   const reconnectDelayMs = options.reconnectDelayMs ?? 1000;
   const coarse = coarsePointer();
+  const useWebgl = wantsWebglRenderer(coarse);
+  let rendererReady = !useWebgl;
   const scrollback = options.scrollback ?? 2000;
 
   // Layout: the terminal renders at its natural grid top-left; when the pane is
@@ -300,6 +302,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   // Re-proposes the viewport on each render until one carries, then drops itself (wired to
   // onRender below); see there for why the open and initial-resize sends aren't enough.
   let firstViewportSub: IDisposable | undefined;
+  let seedRenderSub: IDisposable | undefined;
 
   const scheduleOverlayRender = () => {
     if (overlayFrame !== undefined) return;
@@ -447,12 +450,20 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
         if (wasSeed && connection === source && generation === outputGeneration) {
           parsedSeedGeneration = generation;
           seededAt = performance.now();
-          hideStatus();
+          seedRenderSub?.dispose();
+          // reveal only a full paint by the settled renderer for this exact stream
+          seedRenderSub = terminal.onRender(({ start, end }) => {
+            // old, partial or temporary renderer frames cannot dismiss loading artwork
+            if (disposed || parked || !rendererReady || connection !== source || generation !== outputGeneration || start !== 0 || end < terminal.rows - 1) return;
+            seedRenderSub?.dispose();
+            seedRenderSub = undefined;
+            hideStatus();
+            revealTerminal();
+          });
+          terminal.refresh(0, terminal.rows - 1);
         }
         scheduleOverlayRender();
         syncFollowState();
-        // uncover the first populated frame
-        if (wasSeed) revealTerminal();
         // let xterm finish its parser turn before scheduling the next visual event
         queueMicrotask(drainOutput);
       });
@@ -507,6 +518,9 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   };
 
   const closeConnection = () => {
+    // a departed stream cannot reveal its pending frame later
+    seedRenderSub?.dispose();
+    seedRenderSub = undefined;
     const current = connection;
     connection = undefined;
     if (current !== undefined) { try { current.close(); } catch { /* already closing */ } }
@@ -771,8 +785,11 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     scheduleOverlayRender();
   });
 
-  const releaseWebgl = wantsWebglRenderer(coarse) ? attachWebglRenderer(terminal, () => {
+  // fonts and the selected renderer must settle before the seed's paint can reveal it
+  const releaseWebgl = useWebgl ? attachWebglRenderer(terminal, () => {
     if (disposed) return;
+    rendererReady = true;
+    terminal.refresh(0, terminal.rows - 1);
     scheduleViewport();
     scheduleOverlayRender();
   }) : undefined;
