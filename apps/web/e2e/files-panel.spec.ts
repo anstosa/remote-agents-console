@@ -3,9 +3,9 @@ import { installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock.js'
 import { installFilesFixture } from './files-panel-fixture.js';
 
 // open one authenticated worktree files fixture
-async function openFiles(page: Page) {
+async function openFiles(page: Page, entryCount?: number) {
   await installPaneMock(page);
-  const fixture = await installFilesFixture(page);
+  const fixture = await installFilesFixture(page, { entryCount });
   await page.goto('/');
   await seedPaneSize(page, 'agent-1', 80, 24);
   await pushBytes(page, 'agent-1', 'Ready\r\n');
@@ -18,6 +18,137 @@ async function openFiles(page: Page) {
   const panel = page.getByRole('region', { name: 'Files' });
   await expect(panel.getByRole('grid')).toBeVisible();
   return { fixture, panel };
+}
+
+// bound mounted rows while retaining every logical entry on desktop and phone
+for (const width of [1_600, 390]) {
+  // exercise the server's maximum listing through real scrolling
+  test(`virtualizes a 10000-entry Files table at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { panel } = await openFiles(page, 10_000);
+    const grid = panel.getByRole('grid');
+    const rows = grid.locator('.files-row');
+    await expect(grid).toHaveAttribute('aria-busy', 'false');
+    expect(await rows.count()).toBeLessThan(100);
+    await expect(grid).toHaveAttribute('aria-rowcount', '10001');
+    await expect(panel.getByRole('button', { name: 'file-00000.txt', exact: true })).toBeVisible();
+    await grid.evaluate(element => { element.scrollTop = element.scrollHeight / 2; });
+    await expect(panel.getByRole('button', { name: 'file-05000.txt', exact: true })).toBeVisible();
+    expect(await rows.count()).toBeLessThan(100);
+    await grid.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    const last = rows.filter({ hasText: 'file-09999.txt' });
+    await expect(last).toBeInViewport();
+    await expect(last).toHaveAttribute('aria-rowindex', '10001');
+    await expect(last).toHaveCSS('border-bottom-width', '0px');
+    expect(await rows.count()).toBeLessThan(100);
+    // keep the header sticky and the page free of horizontal overflow
+    const geometry = await grid.evaluate(element => ({ gridTop: element.getBoundingClientRect().top, headerTop: element.querySelector('.files-grid-head')!.getBoundingClientRect().top }));
+    expect(Math.abs(geometry.headerTop - geometry.gridTop)).toBeLessThanOrEqual(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    const previousHeight = await grid.evaluate(element => element.clientHeight);
+    await page.setViewportSize({ width, height: 550 });
+    await expect.poll(() => grid.evaluate(element => element.clientHeight)).toBeLessThan(previousHeight);
+    // a resize preserves the top offset, so revisit the new end of the scrollbar
+    await grid.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    await expect(last).toBeInViewport();
+    expect(await rows.count()).toBeLessThan(100);
+  });
+}
+
+// retain complete-list ranges and reset the viewport when its ordering or folder changes
+test('keeps offscreen Files selections through scrolling and sorting', async ({ page }) => {
+  await page.setViewportSize({ width: 1_600, height: 900 });
+  const { panel } = await openFiles(page, 10_000);
+  const grid = panel.getByRole('grid');
+  const rows = grid.locator('.files-row');
+  await rows.filter({ hasText: 'file-00000.txt' }).locator('[data-label="Owner"]').click();
+  await grid.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  const last = rows.filter({ hasText: 'file-09999.txt' });
+  await expect(last).toBeInViewport();
+  await last.locator('[data-label="Owner"]').click({ modifiers: ['Shift'] });
+  await last.click({ button: 'right' });
+  await expect(page.getByRole('menu', { name: 'Actions for 10000 selected items', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await panel.getByRole('button', { name: 'Sort by Name', exact: true }).click();
+  await expect(rows.first()).toContainText('file-09999.txt');
+  await expect(rows.first()).toHaveAttribute('aria-selected', 'true');
+  await expect.poll(() => grid.evaluate(element => element.scrollTop)).toBe(0);
+  // a smaller destination cannot inherit a far-away virtual window
+  const location = panel.getByRole('textbox', { name: 'Absolute path' });
+  await location.fill('/home/ubuntu/project/sub');
+  await location.press('Enter');
+  await expect(panel.getByText('This folder is empty.', { exact: true })).toBeVisible();
+  await expect(rows).toHaveCount(0);
+});
+
+// delayed scroll events from revealing the actions column must not close a new menu
+test('keeps Files actions open after their trigger scrolls into view', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const { panel } = await openFiles(page);
+  const grid = panel.getByRole('grid');
+  await panel.getByRole('button', { name: 'Actions for alpha.txt', exact: true }).click();
+  await expect.poll(() => grid.evaluate(element => element.scrollLeft)).toBeGreaterThan(0);
+  const menu = page.getByRole('menu', { name: 'Actions for alpha.txt', exact: true });
+  await expect(menu).toBeVisible();
+  await menu.getByRole('menuitem', { name: 'Copy', exact: true }).click();
+  await expect(menu).toHaveCount(0);
+});
+
+// preserve keyboard continuity and avoid orphaned row-menu anchors
+test('keeps Files keyboard focus across virtual windows and dismisses scrolled menus', async ({ page }) => {
+  await page.setViewportSize({ width: 1_600, height: 900 });
+  const { panel } = await openFiles(page, 10_000);
+  const grid = panel.getByRole('grid');
+  const rows = grid.locator('.files-row');
+  const first = rows.filter({ hasText: 'file-00000.txt' });
+  await first.getByRole('button', { name: 'Actions for file-00000.txt', exact: true }).focus();
+  await grid.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await expect(rows.filter({ hasText: 'file-09999.txt' })).toBeInViewport();
+  await expect(first.getByRole('button', { name: 'Actions for file-00000.txt', exact: true })).toBeFocused();
+  expect(await rows.count()).toBeLessThan(100);
+  await page.keyboard.press('Tab');
+  const second = rows.filter({ hasText: 'file-00001.txt' });
+  await expect(second).toBeFocused();
+  await second.press('Shift+Tab');
+  await expect(first.getByRole('button', { name: 'Actions for file-00000.txt', exact: true })).toBeFocused();
+  await first.getByRole('button', { name: 'Actions for file-00000.txt', exact: true }).click();
+  await expect(page.getByRole('menu', { name: 'Actions for file-00000.txt', exact: true })).toBeVisible();
+  await grid.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await expect(page.getByRole('menu', { name: 'Actions for file-00000.txt', exact: true })).toHaveCount(0);
+  await expect(rows.filter({ hasText: 'file-09999.txt' })).toBeInViewport();
+});
+
+// resize must dismiss orphaned row menus but retain still-mounted anchors
+for (const [height, externalFocus] of [[850, false], [550, false], [550, true]] as const) {
+  // open near the viewport edge before changing only its height
+  test(`keeps Files row-menu lifecycle stable after resizing to ${height}px${externalFocus ? ' with external focus' : ''}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1_600, height: 900 });
+    const { panel } = await openFiles(page, 10_000);
+    const grid = panel.getByRole('grid');
+    const trigger = panel.getByRole('button', { name: 'Actions for file-00019.txt', exact: true });
+    await expect(trigger).toBeInViewport();
+    await trigger.click();
+    const menu = page.getByRole('menu', { name: 'Actions for file-00019.txt', exact: true });
+    await expect(menu).toBeVisible();
+    const previousHeight = await grid.evaluate(element => element.clientHeight);
+    const scrollTop = await grid.evaluate(element => element.scrollTop);
+    const location = panel.getByRole('textbox', { name: 'Absolute path' });
+    // keyboard focus may already have left the portal without dismissing it
+    if (externalFocus) { await location.focus(); await expect(menu).toBeVisible(); }
+    await page.setViewportSize({ width: 1_600, height });
+    await expect.poll(() => grid.evaluate(element => element.clientHeight)).toBeLessThan(previousHeight);
+    // a large shrink evicts the trigger from the overscanned row window
+    if (height === 550) {
+      await expect(trigger).toHaveCount(0);
+      await expect(menu).toHaveCount(0);
+      await expect(externalFocus ? location : grid).toBeFocused();
+    } else {
+      await expect(trigger).toHaveCount(1);
+      await expect(menu).toBeVisible();
+    }
+    expect(await grid.evaluate(element => element.scrollTop)).toBe(scrollTop);
+    expect(await grid.locator('.files-row').count()).toBeLessThan(100);
+  });
 }
 
 // preserve flush table geometry at desktop and phone widths

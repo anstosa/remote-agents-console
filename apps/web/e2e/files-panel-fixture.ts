@@ -27,7 +27,7 @@ const fileEntry = (name: string, kind: 'file' | 'directory', token = objectToken
 });
 
 // install a complete authenticated files fixture
-export async function installFilesFixture(page: Page): Promise<FilesFixture> {
+export async function installFilesFixture(page: Page, options: { entryCount?: number } = {}): Promise<FilesFixture> {
   const records: FilesRequestRecord[] = [];
   let currentPath = '/home/ubuntu/project';
   let favorites: unknown[] = [];
@@ -55,6 +55,8 @@ export async function installFilesFixture(page: Page): Promise<FilesFixture> {
   // list deterministic entries at one canonical path
   const entriesAt = (path: string) => path === '/home/ubuntu/project/sub'
     ? []
+    // generate a complete large directory without changing the small-folder scenarios
+    : options.entryCount !== undefined ? Array.from({ length: options.entryCount }, (_, index) => ({ ...fileEntry(`file-${String(index).padStart(5, '0')}.txt`, 'file', objectToken(`file-${index}`), path), size: index + 1 }))
     : [
         fileEntry('sub', 'directory', objectToken('sub'), path),
         { ...fileEntry('.hidden', 'file', objectToken('.hidden'), path), owner: { uid: 1001, label: 'alex' }, modifiedAt: '2026-10-06T09:00:00.000Z', size: 64 },
@@ -116,7 +118,7 @@ export async function installFilesFixture(page: Page): Promise<FilesFixture> {
       });
       const currentFavorite = favorites.find(item => (item as { path: string }).path === currentPath) as { id: string; state: string } | undefined;
       const currentEntry = directoryEntry(currentPath);
-      return route.fulfill({ json: { path: currentPath, parent: currentPath === '/' ? undefined : currentPath.slice(0, currentPath.lastIndexOf('/')) || '/', destinationDirectoryToken: `directory:${currentPath}`, directoryEntry: currentFavorite === undefined ? currentEntry : { ...currentEntry, favorite: { id: currentFavorite.id, state: currentFavorite.state } }, entries: directory, inaccessibleEntries: 0, limits: { maxEntries: 1000 } } });
+      return route.fulfill({ json: { path: currentPath, parent: currentPath === '/' ? undefined : currentPath.slice(0, currentPath.lastIndexOf('/')) || '/', destinationDirectoryToken: `directory:${currentPath}`, directoryEntry: currentFavorite === undefined ? currentEntry : { ...currentEntry, favorite: { id: currentFavorite.id, state: currentFavorite.state } }, entries: directory, inaccessibleEntries: 0, limits: { maxEntries: 10_000 } } });
     }
     if (url.pathname === '/api/worktrees/cora/files/preview') {
       return route.fulfill({ json: { path: '/home/ubuntu/project/alpha.txt', size: 16, binary: false, truncated: false, content: 'outside root preview\n' } });

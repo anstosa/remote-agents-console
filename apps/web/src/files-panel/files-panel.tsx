@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom';
-import { useCallback, useContext, useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import { Fragment, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
 import { FlyoutPortal } from '../flyout-portal.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand, usePhoneLayout } from '../panel-header.js';
 import { useViewportFlyout } from '../viewport-flyout.js';
@@ -8,6 +8,7 @@ import { Skeleton } from '../skeleton.js';
 import type { FileSortColumn, FilesController } from './controller.js';
 import { formatFileSize, formatModifiedAt } from './format.js';
 import { FileIcon } from './file-icon.js';
+import { useFileRowWindow } from './row-window.js';
 import type { CollisionDecision, Favorite, FileEntry, FilesError, OperationConflict, OperationResult, PreparedOperation, UploadPreparation } from './contracts.js';
 import './loading.css';
 
@@ -180,6 +181,9 @@ export function FilesPanel({ controller, onOpenFile, onPreviewFile, onEditFile }
   const [favoritesOpen, setFavoritesOpen] = useState(false);
   const [rowMenu, setRowMenu] = useState<EntryMenu>();
   const [contextMenu, setContextMenu] = useState<ContextMenu>();
+  const rowWindow = useFileRowWindow(controller.loading ? 0 : controller.entries.length, JSON.stringify([controller.listing?.path, controller.sort.column, controller.sort.direction, controller.loading]));
+  const remainingRows = controller.entries.length - (rowWindow.indices.at(-1) ?? -1) - 1;
+  const menuScroll = useRef({ top: 0, left: 0 });
   const uploadInput = useRef<HTMLInputElement | null>(null);
   const uploadDestination = useRef<string | undefined>(undefined);
   const newFlyout = useViewportFlyout<HTMLButtonElement>(newOpen, { contentSized: true, align: 'start' });
@@ -203,10 +207,39 @@ export function FilesPanel({ controller, onOpenFile, onPreviewFile, onEditFile }
     setContextMenu(undefined);
   }, []);
 
+  // remember scrolling that already happened while revealing a menu trigger
+  const captureMenuScroll = () => {
+    const grid = rowWindow.gridRef.current;
+    menuScroll.current = { top: grid?.scrollTop ?? 0, left: grid?.scrollLeft ?? 0 };
+  };
+
+  // dismiss table-scoped menus before later scrolling can unmount their invoking row
+  const scrollGrid = () => {
+    const grid = rowWindow.gridRef.current;
+    // delayed events from revealing the trigger must not dismiss its new menu
+    if (grid === null || grid.scrollTop === menuScroll.current.top && grid.scrollLeft === menuScroll.current.left) return;
+    // avoid restoring focus to an offscreen menu anchor and undoing the scroll
+    if (rowMenu !== undefined || contextMenu !== undefined) {
+      rowWindow.gridRef.current?.focus({ preventScroll: true });
+      setRowMenu(undefined);
+      setContextMenu(undefined);
+    }
+  };
+
   // synchronize the editable location after every successful canonical listing
   useEffect(() => { setLocation(controller.listing?.path ?? ''); }, [controller.listing]);
   // dismiss stale menu scopes after refresh, loading or sort changes
   useEffect(() => { closeMenus(); }, [closeMenus, controller.listing, controller.loading, controller.sort.column, controller.sort.direction]);
+
+  // dismiss row-owned portals before painting a window without their trigger
+  useLayoutEffect(() => {
+    // retain mounted anchors and independent coordinate-based context menus
+    if (rowMenu === undefined || rowWindow.indices.some(index => controller.entries[index]?.objectToken === rowMenu.entry.objectToken)) return;
+    const focus = document.activeElement;
+    // recover orphaned menu focus without stealing it from another control
+    if (focus === document.body || focus !== null && rowFlyout.flyoutRef.current?.contains(focus)) rowWindow.gridRef.current?.focus({ preventScroll: true });
+    setRowMenu(undefined);
+  }, [controller.entries, rowMenu, rowWindow.indices, rowWindow.gridRef, rowFlyout.flyoutRef]);
 
   // open a directory or regular file from either list or favorites
   const activate = (entry: FileEntry) => {
@@ -472,6 +505,7 @@ export function FilesPanel({ controller, onOpenFile, onPreviewFile, onEditFile }
   // show a row-end menu for exactly its own entry
   const openRowMenu = (entry: FileEntry, event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
+    captureMenuScroll();
     setContextMenu(undefined);
     setNewOpen(false);
     setFavoritesOpen(false);
@@ -482,6 +516,7 @@ export function FilesPanel({ controller, onOpenFile, onPreviewFile, onEditFile }
   const openEntryContext = (entry: FileEntry, event: MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
+    captureMenuScroll();
     const entries = controller.selection.tokens.has(entry.objectToken) ? selected : [entry];
     setNewOpen(false);
     setFavoritesOpen(false);
@@ -495,6 +530,7 @@ export function FilesPanel({ controller, onOpenFile, onPreviewFile, onEditFile }
     // preserve native menus on interactive content
     if (target.closest('button, input, a, [role="menu"]') !== null) return;
     event.preventDefault();
+    captureMenuScroll();
     setNewOpen(false);
     setFavoritesOpen(false);
     setRowMenu(undefined);
@@ -558,17 +594,23 @@ export function FilesPanel({ controller, onOpenFile, onPreviewFile, onEditFile }
       {notice && <p className={`files-notice ${notice.tone}`} role={notice.tone}>{notice.text}</p>}
       {controller.progress && ['queued', 'running'].includes(controller.progress.state) && <div className="files-progress progress-border progress-peach" role="status" aria-busy="true" aria-live="polite"><span className="update-progress-ring" aria-hidden="true" /><span>{controller.progress.phase || 'Working'}</span><progress value={controller.progress.completedItems} max={Math.max(1, controller.progress.totalItems)} /></div>}
       {uploadStates.length > 0 && <p className="files-upload-status" role="status">{uploadStates.map(item => `${item.name}: ${item.state}`).join(' · ')}</p>}
-      <div className="files-grid" role="grid" aria-label={`Files in ${controller.listing?.path ?? 'Place home'}`} aria-busy={controller.loading} aria-multiselectable="true">
-        <div className="files-grid-head" role="row">{sortColumns.map(item => <SortHeader key={item.column} column={item.column} label={item.label} activeColumn={controller.sort.column} direction={controller.sort.direction} onSort={controller.setSort} />)}<span role="columnheader"><span className="sr-only">Actions</span></span></div>
+      <div ref={rowWindow.gridRef} className="files-grid" role="grid" tabIndex={-1} aria-label={`Files in ${controller.listing?.path ?? 'Place home'}`} aria-busy={controller.loading} aria-multiselectable="true" aria-rowcount={controller.loading ? -1 : controller.entries.length + 1} onScroll={scrollGrid} onFocusCapture={rowWindow.onFocusCapture} onBlurCapture={rowWindow.onBlurCapture} onKeyDown={rowWindow.onKeyDown}>
+        <div className="files-grid-head" role="row" aria-rowindex={1}>{sortColumns.map(item => <SortHeader key={item.column} column={item.column} label={item.label} activeColumn={controller.sort.column} direction={controller.sort.direction} onSort={controller.setSort} />)}<span role="columnheader"><span className="sr-only">Actions</span></span></div>
         {/* hide stale values behind the same table geometry during every read */}
-        {controller.loading ? <FilesLoadingRows /> : controller.entries.length === 0 ? <p className="files-empty">{emptyMessage}</p> : controller.entries.map(entry => {
+        {controller.loading ? <FilesLoadingRows /> : controller.entries.length === 0 ? <p className="files-empty">{emptyMessage}</p> : rowWindow.indices.map((index, position) => {
+          const entry = controller.entries[index];
+          const previous = rowWindow.indices[position - 1] ?? -1;
           const selectedRow = controller.selection.tokens.has(entry.objectToken);
-          return <div key={entry.objectToken} className={`files-row ${entry.kind}${selectedRow ? ' selected' : ''}`} role="row" aria-selected={selectedRow} tabIndex={0} title={entry.hostPath} onMouseDownCapture={preventShiftTextSelection} onClick={event => selectRow(entry, event)} onKeyDown={event => rowKey(entry, event)} onContextMenu={event => openEntryContext(entry, event)}>
+          return <Fragment key={entry.objectToken}>
+            {index > previous + 1 && <div className="files-row-spacer" aria-hidden="true" role="presentation" style={{ height: (index - previous - 1) * rowWindow.rowHeight }} />}
+            <div className={`files-row ${entry.kind}${selectedRow ? ' selected' : ''}`} role="row" aria-rowindex={index + 2} data-file-index={index} aria-selected={selectedRow} tabIndex={0} title={entry.hostPath} onMouseDownCapture={preventShiftTextSelection} onClick={event => selectRow(entry, event)} onKeyDown={event => rowKey(entry, event)} onContextMenu={event => openEntryContext(entry, event)}>
             <span className="files-name-cell" role="gridcell"><FileIcon entry={entry} /><button className="files-name" type="button" title={entry.hostPath} disabled={!isDirectory(entry) && !isPreviewable(entry)} onClick={event => clickName(entry, event)}>{entry.name}</button>{entry.favorite !== undefined && <span className={`files-favorite-mark ${entry.favorite.state}`} aria-label={`Favorite: ${entry.favorite.state}`}>★</span>}</span>
             <span role="gridcell" data-label="Owner">{entry.owner.label}</span><span role="gridcell" data-label="Permissions"><code>{entry.permissions}</code></span><span role="gridcell" data-label="Modified" title={entry.modifiedAt}>{formatModifiedAt(entry.modifiedAt)}</span><span role="gridcell" data-label="Size" title={`${entry.size} bytes`}>{formatFileSize(entry.size)}</span>
             <span className="files-row-actions" role="gridcell"><button ref={rowMenu?.entry.objectToken === entry.objectToken ? rowFlyout.anchorRef : undefined} type="button" aria-label={`Actions for ${entry.name}`} aria-haspopup="menu" aria-expanded={rowMenu?.entry.objectToken === entry.objectToken} data-context-flyout onClick={event => openRowMenu(entry, event)}><span aria-hidden="true">⋮</span></button></span>
-          </div>;
+            </div>
+          </Fragment>;
         })}
+        {!controller.loading && remainingRows > 0 && <div className="files-row-spacer" aria-hidden="true" role="presentation" style={{ height: remainingRows * rowWindow.rowHeight }} />}
       </div>
       {/* disclose partial directory metadata without hiding readable entries */}
       {inaccessibleEntries > 0 && <p className="files-limit" role="status">{inaccessibleEntries} {inaccessibleEntries === 1 ? 'item' : 'items'} hidden because permission was denied.</p>}

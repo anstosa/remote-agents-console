@@ -255,6 +255,10 @@ the initial default and fall back to Preview when no editor is configured or lau
 Explicit Preview never launches an editor. Settings base-file previews remain redacted
 and read-only. Preview shares split resizing, expand/close, keyboard navigation and the
 phone carousel. Uploads remain available.
+Files tables mount only viewport rows with overscan, preserving the complete sorted
+listing for selection and operations. Keep the sticky six-column header and native
+horizontal scrolling; expose logical row counts and indices. Retain keyboard focus
+without mounting the intervening rows, and dismiss row menus when their anchors scroll.
 Cleanup loading rows contain decorative checkbox shapes, never consent inputs or
 target identities. Only settled real controls determine destructive selections;
 actual cleanup submission retains its working feedback and closed-PR opt-in rule.
