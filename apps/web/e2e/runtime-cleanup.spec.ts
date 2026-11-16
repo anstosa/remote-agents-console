@@ -7,6 +7,8 @@ for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 900 });
     let submissions = 0;
     let submittedIds: string[] = [];
+    // render the five-count toolbar reference
+    const notes = Array.from({ length: 5 }, (_, index) => ({ id: `note-${index + 1}`, title: `Note ${index + 1}`, text: 'Reference' }));
     let targets = [
       { id: 'worker-1', kind: 'orphan-worker', label: 'Orphan OMX worker', detail: 'worker-2 in tmux session feature-team' },
       { id: 'agent-1', kind: 'stale-agent', label: 'Stale Codex agent', detail: 'old-agent at /worktrees/removed' },
@@ -32,6 +34,8 @@ for (const width of [1280, 390]) {
       if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, cleanupPending: targets.length, cleanupTargets: targets, agents: [{ id: 'current-agent', sessionId: 'socket:$1', home: '/worktrees/current', title: 'Ready' }], projects: [] } });
       if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
       if (path === '/api/agents/current-agent/saved-prompts') return route.fulfill({ json: { prompts: [] } });
+      // return the real workspace Notes records
+      if (path.endsWith('/notes') && request.method() === 'GET') return route.fulfill({ json: { notes } });
       if (path === '/api/cleanup' && request.method() === 'GET') return route.fulfill({ json: { targets } });
       // keep unchecked resources and one failed selection available for retry
       if (path === '/api/cleanup' && request.method() === 'POST') {
@@ -48,12 +52,32 @@ for (const width of [1280, 390]) {
     const dialog = page.getByRole('dialog', { name: 'Cleanup', exact: true });
     // expose counts without opening or scanning the cleanup dialog
     await expect(page.locator('.cleanup-toggle')).toHaveCount(0);
-    await expect(more.locator('.cleanup-summary-count')).toHaveText('5');
+    const summary = more.locator('.cleanup-summary-count');
+    await expect(summary).toHaveText('5');
     await expect(more).toHaveAccessibleDescription('5 checked cleanup items');
+    const notesBadge = page.getByRole('button', { name: 'Notes (5)' }).locator('.notes-count-other');
+    const badgeMetrics = (selector: typeof summary) => selector.evaluate(element => { // inspect the production badge box and type
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return { width: bounds.width, height: bounds.height, minWidth: style.minWidth, minHeight: style.minHeight, fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, lineHeight: style.lineHeight, padding: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft], border: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth] };
+    });
+    expect(await badgeMetrics(summary)).toEqual(await badgeMetrics(notesBadge));
+    const cornerAnchor = (selector: typeof summary) => selector.evaluate(element => { // compare shared toolbar corner placement
+      const style = getComputedStyle(element);
+      return { top: style.top, right: style.right };
+    });
+    expect(await cornerAnchor(summary)).toEqual(await cornerAnchor(page.locator('.notes-counts')));
     await more.click();
     await expect(cleanup).toBeVisible();
     await expect(cleanup.locator('.cleanup-count.unchecked')).toHaveText('1');
-    await expect(cleanup.locator('.cleanup-count.checked')).toHaveText('5');
+    const flyoutChecked = cleanup.locator('.cleanup-count.checked');
+    await expect(flyoutChecked).toHaveText('5');
+    const flyoutMetrics = await badgeMetrics(flyoutChecked);
+    expect(flyoutMetrics.height).toBeCloseTo(17.6, 1);
+    expect(flyoutMetrics.fontSize).toBe('10.4px');
+    expect(flyoutMetrics.fontWeight).toBe('700');
+    expect(flyoutMetrics.padding).toEqual(['0px', '4px', '0px', '4px']);
+    expect(flyoutMetrics.border).toEqual(['0px', '0px', '0px', '0px']);
     await expect(cleanup).toHaveAccessibleDescription('5 checked and 1 unchecked cleanup items');
     await expect(cleanup).toHaveCSS('animation-name', 'none');
     await expect(more.locator('.cleanup-summary-count')).toHaveCSS('animation-name', 'none');

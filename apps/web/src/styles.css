@@ -696,7 +696,7 @@ button.model-chip:hover, button.model-chip.active, .watches-chip:hover, .watches
 .cleanup-count.unchecked { background: var(--overlay-1); color: var(--crust); }
 .cleanup-count.checked { background: var(--yellow); color: var(--crust); }
 .more:has(.cleanup-summary-count) { position: relative; overflow: visible; }
-.cleanup-summary-count { position: absolute; top: -.35rem; right: -.35rem; }
+.cleanup-summary-count { position: absolute; top: -.4rem; right: -.35rem; }
 .notes-control { position: relative; z-index: 3; }
 .notes-toggle { overflow: visible; }
 .notes-toggle.active { border-color: var(--yellow); color: var(--yellow); }
@@ -707,8 +707,8 @@ button.model-chip:hover, button.model-chip.active, .watches-chip:hover, .watches
 .notes-toggle .notes-icon-sheet { fill: color-mix(in srgb, currentColor 18%, transparent); }
 /* overlap category circles at the shared upper-right anchor */
 .notes-counts { position: absolute; top: -.4rem; right: -.35rem; display: flex; align-items: flex-start; pointer-events: none; }
-/* share compact count sizing across notes and github */
-.notes-counts > .notes-count, .github-badge { flex: none; width: max-content; min-width: 1.05rem; height: auto; min-height: 1.05rem; aspect-ratio: 1; padding: 0 .1rem; border: 1px solid var(--mantle); font: 800 .6rem/1 var(--font-mono); }
+/* share compact count sizing across workspace controls */
+.notes-counts > .notes-count, .github-badge, .cleanup-summary-count { flex: none; width: max-content; min-width: 1.05rem; height: auto; min-height: 1.05rem; aspect-ratio: 1; padding: 0 .1rem; border: 1px solid var(--mantle); font: 800 .6rem/1 var(--font-mono); }
 .notes-counts > .notes-count { position: relative; top: auto; right: auto; }
 .notes-counts > .notes-count + .notes-count { margin-left: -.15rem; }
 /* shared notes stay gray even when locked or newly recovered */
