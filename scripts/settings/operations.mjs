@@ -884,7 +884,8 @@ function installNativeEnvironmentDropIn(descriptor, configuredUnitDirectory, nod
   const unitRoot = configuredUnitDirectory ?? resolve(process.env.XDG_CONFIG_HOME || resolve(homedir(), ".config"), "systemd/user");
   const directory = resolve(unitRoot, `${descriptor.native.unit}.d`);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const workingDirectory = systemdQuote(descriptor.hostCheckout);
+  // WorkingDirectory= takes the path literally: no quotes or escapes, only % specifiers
+  const workingDirectory = descriptor.hostCheckout.replaceAll("%", "%%");
   const environmentFile = systemdQuote(descriptor.native.environmentFile);
   const executable = systemdQuote(nodeExecutable);
   const entrypoint = systemdQuote(resolve(descriptor.hostCheckout, "apps/server/dist/index.js"));

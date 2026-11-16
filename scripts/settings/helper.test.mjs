@@ -433,7 +433,7 @@ test("native RAC apply pins the selected checkout and fixed entrypoint", async (
     runner: async () => ({ code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) })
   });
   const dropIn = readFileSync(resolve(unitRoot, "remote-agent-console.service.d/20-rac-settings-environment.conf"), "utf8");
-  assert.match(dropIn, new RegExp(`WorkingDirectory="${current.root}"`, "u"));
+  assert.match(dropIn, new RegExp(`WorkingDirectory=${current.root}\n`, "u"));
   assert.match(dropIn, new RegExp(`ExecStart="${node}" "${resolve(current.root, "apps/server/dist/index.js")}" --settings-control "${current.controlRoot}"`, "u"));
 });
 
