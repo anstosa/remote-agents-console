@@ -98,6 +98,16 @@ Enable lingering so the user service starts at boot before the user logs in:
 sudo loginctl enable-linger "$USER"
 ```
 
+## Keep tmux alive across reboots and deploys
+
+The console must not start the tmux server itself. A server spawned by the console's `new-session` stays in the console unit's cgroup, so the next `systemctl --user restart remote-agent-console` kills it along with every agent. Install the tmux keeper, pointed at tmux's default socket (which a native console uses), so the server runs in its own scope:
+
+```bash
+TMUX_BIN=/absolute/path/to/tmux HOST_TMUX_DIR="/tmp/tmux-$(id -u)" ./scripts/install-host-tmux.sh
+```
+
+Use the same tmux as `RAC_TMUX_BIN`. The keeper starts the server at boot, disables `exit-empty`, and rechecks every 30 seconds. The console unit wants and orders after it, so a console started at boot never creates its own server first. If your shell sets `TMUX_TMPDIR`, use that directory instead so your terminal's `tmux attach` and the console find the same socket.
+
 Verify the service and loopback health endpoint:
 
 ```bash
