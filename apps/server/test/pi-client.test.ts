@@ -128,6 +128,31 @@ describe('the Pi client', () => {
     expect(await cancelled).toEqual(['Never mind']);
   });
 
+  it('lists the skills and prompt templates Pi loaded as `/` commands, but not the RAC extension\'s own', async () => {
+    const { connection, sent, pi } = piOverChannel();
+    const listed = connection.commands!();
+    expect(sent.at(-1)).toMatchObject({ type: 'get_commands' });
+    pi({ type: 'response', id: sent.at(-1)!.id, command: 'get_commands', success: true, data: { commands: [
+      { name: 'skill:grilling', description: 'Grill the user\n  relentlessly.', source: 'skill' },
+      { name: 'fix-tests', description: 'Fix failing tests', source: 'prompt' },
+      { name: 'rac-console', description: 'Console access', source: 'extension' },
+      { name: 'no description', source: 'prompt' },
+      { name: 'bare', source: 'prompt' }
+    ] } });
+    expect(await listed).toEqual([
+      { name: '/bare' },
+      { name: '/fix-tests', description: 'Fix failing tests' },
+      { name: '/skill:grilling', description: 'Grill the user relentlessly.' }
+    ]);
+  });
+
+  it('lists no commands when Pi refuses the request', async () => {
+    const { connection, sent, pi } = piOverChannel();
+    const listed = connection.commands!();
+    pi({ type: 'response', id: sent.at(-1)!.id, command: 'get_commands', success: false, error: 'nope' });
+    expect(await listed).toEqual([]);
+  });
+
   it('closes a dialog once the tool call it names has ended, as a replayed dialog answered before a restart has', () => {
     const { pi, questions, closed } = piOverChannel();
     pi({ type: 'agent_start' });

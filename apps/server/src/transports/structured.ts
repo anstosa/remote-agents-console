@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import type { QuestionField } from '../adapters/types.js';
+import type { PromptCommand, QuestionField } from '../adapters/types.js';
 import type { QuestionAnswer, TurnEvent } from './transport.js';
 import type { PromptLabel } from '../prompts/queue.js';
 
@@ -108,6 +108,8 @@ export interface StructuredConnection {
   /** The models the Agent can reach now. */
   models(): Promise<ModelInfo[]>;
   setModel(setting: ModelSetting): Promise<boolean>;
+  /** The commands the Agent's process offers at its prompt, as typed there; absent when its protocol cannot list them. */
+  commands?(): Promise<PromptCommand[]>;
   /** Redirect the working Agent with `prompt` (an idle one starts a Turn with it); false when refused. */
   steer(prompt: string): Promise<boolean>;
   /**

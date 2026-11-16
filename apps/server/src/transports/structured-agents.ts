@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { gte, valid } from 'semver';
 import { structuredAdapterFor } from '../adapters/registry.js';
-import type { AdapterConfigs, AgentKind, AllowedModel, StructuredAdapter } from '../adapters/types.js';
+import type { AdapterConfigs, AgentKind, AllowedModel, PromptCommand, StructuredAdapter } from '../adapters/types.js';
 import type { Agent, AgentLifecycle } from '../domain/models.js';
 import type { ShapedQuestion } from '../adapters/types.js';
 import { placeHostRoot, type Place } from '../places/places.js';
@@ -923,6 +923,11 @@ export class StructuredAgents {
     const reachable = live.models ?? await live.connection.models();
     if (reachable.length > 0) live.models = reachable;
     return { models: this.anyListed(record.kind) ? reachable : this.allowed(record.kind).flatMap(entry => reachable.find(model => model.id === entry.model) ?? []), ...(live.model === undefined ? {} : { current: live.model }) };
+  }
+
+  /** The commands the live Agent's process lists itself; undefined when it is not live or its client cannot list them. */
+  async commands(id: string): Promise<PromptCommand[] | undefined> {
+    return await this.live.get(id)?.connection?.commands?.();
   }
 
   // with no Allowed models configured, whether the kind's Agents may take any model their client lists

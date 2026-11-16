@@ -56,6 +56,24 @@ describe('agent command catalog API', () => {
     expect(seen).toEqual([{ kind: 'claude', workspace: '/worktrees/ferry.fyi' }]);
   });
 
+  it('serves the commands a live structured agent lists itself, as Pi does', async () => {
+    const agent = { id: 'conductor-1', home: '/home/ubuntu/ferry.fyi', title: 'Ready', kind: 'pi', transport: 'structured' } as const;
+    const structuredAgents = noStructuredAgents();
+    vi.spyOn(structuredAgents, 'agent').mockImplementation(async id => id === agent.id ? agent : undefined);
+    vi.spyOn(structuredAgents, 'commands').mockImplementation(async id => id === agent.id ? [{ name: '/skill:grilling', description: 'Grill the user.' }, { name: '/bare' }] : undefined);
+    app = await buildApp(config, {
+      auth: { unsign: () => 'session', get: () => ({ id: 'session', csrf: 'csrf' }) } as never,
+      control: { connect: () => true } as never,
+      discovery: { target: async () => undefined, worktreesNow: () => [ferry] } as never,
+      structuredAgents
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/api/agents/conductor-1/commands', headers: { host: 'agents.example.com' } });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ commands: [{ value: '/skill:grilling', description: 'Grill the user.' }, { value: '/bare' }] });
+  });
+
   it('reports 404 for an unknown agent', async () => {
     app = await buildApp(config, {
       auth: { unsign: () => 'session', get: () => ({ id: 'session', csrf: 'csrf' }) } as never,

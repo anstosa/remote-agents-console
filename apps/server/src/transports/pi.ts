@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { QuestionField } from '../adapters/types.js';
+import type { PromptCommand, QuestionField } from '../adapters/types.js';
 import { bounded, count, isObject, oneLine, outcome, strings, summary, text, thousands, waitingForAnswer, type Json, type LaunchReport, type ModelInfo, type ModelSetting, type ProtocolClient, type TranscriptItem, type TranscriptTool } from './structured.js';
 
 /**
@@ -508,6 +508,15 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
     async models() {
       const data = (await request({ type: 'get_available_models' })).data;
       return isObject(data) && Array.isArray(data.models) ? data.models.flatMap(model => modelInfo(model) ?? []) : [];
+    },
+    // the skills and prompt templates Pi loaded; extension commands are the RAC extension's own
+    async commands() {
+      const data = (await request({ type: 'get_commands' })).data;
+      if (!isObject(data) || !Array.isArray(data.commands)) return [];
+      return data.commands.flatMap((command): PromptCommand[] => {
+        if (!isObject(command) || command.source === 'extension' || typeof command.name !== 'string' || !/^\S{1,128}$/u.test(command.name)) return [];
+        return [{ name: `/${command.name}`, ...(typeof command.description === 'string' ? { description: command.description.replace(/\s+/gu, ' ').slice(0, 500) } : {}) }];
+      }).sort((left, right) => left.name.localeCompare(right.name));
     },
     async setModel(setting) {
       const applied = await apply(setting);

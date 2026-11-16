@@ -2849,6 +2849,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const id = (request.params as { id: string }).id;
     const agent = (await discovery.target(id))?.agent ?? await structuredAgents.agent(id);
     if (!agent) return reply.code(404).send({ error: 'target unavailable' });
+    // a process that lists its own commands (Pi) is asked, so the list is exactly what it loaded
+    const listed = await structuredAgents.commands(id);
+    if (listed !== undefined) return { commands: listed.map(({ name, description }) => ({ value: name, ...(description === undefined ? {} : { description }) })) };
     // a kind's catalog is the same over either Transport
     const adapter = adapterFor(agent.kind);
     // an Adapter without a command catalog serves an empty one
