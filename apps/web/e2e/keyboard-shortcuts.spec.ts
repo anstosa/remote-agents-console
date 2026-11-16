@@ -11,11 +11,11 @@ const panes = (): Pane[] => [
   { paneId: '%5', session: '$1', window: '@1', role: 'shell', name: 'build', command: 'zsh', path: '/worktrees/cora', title: '', agent: false, busy: false }
 ];
 
-const routeApi = (page: Page, options: { keys?: unknown; shells?: unknown[]; deleted?: string[]; notes?: unknown[]; agent?: object; dashboard?: object; launches?: unknown[] } = {}) => page.route('**/api/**', async route => {
+const routeApi = (page: Page, options: { keys?: unknown; shells?: unknown[]; deleted?: string[]; notes?: unknown[]; agent?: object; dashboard?: object; launches?: unknown[]; server?: object } = {}) => page.route('**/api/**', async route => {
   const request = route.request();
   const url = new URL(request.url());
   const path = url.pathname;
-  if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+  if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', ...(options.server === undefined ? {} : { server: options.server }) } });
   if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Working', attention: 'working', queuedPromptCount: 0, ...options.agent }], projects: [], ...(options.keys === undefined ? {} : { keys: options.keys }), ...options.dashboard } });
   // expose the authoritative server source to the dedicated shortcut editor
   if (path === '/api/settings/status') return route.fulfill({ json: { pending: false, targets: [], effective: 'known', restartAvailable: true } });
@@ -359,6 +359,27 @@ test('the palette opens the Code panel and a bound key closes it', async ({ page
   await page.keyboard.press('Control+b');
   await page.keyboard.press('k');
   await expect(code).toHaveCount(0);
+});
+
+test('the palette and a bound key pick a server to switch to', async ({ page }) => {
+  await page.route('https://studio.example.test/**', route => route.fulfill({ contentType: 'text/html', body: '<title>Studio</title>' }));
+  await openWithTerminal(page, { keys: { prefix: { 'S-s': 'choose-server' } }, server: { name: 'Framework', url: 'http://framework.example.test', remotes: [{ name: 'Studio', url: 'https://studio.example.test/' }] } });
+  const picker = page.getByRole('dialog', { name: 'Servers' });
+
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('Shift+S');
+  await expect(picker.getByRole('option')).toHaveText([/^Framework/u, /^Studio/u]);
+  await expect(picker.getByRole('option', { name: 'Framework' })).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Escape');
+  await expect(picker).toHaveCount(0);
+
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press(':');
+  await page.keyboard.type('switch server');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('stud');
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL('https://studio.example.test/');
 });
 
 test('the palette opens the Stack panel and a bound key closes it', async ({ page }) => {
