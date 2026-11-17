@@ -73,9 +73,9 @@ export const useWorkspaceViewRevision = () => useSyncExternalStore(subscribe, ()
 export const agentSplitHidden = (key: string) => read(`rac.hidden-agent:${key}`) === '1';
 // capture close-all ordering before an asynchronous explicit open
 export const workspaceOpenGeneration = (key: string) => openGenerations.get(key) ?? 0;
-// distinguish deliberate empty layouts from accidental all-minimized state
+// retain empty intent without suppressing recovery of existing live content
 export const workspaceIntentionallyEmpty = (key: string) => read(`rac.workspace-empty:${key}`) !== null;
-// retain close-all intent only in this browser and workspace
+// invalidate older opens while retaining browser-local close-all intent
 export const setWorkspaceIntentionallyEmpty = (key: string, empty: boolean) => {
   // a completed close invalidates old opens without invalidating later explicit restores
   if (empty) openGenerations.set(key, workspaceOpenGeneration(key) + 1);

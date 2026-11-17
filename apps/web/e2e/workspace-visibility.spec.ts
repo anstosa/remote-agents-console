@@ -44,6 +44,8 @@ async function seedStorage(page: Page, entries: Record<string, string>) {
   await page.addInitScript(values => {
     // keep product writes authoritative after the fixture's first document
     if (sessionStorage.getItem('rac.e2e.workspace-visibility-seeded') === '1') return;
+    // current worktree ids must survive the legacy preference migration
+    localStorage.setItem('rac.worktree-id-reset:v1', '1');
     // restore every requested fixture preference
     for (const [key, value] of Object.entries(values)) localStorage.setItem(key, value);
     sessionStorage.setItem('rac.e2e.workspace-visibility-seeded', '1');
@@ -204,8 +206,9 @@ async function mountWorkspace(page: Page, selected: string, storage: Record<stri
     if (path.endsWith('/shells') && request.method() === 'POST') return route.fulfill({ status: 500, json: { error: 'unexpected shell creation' } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
-  await page.goto(`/#worktree=${selected}`);
-  await expect(page.getByRole('tab', { selected: true })).toHaveAccessibleName(new RegExp(`^${workspaces.find(workspace => workspace.id === selected)?.label} —`, 'u'), { timeout: 10_000 });
+  // pending fixture requests must not delay the app readiness assertion
+  await page.goto(`/#worktree=${selected}`, { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('tab', { selected: true })).toHaveAccessibleName(new RegExp(`^${workspaces.find(workspace => workspace.id === selected)?.label} —`, 'u'), { timeout: 30_000 });
   return {
     mutations,
     // release only the fixture request selected by this test
@@ -244,7 +247,7 @@ async function invokeCloseAll(page: Page, label: string) {
   await page.getByRole('menu', { name: `${label} workspace` }).getByRole('menuitem', { name: 'Close all splits' }).click();
 }
 
-// read only whether this workspace has deliberate empty intent
+// read only whether this workspace retains an empty marker
 const isIntentionallyEmpty = (page: Page, workspaceId: string) => page.evaluate(key => localStorage.getItem(key) !== null, `rac.workspace-empty:place-${workspaceId}`);
 
 // address the shared transient minimize failure without matching exact product copy
@@ -326,19 +329,111 @@ test('minimizing Agent and Terminal succeeds while a visible sibling remains', a
   await expect(minimizeError(page)).toHaveCount(0);
 });
 
-// repair legacy all-minimized state from existing content only
+// restore hidden live content when the final visible note closes
+test('closing the final visible Note restores its hidden Agent', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const note = { id: 'note-final-visible', title: 'Visible note', text: 'Keep the workspace available.' };
+  const harness = await mountWorkspace(page, coraId, {
+    [`rac.terminals:${coraId}`]: '[]'
+  }, { notes: { state: 'ready', values: [note] } });
+  const notePane = page.getByRole('dialog', { name: 'Note' });
+  await openExistingNote(page, note.title);
+  await expect(notePane).toBeVisible();
+  await expect(page.locator('.agent-panel')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Minimize agent output' }).click();
+  await expect(page.locator('.agent-panel')).toHaveCount(0);
+
+  await notePane.getByRole('button', { name: 'Close note' }).click();
+  await expect(notePane).toHaveCount(0);
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  expect(await isIntentionallyEmpty(page, coraId)).toBe(false);
+  // do not create replacement content
+  expect(harness.mutations.filter(entry => entry.path.endsWith('/shells') || entry.path.endsWith('/launch') || entry.path === '/api/agents')).toEqual([]);
+});
+
+// restore a prepared agent draft after sibling closure and close-all
+test('prelaunch draft Agent remains visible when its final sibling closes', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const draft = 'Keep this prepared prompt.';
+  const draftKey = `remote-agent-console:prompt-draft:worktree-prompt:${emptyId}`;
+  const note = { id: 'note-prelaunch-sibling', title: 'Draft sibling', text: 'Close this without losing the prompt.' };
+  const harness = await mountWorkspace(page, emptyId, {
+    [draftKey]: draft
+  }, { notes: { state: 'ready', values: [note] } });
+  const agent = page.locator('.agent-panel');
+  const notePane = page.getByRole('dialog', { name: 'Note' });
+  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+  await expect(agent).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveValue(draft);
+  await openExistingNote(page, note.title);
+  await expect(notePane).toBeVisible();
+
+  await agent.getByRole('button', { name: 'Discard draft' }).focus();
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('x');
+  await page.keyboard.press('y');
+  await expect(agent).toHaveCount(0);
+  await expect(notePane).toBeVisible();
+  await expect(toolbar.locator('.launch-minimized-count')).toHaveText('1');
+  // retain the exact prelaunch draft
+  expect(await page.evaluate(key => localStorage.getItem(key), draftKey)).toBe(draft);
+
+  await notePane.getByRole('button', { name: 'Close note' }).click();
+  await expect(notePane).toHaveCount(0);
+  await expect(agent).toBeVisible();
+  await expect(toolbar.locator('.launch-minimized-count')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveValue(draft);
+
+  await openExistingNote(page, note.title);
+  // hide the draft again before exercising close-all recovery
+  await agent.getByRole('button', { name: 'Discard draft' }).focus();
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('x');
+  await page.keyboard.press('y');
+  await expect(agent).toHaveCount(0);
+  await expect(toolbar.locator('.launch-minimized-count')).toHaveText('1');
+  expect(await page.evaluate(key => localStorage.getItem(key), draftKey)).toBe(draft);
+  await invokeCloseAll(page, 'Empty');
+  await expect(notePane).toHaveCount(0);
+  await expect(agent).toBeVisible();
+  await expect(toolbar.locator('.launch-minimized-count')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveValue(draft);
+  // do not create replacement content
+  expect(harness.mutations.filter(entry => entry.path.endsWith('/shells') || entry.path.endsWith('/launch') || entry.path === '/api/agents')).toEqual([]);
+});
+
+// repair legacy all-minimized state and its stale empty marker
 test('legacy hidden Agent and live shell recover when their workspaces activate', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await mountWorkspace(page, coraId, {
     [`rac.hidden-agent:place-${coraId}`]: '1',
+    [`rac.workspace-empty:place-${coraId}`]: '1',
     [`rac.terminals:${coraId}`]: '[]',
-    [`rac.terminals:${shellId}`]: '[]'
+    [`rac.terminals:${shellId}`]: '[]',
+    [`rac.workspace-empty:place-${shellId}`]: '1'
   });
   await expect(page.locator('.agent-panel')).toBeVisible();
+  expect(await isIntentionallyEmpty(page, coraId)).toBe(false);
 
   await page.getByRole('tab', { name: /^Shell —/u }).click();
   await expect(page.locator('.terminal-pane[data-panel-key="%7"]')).toBeVisible();
   await expect(page.getByRole('region', { name: 'Empty workspace' })).toHaveCount(0);
+  expect(await isIntentionallyEmpty(page, shellId)).toBe(false);
+});
+
+// repair a stale shell-only marker on the phone without creating content
+test('legacy empty marker cannot keep a live shell minimized on phone', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const harness = await mountWorkspace(page, shellId, {
+    [`rac.terminals:${shellId}`]: '[]',
+    [`rac.workspace-empty:place-${shellId}`]: '1'
+  });
+  await expect(page.locator('.terminal-pane[data-panel-key="%7"]')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Empty workspace' })).toHaveCount(0);
+  expect(await isIntentionallyEmpty(page, shellId)).toBe(false);
+  // do not create replacement content
+  expect(harness.mutations.filter(entry => entry.path.endsWith('/shells') || entry.path.endsWith('/launch') || entry.path === '/api/agents')).toEqual([]);
 });
 
 // let known agent and shell candidates recover even when notes cannot load
@@ -354,29 +449,47 @@ test('failed Notes read does not block legacy Agent or shell recovery', async ({
   await expect(page.locator('.terminal-pane[data-panel-key="%7"]')).toBeVisible();
 });
 
-// prevent delayed initial note hydration from undoing a newer close-all
-test('Close all wins over a delayed initial Note restore', async ({ page }) => {
+// retained notes loading must not leave existing live content entirely minimized
+test('pending retained Note read does not block Agent or shell recovery', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const note = { id: 'note-pending-retained', title: 'Pending retained note', text: 'Still loading.' };
+  const harness = await mountWorkspace(page, coraId, {
+    [`rac.hidden-agent:place-${coraId}`]: '1',
+    [`rac.note-view:${coraId}`]: JSON.stringify({ noteId: note.id, expanded: false }),
+    [`rac.terminals:${shellId}`]: '[]'
+  }, { notes: { state: 'delayed', values: [note] } });
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.note-pane')).toHaveCount(0);
+
+  await page.getByRole('tab', { name: /^Shell —/u }).click();
+  await expect(page.locator('.terminal-pane[data-panel-key="%7"]')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Empty workspace' })).toHaveCount(0);
+  // do not create replacement content
+  expect(harness.mutations.filter(entry => entry.path.endsWith('/shells') || entry.path.endsWith('/launch') || entry.path === '/api/agents')).toEqual([]);
+  harness.releaseNotes();
+});
+
+// prevent delayed initial note hydration from undoing close-all cleanup
+test('Close all keeps Agent visible and suppresses a delayed initial Note restore', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const harness = await mountWorkspace(page, coraId, {
     [`rac.note-view:${coraId}`]: JSON.stringify({ noteId: 'note-delayed', expanded: false })
   }, { notes: { state: 'delayed', values: [{ id: 'note-delayed', title: 'Delayed', text: 'Retained note' }] } });
-  const coraTab = page.getByRole('tab', { name: /^Cora —/u });
-  await coraTab.click({ button: 'right' });
-  await page.getByRole('menu', { name: 'Cora workspace' }).getByRole('menuitem', { name: 'Close all splits' }).click();
-  await expect(page.locator('.agent-panel, .note-pane')).toHaveCount(0);
-  expect(await isIntentionallyEmpty(page, coraId)).toBe(true);
+  await invokeCloseAll(page, 'Cora');
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.note-pane')).toHaveCount(0);
   expect(await page.evaluate(key => localStorage.getItem(key), `rac.note-view:${coraId}`)).toBeNull();
 
   const notesResponse = page.waitForResponse(response => decodeURIComponent(new URL(response.url()).pathname) === `/api/worktrees/${coraId}/notes`);
   harness.releaseNotes();
   await notesResponse;
   await expect(page.locator('.note-pane')).toHaveCount(0);
-  await expect(page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: 'Show agent' })).toBeVisible();
-  expect(await isIntentionallyEmpty(page, coraId)).toBe(true);
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  expect(await isIntentionallyEmpty(page, coraId)).toBe(false);
 });
 
-// commit empty intent only after selected blank-note deletion succeeds
-test('Close all waits for blank Note deletion before committing empty intent', async ({ page }) => {
+// close the blank note only after its deletion succeeds
+test('Close all waits for blank Note deletion before keeping only Agent', async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const note = { id: 'note-blank-delayed', title: 'Blank draft', text: '' };
@@ -393,12 +506,14 @@ test('Close all waits for blank Note deletion before committing empty intent', a
   const deleteResponse = page.waitForResponse(response => response.request().method() === 'DELETE' && decodeURIComponent(new URL(response.url()).pathname) === `/api/worktrees/${coraId}/notes/${note.id}`);
   harness.releaseNoteDelete();
   expect((await deleteResponse).status()).toBe(200);
-  await expect(page.locator('.agent-panel, .note-pane')).toHaveCount(0);
-  expect(await isIntentionallyEmpty(page, coraId)).toBe(true);
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.note-pane')).toHaveCount(0);
+  expect(await isIntentionallyEmpty(page, coraId)).toBe(false);
 
   await page.reload();
   const notesButton = page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: 'Notes (0)' });
   await expect(notesButton).toBeVisible();
+  await expect(page.locator('.agent-panel')).toBeVisible();
   await expect(page.locator('.note-pane')).toHaveCount(0);
   await notesButton.click();
   await expect(page.getByRole('button', { name: note.title, exact: true })).toHaveCount(0);
@@ -421,7 +536,7 @@ test('failed blank Note deletion keeps the Note and Agent visible', async ({ pag
 });
 
 // suppress a late shell panel while retaining its completed process as a picker choice
-test('Close all wins over an earlier shell open that completes late', async ({ page }) => {
+test('Close all keeps Agent visible and suppresses an earlier shell open that completes late', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const harness = await mountWorkspace(page, owenId, {}, {
     lateShell: { workspaceId: owenId, pane: { paneId: '%9', name: 'late', path: '/repo/wts/owen' } }
@@ -431,11 +546,9 @@ test('Close all wins over an earlier shell open that completes late', async ({ p
   await toolbar.getByRole('button', { name: 'Open a terminal' }).click();
   await shellRequest;
 
-  const owenTab = page.getByRole('tab', { name: /^Owen —/u });
-  await owenTab.click({ button: 'right' });
-  await page.getByRole('menu', { name: 'Owen workspace' }).getByRole('menuitem', { name: 'Close all splits' }).click();
-  await expect(page.locator('.agent-panel, .terminal-pane')).toHaveCount(0);
-  expect(await isIntentionallyEmpty(page, owenId)).toBe(true);
+  await invokeCloseAll(page, 'Owen');
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.terminal-pane')).toHaveCount(0);
 
   const shellResponse = page.waitForResponse(response => decodeURIComponent(new URL(response.url()).pathname) === `/api/worktrees/${owenId}/shells`);
   const panesResponse = page.waitForResponse(response => decodeURIComponent(new URL(response.url()).pathname) === `/api/worktrees/${owenId}/panes`);
@@ -443,9 +556,9 @@ test('Close all wins over an earlier shell open that completes late', async ({ p
   await shellResponse;
   await panesResponse;
   await expect(page.locator('.terminal-pane')).toHaveCount(0);
-  await expect(toolbar.getByRole('button', { name: 'Show agent' })).toBeVisible();
+  await expect(page.locator('.agent-panel')).toBeVisible();
   await expect(toolbar.getByRole('button', { name: 'Open a terminal' })).toHaveAttribute('aria-haspopup', 'menu');
-  expect(await isIntentionallyEmpty(page, owenId)).toBe(true);
+  expect(await isIntentionallyEmpty(page, owenId)).toBe(false);
 });
 
 // include a shell completed behind dirty settings in the confirmed close-all commit
@@ -473,8 +586,9 @@ test('Close all closes a shell completed during dirty Settings confirmation', as
   await confirmation.getByRole('button', { name: 'Discard and close', exact: true }).click();
 
   await expect(settings).toHaveCount(0);
-  await expect(page.locator('.agent-panel, .terminal-pane, .note-pane, .browser-pane, .code-pane, .review-pane')).toHaveCount(0);
-  expect(await isIntentionallyEmpty(page, owenId)).toBe(true);
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.terminal-pane, .note-pane, .browser-pane, .code-pane, .review-pane')).toHaveCount(0);
+  expect(await isIntentionallyEmpty(page, owenId)).toBe(false);
   const terminalButton = toolbar.getByRole('button', { name: 'Open a terminal' });
   await expect(terminalButton).toHaveAttribute('aria-haspopup', 'menu');
   await terminalButton.click();
@@ -505,40 +619,12 @@ test('Close all closes a stored Review restored during dirty Settings confirmati
   await confirmation.getByRole('button', { name: 'Discard and close', exact: true }).click();
 
   await expect(settings).toHaveCount(0);
-  await expect(page.locator('.agent-panel, .terminal-pane, .note-pane, .browser-pane, .code-pane, .review-pane')).toHaveCount(0);
-  expect(await isIntentionallyEmpty(page, owenId)).toBe(true);
-});
-
-// keep an explicit agent restore newer than an older pending shell open
-test('restoring Agent after Close all suppresses an older shell completion', async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  const harness = await mountWorkspace(page, owenId, {}, {
-    lateShell: { workspaceId: owenId, pane: { paneId: '%9', name: 'late', path: '/repo/wts/owen' } }
-  });
-  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
-  const shellRequest = page.waitForRequest(request => request.method() === 'POST' && decodeURIComponent(new URL(request.url()).pathname) === `/api/worktrees/${owenId}/shells`);
-  await toolbar.getByRole('button', { name: 'Open a terminal' }).click();
-  await shellRequest;
-
-  await invokeCloseAll(page, 'Owen');
-  await expect(page.locator('.agent-panel, .terminal-pane')).toHaveCount(0);
-  expect(await isIntentionallyEmpty(page, owenId)).toBe(true);
-  await toolbar.getByRole('button', { name: 'Show agent' }).click();
   await expect(page.locator('.agent-panel')).toBeVisible();
-  expect(await isIntentionallyEmpty(page, owenId)).toBe(false);
-
-  const shellResponse = page.waitForResponse(response => response.request().method() === 'POST' && decodeURIComponent(new URL(response.url()).pathname) === `/api/worktrees/${owenId}/shells`);
-  const panesResponse = page.waitForResponse(response => decodeURIComponent(new URL(response.url()).pathname) === `/api/worktrees/${owenId}/panes`);
-  harness.releaseShell();
-  await shellResponse;
-  await panesResponse;
-  await expect(page.locator('.agent-panel')).toBeVisible();
-  await expect(page.locator('.terminal-pane')).toHaveCount(0);
-  await expect(toolbar.getByRole('button', { name: 'Open a terminal' })).toHaveAttribute('aria-haspopup', 'menu');
+  await expect(page.locator('.terminal-pane, .note-pane, .browser-pane, .code-pane, .review-pane')).toHaveCount(0);
   expect(await isIntentionallyEmpty(page, owenId)).toBe(false);
 });
 
-// retain ordinary deep-link restoration without weakening deliberate close-all intent
+// retain ordinary deep-link restoration for minimized output
 test('agent links still reveal ordinarily minimized output', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await mountWorkspace(page, coraId, {
@@ -556,38 +642,78 @@ test('agent links still reveal ordinarily minimized output', async ({ page }) =>
   expect(await isIntentionallyEmpty(page, coraId)).toBe(false);
 });
 
-// preserve deliberate emptiness until an explicit restore clears it
-test('Close all remains empty across switching and reload until restore reactivates the guard', async ({ page }) => {
+// repair off-tab empty state when an agent link selects it
+test('agent link repairs a stale empty marker before opening the worktree', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const harness = await mountWorkspace(page, owenId, {
+    [`rac.hidden-agent:place-${coraId}`]: '1',
+    [`rac.terminals:${coraId}`]: '[]',
+    [`rac.workspace-empty:place-${coraId}`]: '1'
+  });
+  await expect(page.getByRole('tab', { name: /^Owen —/u })).toHaveAttribute('aria-selected', 'true');
+
+  await page.evaluate(() => { location.hash = '#agent=agent-cora'; });
+  await expect(page.getByRole('tab', { name: /^Cora —/u })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.terminal-pane')).toHaveCount(0);
+  expect(await isIntentionallyEmpty(page, coraId)).toBe(false);
+  // do not create replacement content
+  expect(harness.mutations.filter(entry => entry.path.endsWith('/shells') || entry.path.endsWith('/launch') || entry.path === '/api/agents')).toEqual([]);
+});
+
+// preserve one live split across switching and reload
+test('Close all keeps Agent visible across switching and reload', async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await mountWorkspace(page, coraId, {
     [`rac.terminals:${coraId}`]: JSON.stringify([{ paneId: '%5', name: 'build' }])
   });
   const coraTab = page.getByRole('tab', { name: /^Cora —/u });
-  await coraTab.click({ button: 'right' });
-  await page.getByRole('menu', { name: 'Cora workspace' }).getByRole('menuitem', { name: 'Close all splits' }).click();
-  await expect(page.locator('.agent-panel, .terminal-pane')).toHaveCount(0);
-  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
-  await expect(toolbar.getByRole('button', { name: 'Show agent' })).toBeVisible();
-  expect(await isIntentionallyEmpty(page, coraId)).toBe(true);
+  await invokeCloseAll(page, 'Cora');
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.terminal-pane')).toHaveCount(0);
 
   await page.getByRole('tab', { name: /^Owen —/u }).click();
   await expect(page.locator('.agent-panel')).toBeVisible();
   await expect(page.getByRole('region', { name: 'Empty workspace' })).toHaveCount(0);
   await coraTab.click();
-  await expect(page.locator('.agent-panel, .terminal-pane')).toHaveCount(0);
-  await expect(toolbar.getByRole('button', { name: 'Show agent' })).toBeVisible();
-  expect(await isIntentionallyEmpty(page, coraId)).toBe(true);
-  await page.reload();
-  await expect(page.locator('.agent-panel, .terminal-pane')).toHaveCount(0);
-  await expect(toolbar.getByRole('button', { name: 'Show agent' })).toBeVisible();
-  expect(await isIntentionallyEmpty(page, coraId)).toBe(true);
-
-  await toolbar.getByRole('button', { name: 'Show agent' }).click();
   await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.terminal-pane')).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.terminal-pane')).toHaveCount(0);
+  expect(await isIntentionallyEmpty(page, coraId)).toBe(false);
+
   await page.getByRole('button', { name: 'Minimize agent output' }).click();
   await expect(page.locator('.agent-panel')).toBeVisible();
   await expect(minimizeError(page)).toBeVisible();
+});
+
+// keep one live shell when no agent can satisfy the invariant
+test('Close all keeps the only live Terminal visible', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mountWorkspace(page, shellId, {
+    [`rac.terminals:${shellId}`]: JSON.stringify([{ paneId: '%7', name: 'server' }])
+  });
+  await invokeCloseAll(page, 'Shell');
+  await expect(page.locator('.terminal-pane[data-panel-key="%7"]')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Empty workspace' })).toHaveCount(0);
+  expect(await isIntentionallyEmpty(page, shellId)).toBe(false);
+});
+
+// inactive close-all must not leave a hidden agent behind when its tab activates
+test('Close all in an inactive worktree preserves its live Agent', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mountWorkspace(page, owenId, {
+    [`rac.hidden-agent:place-${coraId}`]: '1',
+    [`rac.terminals:${coraId}`]: JSON.stringify([{ paneId: '%5', name: 'build' }])
+  });
+  await invokeCloseAll(page, 'Cora');
+  await expect(page.getByRole('tab', { name: /^Owen —/u })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: /^Cora —/u }).click();
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(page.locator('.terminal-pane')).toHaveCount(0);
+  expect(await isIntentionallyEmpty(page, coraId)).toBe(false);
 });
 
 // leave a genuinely empty workspace empty without launching or creating content

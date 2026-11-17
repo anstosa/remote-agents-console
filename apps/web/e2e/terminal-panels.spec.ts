@@ -696,8 +696,8 @@ test('a phone Terminal keeps its selected text when note creation fails', async 
   await context.close();
 });
 
-// keep delayed note creation behind deliberate workspace closure
-test('a delayed terminal note creation cannot reopen a workspace closed during the request', async ({ page }) => {
+// keep delayed note creation behind close-all without hiding every live split
+test('a delayed terminal note creation cannot reopen its split after Close all', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 900 });
   await installPaneMock(page);
   const notes: Note[] = [];
@@ -720,24 +720,18 @@ test('a delayed terminal note creation cannot reopen a workspace closed during t
   await createRequest;
 
   try {
-    // commit deliberate empty intent before the server answers
+    // close sibling splits before the server answers
     await page.getByRole('tab', { name: /^Cora —/u }).click({ button: 'right' });
     await page.getByRole('menu', { name: 'Cora workspace' }).getByRole('menuitem', { name: 'Close all splits' }).click();
-    await expect(page.locator('.agent-panel, .terminal-pane, .note-pane')).toHaveCount(0);
+    await expect(page.locator('.agent-panel')).toBeVisible();
+    await expect(page.locator('.terminal-pane, .note-pane')).toHaveCount(0);
 
     const createResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/worktrees/cora/notes' && response.request().method() === 'POST');
     releaseCreate?.();
     expect((await createResponse).status()).toBe(201);
     await expect.poll(() => savedNotes[0]).toContain('Late terminal');
-    await expect(page.locator('.agent-panel, .terminal-pane, .note-pane')).toHaveCount(0);
-
-    // a later explicit restore must keep its own destination
-    const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
-    await toolbar.getByRole('button', { name: 'Show agent' }).click();
-    const agentPanel = page.locator('.agent-panel');
-    await expect(agentPanel).toBeVisible();
-    await expect.poll(() => agentPanel.evaluate(element => element === document.activeElement || element.contains(document.activeElement))).toBe(true);
-    await expect(page.locator('.note-pane')).toHaveCount(0);
+    await expect(page.locator('.agent-panel')).toBeVisible();
+    await expect(page.locator('.terminal-pane, .note-pane')).toHaveCount(0);
   } finally {
     // release the route during failed assertions and teardown
     releaseCreate?.();

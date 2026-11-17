@@ -300,12 +300,10 @@ test('workspace actions target inactive tabs, restore splits and keep responsive
   await renamedTab.click({ button: 'right' });
   menu = page.getByRole('menu', { name: 'Cora Context workspace' });
   await menu.getByRole('menuitem', { name: 'Close all splits' }).click();
-  await expect(page.locator('.log-output, .terminal-pane, .note-pane, .browser-pane, .code-pane')).toHaveCount(0);
-  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
-  await expect(toolbar.getByRole('button', { name: 'Show agent' })).toBeVisible();
-  expect(fixture.mutations.some(entry => entry.method === 'DELETE' || entry.path.endsWith('/deactivate'))).toBe(false);
-  await toolbar.getByRole('button', { name: 'Show agent' }).click();
   await expect(page.locator('.log-output')).toBeVisible();
+  await expect(page.locator('.terminal-pane, .note-pane, .browser-pane, .code-pane')).toHaveCount(0);
+  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+  expect(fixture.mutations.some(entry => entry.method === 'DELETE' || entry.path.endsWith('/deactivate'))).toBe(false);
   await expect(toolbar.locator('.launch-minimized-count')).toHaveCount(0);
 
   // retain a visible terminal while exercising the minimized agent launcher

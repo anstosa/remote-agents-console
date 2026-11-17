@@ -7321,7 +7321,7 @@ const minimizeWorkspacePanel = (workspaceKey: string, panelKey: string, minimize
 // and git expansion. The tab's card holds it, so it outlives a switch between the Agents there;
 // the agent panel's composer drives the same browser and Terminals, and the Workspace renders it.
 // `onCloseReview`, given while the guided review's panel is open here, minimizes it.
-function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, noteOptions: notes, onNavigateWorktree, onOperationFeedback, onCloseReview, onAddToPrompt }: { agentId?: string; newConversationInPlace?: boolean; noteOptions: WorkspaceNotesOptions; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onCloseReview?: () => void; onAddToPrompt?: (text: string) => void }) {
+function useWorkspace(place: WorkspacePlace, { agentId, agentPanelAvailable = agentId !== undefined, newConversationInPlace, noteOptions: notes, onNavigateWorktree, onOperationFeedback, onCloseReview, onAddToPrompt }: { agentId?: string; agentPanelAvailable?: boolean; newConversationInPlace?: boolean; noteOptions: WorkspaceNotesOptions; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onCloseReview?: () => void; onAddToPrompt?: (text: string) => void }) {
   const key = place.id === undefined ? `agent-${agentId ?? 'pending'}` : placeItemKey(place.id);
   // runs after the panels' own effects have reclaimed their kept terminals
   useEffect(() => showKeptWorkspace(key), [key]);
@@ -7365,8 +7365,8 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
   }, addToPrompt);
   const [gitExpanded, setGitExpanded] = useState(false);
   useWorkspaceViewRevision();
-  const intentionallyEmpty = workspaceIntentionallyEmpty(key);
-  const agentHidden = agentSplitHidden(key) || (agentId !== undefined && intentionallyEmpty);
+  // stale empty markers must not hide existing output
+  const agentHidden = agentSplitHidden(key);
   // bring a requested split into view; focus its container, or with `input` its terminal or composer
   const jump = (panelKey: string, input = false) => {
     // reveal siblings without collapsing an already expanded destination
@@ -7401,7 +7401,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
     carouselRef.current = next;
     minimizing.current.clear();
     setCarousel(next);
-    // actual new content resumes the ordinary policy, including on a fresh mount
+    // revealed content clears stale empty intent even on a fresh mount
     if (added && workspaceIntentionallyEmpty(key)) setWorkspaceIntentionallyEmpty(key, false);
   }, [key]);
   const panelKeyOf = (element: Element | null): string | undefined => {
@@ -7432,20 +7432,14 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
     minimizing.current.add(panelKey);
     minimize();
   };
-  // repair legacy or reconciled empty layouts without undoing an intentional close-all
+  // restore existing live content even after close-all or delayed discovery
   useLayoutEffect(() => {
-    // newly discovered agents must not reopen a deliberately empty workspace
-    if (intentionallyEmpty) {
-      // retain the agent's hidden state when another kind of split is later opened
-      if (agentId !== undefined && !agentSplitHidden(key)) setAgentSplitHidden(key, true);
-      return;
-    }
-    // wait for authoritative columns, note restoration and close-all preflight
-    if (carousel === undefined || !placeNotes.initialNotesSettled || closingAll.current) return;
+    // wait for authoritative columns and pending close-all preflight only
+    if (carousel === undefined || closingAll.current) return;
     // ordinary nonempty layouts require no repair
     if (carousel.panels.length > 0) return;
-    // the existing agent is first in layout order and needs no launch
-    if (agentId !== undefined) {
+    // existing output or a prepared draft needs no launch
+    if (agentPanelAvailable) {
       // avoid repeated preference writes while the new column is mounting
       if (agentHidden) setAgentSplitHidden(key, false);
       return;
@@ -7487,7 +7481,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
           if (settingsSplit?.open && !await settingsSplit.close()) return;
           // await disposable note cleanup before committing a completed close-all
           if (!await placeNotes.close()) return;
-          // retain deliberate emptiness only after every close preflight succeeds
+          // invalidate older opens only after every close preflight succeeds
           setWorkspaceIntentionallyEmpty(key, true);
           browser.close();
           files.close();
@@ -7498,8 +7492,8 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
           onCloseReview?.();
           terminals.closeAll();
           expansion.restore();
-          // retain a restore action only when an agent or draft was actually visible
-          if (carousel?.panels.some(panel => panel.key === 'agent')) setAgentSplitHidden(key, true);
+          // keep existing output or a prepared draft visible
+          if (agentPanelAvailable) setAgentSplitHidden(key, false);
         } finally {
           closingAll.current = false;
         }
@@ -9108,8 +9102,11 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
   const launchKind = pendingWorktreeLaunches.get(worktree.id)?.kind ?? worktree.launch?.kind;
   const presentation = inactiveWorktreePresentation(worktree.label, launchKind, { startingNewTask, restarting, turningOff, launching });
   const processingColor: ProgressColor = restarting ? 'yellow' : turningOff ? 'red' : 'blue';
+  // recover prelaunch output using the same availability that renders its column
+  const starting = launching || restarting || startingNewTask;
+  const agentPanelAvailable = starting || promptOpened;
   // keep place panels available without an agent
-  const workspace = useWorkspace({ ...worktree, worktreeId: worktree.id }, { onAddToPrompt: appendToPrompt, noteOptions: { schedulePrefill, onLaunchAndRun: noteId => launchAndRun(noteId), launchRunLabel: `${launchKind === undefined ? 'an agent' : agentKindLabel[launchKind]} on ${worktree.label}` }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => onCloseReview(worktree.id) });
+  const workspace = useWorkspace({ ...worktree, worktreeId: worktree.id }, { agentPanelAvailable, onAddToPrompt: appendToPrompt, noteOptions: { schedulePrefill, onLaunchAndRun: noteId => launchAndRun(noteId), launchRunLabel: `${launchKind === undefined ? 'an agent' : agentKindLabel[launchKind]} on ${worktree.label}` }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => onCloseReview(worktree.id) });
   const [error, setError] = useState('');
   useEffect(() => {
     if (!error) return;
@@ -9202,9 +9199,6 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
     }
   };
   const gitActions: WorkspaceGitActions = { ...reviewGitActions(worktree.id, workspace.viewKey, review, onReview, reviewTourUnavailableText(reviewCapability)), onSelectTarget: target => onNavigateWorktree(target.worktreeId), onNewWorktree, onOperationFeedback };
-  // a starting Agent (or a draft typed before launch) gets the agent panel; with none, the
-  // Workspace shows only its other panels
-  const starting = launching || restarting || startingNewTask;
   // a draft with no launch under way can be dropped, which closes its panel
   const discardDraft: PanelAction = { key: 'discard', label: 'Discard draft', title: 'Discard this draft and its attachments', className: 'agent-discard', icon: <PanelIcon path={actionIconPaths.trash} />, onSelect: () => {
     // confirm before losing prepared text or files, as a failed launch's discard does
@@ -9213,7 +9207,8 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
     setPromptDraft(draftId, '');
     setPromptOpened(false);
   } };
-  const agentPanel = starting || promptOpened
+  // render exactly the output advertised to workspace recovery
+  const agentPanel = agentPanelAvailable
     ? <PendingAgentPanel kind={launchKind} title={worktree.label} state={processing ? { label: presentation.status, tone: presentation.tone } : { label: 'Off', tone: 'off' }} loading={<PanelNotice busy={processing} progress={processingColor} ariaLabel={presentation.ariaLabel} heading={presentation.heading} detail={presentation.detail} />} close={starting ? undefined : discardDraft} composer={<Prompt id={draftId} ready={false} history={[]} onHistoryChanged={async () => { /* no agent history yet */ }} onPromptFocus={() => { /* draft belongs to the inactive worktree */ }} onOperationFeedback={onOperationFeedback} worktreeId={worktree.id} />} />
     : undefined;
   const launch: ToolbarLaunch = { label: worktree.label, resolution: worktree.launch, target: { type: 'worktree', id: worktree.id }, disabled: !worktree.available, pending: processing, start: choice => void start(choice) };
@@ -9312,7 +9307,7 @@ function PlaceCard({ place, tabBar, cleanupControl, transient = false, launchDis
     }
   };
   const launchKind = launch?.resolution?.kind;
-  const workspace = useWorkspace({ id: place.id, path: place.home }, { noteOptions: { schedulePrefill, ...(launch === undefined ? {} : { onLaunchAndRun: launchAndRun, launchRunLabel: `${launchKind === undefined ? 'an agent' : agentKindLabel[launchKind]} on ${place.label}` }) }, onOperationFeedback });
+  const workspace = useWorkspace({ id: place.id, path: place.home }, { agentPanelAvailable: running, noteOptions: { schedulePrefill, ...(launch === undefined ? {} : { onLaunchAndRun: launchAndRun, launchRunLabel: `${launchKind === undefined ? 'an agent' : agentKindLabel[launchKind]} on ${place.label}` }) }, onOperationFeedback });
   // an ad-hoc Scratch folder has no launch: only its terminals and notes live here
   const toolbarLaunch: ToolbarLaunch | undefined = launch === undefined ? undefined : { label: place.label, resolution: launch.resolution, target: launch.target, disabled: launchDisabled || running, pending: running, start: launch.start };
   const empty = <EmptyWorkspace workspace={workspace} label={place.label} detail={`${place.home} · ${place.kind === 'scratch' ? 'Scratch folder' : 'directory Project'}`} launch={toolbarLaunch} onPin={transient ? onTogglePin : undefined} />;
@@ -10843,11 +10838,10 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       const linkedItem = items[linked]!;
       // keep linked navigation aligned with the stable selection key
       selectedItemKey.current = linkedItem.key;
-      // select linked agents without undoing a deliberately empty workspace
+      // explicit agent destinations restore their output and clear stale empty intent
       if (linkedAgentId !== undefined) {
         chooseAgent(linkedItem.key, linkedAgentId);
-        // passive URL activation must not clear close-all intent on reload
-        if (!workspaceIntentionallyEmpty(linkedItem.key)) setAgentSplitHidden(linkedItem.key, false);
+        setAgentSplitHidden(linkedItem.key, false);
       }
       setActive(linked);
       // clear the selected notification state
@@ -11275,14 +11269,14 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     return items.findIndex(candidate => candidate.placeId === placeId || (place !== undefined && candidate.pendingLaunch !== undefined
       && (candidate.pendingLaunch.scope === 'scratch' ? place.kind === 'scratch' : place.kind === 'directory' && candidate.pendingLaunch.projectId === place.projectId)));
   };
-  // Empty workspace from +: focus the Place's Workspace when it has one, else open it with no panels
+  // focus an existing workspace or clear retained panels for a new tab
   const openEmptyWorkspace = (placeId: string) => {
     const index = placeTabIndex(placeId);
     if (index >= 0) {
       closeLauncher();
       return select(index);
     }
-    // explicit empty entry must not auto-reveal an existing hidden shell
+    // invalidate older opens without suppressing live-content recovery
     setWorkspaceIntentionallyEmpty(placeItemKey(placeId), true);
     forgetOpenPanels(placeId);
     // explicit empty entry also forgets retained Code, Settings and local Review
@@ -11699,7 +11693,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const live = workspaceViews.get(entry.key);
     // flush mounted note drafts before minimizing their panels
     if (live !== undefined) { live.closeAll(); return; }
-    // inactive tabs retain the same deliberate-empty policy across reloads
+    // inactive closes invalidate older opens before forgetting stored panels
     setWorkspaceIntentionallyEmpty(entry.key, true);
     // hiding an inactive settings split does not discard the shared in-memory draft
     setSettingsSplitOpen(entry.key, false);
@@ -11710,8 +11704,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const selectedAgent = currentAgentOf(entry);
     // clear the unscoped note view without deleting its stored content
     if (entry.placeId === undefined && selectedAgent !== undefined) clearWorktreeNoteView(`agent:${selectedAgent.id}`);
-    // keep empty workspaces free of a meaningless agent restore button
-    if (entry.agents.length > 0 || retainedSplits(entry).some(split => split.key === 'agent')) setAgentSplitHidden(entry.key, true);
+    // keep inactive live output visible before workspace recovery
+    if (entry.agents.length > 0) setAgentSplitHidden(entry.key, false);
   };
   // stop every managed session with feedback visible even from inactive tabs
   const turnOffWorkspace = async (entry: DashboardItem) => {
