@@ -4,8 +4,8 @@ import type { InlineQuestion, TmuxKey } from './types.js';
 
 // admit text only in native question editors, never in arbitrary numbered menus
 export function codexQuestionTextEntry(question: InlineQuestion, capture: string): TmuxKey[] | undefined {
-  // structured OMX renderers have a different text-entry protocol
-  if (question.pane?.targetPaneId !== undefined) return undefined;
+  // folder permissions have no prose field, and structured OMX uses a different protocol
+  if (question.permission === true || question.pane?.targetPaneId !== undefined) return undefined;
   const lines = normalizedLines(capture).filter(Boolean);
   const footer = lines.slice(-8).join(' ');
   // the asynchronous editor moves bracketed pastes directly into its other field
@@ -108,8 +108,8 @@ function choiceQuestionText(lines: string[], start: number, interactive: boolean
       paragraphStart = undefined;
       break;
     }
-    // do not absorb earlier menus, progress messages, or prompt chrome
-    if (questionChoiceLine.test(line) || questionChrome.test(line) || questionFooter.test(line)) break;
+    // do not absorb earlier menus, progress messages, prompt chrome, or startup footers
+    if (questionChoiceLine.test(line) || questionChrome.test(line) || questionFooter.test(line) || /^enter continue · esc (?:quit|back)$/iu.test(line)) break;
     // without a native header, use only the paragraph nearest the options
     if (!line && paragraphStart === undefined) paragraphStart = begin;
     begin -= 1;

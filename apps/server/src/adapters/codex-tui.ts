@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { codexDraftState, codexOwnsDraft, failedTurnFromCapture, lastPromptFromHistory, latestAgentMessageFromHistory, latestCompletedAssistantTurn, queueReadyPrompt } from './codex-turns.js';
 import { parseChoiceQuestion } from './codex-questions.js';
+import { codexFolderTrustDialog } from './codex-folder-trust.js';
 import { codexConversationName, codexConversationSummaries, codexHome, codexLatestMessage, codexManagedPromptLifecycle, codexPromptAccepted, codexRolloutBaseline, codexTurnSince, discoverCodexConversation, validCodexThreadId } from './codex-conversations.js';
 import type { Adapter, AttentionState, PromptCommand } from './types.js';
 
@@ -114,12 +115,13 @@ export const codexTurns: NonNullable<Adapter['turns']> = {
   failed: failedTurnFromCapture,
 };
 
-// `capture` is either a raw pane capture or an already-isolated latest message.
-// Isolate the agent's latest message when a prompt boundary is present (so the
-// composer box below it never reads as a choice list); an already-isolated message
-// has none and is parsed as-is. Both paths yield the same question — and so the
-// same id — for a given on-screen list.
-export const parseCodexQuestion = (capture: string) => parseChoiceQuestion(latestAgentMessageFromHistory(capture) ?? capture);
+// native folder consent precedes ordinary message isolation and cannot fall back to a plain menu
+export const parseCodexQuestion = (capture: string) => {
+  const trust = codexFolderTrustDialog(capture);
+  // an unsupported trust surface stays terminal-only instead of bypassing operator consent
+  if (trust !== undefined) return trust.question;
+  return parseChoiceQuestion(latestAgentMessageFromHistory(capture) ?? capture);
+};
 
 export const codexCommands: NonNullable<Adapter['commands']> = {
   // The account-global skills override nothing; the workspace's `.codex/skills`

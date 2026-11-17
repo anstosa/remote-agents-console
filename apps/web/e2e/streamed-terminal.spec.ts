@@ -179,6 +179,26 @@ test('conforms to the reported size and letterboxes a smaller pane', async ({ pa
   expect(screenWidth).toBeLessThan(hostWidth);
 });
 
+// recover an idle agent whose full-width redraw arrived before the expanded grid
+test('restores a clipped split-close redraw from the new-grid snapshot', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 600 });
+  await setup(page, { width: '1500px', height: '400px', loadingKind: 'agent' });
+  await drive(page, 'pushSize', 80, 24);
+  const fullWidthScreen = `\x1b[?1049h\x1b[?7l\x1b[H\x1b[2J${'X'.repeat(200)}`;
+  await drive(page, 'pushBytes', fullWidthScreen);
+  await expect.poll(async () => (await drive<string>(page, 'screenText')).split('\n')[0]!.length).toBe(80);
+  await drive(page, 'pushSize', 200, 24);
+  await expect.poll(() => drive(page, 'cols')).toBe(200);
+  // resizing alone cannot recover characters already clipped by the previous grid
+  expect((await drive<string>(page, 'screenText')).split('\n')[0]!.length).toBe(80);
+
+  await drive(page, 'pushReseed');
+  await drive(page, 'pushBytes', fullWidthScreen);
+  // the authoritative snapshot restores the idle screen without another live repaint
+  await expect.poll(async () => (await drive<string>(page, 'screenText')).split('\n')[0]!.length).toBe(200);
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+});
+
 test('letterboxes the smaller pane in the terminal background, not xterm black', async ({ page }) => {
   // A pane shorter than the panel leaves a strip below the last row. xterm's own
   // `.xterm-viewport` is a full-height, hardcoded-black overlay, so without an override

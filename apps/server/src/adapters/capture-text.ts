@@ -7,8 +7,8 @@
  * which tolerates an embedded ESC that these matchers never meet.
  */
 
-/** Drop the ANSI escape sequences a capture carries: OSC (hyperlinks) and CSI (colours, cursor). */
-function stripAnsi(text: string): string {
+/** drop capture styling without changing literal folder characters */
+export function stripAnsi(text: string): string {
   return text
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/gu, '')  // OSC (e.g. hyperlinks)
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, '');           // CSI (colours, cursor)

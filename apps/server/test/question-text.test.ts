@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { PromptService } from '../src/prompts/service.js';
 import { inlineQuestionId } from '../src/adapters/inline-questions.js';
 
@@ -117,3 +118,133 @@ describe('text question answers', () => {
     expect(tmux.sendKeys.mock.calls).toEqual([[socket, '%1', ['Down', 'Down', 'Down', 'Enter']]]);
   });
 });
+
+const { lines: folderTrustLines } = JSON.parse(readFileSync(new URL('./fixtures/claude/folder-trust.json', import.meta.url), 'utf8')) as { lines: string[] };
+const folderTrustCapture = folderTrustLines.join('\n');
+const folderTrustId = inlineQuestionId('Do you trust /workspaces/example?', ['No, exit', 'Yes, I trust this folder']);
+
+// native folder permissions are direct operator answers, never queued prompts
+describe('folder trust answers', () => {
+  // move relative to the freshly captured cursor rather than assuming the first row
+  it.each([
+    { selected: 0, answer: 1, keys: ['Down', 'Enter'] },
+    { selected: 0, answer: 0, keys: ['Enter'] },
+    { selected: 1, answer: 0, keys: ['Up', 'Enter'] },
+    { selected: 1, answer: 1, keys: ['Enter'] }
+  ])('delivers explicit choice $answer from native row $selected', async ({ selected, answer, keys }) => {
+    const capture = selected === 0 ? folderTrustCapture : folderTrustCapture.replace('❯ No, exit', '  No, exit').replace('  Yes, I trust', '❯ Yes, I trust');
+    const { service, tmux, queued } = fixture(capture, 'claude');
+    await expect(service.answerQuestion(agent.id, folderTrustId, answer, { operator: true })).resolves.toBe(true);
+    expect(tmux.sendKeys).toHaveBeenCalledExactlyOnceWith(socket, '%1', keys);
+    expect(tmux.pastePrompt).not.toHaveBeenCalled();
+    expect(queued.enqueue).not.toHaveBeenCalled();
+  });
+
+  // a caller without operator consent must not choose either native folder action
+  it.each([0, 1])('refuses non-operator folder choice %s', async answer => {
+    const { service, tmux } = fixture(folderTrustCapture, 'claude');
+    await expect(service.answerQuestion(agent.id, folderTrustId, answer)).resolves.toBe(false);
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.pastePrompt).not.toHaveBeenCalled();
+  });
+
+  // even a matching shortened-display id cannot authorize an ambiguous folder
+  it.each(['/workspaces/ex…mple', '/workspaces/.../example'])('refuses the shortened folder %s without sending keys', async folder => {
+    const { service, tmux } = fixture(folderTrustCapture.replace('/workspaces/example', folder), 'claude');
+    const id = inlineQuestionId(`Do you trust ${folder}?`, ['No, exit', 'Yes, I trust this folder']);
+    await expect(service.answerQuestion(agent.id, id, 1, { operator: true })).resolves.toBe(false);
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.pastePrompt).not.toHaveBeenCalled();
+  });
+
+  // stale folders, missing highlights, and prose cannot authorize a native trust action
+  it.each([
+    { capture: folderTrustCapture.replace('/workspaces/example', '/workspaces/other'), answer: 1 },
+    { capture: `${folderTrustCapture}\nClaude is ready\n❯ `, answer: 1 },
+    { capture: folderTrustCapture.replace('❯ No, exit', '  No, exit'), answer: 1 },
+    { capture: folderTrustCapture, answer: 'Yes, trust it.' }
+  ])('refuses an unavailable folder answer %#', async ({ capture, answer }) => {
+    const { service, tmux } = fixture(capture, 'claude');
+    await expect(service.answerQuestion(agent.id, folderTrustId, answer, { operator: true })).resolves.toBe(false);
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.pastePrompt).not.toHaveBeenCalled();
+  });
+});
+
+const { lines: codexTrustLines } = JSON.parse(readFileSync(new URL('./fixtures/codex/folder-trust.json', import.meta.url), 'utf8')) as { lines: string[] };
+const codexTrustCapture = codexTrustLines.join('\n');
+const codexTrustId = inlineQuestionId('Do you trust /workspaces/example?', ['Trust and continue', 'Quit']);
+
+// codex and omx require the same explicit native folder decision as claude
+for (const kind of ['codex', 'omx']) {
+  describe(`${kind} folder trust answers`, () => {
+    // source-verified native actions must match whole labels instead of ordinary prefixes
+    it.each(['Open restricted settings', 'Open existing task preferences', 'Trust and continue with tests'])('answers the ordinary choice %s', async label => {
+      const capture = `Which approach?\n› 1. ${label}\n  2. Broad\nenter confirm`;
+      const { service, tmux } = fixture(capture, kind);
+      const id = inlineQuestionId('Which approach?', [label, 'Broad']);
+      await expect(service.answerQuestion(agent.id, id, 0)).resolves.toBe(true);
+      expect(tmux.sendKeys).toHaveBeenCalledExactlyOnceWith(socket, '%1', ['Enter']);
+    });
+
+    // exact native labels remain ordinary answers unless native structural chrome is present
+    it.each(['Trust and continue', 'Open restricted', 'Open existing task'])('answers exact ordinary choice %s with or without quoted chrome', async label => {
+      // neither a bare action label nor a quoted heading grants native permission semantics
+      for (const prose of ['', 'Folder access\n/workspaces/example\nThis is an example configuration section.\n\n']) {
+        const capture = `${prose}Which approach?\n› 1. ${label}\n  2. Broad\nenter confirm`;
+        const { service, tmux } = fixture(capture, kind);
+        const id = inlineQuestionId('Which approach?', [label, 'Broad']);
+        await expect(service.answerQuestion(agent.id, id, 0)).resolves.toBe(true);
+        expect(tmux.sendKeys).toHaveBeenCalledExactlyOnceWith(socket, '%1', ['Enter']);
+        expect(tmux.pastePrompt).not.toHaveBeenCalled();
+      }
+    });
+
+    // a quoted native heading must not prevent answering an unrelated ordinary question
+    it('answers a normal question after prose containing the folder-access heading', async () => {
+      const capture = 'Folder access\n/workspaces/example\nThis is an example configuration section.\n\nWhich approach?\n› 1. Small\n  2. Broad\nenter confirm';
+      const { service, tmux } = fixture(capture, kind);
+      const id = inlineQuestionId('Which approach?', ['Small', 'Broad']);
+      await expect(service.answerQuestion(agent.id, id, 1)).resolves.toBe(true);
+      expect(tmux.sendKeys).toHaveBeenCalledExactlyOnceWith(socket, '%1', ['Down', 'Enter']);
+    });
+
+    // freshly captured highlights determine navigation, never the default affirmative row
+    it.each([
+      { selected: 0, answer: 0, keys: ['Enter'] },
+      { selected: 0, answer: 1, keys: ['Down', 'Enter'] },
+      { selected: 1, answer: 0, keys: ['Up', 'Enter'] },
+      { selected: 1, answer: 1, keys: ['Enter'] }
+    ])('delivers explicit choice $answer from native row $selected', async ({ selected, answer, keys }) => {
+      const capture = selected === 0 ? codexTrustCapture : codexTrustCapture.replace('› 1.', '  1.').replace('  2.', '› 2.');
+      const { service, tmux, queued } = fixture(capture, kind);
+      await expect(service.answerQuestion(agent.id, codexTrustId, answer, { operator: true })).resolves.toBe(true);
+      expect(tmux.sendKeys).toHaveBeenCalledExactlyOnceWith(socket, '%1', keys);
+      expect(tmux.pastePrompt).not.toHaveBeenCalled();
+      expect(queued.enqueue).not.toHaveBeenCalled();
+    });
+
+    // automated callers cannot choose either native folder action
+    it.each([0, 1])('refuses non-operator choice %s', async answer => {
+      const { service, tmux } = fixture(codexTrustCapture, kind);
+      await expect(service.answerQuestion(agent.id, codexTrustId, answer)).resolves.toBe(false);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.pastePrompt).not.toHaveBeenCalled();
+    });
+
+    // malformed, stale, and prose answers must never submit the default trust selection
+    it.each([
+      { capture: codexTrustCapture.replace('/workspaces/example', '/workspaces/other'), answer: 0 },
+      { capture: codexTrustCapture.replace('/workspaces/example', '/workspaces/ex…mple'), answer: 0 },
+      { capture: codexTrustCapture.replace('Your trust decision will be saved.', ''), answer: 0 },
+      { capture: codexTrustCapture.replace('› 1.', '  1.'), answer: 0 },
+      { capture: `${codexTrustCapture}\n• Ready\n› Ask Codex to do anything`, answer: 0 },
+      { capture: codexTrustCapture, answer: 'Yes, trust it.' }
+    ])('refuses an unavailable trust answer %#', async ({ capture, answer }) => {
+      const { service, tmux } = fixture(capture, kind);
+      await expect(service.answerQuestion(agent.id, codexTrustId, answer, { operator: true })).resolves.toBe(false);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.pastePrompt).not.toHaveBeenCalled();
+    });
+  });
+}

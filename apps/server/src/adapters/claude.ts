@@ -5,6 +5,7 @@ import { claudeFiles, claudeHooksFileName, claudeStructuredSettings } from './cl
 import { claudeNewConversation } from './claude-new-conversation.js';
 import { claudeReviewRuns } from './claude-review-runs.js';
 import { claudeQuestionTextAnswer, claudeQuestionTextEntry, reportedClaudeQuestion } from './claude-questions.js';
+import { claudeFolderTrustQuestion } from './claude-folder-trust.js';
 import { responseUrlEnvironment } from './response-urls.js';
 import { claudeClient, claudeEfforts, claudeMcpServer } from '../transports/claude.js';
 import type { Adapter, ReplacedFlagValue, StructuredAdapter, TmuxKey } from './types.js';
@@ -47,8 +48,8 @@ const instantCommands = new Set(['/clear']);
  * viewport) and no `panes`, and `conversations` has no `discover` (the transcript
  * fd is not held open) — only a reported `@rac_session` id, whose name is read from
  * the transcript. `AskUserQuestion` renders as an Inline question through the reported
- * hook payload (ADR 0006): the dialog draws options in payload order with the
- * highlight on the first, so `selectOption` navigates it by Down-key count.
+ * hook payload (ADR 0006). Startup folder trust has no hook payload, so its native
+ * dialog is parsed separately and retains its live keyboard cursor.
  */
 export const claudeAdapter = {
   kind: 'claude',
@@ -73,7 +74,11 @@ export const claudeAdapter = {
     completesWithoutWork: (prompt) => instantCommands.has(prompt.trim().split(/\s+/u)[0] ?? ''),
     // Escape then C-c as separate writes; never Escape Escape (Rewind) or C-c C-c (exit)
     interrupt: ['Escape', 'C-c'],
-    selectOption: (index) => [...Array.from({ length: index }, () => 'Down' as TmuxKey), 'Enter'],
+    // navigate from the actual cursor for unnumbered startup permission dialogs
+    selectOption: (index, selectedIndex = 0) => {
+      const offset = index - selectedIndex;
+      return [...Array.from({ length: Math.abs(offset) }, () => offset < 0 ? 'Up' as TmuxKey : 'Down' as TmuxKey), 'Enter'];
+    },
   },
   commands: {
     stateDirectory: (env) => claudeConfigDir(env),
@@ -82,6 +87,8 @@ export const claudeAdapter = {
     skillInvocation: (name) => `/${name}`,
   },
   questions: {
+    // startup folder consent precedes the session hooks
+    parse: claudeFolderTrustQuestion,
     // the Agent reports the question payload on its own pane; the matcher confirms
     // the dialog is live against the capture and answers it on the same pane
     reported: reportedClaudeQuestion,

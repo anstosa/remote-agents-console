@@ -1,4 +1,5 @@
 import { createServer } from 'node:net';
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
@@ -291,6 +292,133 @@ describe('pane stream seed and size', () => {
     const sizeAt = conn.order.indexOf('frame:size');
     expect(sizeAt).toBeGreaterThanOrEqual(0);
     expect(conn.order.slice(sizeAt).filter(event => event === 'frame:size' || event === 'binary')).toEqual(['frame:size', 'binary', 'binary']);
+  });
+
+  // repair redraws parsed at the previous split size without waiting for more agent output
+  it.each(['viewport', 'layout', 'settled-layout'])('refreshes the screen after a %s changes the reported grid', async change => {
+    const stream = fakePaneStream();
+    let size = { cols: 80, rows: 24 };
+    let limit = size;
+    // model a sigwinch repaint arriving before the resize command resolves
+    const resize = vi.fn(async (_socket: unknown, _pane: string, cols: number, rows: number) => {
+      size = { cols, rows };
+      stream.output(Buffer.from('EARLY-REDRAW'));
+      return true;
+    });
+    const { tmux } = fakeTmux(stream, {
+      // expose a terminal limit that can grow with the browser
+      size: async () => ({ ...size, clientLimit: limit }),
+      resize
+    });
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport(change === 'viewport' ? 80 : 200, change === 'viewport' ? 24 : 40);
+    await waitFor(() => conn.binary.length > 0);
+    stream.setSeed(Buffer.from('FULL-WIDTH-SCREEN'));
+    const before = conn.order.length;
+    limit = { cols: 200, rows: 40 };
+
+    // exercise split closure and an external layout that changes the same pane
+    if (change === 'viewport') conn.viewport(200, 40);
+    else {
+      // tmux may already have reached the target before the layout notification arrives
+      if (change === 'settled-layout') size = limit;
+      stream.fire('onResize');
+    }
+
+    await waitFor(() => conn.frames.filter(frame => frame.type === 'size').length === 2);
+    await waitFor(() => conn.binary.at(-1)?.toString() === 'FULL-WIDTH-SCREEN');
+    expect(conn.frames.filter(frame => frame.type === 'size').at(-1)).toEqual({ type: 'size', cols: 200, rows: 40 });
+    expect(conn.order.slice(before).slice(-3)).toEqual(['frame:size', 'frame:reseed', 'binary']);
+    expect(stream.seedDepths).toEqual([500, 500]);
+    expect(resize).toHaveBeenCalledTimes(change === 'settled-layout' ? 1 : 2);
+    expect(conn.closeCode()).toBeUndefined();
+  });
+
+  // resize bursts must finish their current capture before starting the latest one
+  it('coalesces viewport bursts while a changed-grid snapshot is pending', async () => {
+    const stream = fakePaneStream();
+    let size = { cols: 80, rows: 24 };
+    const { tmux } = fakeTmux(stream, {
+      // retain the actual pane grid across viewport requests
+      size: async () => size,
+      // apply each requested grid without a native terminal clamp
+      resize: async (_socket: unknown, _pane: string, cols: number, rows: number) => { size = { cols, rows }; return true; }
+    });
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport(80, 24);
+    await waitFor(() => conn.binary.length > 0);
+    const pending: Array<{ deliver: (bytes: Buffer) => boolean; resolve: (delivered: boolean) => void }> = [];
+    // keep capture completion under test control during the resize burst
+    stream.setSeedHandler(deliver => new Promise(resolve => { pending.push({ deliver, resolve }); }));
+    conn.viewport(100, 30);
+    await waitFor(() => pending.length === 1);
+
+    // supersede intermediate grids while the first snapshot is still pending
+    for (const cols of [120, 140, 160, 200]) conn.viewport(cols, 40);
+    await delay(50);
+    expect(size).toEqual({ cols: 100, rows: 30 });
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.deliver(Buffer.from('INTERMEDIATE-SCREEN'))).toBe(true);
+    pending[0]!.resolve(true);
+
+    await waitFor(() => pending.length === 2);
+    expect(size).toEqual({ cols: 200, rows: 40 });
+    expect(pending[1]!.deliver(Buffer.from('LATEST-SCREEN'))).toBe(true);
+    pending[1]!.resolve(true);
+    await waitFor(() => conn.binary.at(-1)?.toString() === 'LATEST-SCREEN');
+    expect(conn.frames.filter(frame => frame.type === 'size').map(({ cols, rows }) => ({ cols, rows }))).toEqual([
+      { cols: 80, rows: 24 }, { cols: 100, rows: 30 }, { cols: 200, rows: 40 }
+    ]);
+    expect(conn.closeCode()).toBeUndefined();
+  });
+
+  // external layout events arriving during a capture must still reach the browser
+  it('rechecks the latest layout after a pending resize snapshot finishes', async () => {
+    const stream = fakePaneStream();
+    let size = { cols: 80, rows: 24 };
+    let limit = size;
+    const { tmux } = fakeTmux(stream, {
+      // allow an attached terminal to grow independently of the browser
+      size: async () => ({ ...size, clientLimit: limit }),
+      // retain the actual grid after a clamp correction
+      resize: async (_socket: unknown, _pane: string, cols: number, rows: number) => { size = { cols, rows }; return true; }
+    });
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport(200, 40);
+    await waitFor(() => conn.binary.length > 0);
+    const pending: Array<{ deliver: (bytes: Buffer) => boolean; resolve: (delivered: boolean) => void }> = [];
+    // delay each changed-grid snapshot until its layout events have arrived
+    stream.setSeedHandler(deliver => new Promise(resolve => { pending.push({ deliver, resolve }); }));
+    limit = { cols: 120, rows: 30 };
+    stream.fire('onResize');
+    await waitFor(() => pending.length === 1);
+
+    // another native layout reaches its final size while the first capture is pending
+    size = limit = { cols: 200, rows: 40 };
+    stream.fire('onResize');
+    expect(pending[0]!.deliver(Buffer.from('INTERMEDIATE-SCREEN'))).toBe(true);
+    pending[0]!.resolve(true);
+    await waitFor(() => pending.length === 2);
+    expect(pending[1]!.deliver(Buffer.from('LATEST-SCREEN'))).toBe(true);
+    pending[1]!.resolve(true);
+    await waitFor(() => conn.binary.at(-1)?.toString() === 'LATEST-SCREEN');
+    expect(conn.frames.filter(frame => frame.type === 'size').at(-1)).toEqual({ type: 'size', cols: 200, rows: 40 });
+    expect(conn.closeCode()).toBeUndefined();
+  });
+
+  // duplicate resize observations must not reset scrollback or recapture unchanged screens
+  it('keeps the live screen when repeated viewports report the same grid', async () => {
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport(100, 30);
+    await waitFor(() => conn.binary.length > 0);
+    conn.viewport(100, 30);
+    await waitFor(() => conn.frames.filter(frame => frame.type === 'size').length === 2);
+
+    expect(stream.seedDepths).toEqual([500]);
+    expect(conn.frames.some(frame => frame.type === 'reseed')).toBe(false);
+    expect(conn.closeCode()).toBeUndefined();
   });
 
   // never declare a baseline-less connection live after an unsuccessful capture
@@ -592,7 +720,7 @@ describe('pane stream flow control', () => {
   });
 });
 
-describe('pane stream derive (Codex)', () => {
+describe('pane stream derive', () => {
   const question = { id: 'q', text: 'Pick one', choices: ['1. keep', '2. drop'], source: 'parsed' as const };
 
   // open native follow-up chrome before the existing question frame enters answer mode
@@ -682,7 +810,8 @@ describe('pane stream derive (Codex)', () => {
     expect(conn.frames.at(-1)!.type).toBe('metadata');
   });
 
-  it('performs no derive for a Claude Agent', async () => {
+  // question-only Claude parsing must not publish codex turn metadata
+  it('publishes no turn metadata for a Claude Agent', async () => {
     const stream = fakePaneStream();
     const { tmux } = fakeTmux(stream);
     const conn = await connect(stream.provider, { kind: 'claude', tmux });
@@ -690,7 +819,51 @@ describe('pane stream derive (Codex)', () => {
     await waitFor(() => conn.binary.length > 0);
     conn.send({ type: 'metadata' });
     await new Promise(resolve => setTimeout(resolve, 150));
-    expect(conn.frames.every(frame => frame.type !== 'metadata' && frame.type !== 'question')).toBe(true);
+    expect(conn.frames.every(frame => frame.type !== 'metadata')).toBe(true);
+  });
+
+  // native Claude carets must not be mistaken for codex prompt boundaries
+  it('streams and retires a Claude folder-trust question from the full pane', async () => {
+    const { lines } = JSON.parse(readFileSync(new URL('./fixtures/claude/folder-trust.json', import.meta.url), 'utf8')) as { lines: string[] };
+    const stream = fakePaneStream();
+    stream.setCapture(lines.join('\n'));
+    const { tmux } = fakeTmux(stream, {
+      // model the codex-only extractor stopping after an unnumbered Claude caret
+      captureWindow: async (_socket: unknown, _pane: string, _rows: number, via: (depth: number) => Promise<string | undefined>) => ({
+        text: await via(5_000), older: false, latestAgentMessage: 'Yes, I trust this folder\nEnter to confirm · Esc to cancel'
+      })
+    });
+    const conn = await connect(stream.provider, { kind: 'claude', tmux });
+    conn.viewport(100, 30);
+    await waitFor(() => conn.frames.some(frame => frame.type === 'question' && frame.question !== null));
+    expect(conn.frames.find(frame => frame.type === 'question')?.question).toMatchObject({
+      text: 'Do you trust /workspaces/example?', permission: true,
+      field: { kind: 'choice', choices: ['No, exit', 'Yes, I trust this folder'] }
+    });
+    expect(conn.frames.some(frame => frame.type === 'metadata')).toBe(false);
+    stream.setCapture('Claude is ready\n❯ ');
+    stream.activity();
+    await waitFor(() => conn.frames.some(frame => frame.type === 'question' && frame.question === null));
+    expect(conn.closeCode()).toBeUndefined();
+  });
+
+  // both codex entry points publish native startup consent through the pane stream
+  it.each(['codex', 'omx'])('streams and retires a %s folder-trust permission', async kind => {
+    const { lines } = JSON.parse(readFileSync(new URL('./fixtures/codex/folder-trust.json', import.meta.url), 'utf8')) as { lines: string[] };
+    const stream = fakePaneStream();
+    stream.setCapture(lines.join('\n'));
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { kind, tmux });
+    conn.viewport(100, 30);
+    await waitFor(() => conn.frames.some(frame => frame.type === 'question' && frame.question !== null));
+    expect(conn.frames.find(frame => frame.type === 'question')?.question).toMatchObject({
+      text: 'Do you trust /workspaces/example?', permission: true,
+      field: { kind: 'choice', choices: ['Trust and continue', 'Quit'] }
+    });
+    stream.setCapture('• Ready\n› Ask Codex to do anything');
+    stream.activity();
+    await waitFor(() => conn.frames.some(frame => frame.type === 'question' && frame.question === null));
+    expect(conn.closeCode()).toBeUndefined();
   });
 });
 

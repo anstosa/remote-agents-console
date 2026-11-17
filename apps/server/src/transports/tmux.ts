@@ -872,7 +872,7 @@ export class TmuxTransport implements AgentTransport {
 
   // answer the current question directly without queueing a new agent turn; a pane question
   // has no dismissal, so dismissing one is refused
-  async answer(agentId: string, questionId: string, answer: QuestionAnswer): Promise<boolean> {
+  async answer(agentId: string, questionId: string, answer: QuestionAnswer, operator = false): Promise<boolean> {
     if (typeof answer === 'object') return false;
     const textAnswer = typeof answer === 'string';
     // reject empty text, oversized input, and terminal control sequences
@@ -907,6 +907,8 @@ export class TmuxTransport implements AgentTransport {
       }
       // refuse stale answers and out-of-range choices
       if (question === undefined || question.id !== questionId || (!textAnswer && answer >= question.choices.length)) return false;
+      // native folder permissions require the operator, never an agent-selected default
+      if (question.permission === true && !operator) return false;
       // only native queued-editor answers may release that editor's suppression
       const queuedQuestion = capture === undefined ? undefined : adapter.questions.queued?.(capture);
       const targetPane = question.pane?.targetPaneId ?? first.agent.pane.paneId;

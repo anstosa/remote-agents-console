@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -173,6 +174,28 @@ describe('opening a folder', () => {
       expect(response.statusCode).toBe(201);
       expect(response.json()).toEqual({ placeId: `scratch:${folder}`, agentId: 'socket:%3' });
       expect(launchAt).toHaveBeenCalledWith(adhoc(folder), 'codex', undefined, undefined, expect.objectContaining({ kind: 'codex', nativeDefault: true }));
+    } finally { await app.close(); }
+  });
+
+  // opening an untrusted codex folder must wait for the operator instead of reporting readiness
+  it('reports a Codex folder-trust prompt as needing the operator', async () => {
+    const { lines } = JSON.parse(readFileSync(new URL('./fixtures/codex/folder-trust.json', import.meta.url), 'utf8')) as { lines: string[] };
+    // retain the newly opened folder as the native agent's exact workspace
+    const codex = (folder: string) => stated({ id: 'socket:%3', pane: { paneId: '%3' }, title: 'Folder access', placeId: `ferry-1:${folder}`, worktreeId: `ferry-1:${folder}` });
+    let opened = '';
+    const capture = vi.fn(async () => lines.join('\n').replace('/workspaces/example', opened));
+    const { app, folder } = await start({
+      launch: { launchAt: async () => true },
+      // discover the native startup process without claiming that it is ready for a prompt
+      dashboard: (call, folder) => { opened = folder; return call === 0 ? idleDashboard : { ...idleDashboard, agents: [codex(folder)] }; },
+      tmux: { capture },
+      target: () => ({ agent: codex(opened), socket: testSocket })
+    });
+    try {
+      const response = await app.inject(open({ path: folder, action: 'agent', kind: 'codex' }));
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toEqual({ placeId: `ferry-1:${folder}`, agentId: 'socket:%3', needsOperator: 'untrusted directory: safety check' });
+      expect(capture).toHaveBeenCalledWith(testSocket, '%3');
     } finally { await app.close(); }
   });
 

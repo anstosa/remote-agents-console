@@ -43,22 +43,46 @@ const hookApprovalQuestion = {
   field: { kind: 'choice', choices: ['Review hooks', 'Trust all and continue', "Continue without trusting (hooks won't run)"] },
   source: 'parsed'
 };
-type HookApprovalState = {
+const folderTrustQuestion = {
+  id: 'question-folder-trust',
+  text: 'Do you trust /worktrees/cora?',
+  detail: "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\n\nClaude Code'll be able to read, edit, and execute files here.",
+  permission: true,
+  field: { kind: 'choice', choices: ['No, exit', 'Yes, I trust this folder'] },
+  source: 'parsed'
+};
+const codexFolderTrustQuestion = {
+  id: 'question-codex-folder-trust-cora',
+  text: 'Do you trust /worktrees/cora?',
+  detail: 'Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings can run code automatically, even without a model request. Continue only if you trust these files. Your trust decision will be saved.',
+  permission: true,
+  field: { kind: 'choice', choices: ['Trust and continue', 'Quit'] },
+  source: 'parsed'
+};
+const structuredPermissionQuestion = {
+  id: 'question-structured-permission',
+  text: 'Allow access to the deployment tool?',
+  permission: true,
+  field: { kind: 'choice', choices: ['Allow once', 'Deny'] },
+  source: 'structured'
+};
+type ApprovalState = {
   reject: boolean;
   questionPosts: Array<{ questionId: string; index: number }>;
   promptPosts: unknown[];
 };
+type ApprovalMockOptions = { kind: 'codex' | 'claude'; title: string; attention: 'question' | 'finished' };
 
-// serve one isolated hook approval question
-async function installHookApprovalMock(page: Page, state: HookApprovalState) {
+// serve one isolated native approval question
+async function installApprovalMock(page: Page, state: ApprovalState, options: ApprovalMockOptions = { kind: 'codex', title: 'Hooks need review', attention: 'question' }) {
   await installPaneMock(page);
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
     // authenticate the mocked console
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    // expose one blocked codex agent
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', kind: 'codex', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Hooks need review', attention: 'question', queuedPromptCount: 0 }], projects: [] } });
+    // expose one agent waiting for explicit approval
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', kind: options.kind, sessionId: 'socket:$1', home: '/worktrees/cora', title: options.title, attention: options.attention, queuedPromptCount: 0 }], projects: [] } });
     // mint the mocked pane socket
     if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     // keep prompt sources empty
@@ -92,8 +116,8 @@ for (const viewport of hookApprovalViewports) {
   // verify one explicit approval flow
   test(`answers a hook approval question explicitly on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    const state: HookApprovalState = { reject: true, questionPosts: [], promptPosts: [] };
-    await installHookApprovalMock(page, state);
+    const state: ApprovalState = { reject: true, questionPosts: [], promptPosts: [] };
+    await installApprovalMock(page, state);
     await page.goto('/');
     await seedPaneSize(page, 'agent-1', 80, 24);
     await pushQuestion(page, 'agent-1', hookApprovalQuestion);
@@ -134,6 +158,82 @@ for (const viewport of hookApprovalViewports) {
     await expect(question).toHaveCount(0);
   });
 }
+
+const folderTrustScenarios = [
+  { name: 'Claude', agent: { kind: 'claude', title: 'Claude Code', attention: 'finished' }, question: folderTrustQuestion },
+  { name: 'Codex', agent: { kind: 'codex', title: 'Folder access', attention: 'finished' }, question: codexFolderTrustQuestion }
+] as const;
+
+// preserve each provider's consent and refusal across desktop and phone viewports
+for (const scenario of folderTrustScenarios) for (const viewport of hookApprovalViewports) for (const [index, label] of scenario.question.field.choices.entries()) {
+  test(`answers ${scenario.name} folder trust with ${label} explicitly on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const state: ApprovalState = { reject: true, questionPosts: [], promptPosts: [] };
+    await installApprovalMock(page, state, scenario.agent);
+    await page.goto('/');
+    await seedPaneSize(page, 'agent-1', 80, 24);
+    await pushQuestion(page, 'agent-1', scenario.question);
+
+    const question = page.getByRole('region', { name: 'Agent question' });
+    await expect(question).toBeVisible();
+    await expect(question.getByText('Permission request', { exact: true })).toBeVisible();
+    await expect(question.getByText(scenario.question.text, { exact: true })).toBeVisible();
+    await expect(question.locator('.question-detail')).toHaveText(scenario.question.detail);
+    const choices = question.getByRole('button', { name: scenario.question.field.choices[0], exact: true })
+      .or(question.getByRole('button', { name: scenario.question.field.choices[1], exact: true }));
+    // retain native choice order and exact provider labels
+    await expect(choices).toHaveText(scenario.question.field.choices.map((label, index) => `${index + 1}${label}`));
+    await expect(page.getByRole('button', { name: 'Switch to normal prompt mode' })).toHaveCount(0);
+    await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveCount(0);
+    await expect(question.getByRole('button', { name: 'Reply in your own words' })).toHaveCount(0);
+    await expect(question.getByRole('textbox', { name: 'Reply' })).toHaveCount(0);
+    await expect(question.getByRole('button', { name: 'Send reply' })).toHaveCount(0);
+    expect(state.questionPosts).toEqual([]);
+    expect(state.promptPosts).toEqual([]);
+
+    // neutral enter must not accept codex's highlighted native default
+    if (scenario.agent.kind === 'codex') {
+      await page.keyboard.press('Enter');
+      await expect(question).toBeVisible();
+      expect(state.questionPosts).toEqual([]);
+      expect(state.promptPosts).toEqual([]);
+    }
+
+    // keep failed consent visible and retryable
+    await question.getByRole('button', { name: label, exact: true }).click();
+    await expect(page.getByRole('alert')).toContainText('Unable to send this answer.');
+    await expect(question).toBeVisible();
+    expect(state.questionPosts).toEqual([{ questionId: scenario.question.id, index }]);
+    expect(state.promptPosts).toEqual([]);
+
+    // dismiss only after the explicit native answer succeeds
+    state.reject = false;
+    await question.getByRole('button', { name: label, exact: true }).click();
+    await expect(question).toHaveCount(0);
+    expect(state.questionPosts).toEqual([
+      { questionId: scenario.question.id, index },
+      { questionId: scenario.question.id, index }
+    ]);
+    expect(state.promptPosts).toEqual([]);
+  });
+}
+
+test('keeps free-text denial available for a structured permission', async ({ page }) => {
+  const state: ApprovalState = { reject: false, questionPosts: [], promptPosts: [] };
+  await installApprovalMock(page, state, { kind: 'claude', title: 'Claude Code', attention: 'question' });
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await pushQuestion(page, 'agent-1', structuredPermissionQuestion);
+
+  const question = page.getByRole('region', { name: 'Agent question' });
+  const reply = question.getByRole('button', { name: 'Reply in your own words' });
+  await expect(reply).toBeVisible();
+  await reply.click();
+  await expect(question.getByRole('textbox', { name: 'Reply' })).toBeVisible();
+  await expect(question.getByRole('button', { name: 'Send reply' })).toBeVisible();
+  expect(state.questionPosts).toEqual([]);
+  expect(state.promptPosts).toEqual([]);
+});
 
 test('renders inline questions from the pane stream and answers through one endpoint', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 800 });

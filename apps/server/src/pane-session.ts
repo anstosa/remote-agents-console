@@ -112,8 +112,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     const paneClient = paneStream.get(socketRef, session);
     const captureVia = (depth: number) => paneClient.capture(pane, depth);
     const adapter = agent === undefined ? undefined : adapterFor(agent.kind);
-    // the Agent's derive (question/metadata) rides the Agent's own pane only, and only for
-    // an Adapter with Turns or a question parser (Codex/OMX, not Claude)
+    // derive only the agent's own pane: codex/omx include turns and claude parses questions
     const derives = isAgentPane && (adapter?.turns !== undefined || adapter?.questions?.parse !== undefined);
     // One Size claim per window, keyed by window id resolved over the connection: every
     // caller awaits windowKeyReady first (see the INVARIANT below).
@@ -138,18 +137,36 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     const sendBinary = (bytes: Buffer) => { if (!control.active(sessionId)) return transport.close(1008); if (transport.open()) transport.sendBytes(bytes); };
     // report the pane's ACTUAL size, so a smaller attached terminal the coordinator yields
     // to is the grid the browser conforms to (Sizing, ADR 0008)
-    const reportSize = async (): Promise<boolean> => {
-      const size = await tmux.size(socketRef, pane);
-      // an unknown grid cannot authorize the initial snapshot
-      if (size === undefined) return false;
-      sendFrame({ type: 'size', cols: size.cols, rows: size.rows });
-      return transport.open();
+    let reportedSize: { cols: number; rows: number } | undefined;
+    let sizeReports = Promise.resolve(true);
+    // serialize viewport and layout reports so stale reads cannot replace the newest grid
+    const reportSize = (): Promise<boolean> => {
+      const next = sizeReports.then(async () => {
+        const size = await tmux.size(socketRef, pane);
+        // an unknown grid cannot authorize the initial snapshot
+        if (size === undefined) return false;
+        sendFrame({ type: 'size', cols: size.cols, rows: size.rows });
+        // a revoked or closed viewer must not start another capture
+        if (!transport.open()) return false;
+        const changed = reportedSize !== undefined && (reportedSize.cols !== size.cols || reportedSize.rows !== size.rows);
+        reportedSize = { cols: size.cols, rows: size.rows };
+        // sigwinch output can precede this grid report and be clipped at the browser's old size
+        if (changed && seeded) {
+          sendFrame({ type: 'reseed' });
+          // finish this snapshot before a resize burst can queue another capture
+          await reseed();
+        }
+        return transport.open();
+      });
+      sizeReports = next.catch(() => false);
+      return next;
     };
     let cols = 120;
     let rows = 36;
     let seedDepth = 2_000;
     let viewportEstablished = false;
     let reclamping = false;
+    let reclampQueued = false;
     // Flow control: drop-while-behind + reseed, and the control pipe is never paused (spec).
     const highWatermark = 256 * 1024;
     const lowWatermark = 64 * 1024;
@@ -213,7 +230,8 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
         if (adapter?.questions?.queued !== undefined) {
           await prompts.openQueuedQuestion(id, captured.text, () => control.active(sessionId) && transport.open()).catch(() => false);
         }
-        const parseInput = captured.latestAgentMessage ?? captured.text;
+        // unnumbered native carets are not codex prompt boundaries
+        const parseInput = adapter?.turns === undefined ? captured.text : captured.latestAgentMessage ?? captured.text;
         if (parseInput !== lastParseInput) { lastParseInput = parseInput; const parsed = adapter?.questions?.parse?.(parseInput); lastQuestion = parsed === undefined ? undefined : withQuestionShape(parsed); }
         const question = lastQuestion;
         const metadata = { message: captured.latestAssistantMessage ?? '', overflow: captured.latestAssistantMessageOverflows === true };
@@ -221,7 +239,8 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
         const metadataKey = JSON.stringify(metadata);
         if (!transport.open()) return;
         if (force || questionKey !== lastQuestionKey) { lastQuestionKey = questionKey; sendFrame({ type: 'question', question: question ?? null }); }
-        if (force || metadataKey !== lastMetadataKey) { lastMetadataKey = metadataKey; sendFrame({ type: 'metadata', metadata }); }
+        // question-only adapters must not publish empty codex turn metadata
+        if (adapter?.turns !== undefined && (force || metadataKey !== lastMetadataKey)) { lastMetadataKey = metadataKey; sendFrame({ type: 'metadata', metadata }); }
       } finally {
         deriving = false;
         if (deriveQueued) { deriveQueued = false; const queued = forceQueued; forceQueued = false; void runDerive(queued); }
@@ -238,7 +257,10 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     // pane yields no window id, while a transient spawn hiccup in the sizing read must not be
     // misread as death and tear down a live stream.
     const reclamp = async () => {
-      if (reclamping) return;
+      // ignore layout work after this viewer has left
+      if (ended || !transport.open()) return;
+      // retain native layout changes that arrive while a snapshot is pending
+      if (reclamping) { reclampQueued = true; return; }
       reclamping = true;
       try {
         await windowKeyReady;
@@ -248,10 +270,12 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
         const ensured = await viewportLease()?.ensure(cols, rows);
         if (ensured === undefined) return;
         if (!ensured.ok) return transport.close(1011);
-        // report the pane's actual size only when it moved (a layout change may leave it put)
-        if (ensured.resized) { const after = await tmux.size(socketRef, pane); if (after !== undefined) sendFrame({ type: 'size', cols: after.cols, rows: after.rows }); }
+        // external changes may already have reached the target without an ensure-owned resize
+        await reportSize();
       } finally {
         reclamping = false;
+        // coalesce overlapping events into one fresh geometry check
+        if (reclampQueued) { reclampQueued = false; void reclamp(); }
       }
     };
     // Seed only after this task has reported the size, so the browser always gets its

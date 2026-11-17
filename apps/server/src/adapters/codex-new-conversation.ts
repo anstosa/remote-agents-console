@@ -1,5 +1,6 @@
 import { normalizedCapture, normalizedLines } from './capture-text.js';
 import { withoutComposerSparkles } from './codex-turns.js';
+import { codexFolderTrustDialog } from './codex-folder-trust.js';
 import type { Adapter, LaunchReadiness, PaneSnapshot, ResetSettling } from './types.js';
 
 /**
@@ -53,9 +54,11 @@ const headerLoading = /model:\s*loading/i;
  * title left the shell's title" — and the title becoming the directory basename is
  * the same event as the header filling; a pure `ready` has no cwd to compare the
  * title against, so it keys on the header, which is the authoritative signal. Codex
- * never blocks on a dialog, so a fresh launch is only ever `pending` or `ready`.
+ * can also wait for explicit folder trust before becoming ready.
  */
 function ready(snapshot: PaneSnapshot, capture: string): LaunchReadiness {
+  // an idle title during folder trust never authorizes an initial prompt
+  if (codexFolderTrustDialog(capture) !== undefined) return { state: 'blocked', reason: 'untrusted directory: safety check' };
   if (headerLoading.test(normalizedCapture(capture)) || snapshot.attention === 'working') return { state: 'pending' };
   return { state: 'ready' };
 }

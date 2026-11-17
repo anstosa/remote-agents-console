@@ -53,7 +53,7 @@ export type Turn = { prompt?: string; text: string; rows?: number };
 // `field` is the Transport-neutral answer the question takes (ADR 0015) and `pane` where a question
 // drawn on a tmux pane is answered. Adapters fill `choices` and `pane`; every question sent to the
 // web is a ShapedQuestion, with `field` derived from the choices (`withQuestionShape`).
-// `detail` is what a question is about in full, shown as written; a `permission` question asks to run a tool
+// `detail` is shown in full; a `permission` question requires explicit operator consent
 export type InlineQuestion = { id: string; text: string; detail?: string; permission?: true; choices: string[]; descriptions?: string[]; source: 'structured' | 'parsed'; field?: QuestionField; pane?: QuestionPane; expiresAt?: number };
 export type ShapedQuestion = InlineQuestion & { field: QuestionField };
 // one of the question's choices, or text: one line or several, prefilled or with a placeholder

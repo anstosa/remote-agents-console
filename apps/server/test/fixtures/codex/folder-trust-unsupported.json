@@ -1,0 +1,36 @@
+[
+  {
+    "name": "Open restricted",
+    "lines": [
+      "Folder access",
+      "/workspace/project",
+      "",
+      "Config, hooks, and exec policies from untrusted folders stay",
+      "disabled. Trusted project folders can still contribute settings.",
+      "Skills still load, and tools follow your permission settings.",
+      "Opening will not change saved trust.",
+      "",
+      "› 1. Open restricted",
+      "  2. Back to Agent Command Center",
+      "",
+      "enter continue · esc back"
+    ]
+  },
+  {
+    "name": "Open existing task",
+    "lines": [
+      "Folder access",
+      "/workspace/project",
+      "",
+      "This existing task may retain settings and history, including",
+      "project configuration or hooks loaded while it was trusted. To use",
+      "restricted settings, start a new task. The folder's trust setting",
+      "will not change.",
+      "",
+      "› 1. Open existing task",
+      "  2. Back to Agent Command Center",
+      "",
+      "enter continue · esc back"
+    ]
+  }
+]
