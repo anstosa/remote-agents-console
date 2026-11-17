@@ -67,6 +67,25 @@ const launched = async (context?: Partial<ClientContext>) => {
 };
 
 describe('the Claude client', () => {
+  // reattached history must come from the configured runtime profile, not the server default
+  it('reads reattached history from the supplied conversation environment', async () => {
+    const current = await mkdtemp(join(tmpdir(), 'rac-claude-current-'));
+    dirs.push(current);
+    const directory = join(current, 'projects', '-work-project');
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, `${session}.jsonl`), [
+      { type: 'custom-title', customTitle: 'Current profile history' },
+      { type: 'user', message: { role: 'user', content: 'Current profile prompt' }, uuid: 'current-prompt', sessionId: session },
+    ].map(record => JSON.stringify(record)).join('\n'));
+    const client = claudeOverChannel({ env: { CLAUDE_CONFIG_DIR: current }, attached: { dropped: 0, conversation: session } });
+    // initialization ends replay and triggers the profile-bound disk resync
+    client.play(fixture('initialize-again.jsonl'));
+
+    await vi.waitFor(() => expect(client.of('conversation')).toContainEqual({ type: 'conversation', id: session, name: 'Current profile history' }));
+    expect(client.of('history').at(-1)).toMatchObject({ conversationId: session, items: expect.arrayContaining([expect.objectContaining({ text: 'Current profile prompt' })]) });
+    client.connection.close();
+  });
+
   it('reads the lines a channel replays as the client attaches', () => {
     // a holder channel hands its early lines to the listener inside `onLine`
     const early = JSON.stringify({ type: 'system', subtype: 'init', session_id: session, model: 'claude-haiku-4-5' });

@@ -7,6 +7,19 @@ limited to 120 characters, and must not contain control characters. Renames
 survive reloads, duplicate account additions, and re-login. The provider email
 remains visible under a custom account name.
 
+The conversations list combines the default agent stores with every configured
+agent account's store, including account-specific home or state-directory
+overrides. Shared stores and duplicate conversations appear only once; existing
+folder filters still apply. Saved Codex logins share the same history under
+`CODEX_HOME`, so conversations are not restricted to the active login. Listing
+history does not switch accounts or change credentials. **Resume** opens the
+selected conversation using the currently selected account, not the account that
+originally created it. Resuming does not select a saved account or restore old
+credentials.
+History stored only in a different state directory stays visible, but cannot
+resume until the current runtime can read it. The console checks availability
+before replacing an agent; it does not copy transcripts or credentials.
+
 ## API-key spending
 
 API-key rows show **Spent today** and **Spent this week** in US dollars from the

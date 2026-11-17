@@ -1,6 +1,6 @@
 import argon2 from 'argon2';
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuthService } from '../src/auth/service.js';
@@ -8,6 +8,7 @@ import { buildApp } from '../src/app.js';
 import { stated } from './helpers/agent.js';
 import { testConfig, testWorktree } from './helpers/config.js';
 import type { AgentKind } from '../src/adapters/types.js';
+import { DiscoveryService } from '../src/discovery/service.js';
 
 const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
 const conversationId = '0198c333-3333-7333-8333-333333333333';
@@ -25,6 +26,116 @@ async function authenticatedHeaders(app: Awaited<ReturnType<typeof buildApp>>) {
 const conversationsIn = (rows: Row[]) => async (directories: readonly string[]) => rows.filter(row => directories.includes(row.directory));
 
 describe('conversations switch API', () => {
+  // credential slots may share history, but an unavailable file cannot authorize closing an agent
+  it.each(['foreign', 'shared'])('checks %s-store history before resuming with current credentials', async mode => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-switch-accounts-'));
+    const previous = process.env.CODEX_HOME;
+    const otherStore = join(root, 'other-account');
+    const currentStore = mode === 'shared' ? otherStore : join(root, 'current-account');
+    const directory = join(otherStore, 'sessions', '2026', '11', '17');
+    const cora = testWorktree({ hostPath: '/host/cora' });
+    const replacement = stated({ id: 'agent-2', home: cora.path, projectId: cora.projectId, worktreeId: cora.id, title: 'Ready' });
+    const currentAuth = `${JSON.stringify({ OPENAI_API_KEY: 'current-account-key' })}\n`;
+    const sourceAuth = `${JSON.stringify({ OPENAI_API_KEY: 'source-account-key' })}\n`;
+    const events: string[] = [];
+    let resumed = false;
+    let app: Awaited<ReturnType<typeof buildApp>> | undefined;
+    try {
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, `rollout-2026-11-17T00-00-00-${conversationId}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: conversationId, cwd: '/host/cora', originator: 'codex-tui' } }));
+      await writeFile(join(otherStore, 'session_index.jsonl'), JSON.stringify({ id: conversationId, thread_name: 'Another account history' }));
+      await mkdir(join(otherStore, 'accounts'));
+      await writeFile(join(otherStore, 'accounts', 'account-1.auth.json'), sourceAuth);
+      await mkdir(currentStore, { recursive: true });
+      await writeFile(join(currentStore, 'auth.json'), currentAuth);
+      process.env.CODEX_HOME = otherStore;
+      const adapters = { codex: { program: '/bin/false', args: [], env: { CODEX_HOME: currentStore }, launchable: true } };
+      const catalog = new DiscoveryService(undefined, undefined, undefined, undefined, adapters);
+      // the conversation remains available to browsing across all accounts
+      expect((await catalog.conversations(['/host/cora'])).some(row => row.id === conversationId)).toBe(true);
+      const discovery = {
+        worktreesNow: () => [cora],
+        conversations: catalog.conversations.bind(catalog),
+        // publish the replacement only after the current-account launch begins
+        dashboard: async () => ({ agents: resumed ? [replacement] : [], projects: [], places: [] }),
+      };
+      const launch = {
+        canResumeConversation: () => true,
+        // the selected id is launched without changing the configured current account
+        resumeConversation: async (worktreeId: string, id: string, kind?: AgentKind) => {
+          events.push(`resume:${worktreeId}:${id}:${kind}`);
+          resumed = worktreeId === cora.id && id === conversationId && kind === 'codex';
+          return resumed;
+        },
+      };
+      const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+      app = await buildApp(testConfig({ adapters, launchHome: join(root, 'current-home') }), {
+        auth: new AuthService(hash, Buffer.alloc(32, 64).toString('base64url')),
+        discovery: discovery as never,
+        launch: launch as never,
+        launchPollDelay: async () => undefined,
+      });
+      const headers = await authenticatedHeaders(app);
+      const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'codex', id: conversationId } });
+      // only history readable by the current runtime may trigger a handoff
+      if (mode === 'shared') {
+        expect(switched.statusCode).toBe(201);
+        expect(switched.json()).toEqual({ agentId: replacement.id });
+        expect(events).toEqual([`resume:${cora.id}:${conversationId}:codex`]);
+      } else {
+        expect(switched.statusCode).toBe(409);
+        expect(events).toEqual([]);
+      }
+      expect(await readFile(join(currentStore, 'auth.json'), 'utf8')).toBe(currentAuth);
+      expect(await readFile(join(otherStore, 'accounts', 'account-1.auth.json'), 'utf8')).toBe(sourceAuth);
+    } finally {
+      await app?.close();
+      // restore the default store without changing credentials
+      if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // structured transports must resolve their own transcript before closing a live agent
+  it('refuses a listed conversation that the structured transport cannot locate', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-switch-structured-account-'));
+    const previous = process.env.RAC_CLAUDE_CONFIG_DIR;
+    const cora = testWorktree({ hostPath: '/host/cora' });
+    const events: string[] = [];
+    let app: Awaited<ReturnType<typeof buildApp>> | undefined;
+    try {
+      process.env.RAC_CLAUDE_CONFIG_DIR = root;
+      const discovery = {
+        worktreesNow: () => [cora],
+        conversations: conversationsIn([{ kind: 'claude', id: conversationId, name: 'Other account', lastActiveAt: 100, directory: '/host/cora' }]),
+        // record any lifecycle checks reached after the unavailable transcript
+        dashboard: async () => { events.push('dashboard'); return { agents: [], projects: [], places: [] }; },
+      };
+      const launch = {
+        canResumeConversation: () => true,
+        // record an accidental launch without a transport-owned transcript
+        resumeConversation: async () => { events.push('resume'); return true; },
+      };
+      const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+      app = await buildApp(testConfig({ adapters: { claude: { program: '/bin/false', args: [], env: {}, launchable: true, transport: 'structured' } } }), {
+        auth: new AuthService(hash, Buffer.alloc(32, 65).toString('base64url')),
+        discovery: discovery as never,
+        launch: launch as never,
+        // record any attempted destructive handoff
+        tmux: { close: async () => { events.push('close'); return true; } } as never,
+      });
+      const headers = await authenticatedHeaders(app);
+      const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
+      expect(switched.statusCode).toBe(409);
+      expect(events).toEqual([]);
+    } finally {
+      await app?.close();
+      // restore the transport's default account selector
+      if (previous === undefined) delete process.env.RAC_CLAUDE_CONFIG_DIR; else process.env.RAC_CLAUDE_CONFIG_DIR = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it('launches an inactive Worktree into a listed Conversation in its home Worktree', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const cora = testWorktree({ id: 'potato:/wt/cora', projectId: 'potato', label: 'Cora', path: '/wt/cora', identity: '/wt/cora', hostPath: '/host/cora' });
@@ -213,7 +324,7 @@ describe('conversations switch API', () => {
       // asking cora to resume owen's Conversation is refused before any handoff
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
       expect(switched.statusCode).toBe(409);
-      expect(switched.json()).toEqual({ error: 'This conversation does not belong to this worktree.' });
+      expect(switched.json()).toEqual({ error: 'This conversation is not available to the current agent in this worktree.' });
       expect(resumed).toBe(false);
     } finally {
       await app.close();
@@ -238,7 +349,7 @@ describe('conversations switch API', () => {
       const headers = await authenticatedHeaders(app);
       const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
       expect(switched.statusCode).toBe(409);
-      expect(switched.json()).toEqual({ error: 'This conversation does not belong to this worktree.' });
+      expect(switched.json()).toEqual({ error: 'This conversation is not available to the current agent in this worktree.' });
       expect(resumed).toBe(false);
     } finally {
       await app.close();

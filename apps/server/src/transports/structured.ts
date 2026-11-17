@@ -143,8 +143,9 @@ export interface LineChannel {
  * earlier console: the client reads its state afresh, `dropped` lines it never sees (the holder's
  * replay overflowed) are resynced from the process, and `conversation` is the Conversation the
  * console last knew it on, for a protocol that does not say until a Turn starts.
+ * `env` is the current profile's server read-view, not a holder launch environment.
  */
-export type ClientContext = { cwd: string; model?: ModelSetting; attached?: { dropped: number; conversation?: string } };
+export type ClientContext = { cwd: string; env?: NodeJS.ProcessEnv; model?: ModelSetting; attached?: { dropped: number; conversation?: string } };
 /** A protocol client: it speaks one protocol over a channel and reports what it sees as events. */
 export type ProtocolClient = (channel: LineChannel, emit: (event: StructuredEvent) => void, context: ClientContext) => StructuredConnection;
 

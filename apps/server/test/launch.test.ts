@@ -26,6 +26,7 @@ import { fileOperations, pathRefusal, sessionPolicy, type SandboxPolicy } from '
 import { commandWindows } from '../src/watches/commands.js';
 import { codexAdapter } from '../src/adapters/codex.js';
 import { responseUrlEnvironment } from '../src/adapters/response-urls.js';
+import { CodexAccountService } from '../src/accounts/service.js';
 
 // a kind's interactive Review run arguments and dropped flags, from its Adapter
 const reviewRunArgs = (kind: ReviewAgentKind, run: ReviewRunSettings & { readDirectory?: string }) => reviewRunsFor(kind).interactive.args(run);
@@ -248,6 +249,38 @@ describe('LaunchService', () => {
     expect(windows).toHaveLength(1);
     expect(panes.pastePrompt).not.toHaveBeenCalled();
     expect(panes.enter).not.toHaveBeenCalled();
+  });
+
+  // selecting old history never restores the account that originally created it
+  it('resumes a saved conversation with the currently selected Codex credentials', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'rac-current-resume-account-'));
+    tempDirs.push(home);
+    const sourceAuth = JSON.stringify({ OPENAI_API_KEY: 'synthetic-original-account' });
+    const currentAuth = JSON.stringify({ OPENAI_API_KEY: 'synthetic-current-account' });
+    await mkdir(join(home, 'accounts'));
+    await writeFile(join(home, 'accounts', 'account-1.auth.json'), sourceAuth);
+    await writeFile(join(home, 'accounts', 'account-2.auth.json'), currentAuth);
+    const accounts = new CodexAccountService({ codexHome: home });
+    await accounts.switchAccount('account-2');
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    // observe the real composed command without starting an external CLI
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
+    const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
+    const worktree = cora();
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }] };
+    const config = { adapters: { codex: { program: codexProgram, args: [], env: { CODEX_HOME: home }, launchable: true } }, projects: [] };
+    const service = new LaunchService(config as never, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
+    const id = '0198c333-3333-7333-8333-333333333333';
+
+    await expect(service.resumeConversation(worktree.id, id, 'codex')).resolves.toBe(true);
+
+    // the selected history changes only the resume argument, never the active auth file
+    const command = (run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[]).at(-1)!;
+    expect(command).toContain(`${codexProgram} resume ${id}`);
+    expect(command).toContain(`CODEX_HOME=${home}`);
+    expect(command).not.toContain('account-1.auth.json');
+    expect(await readFile(join(home, 'auth.json'), 'utf8')).toBe(currentAuth);
+    expect(await readFile(join(home, 'accounts', 'account-1.auth.json'), 'utf8')).toBe(sourceAuth);
   });
 
   it('injects the rendered hooks settings into a Claude worktree launch', async () => {

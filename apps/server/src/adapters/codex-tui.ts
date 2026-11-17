@@ -134,12 +134,14 @@ export const codexCommands: NonNullable<Adapter['commands']> = {
 };
 
 export const codexConversations: NonNullable<Adapter['conversations']> = {
+  stateDirectory: codexHome,
   validId: validCodexThreadId,
   discover: (pane) => discoverCodexConversation(pane),
   // the Named Codex/OMX conversations under the Project's Worktree directories. OMX carries
   // this very object (ADR 0005), so the console dedupes the shared reader to one row per
   // rollout and badges it with the Worktree's remembered kind.
-  list: (directories) => codexConversationSummaries(directories),
+  // retain the selected account's store when listing
+  list: codexConversationSummaries,
   // Codex and OMX rename the current thread with `/rename <name> ` (trailing space), submitted as Enter
   rename: (name) => ({ text: `/rename ${name} `, keys: ['Enter'] }),
   readName: (id) => codexConversationName(id),

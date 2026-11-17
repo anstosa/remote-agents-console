@@ -13,16 +13,20 @@ import { projectIdOf, worktreeMatchesWorkspace, worktreePathOf, worktreeWireId }
 import { gitCommonDir, listWorktrees, type WorktreeEntry } from '../git/worktrees.js';
 import { worktreeManagementAvailability } from '../worktrees/management.js';
 import type { WorktreeLaunchStore } from '../worktrees/store.js';
-import type { Adapter, AdapterConfigs, AgentKind, AttentionState, Conversation, ConversationSummary, InlineQuestion } from '../adapters/types.js';
+import { codexFamily, type Adapter, type AdapterConfigs, type AgentKind, type AttentionState, type Conversation, type ConversationSummary, type InlineQuestion } from '../adapters/types.js';
 import type { Agent, AgentPane, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree, GitComparisonSummary, GitStatusSummary, GitUpstreamSummary, Pane, Project, PullRequestSummary, SocketRef, TmuxAgent, Worktree } from '../domain/models.js';
 import { agentPanel } from '../transports/transport.js';
 import { withQuestionShape } from '../adapters/inline-questions.js';
 import { addUntrackedLineStats, comparisonAgainst, prComparisonCandidates, workingStatus } from '../git/comparison.js';
 import { isUpdateAdvisorLabel } from '../update-advisor.js';
 import { holderPaneRole } from '../tmux/stack-sessions.js';
-import { adhocScratchPlace, configuredPlaces, markedPlace, placeForRoot, scratchHome, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
+import { accountHome, adhocScratchPlace, configuredPlaces, markedPlace, placeForRoot, scratchHome, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
+import { inheritedHomeEnvironment } from '../places/launch-home.js';
 import { implicitProject } from '../config/schema.js';
 import { timed } from '../dashboard/timing.js';
+
+// share the adapter's environment-aware listing contract
+type ConversationList = NonNullable<NonNullable<Adapter['conversations']>['list']>;
 
 export interface SocketFinder { find(): Promise<SocketRef[]>; }
 /** one atomic recognized tmux source target, kept private from dashboard payloads */
@@ -602,27 +606,62 @@ export class DiscoveryService {
   }
 
   // The Named conversations under these directories across every registered kind that
-  // lists, each row tagged with its kind. A per-kind read failure contributes no rows for
-  // that kind rather than failing the whole union — the console only reads the agents'
+  // lists, each row tagged with its kind. A per-account read failure contributes no rows for
+  // that store rather than failing the whole union — the console only reads the agents'
   // stores, never writes them, so a locked or absent store degrades to "nothing listed".
-  async conversations(directories: readonly string[]): Promise<Array<ConversationSummary & { kind: AgentKind }>> {
-    // codex and omx carry one rollout reader by reference (ADR 0005); run each distinct
-    // reader once so a shared rollout yields a single row, never one per sharing kind. The
-    // row is tagged with the first (registry-order) kind that owns the reader; the console
-    // re-attributes a codex-family row to the Worktree's remembered Launch kind.
-    // A kind registered for both Transports has one store, read once.
-    const seen = new Set<unknown>();
-    const stores = [...adapters, ...structuredAdapters].flatMap(adapter => {
-      const list = adapter.conversations?.list;
-      if (list === undefined || seen.has(list) || seen.has(adapter.kind)) return [];
-      seen.add(list);
-      seen.add(adapter.kind);
-      return [{ kind: adapter.kind, list }];
-    });
-    const perKind = await Promise.all(stores
-      .map(async store => (await store.list(directories).catch(() => []))
+  async conversations(directories: readonly string[], runtime?: { kind: AgentKind; env: NodeJS.ProcessEnv }): Promise<Array<ConversationSummary & { kind: AgentKind }>> {
+    // an empty directory allowlist cannot contribute any conversations
+    if (directories.length === 0) return [];
+    // retain the mounted default store and every configured launch account without switching credentials
+    const homes = this.launchHome === null ? [] : this.launchHome === undefined
+      ? [...new Set(this.configuredProjects.map(project => accountHome(this.configuredProjects, project.id)))]
+      : [this.launchHome];
+    const kinds = new Set<AgentKind>();
+    const seen = new Map<ConversationList, Set<string>>();
+    const stores: Array<{ kind: AgentKind; list: ConversationList; env: NodeJS.ProcessEnv }> = [];
+    // one kind has one store implementation across transports
+    for (const adapter of [...adapters, ...structuredAdapters]) {
+      // lifecycle preflight reads only the selected runtime's current store
+      if (runtime !== undefined && adapter.kind !== runtime.kind) continue;
+      const conversations = adapter.conversations;
+      const list = conversations?.list;
+      // skip unsupported readers and duplicate transport facades
+      if (conversations === undefined || list === undefined || kinds.has(adapter.kind)) continue;
+      kinds.add(adapter.kind);
+      const configured = this.adapters[adapter.kind];
+      const environments: NodeJS.ProcessEnv[] = [runtime?.env ?? process.env];
+      // browsing includes account overrides even when no launch home is available
+      if (runtime === undefined && (configured !== undefined || homes.length > 0)) {
+        // keep every known launch account while honoring explicit adapter selectors
+        for (const home of [undefined, ...homes]) {
+          environments.push(inheritedHomeEnvironment(configured?.env, home));
+        }
+      }
+      const roots = seen.get(list) ?? new Set<string>();
+      seen.set(list, roots);
+      // shared readers run once per physical account store rather than once globally
+      for (const env of environments) {
+        const root = conversations.stateDirectory(env);
+        const canonical = await realpath(root).catch(() => root);
+        // aliases of the same store must not duplicate scans
+        if (roots.has(canonical)) continue;
+        roots.add(canonical);
+        stores.push({ kind: adapter.kind, list, env });
+      }
+    }
+    // isolate missing or unreadable accounts without hiding healthy stores
+    const perStore = await Promise.all(stores
+      .map(async store => (await store.list(directories, store.env).catch(() => []))
         .map(summary => ({ ...summary, kind: store.kind }))));
-    return perKind.flat();
+    const unique = new Map<string, ConversationSummary & { kind: AgentKind }>();
+    // copied histories and shared Codex/OMX stores represent one conversation
+    for (const row of perStore.flat()) {
+      const key = JSON.stringify([codexFamily(row.kind) ? 'codex' : row.kind, row.id, row.directory]);
+      const existing = unique.get(key);
+      // prefer the freshest copy without changing stable registry attribution on ties
+      if (existing === undefined || row.lastActiveAt > existing.lastActiveAt) unique.set(key, row);
+    }
+    return [...unique.values()];
   }
   // the Worktrees discovered from every available Project (bare and stale entries
   // excluded), pins folded in, cached with the 30s git-metadata window until a console

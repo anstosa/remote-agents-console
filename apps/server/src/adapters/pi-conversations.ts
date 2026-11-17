@@ -22,10 +22,13 @@ const maxNameLength = 120;
 
 export const validPiSessionId = (id: string): boolean => sessionId.test(id);
 
-function piAgentDir(env: NodeJS.ProcessEnv): string {
+// resolve the account's Pi store for both listing and shared-store deduplication
+export function piAgentDir(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME ?? homedir();
   const configured = env.PI_CODING_AGENT_DIR;
-  if (configured === undefined || configured === '') return join(homedir(), '.pi', 'agent');
-  return configured === '~' ? homedir() : configured.startsWith('~/') ? join(homedir(), configured.slice(2)) : configured;
+  // preserve Pi's default account directory
+  if (configured === undefined || configured === '') return join(home, '.pi', 'agent');
+  return configured === '~' ? home : configured.startsWith('~/') ? join(home, configured.slice(2)) : configured;
 }
 // the directory Pi keeps a working directory's sessions in, encoded as Pi encodes it
 const sessionDirectory = (cwd: string, env: NodeJS.ProcessEnv): string =>

@@ -97,9 +97,10 @@ export const claudeAdapter = {
     textAnswer: claudeQuestionTextAnswer,
   },
   conversations: {
+    stateDirectory: claudeConfigDir,
     validId: validClaudeSessionId,
     // the Named Claude conversations under the Project's Worktree directories
-    list: (directories) => claudeConversationSummaries(directories),
+    list: claudeConversationSummaries,
     // Claude renames the current Conversation with `/rename <name>`, submitted as Enter
     rename: (name) => ({ text: `/rename ${name}`, keys: ['Enter'] }),
     readName: (id, cwd) => claudeConversationName(id, cwd),
@@ -155,7 +156,7 @@ export const claudeStructuredAdapter = {
   }),
   client: claudeClient,
   efforts: claudeEfforts,
-  conversations: { validId: validClaudeSessionId, list: claudeConversationSummaries, readName: claudeConversationName, locate: locateClaudeSession, latest: latestClaudeConversation },
+  conversations: { stateDirectory: claudeConfigDir, validId: validClaudeSessionId, list: claudeConversationSummaries, readName: claudeConversationName, locate: locateClaudeSession, latest: latestClaudeConversation },
   steers: true,
   pinned: () => undefined,
   conflictingArgs: structuredConflictingArgs,

@@ -8,6 +8,7 @@ import type { Agent, AgentLifecycle } from '../domain/models.js';
 import type { ShapedQuestion } from '../adapters/types.js';
 import { placeHostRoot, type Place } from '../places/places.js';
 import { inheritedHomeEnvironment } from '../places/launch-home.js';
+import { conversationEnvironment } from '../adapters/conversation-environment.js';
 import { expandCommand, withoutFlags } from '../launch/service.js';
 import { compileNativeLaunch, nativeSecurityManifest } from '../launch/native-options.js';
 import type { NativeLaunchSecurity } from '../launch/options-types.js';
@@ -60,6 +61,8 @@ export type RawLine = { from: 'agent' | 'console'; line: string };
 export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number; raw?: () => readonly RawLine[]; dropped?: number; notice?: string; replyRuntimeGeneration?: string };
 /** Starts, reads and stops structured Agent processes; the holder in tmux outside tests. */
 export interface StructuredProcesses {
+  /** the current configured profile's server-readable conversation store */
+  conversationEnvironment?(kind: AgentKind): NodeJS.ProcessEnv;
   /** Start the process and connect its protocol client, which reports through `emit`. */
   start(launch: StructuredLaunch, emit: (event: StructuredEvent) => void): Promise<StructuredProcess | undefined>;
   /**
@@ -115,7 +118,11 @@ function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, he
  * them and the launch (its sandbox policy, the nonce its report must echo).
  */
 export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs, files: (kind: AgentKind) => Promise<Record<string, string> | undefined> = async () => undefined, home?: string): StructuredProcesses {
+  // share current-profile lookup across start, switching and reattachment
+  const environment = (kind: AgentKind): NodeJS.ProcessEnv => conversationEnvironment(kind, configs[kind]?.env, home, home);
   return {
+    conversationEnvironment: environment,
+    // resolve history before creating a holder
     async start({ id, kind, place, resume, continue: latest, model, sandboxed, security, nonce, role }, emit) {
       const adapter = structuredAdapterFor(kind);
       const configured = configs[kind];
@@ -123,10 +130,11 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       const replyRuntimeGeneration = kind === 'pi' ? await piReplyRuntimeGeneration(configured, home) : undefined;
       // one path namespace must drive session lookup, policy checks and the host process
       if (process.env.RAC_HOST_TMUX_DIR !== undefined && place.home !== placeHostRoot(place)) { console.warn(`[structured] ${place.home}: aliased host paths cannot launch ${kind}`); return undefined; }
-      const located = resume === undefined ? undefined : await adapter.conversations.locate(resume, place.home);
+      const env = environment(kind);
+      const located = resume === undefined ? undefined : await adapter.conversations.locate(resume, place.home, env);
       if (resume !== undefined && located === undefined) return undefined;
       // a kind that names the latest Conversation itself resumes it, or starts a new one
-      const latestId = resume === undefined && latest === true && adapter.conversations.latest !== undefined ? await adapter.conversations.latest(place.home) : undefined;
+      const latestId = resume === undefined && latest === true && adapter.conversations.latest !== undefined ? await adapter.conversations.latest(place.home, env) : undefined;
       const resumed = located ?? latestId;
       const continues = latest === true && adapter.conversations.latest === undefined;
       const allowed = configured.allowedModels ?? (model === undefined ? [] : [{ model: model.model }]);
@@ -146,14 +154,15 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       // report is (30 s), not given up on first
       const connected = await connectHolder(holder.socket, { attempts: 300 });
       if (connected === undefined) { await windows.closeHolder(holder); return undefined; }
-      return { ...clientOver(adapter, holder, connected, emit, { cwd: place.home, ...(model === undefined ? {} : { model }) }), ...(untrusted === undefined ? {} : { notice: untrusted.notice }), ...(replyRuntimeGeneration === undefined ? {} : { replyRuntimeGeneration }) };
+      return { ...clientOver(adapter, holder, connected, emit, { cwd: place.home, env, ...(model === undefined ? {} : { model }) }), ...(untrusted === undefined ? {} : { notice: untrusted.notice }), ...(replyRuntimeGeneration === undefined ? {} : { replyRuntimeGeneration }) };
     },
+    // restore profile-bound history after reconnecting
     async attach(holder, kind, emit, { cwd, conversation }) {
       const adapter = structuredAdapterFor(kind);
       // a holder that is gone, or not this Agent's any more, is never reached
       if (adapter === undefined || !await windows.holderRunning(holder)) return undefined;
       const connected = await connectHolder(holder.socket, { from: holder.read ?? 0, attempts: 3 });
-      return connected === undefined ? undefined : clientOver(adapter, holder, connected, emit, { cwd, attached: { dropped: connected.hello.dropped, ...(conversation === undefined ? {} : { conversation }) } });
+      return connected === undefined ? undefined : clientOver(adapter, holder, connected, emit, { cwd, env: environment(kind), attached: { dropped: connected.hello.dropped, ...(conversation === undefined ? {} : { conversation }) } });
     },
     sandboxGeneration: async kind => await windows.holderGeneration?.(kind),
     stderr: (holder, lines) => windows.captureHolder(holder, lines),
@@ -296,6 +305,11 @@ export class StructuredAgents {
    */
   constructor(private readonly processes: StructuredProcesses, private readonly options: { file?: string; reportTimeoutMs?: number; allowedModels?: (kind: AgentKind) => readonly AllowedModel[] | undefined } = {}) {
     this.file = options.file ?? join(serverCheckout(), '.data/structured-agents.json');
+  }
+
+  // expose the process owner's current store context without exposing it through the API
+  conversationEnvironment(kind: AgentKind): NodeJS.ProcessEnv {
+    return this.processes.conversationEnvironment?.(kind) ?? process.env;
   }
 
   /** Called whenever an Agent's state or transcript changes. */
@@ -472,7 +486,7 @@ export class StructuredAgents {
     try {
       const place = await this.place(record.placeId);
       if (place === undefined) return false;
-      const resume = conversationId === undefined || !located && await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home) === undefined ? undefined : conversationId;
+      const resume = conversationId === undefined || !located && await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home, this.conversationEnvironment(record.kind)) === undefined ? undefined : conversationId;
       // the old process's last events (its exit) are not this Agent's any more
       live.generation += 1;
       live.connection?.close();
@@ -872,7 +886,7 @@ export class StructuredAgents {
    */
   async switchConversation(id: string, conversationId: string): Promise<'ok' | StructuredRefusal> {
     return await this.whileIdle(id, async ({ record, live, connection }) => {
-      const reference = await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home);
+      const reference = await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home, this.conversationEnvironment(record.kind));
       if (reference === undefined) return false;
       if (connection.switchConversation === undefined) return await this.relaunch(record, live, conversationId, { located: true, ...(live.model === undefined ? {} : { model: live.model }) }) === true && record.lifecycle === 'live';
       if (!await connection.switchConversation(reference)) return false;
@@ -958,7 +972,7 @@ export class StructuredAgents {
         const offered = (live.models ?? await connection.models()).find(model => model.id === setting.model)?.efforts ?? [];
         if (!offered.includes(effort)) { this.notice(live, `${this.modelName(live, setting.model)} offers no effort ${effort}.`, 'warning'); return false; }
         // the Conversation goes on only once it has been saved, as after its first prompt
-        const resumed = record.conversationId !== undefined && await adapter.conversations.locate(record.conversationId, record.home) !== undefined;
+        const resumed = record.conversationId !== undefined && await adapter.conversations.locate(record.conversationId, record.home, this.conversationEnvironment(record.kind)) !== undefined;
         const restarted = await this.relaunch(record, live, resumed ? record.conversationId : undefined, { located: resumed, model: { model: setting.model, effort } }) === true && record.lifecycle === 'live';
         if (restarted) this.notice(live, `Model → ${this.modelName(live, setting.model)}, effort ${effort}: restarted ${resumed ? 'on the Conversation' : 'on a new Conversation, as the current one had not been saved yet'}`);
         return restarted;

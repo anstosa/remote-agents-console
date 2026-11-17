@@ -20,6 +20,7 @@ import { TmuxReplySuggestionSources } from './reply-suggestions/tmux-sources.js'
 import { ClaudeReplySourcePolicyTracker } from './reply-suggestions/claude-observer.js';
 import { registerReplySuggestionRoutes } from './reply-suggestions/routes.js';
 import { adapterFor, launchTransport, structuredAdapterFor } from './adapters/registry.js';
+import { conversationEnvironment } from './adapters/conversation-environment.js';
 import { agentChoiceProblem, agentEffort, agentEfforts, agentModel } from './launch/agent-choice.js';
 import type { ModelSetting } from './transports/structured.js';
 import type { ConversationTarget, LaunchOutcome, SwitchOutcome } from './transports/transport.js';
@@ -2247,6 +2248,18 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     rows.sort((left, right) => right.lastActiveAt - left.lastActiveAt);
     return rows;
   };
+  // select history across accounts without changing the current launch credentials
+  const listedConversationAvailable = async (kind: AgentKind, conversationId: string, directory: string, home: string | undefined, structured = launchTransport(kind, config.adapters) === 'structured'): Promise<boolean> => {
+    const env = structured && typeof structuredAgents.conversationEnvironment === 'function'
+      ? structuredAgents.conversationEnvironment(kind)
+      : conversationEnvironment(kind, config.adapters[kind]?.env, home, config.launchHome ?? undefined);
+    const rows = await discovery.conversations([directory], { kind, env });
+    // the selected history must be readable by the current runtime, regardless of its original credentials
+    if (!rows.some(row => sameConversation(row, { kind, id: conversationId }))) return false;
+    // structured transports must locate their own transcript before any agent is closed
+    if (structured) return await structuredAdapterFor(kind)?.conversations.locate(conversationId, directory, env).catch(() => undefined) !== undefined;
+    return true;
+  };
   // all mode adds configured worktrees while preserving the live scratch directory
   const agentConversationScope = async (persistence: NonNullable<Awaited<ReturnType<typeof agentPersistence>>>, all = false): Promise<{ scope: Map<string, string | undefined>; directories: string[] }> => {
     const scope = all ? await conversationWorktreeScope() : persistence.worktree === undefined ? new Map<string, string>() : await conversationWorktreeScope(persistence.worktree.projectId);
@@ -3993,8 +4006,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const homeDirectory = worktreeHostRoot(worktree);
     // reject ambiguous roots before a direct request can trigger a destructive handoff
     if ((await conversationWorktreeScope()).get(homeDirectory) !== worktree.id) return reply.code(409).send({ error: 'This conversation has no unique worktree to resume into.' });
-    const homed = (await discovery.conversations([homeDirectory])).some(row => sameConversation(row, { kind: rowKind, id: conversationId }));
-    if (!homed) return reply.code(409).send({ error: 'This conversation does not belong to this worktree.' });
+    const homed = await listedConversationAvailable(resumeKind, conversationId, homeDirectory, nativeHome(worktree.projectId));
+    if (!homed) return reply.code(409).send({ error: 'This conversation is not available to the current agent in this worktree.' });
     // fail before any destructive handoff
     if (!launch.canResumeConversation(worktree.id)) return reply.code(409).send({ error: 'Exact chat resume is not configured for this worktree.' });
     const chosenAt = prompts.mutationGeneration();
@@ -4974,6 +4987,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       },
       // use a known conversation identity, not a client-supplied resume path
       switchConversation: async (agent, conversation) => {
+        // structured conversations cannot borrow another provider's transcript identity
+        if (agent.transport === 'structured' && agent.kind !== conversation.kind) return false;
+        const persistence = await agentPersistence(agent.id);
+        // a departed target grants no stale directory authority
+        if (persistence === undefined) return false;
+        const directory = persistence.worktree === undefined ? persistence.agent.home : worktreeHostRoot(persistence.worktree);
+        // validate the selected history without inheriting its source account's credentials
+        if (!await listedConversationAvailable(conversation.kind, conversation.id, directory, nativeHome(persistence.worktree?.projectId ?? persistence.agent.projectId), agent.transport === 'structured' || launchTransport(conversation.kind, config.adapters) === 'structured')) return false;
         // current structured conversations switch through their native transport
         if (agent.transport === 'structured') return await prompts.withExternalActivity(agent.id, async () => await structuredAgents.switchConversation(agent.id, conversation.id), result => result === 'ok') === 'ok';
         // pane restarts retain the existing idle/queue/generation guard

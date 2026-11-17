@@ -287,7 +287,8 @@ type Question = ({ kind: 'permission'; input: unknown; deniable?: true } | { kin
 // a slash command the console sent as a prompt (under `id`), or a model switch, which ends no Turn; `seen` once it did what it was for
 type Operation = { kind: 'rename' | 'compact' | 'clear' | 'model'; id?: string; seen: boolean; finish: (result?: Json) => void };
 
-export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launched, attached }) => {
+// bind protocol history reads to the current profile
+export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: launched, attached }) => {
   // request ids no earlier client used, so a response replayed from before a reattach answers nothing
   const prefix = `rac-${randomUUID().slice(0, 8)}`;
   let requests = 0;
@@ -360,7 +361,7 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
   const resync = async (): Promise<void> => {
     const id = sessionId;
     if (id === undefined) return;
-    const [name, lines] = await Promise.all([claudeConversationName(id, cwd), claudeTranscriptRecords(id, cwd)]);
+    const [name, lines] = await Promise.all([claudeConversationName(id, cwd, env), claudeTranscriptRecords(id, cwd, env)]);
     if (id !== sessionId) return;
     conversationName = name;
     emit({ type: 'conversation', id, ...(name === undefined ? {} : { name }) });
@@ -374,7 +375,7 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, model: launch
     const id = sessionId;
     const before = conversationName;
     if (id === undefined) return;
-    let name = await claudeConversationName(id, cwd);
+    let name = await claudeConversationName(id, cwd, env);
     if (name !== undefined && !titled.has(id)) {
       titled.add(id);
       const response = await control({ subtype: 'generate_session_title', description: name, persist: true });

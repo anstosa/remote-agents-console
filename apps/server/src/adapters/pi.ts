@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { piClient, piEfforts } from '../transports/pi.js';
-import { locatePiSession, piConversationName, piConversationSummaries, validPiSessionId } from './pi-conversations.js';
+import { locatePiSession, piAgentDir, piConversationName, piConversationSummaries, validPiSessionId } from './pi-conversations.js';
 import { staticPolicy } from './pi-sandbox.js';
 import { hostPiRuntime, piPackageRoot } from './pi-runtime.js';
 import { responseUrlEnvironment } from './response-urls.js';
@@ -70,7 +70,7 @@ export const piAdapter = {
   steers: true,
   pinned: piPinned,
   efforts: piEfforts,
-  conversations: { validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession },
+  conversations: { stateDirectory: piAgentDir, validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession },
   sandbox: true,
   // the static policy: the kind's sandbox lists as the sandbox runtime takes them (none: no
   // network, no writes beyond what the extension adds), and the extra environment names commands get

@@ -338,6 +338,8 @@ export interface Adapter {
     skillInvocation(name: string): string;
   };
   readonly conversations?: {
+    /** the account's store root, used to deduplicate shared readers without hiding other accounts */
+    stateDirectory(env?: NodeJS.ProcessEnv): string;
     /**
      * Whether `id` is a well-formed Conversation id for this kind. The console
      * interpolates a resumed id into the host launch command, so this MUST reject
@@ -359,7 +361,7 @@ export interface Adapter {
      * started in, matched exactly as the agents' own pickers do. Later chunks fill
      * this in per kind; a kind that lists must also implement `readName`.
      */
-    list?(directories: readonly string[]): Promise<ConversationSummary[]>;
+    list?(directories: readonly string[], env?: NodeJS.ProcessEnv): Promise<ConversationSummary[]>;
     /**
      * The pure tmux delivery for the CLI's own rename command (Claude `/rename`,
      * Codex/OMX `/rename ` with a trailing space): the console pastes `text` and
@@ -489,11 +491,13 @@ export interface StructuredAdapter {
    * the choice to the CLI.
    */
   readonly conversations: {
+    /** the account's store root, shared across transports */
+    stateDirectory(env?: NodeJS.ProcessEnv): string;
     validId(id: string): boolean;
-    list(directories: readonly string[]): Promise<ConversationSummary[]>;
+    list(directories: readonly string[], env?: NodeJS.ProcessEnv): Promise<ConversationSummary[]>;
     readName(id: string, cwd?: string): Promise<string | undefined>;
-    locate(id: string, cwd: string): Promise<string | undefined>;
-    latest?(cwd: string): Promise<string | undefined>;
+    locate(id: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<string | undefined>;
+    latest?(cwd: string, env?: NodeJS.ProcessEnv): Promise<string | undefined>;
   };
   /** whether its protocol client can steer a working Agent */
   readonly steers: boolean;

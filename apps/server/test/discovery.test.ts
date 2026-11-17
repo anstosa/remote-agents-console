@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import { DiscoveryService, gitUpstreamSummary, ProcSocketFinder } from '../src/d
 import { inlineQuestionId } from '../src/adapters/inline-questions.js';
 import { pendingOmxQuestion } from '../src/adapters/omx-questions.js';
 import { adapterFor } from '../src/adapters/registry.js';
+import { CodexAccountService } from '../src/accounts/service.js';
 import type { SocketRef } from '../src/domain/models.js';
 import type { WorktreeEntry } from '../src/git/worktrees.js';
 import { AgentNotificationCoordinator } from '../src/notifications.js';
@@ -45,6 +46,31 @@ async function buildProc(proc: string, holdings: Record<number, string[]>): Prom
     await mkdir(join(proc, pid, 'fd'), { recursive: true });
     await Promise.all(files.map((file, index) => symlink(file, join(proc, pid, 'fd', String(index + 3)))));
   }
+}
+
+// keep account-listing tests off real histories and exercise inherited selector isolation
+function isolateConversationEnvironment(root: string): () => void {
+  const defaults = {
+    HOME: join(root, 'default-home'),
+    CODEX_HOME: join(root, 'default-home', '.codex'),
+    RAC_CLAUDE_CONFIG_DIR: join(root, 'default-home', '.claude'),
+    CLAUDE_CONFIG_DIR: join(root, 'default-home', '.claude'),
+    PI_CODING_AGENT_DIR: join(root, 'default-home', '.pi', 'agent'),
+  };
+  const previous = new Map<string, string | undefined>();
+  // replace only the supported store selectors
+  for (const [name, value] of Object.entries(defaults)) {
+    previous.set(name, process.env[name]);
+    process.env[name] = value;
+  }
+  // restore each caller-owned selector exactly
+  return () => {
+    // absence and an explicit value remain distinct
+    for (const [name, value] of previous) {
+      // remove only variables introduced by this fixture
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  };
 }
 
 describe('DiscoveryService dashboard', () => {
@@ -319,6 +345,173 @@ describe('DiscoveryService dashboard', () => {
     } finally {
       if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous;
       await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  // account selection must not hide another configured conversation store
+  it('unions the default and configured Codex-family account stores without duplicate rows', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-conversation-accounts-'));
+    const restore = isolateConversationEnvironment(root);
+    const defaultHome = join(root, 'default');
+    const codexHome = join(root, 'codex');
+    const omxHome = join(root, 'omx');
+    const sharedId = '0198c111-1111-7111-8111-111111111111';
+    const otherId = '0198c222-2222-7222-8222-222222222222';
+    try {
+      await writeRollout(defaultHome, sharedId, 'Shared conversation');
+      await writeSessionIndex(defaultHome, sharedId, 'Shared conversation');
+      await writeRollout(codexHome, sharedId, 'Shared conversation');
+      await writeSessionIndex(codexHome, sharedId, 'Shared conversation');
+      await writeRollout(omxHome, otherId, 'Other account');
+      await writeSessionIndex(omxHome, otherId, 'Other account');
+      // another folder stays outside the authorized directory list
+      await writeFile(join(omxHome, 'sessions', '2026', '08', '20', `rollout-foreign-${sharedId}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: sharedId, cwd: '/foreign', originator: 'codex-tui' } }));
+      process.env.CODEX_HOME = defaultHome;
+      const service = new DiscoveryService(undefined, undefined, undefined, undefined, {
+        codex: { program: '/codex', args: [], env: { CODEX_HOME: codexHome }, launchable: true },
+        omx: { program: '/omx', args: [], env: { CODEX_HOME: omxHome }, launchable: true },
+      });
+
+      expect(await service.conversations(['/host/cora'])).toEqual([
+        { kind: 'codex', id: sharedId, name: 'Shared conversation', lastActiveAt: 0, directory: '/host/cora' },
+        { kind: 'omx', id: otherId, name: 'Other account', lastActiveAt: 0, directory: '/host/cora' },
+      ]);
+    } finally {
+      restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // saved logins share history regardless of which credential slot is active
+  it('lists conversations from all saved Codex accounts without changing the active credentials', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'rac-saved-account-history-'));
+    const restore = isolateConversationEnvironment(home);
+    const firstId = '0198c111-1111-7111-8111-111111111111';
+    const secondId = '0198c222-2222-7222-8222-222222222222';
+    try {
+      await writeRollout(home, firstId, 'First account');
+      await writeRollout(home, secondId, 'Second account');
+      // both accounts' titles live in the shared index
+      await writeFile(join(home, 'session_index.jsonl'), [
+        { id: firstId, thread_name: 'First account' },
+        { id: secondId, thread_name: 'Second account' },
+      ].map(record => JSON.stringify(record)).join('\n'));
+      await mkdir(join(home, 'accounts'));
+      await writeFile(join(home, 'accounts', 'account-1.auth.json'), JSON.stringify({ OPENAI_API_KEY: 'synthetic-first-key' }));
+      await writeFile(join(home, 'accounts', 'account-2.auth.json'), JSON.stringify({ OPENAI_API_KEY: 'synthetic-second-key' }));
+      process.env.CODEX_HOME = home;
+      const accounts = new CodexAccountService({ codexHome: home });
+      const service = new DiscoveryService();
+      // exercise both active selections without letting listing rotate credentials
+      for (const id of ['account-1', 'account-2']) {
+        await accounts.switchAccount(id);
+        const auth = await readFile(join(home, 'auth.json'), 'utf8');
+        expect((await service.conversations(['/host/cora'])).map(row => row.id).sort()).toEqual([firstId, secondId]);
+        expect(await readFile(join(home, 'auth.json'), 'utf8')).toBe(auth);
+      }
+    } finally {
+      restore();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  // the same physical store is read once even through different account aliases
+  it('deduplicates shared readers by canonical store rather than adapter kind', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-conversation-store-'));
+    const restore = isolateConversationEnvironment(root);
+    const list = vi.spyOn(adapterFor('codex')!.conversations!, 'list').mockResolvedValue([]);
+    try {
+      await symlink(root, join(root, 'alias'), 'dir');
+      process.env.CODEX_HOME = root;
+      const service = new DiscoveryService(undefined, undefined, undefined, undefined, {
+        codex: { program: '/codex', args: [], env: { CODEX_HOME: root }, launchable: true },
+        omx: { program: '/omx', args: [], env: { CODEX_HOME: join(root, 'alias') }, launchable: true },
+      });
+
+      await expect(service.conversations(['/host/cora'])).resolves.toEqual([]);
+      expect(list).toHaveBeenCalledTimes(1);
+    } finally {
+      list.mockRestore();
+      restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // configured homes must reach both Claude transport facades
+  it('lists Claude conversations from its configured account home once across transports', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-claude-account-'));
+    const restore = isolateConversationEnvironment(root);
+    const id = '11111111-2222-4333-8444-555555555555';
+    try {
+      const directory = join(root, '.claude', 'projects', '-host-cora');
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, `${id}.jsonl`), [
+        { type: 'custom-title', customTitle: 'Other Claude account' },
+        { type: 'user', promptSource: 'typed', origin: { kind: 'human' }, message: { content: 'hello' }, timestamp: '2026-11-17T10:00:00Z' },
+      ].map(record => JSON.stringify(record)).join('\n'));
+      const service = new DiscoveryService(undefined, undefined, undefined, undefined, {
+        claude: { program: '/claude', args: [], env: { HOME: root }, launchable: true },
+      });
+
+      expect(await service.conversations(['/host/cora'])).toEqual([
+        { kind: 'claude', id, name: 'Other Claude account', automatic: false, lastActiveAt: Date.parse('2026-11-17T10:00:00Z'), directory: '/host/cora' },
+      ]);
+    } finally {
+      restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // legacy bridged projects may launch under different host accounts
+  it.each([true, false])('considers every project account home with configured adapters=%s while keeping the directory allowlist', async configured => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-project-accounts-'));
+    const restore = isolateConversationEnvironment(root);
+    const firstHome = join(root, 'first');
+    const secondHome = join(root, 'second');
+    const firstId = '0198c111-1111-7111-8111-111111111111';
+    const secondId = '0198c222-2222-7222-8222-222222222222';
+    try {
+      await writeRollout(join(firstHome, '.codex'), firstId, 'First account');
+      await writeSessionIndex(join(firstHome, '.codex'), firstId, 'First account');
+      await writeRollout(join(secondHome, '.codex'), secondId, 'Second account');
+      await writeSessionIndex(join(secondHome, '.codex'), secondId, 'Second account');
+      const service = new DiscoveryService(undefined, undefined, undefined, undefined, configured ? {
+        codex: { program: '/codex', args: [], env: {}, launchable: true },
+      } : {}, [
+        testProject({ id: 'first', hostPath: join(firstHome, 'repo') }),
+        testProject({ id: 'second', hostPath: join(secondHome, 'repo') }),
+      ]);
+
+      expect((await service.conversations(['/host/cora'])).map(row => row.id)).toEqual([firstId, secondId]);
+      await expect(service.conversations(['/foreign'])).resolves.toEqual([]);
+    } finally {
+      restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // structured-only agents must honor account home and explicit state-directory overrides
+  it.each(['HOME', 'PI_CODING_AGENT_DIR'] as const)('lists the configured Pi account selected by %s', async selector => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-pi-account-'));
+    const restore = isolateConversationEnvironment(root);
+    try {
+      const store = selector === 'HOME' ? join(root, '.pi', 'agent') : root;
+      const directory = join(store, 'sessions', '--host-cora--');
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, '2026-11-17_other-account.jsonl'), [
+        { type: 'session', id: 'other-account', timestamp: '2026-11-17T09:00:00Z' },
+        { type: 'session_info', name: 'Other Pi account', timestamp: '2026-11-17T10:00:00Z' },
+      ].map(record => JSON.stringify(record)).join('\n'));
+      const service = new DiscoveryService(undefined, undefined, undefined, undefined, {
+        pi: { program: '/pi', args: [], env: { [selector]: root }, launchable: true },
+      });
+
+      expect(await service.conversations(['/host/cora'])).toEqual([
+        { kind: 'pi', id: 'other-account', name: 'Other Pi account', lastActiveAt: Date.parse('2026-11-17T10:00:00Z'), directory: '/host/cora' },
+      ]);
+    } finally {
+      restore();
+      await rm(root, { recursive: true, force: true });
     }
   });
 

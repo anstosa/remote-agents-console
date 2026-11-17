@@ -730,6 +730,62 @@ async function piSession(agentDir: string, cwd: string, id: string, name?: strin
 }
 
 describe('a structured Agent\'s Named conversations', () => {
+  // switching must use the same configured store that a real holder lookup receives
+  it.each(['claude', 'pi'] as const)('switches %s under its configured conversation environment', async kind => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-structured-current-store-'));
+    dirs.push(root);
+    const cwd = join(root, 'checkout');
+    const current = join(root, 'current-store');
+    const conversation = '11111111-2222-4333-8444-555555555555';
+    await mkdir(cwd);
+    vi.stubEnv('RAC_CLAUDE_CONFIG_DIR', join(root, 'unrelated-claude'));
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'unrelated-pi'));
+    let reference: string;
+    // create actual history in the configured profile only
+    if (kind === 'claude') {
+      const directory = join(current, 'projects', cwd.replace(/[^a-zA-Z0-9]/gu, '-'));
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, `${conversation}.jsonl`), JSON.stringify({ type: 'custom-title', customTitle: 'Current profile' }));
+      reference = conversation;
+    } else reference = await piSession(current, cwd, conversation, 'Current profile');
+    const fake = fakeAgent();
+    // the process owner supplies the current profile, not the selected history's original account
+    fake.processes.conversationEnvironment = () => kind === 'claude' ? { CLAUDE_CONFIG_DIR: current } : { PI_CODING_AGENT_DIR: current };
+    const agents = new StructuredAgents(fake.processes, { file: join(root, 'agents.json') });
+    const place = { id: 'checkout', kind: 'directory' as const, projectId: 'project', label: 'Checkout', home: cwd };
+    agents.usePlaces(async () => place);
+    const agent = await agents.launch(place, kind);
+    expect(agent).toBeDefined();
+
+    await expect(agents.switchConversation(agent!, conversation)).resolves.toBe('ok');
+
+    expect(fake.operations).toContain(`switch ${reference}`);
+    await agents.close(agent!);
+  });
+
+  // an exited process resumes the configured store rather than silently starting fresh
+  it('keeps the configured Pi conversation on relaunch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-structured-current-relaunch-'));
+    dirs.push(root);
+    const current = join(root, 'current-store');
+    const conversation = '11111111-2222-4333-8444-555555555555';
+    await piSession(current, root, conversation, 'Current profile');
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'unrelated-pi'));
+    const fake = fakeAgent();
+    fake.processes.conversationEnvironment = () => ({ PI_CODING_AGENT_DIR: current });
+    const agents = new StructuredAgents(fake.processes, { file: join(root, 'agents.json') });
+    const place = { id: 'checkout', kind: 'directory' as const, projectId: 'project', label: 'Checkout', home: root };
+    agents.usePlaces(async () => place);
+    const agent = await agents.launch(place, 'pi');
+    expect(agent).toBeDefined();
+    await agents.stop(agent!, 'test exit');
+
+    await expect(agents.resume(agent!, conversation)).resolves.toBe(true);
+
+    expect(fake.launches.at(-1)?.resume).toBe(conversation);
+    await agents.close(agent!);
+  });
+
   it('lists Named Pi Conversations, one named in a hand-started Pi TUI included, and names, starts and switches them in place while idle', async () => {
     const fake = fakeAgent();
     const { app, headers, dashboardAgent, root } = await consoleWith(fake);
