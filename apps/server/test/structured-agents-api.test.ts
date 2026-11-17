@@ -536,6 +536,41 @@ describe('a structured Agent over HTTP', () => {
     await app.close();
   });
 
+  // ordinary restarts must preserve history from the current configured profile
+  it.each(['claude', 'pi'] as const)('keeps %s configured history during an ordinary agent restart', async kind => {
+    const profile = await mkdtemp(join(tmpdir(), 'rac-structured-restart-profile-'));
+    dirs.push(profile);
+    const current = join(profile, 'current');
+    const conversation = '11111111-2222-4333-8444-555555555555';
+    vi.stubEnv('RAC_CLAUDE_CONFIG_DIR', join(profile, 'unrelated-claude'));
+    vi.stubEnv('CLAUDE_CONFIG_DIR', join(profile, 'unrelated-claude'));
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(profile, 'unrelated-pi'));
+    const env = kind === 'claude' ? { CLAUDE_CONFIG_DIR: current } : { PI_CODING_AGENT_DIR: current };
+    const fake = fakeAgent();
+    // use the process owner's profile without mocking transcript lookup
+    fake.processes.conversationEnvironment = () => env;
+    const { app, headers, root } = await consoleWith(fake, { config: { adapters: { [kind]: { program: '/bin/false', args: [], env, launchable: true, transport: 'structured' } } } });
+    try {
+      // keep the transcript absent from the server's unrelated store
+      if (kind === 'claude') await claudeSession(current, join(root, 'repo'), conversation);
+      else await piSession(current, join(root, 'repo'), conversation);
+      const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0];
+      const launched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers, payload: { kind } });
+      expect(launched.statusCode).toBe(201);
+      const id: string = launched.json().agentId;
+      fake.emit({ type: 'conversation', id: conversation });
+
+      const restarted = await app.inject({ method: 'POST', url: `/api/agents/${id}/restart`, headers });
+
+      expect(restarted.statusCode).toBe(201);
+      expect(fake.launches).toHaveLength(2);
+      expect(fake.launches.at(-1)).toMatchObject({ kind, resume: conversation });
+      expect(fake.launches.at(-1)!.continue).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
   it('keeps no model on the record that could not be read back, and saves one reported again unchanged only once', async () => {
     const fake = fakeAgent();
     const { app, headers, root } = await consoleWith(fake);

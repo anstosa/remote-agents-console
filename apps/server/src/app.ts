@@ -3785,7 +3785,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const structuredRestart = observed.transport === 'structured' || launchTransport(observed.kind, config.adapters) === 'structured';
       const candidate = threadId === undefined && (hasSiblings || structuredRestart) && (kind === undefined || kind === observed.kind) && observed.conversationId !== undefined && (adapterFor(observed.kind) ?? structuredAdapterFor(observed.kind))?.conversations?.validId(observed.conversationId) === true ? observed.conversationId : undefined;
       const store = structuredRestart ? structuredAdapterFor(observed.kind)?.conversations : undefined;
-      const unwritten = candidate !== undefined && store !== undefined && await store.locate(candidate, observed.home) === undefined;
+      // check the current runtime's store before deciding to start fresh
+      const unwritten = candidate !== undefined && store !== undefined && await store.locate(candidate, observed.home, structuredAgents.conversationEnvironment(observed.kind)) === undefined;
       const ownConversation = unwritten ? undefined : candidate;
       const resumeThread = threadId ?? ownConversation;
       const resumeKind = ownConversation === undefined ? kind : observed.kind;
