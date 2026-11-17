@@ -1308,6 +1308,11 @@ async function setupSettings(
           (candidate) => candidate.id === change.sourceId,
         );
         if (!source) continue;
+        // remove saved artwork from the next catalog only after a successful commit
+        if (change.sourceId.startsWith("icon-") && change.remove === true) {
+          sources.splice(sources.indexOf(source), 1);
+          continue;
+        }
         // project successful whole-file writes into the next catalog snapshot
         if (typeof change.content === "string") {
           const rawSource = source as { content?: string; exists: boolean };
@@ -8994,10 +8999,12 @@ for (const width of [390, 1440]) {
     expect(geometry.squareDelta).toBeLessThanOrEqual(1);
     expect(geometry.color).toBe(geometry.expectedColor);
     expect(geometry.overflow).toBe(0);
-    // removing a closed source stages only and never opens its viewer
+    // hide a deleted source immediately without changing its saved catalog
     await trash.click();
-    await expect(artwork).not.toHaveAttribute("open");
-    await expect(trash).toBeDisabled();
+    await expect(artwork).toHaveCount(0);
+    await expect(
+      settings.getByText("View / edit potato icon", { exact: true }),
+    ).toBeVisible();
     expect(state.saves).toHaveLength(0);
     expect(state.validations).toHaveLength(0);
     await settings
@@ -9013,11 +9020,10 @@ for (const width of [390, 1440]) {
         .getByRole("button", { name: /Remove/u }),
     ).toHaveCount(0);
     await expect(summary.locator(".settings-icon-source-close")).toBeVisible();
-    // keyboard activation removes without closing or toggling the viewer
+    // keyboard activation removes an expanded source from the draft too
     await trash.focus();
     await page.keyboard.press("Space");
-    await expect(artwork).toHaveAttribute("open", "");
-    await expect(trash).toBeDisabled();
+    await expect(artwork).toHaveCount(0);
     expect(state.saves).toHaveLength(0);
     await settings
       .getByRole("button", { name: "Save changes", exact: true })
@@ -9028,6 +9034,15 @@ for (const width of [390, 1440]) {
     ).toEqual([
       { sourceId: "icon-heart", revisionId: "heart-r1", remove: true },
     ]);
+    // the saved catalog keeps the icon absent after a fresh read
+    await expect(artwork).toHaveCount(0);
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
+    await expect(
+      settings.getByRole("button", { name: "Refresh files", exact: true }),
+    ).toBeEnabled();
+    await expect(artwork).toHaveCount(0);
     expect(state.reveals).toHaveLength(0);
     expect(state.restarts).toBe(0);
   });
@@ -10517,6 +10532,47 @@ for (const width of [390, 1440]) {
     await expect(settings.locator(".settings-source-warning")).toHaveCount(0);
   });
 }
+
+// keep saved names reserved even when the optional icon list cannot load
+test("keeps staged deleted icon names reserved when the icon catalog is unavailable", async ({
+  page,
+}) => {
+  const { settings, state } = await setupSettings(page, true, true);
+  // fail only the optional list while authoritative source reads still succeed
+  await page.route("**/api/instance-icons", (route) =>
+    route.fulfill({ status: 503, json: { error: "icon catalog unavailable" } }),
+  );
+  const unavailable = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/instance-icons" && response.status() === 503,
+  );
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  // settle the failed list read before exercising the saved source's name reservation
+  await (await unavailable).finished();
+  await expect(settings.getByRole("button", { name: "Refresh files", exact: true })).toBeEnabled();
+
+  const library = settings.getByRole("group", { name: "Icon library", exact: true });
+  const artwork = library.locator(".settings-icon-source").filter({ hasText: "View / edit potato icon" });
+  await artwork.getByRole("button", { name: "Remove potato icon", exact: true }).click();
+  await expect(artwork).toHaveCount(0);
+  await library.getByRole("button", { name: "Add icon", exact: true }).click();
+  await library.getByRole("textbox", { name: "Icon name", exact: true }).fill("potato");
+  await expect(library.getByText("The library already has potato.", { exact: true })).toBeVisible();
+  await expect(library.getByRole("button", { name: "Add", exact: true })).toBeDisabled();
+  expect(state.saves).toHaveLength(0);
+  expect(state.validations).toHaveLength(0);
+
+  // the rejected addition must not replace the pending deletion
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  // reject content or patches combined with removal
+  const saved = state.saves[0] as { body: { changes: unknown[] } };
+  expect(saved.body.changes).toEqual([
+    { sourceId: "icon-potato", revisionId: "potato-r1", remove: true },
+  ]);
+  await expect(artwork).toHaveCount(0);
+});
 
 // say what peers will draw before the operator saves a removal or keeps refused artwork
 test("warns when the server icon is removed or its artwork is refused by peers", async ({
