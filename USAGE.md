@@ -200,6 +200,14 @@ Compose checkout's `config/instance-icons/` directory is ignored by Git and
 excluded from the build context; its runtime bind mount makes the files available
 without baking them into the image.
 
+The icon directory and its files must be owned by the user running the host
+settings applier and must not be group- or world-writable. Use directory mode
+`0755` (or `0700`) and file mode `0644` (or `0600`). If Save reports
+`unsafe_mode`, check these permissions on the host; for an owner-controlled
+library, `chmod go-w -- /path/to/instance-icons` removes shared directory write
+access without changing the artwork. Settings deliberately refuses unsafe
+permissions rather than silently relaxing this boundary.
+
 Upgrading from an older `worktrees[]` configuration is automatic: start the
 console once and it migrates the config and its `.data` stores to Projects,
 leaving `*.pre-projects.bak` backups. Preview the plan with

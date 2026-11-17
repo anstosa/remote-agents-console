@@ -2123,6 +2123,34 @@ test("commits create and remove any named icon beside the app configuration", as
   assert.equal(existsSync(rocket), false);
 });
 
+// retain the mutation boundary while allowing a permission repair and retry
+test("icon deletion succeeds after repairing a shared writable library directory", async () => {
+  const current = fixture();
+  const directory = resolve(current.root, "instance-icons");
+  mkdirSync(directory, { mode: 0o755 });
+  const icon = resolve(directory, "rocket-2.svg");
+  const artwork = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>\n';
+  atomicWriteFile(icon, artwork, 0o644);
+  chmodSync(icon, 0o644);
+  const removal = { id: "icon-rocket-2", existed: true, contentHash: sha256(Buffer.from(artwork)), remove: true };
+  // reject both group and public mutation without deleting or rewriting artwork
+  for (const mode of [0o775, 0o757]) {
+    chmodSync(directory, mode);
+    const rejected = await commitIcon(current, `icon_unsafe_mode_${mode}_0001`, removal);
+    assert.equal(rejected.state, "failed");
+    assert.equal(rejected.error, "unsafe-mode");
+    assert.equal(readFileSync(icon, "utf8"), artwork);
+    assert.equal(lstatSync(icon).mode & 0o777, 0o644);
+    assert.equal(lstatSync(directory).mode & 0o777, mode);
+  }
+  // preserve read access while removing shared write permissions
+  chmodSync(directory, 0o755);
+  const removed = await commitIcon(current, "icon_repaired_mode_0001", removal);
+  assert.equal(removed.state, "complete");
+  assert.equal(existsSync(icon), false);
+  assert.deepEqual(removed.privateRecord.targets, []);
+});
+
 test("icon commits reject traversal, reserved and linked names without writing", async () => {
   const current = fixture();
   mkdirSync(resolve(current.root, "instance-icons"), { mode: 0o700 });
