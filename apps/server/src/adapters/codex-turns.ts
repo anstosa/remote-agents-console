@@ -23,6 +23,8 @@ const composerShortcutsLine = /^ {2}(?:(?:← for agents · )?\? for shortcuts|�
 const composerWarningLine = /^ {2,}⚠ \d+(?: warnings? · \S+ to view| · \S+)?\s*$/u;
 // filled working composers expose queue hints with optional native context counters
 const composerQueueLine = /^ {2}(?:\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode)(?:\s{2,}(?:\d+% context left|[\d.,]+[kKmMbB]? used))?\s*$/u;
+// goal badges share the auxiliary row with queue hints and optional warnings
+const composerGoalLine = /^ {2,}(?:(?:\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode) {2,})?(?:Pursuing goal \(\d+[dhms](?: \d+[dhms])*\)|Goal (?:paused|stalled) \(\/goal resume\))(?: · ⚠ \d+(?: warnings? · \S+ to view| · \S+)?)?\s*$/u;
 // narrow panes wrap the native agent label below the workspace status
 const composerAgentLabelContinuation = /^ {2}\[default\]\s*$/u;
 // terminal modifier resets may clear more than one style bit
@@ -93,7 +95,7 @@ function activeComposerFromCapture(value: string): string | undefined {
   while (finalVisibleRow >= 0 && !lines[finalVisibleRow]!.trim()) finalVisibleRow -= 1;
   let footerStart = finalVisibleRow;
   const auxiliary = lines[footerStart] ?? '';
-  const statusEnd = composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) ? footerStart - 1 : footerStart;
+  const statusEnd = composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) || composerGoalLine.test(auxiliary) ? footerStart - 1 : footerStart;
   const statusStart = composerAgentLabelContinuation.test(lines[statusEnd] ?? '') ? statusEnd - 1 : statusEnd;
   // require the native workspace and blank separator before excluding auxiliary or wrapped rows
   if (composerWorkspaceStatusLine.test(lines[statusStart] ?? '') && lines[statusStart - 1]?.trim() === '') footerStart = statusStart;

@@ -9,7 +9,7 @@ import { PromptHistoryService } from '../src/prompt-history/service.js';
 import { adapterFor } from '../src/adapters/registry.js';
 import type { AgentKind } from '../src/adapters/types.js';
 import { stated } from './helpers/agent.js';
-import { codexComposerWithFooter } from './helpers/codex-composer.js';
+import { codexComposerWithAuxiliary, codexComposerWithFooter, codexGoalFooters } from './helpers/codex-composer.js';
 
 const socket = { fingerprint: 'socket', path: '/tmp/sock', device: 1, inode: 1 };
 
@@ -46,6 +46,35 @@ const fixture = async (kind: AgentKind = 'codex') => {
 // recover pasted drafts before moving failed queues into notes
 describe('failed queue submission recovery', () => {
   afterEach(() => vi.useRealTimers());
+
+  // goal chrome must not veto either initial submission or a swallowed-key retry
+  it.each(codexGoalFooters)('submits and retries drafts above the goal footer %s', async auxiliary => {
+    const { agent, queue, history, scope, notes, drain, cleanup } = await fixture();
+    const prompt = 'retry the goal draft';
+    let composer = prompt;
+    const sent: string[][] = [];
+    const discovery = { worktreesNow: () => [], target: async () => ({ agent, socket }) };
+    const tmux = {
+      pastePrompt: async () => true,
+      capture: async () => codexComposerWithAuxiliary(composer, auxiliary, true),
+      // swallow the first key and acknowledge the next submit exactly once
+      sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => {
+        sent.push(keys);
+        // clear only after retrying the unsubmitted original draft
+        if (sent.length > 1) composer = '';
+        return true;
+      }
+    };
+    const service = new PromptService(discovery as never, tmux as never, history, queue, drain);
+    try {
+      await settlePolling(service.submit(agent.id, prompt));
+      expect(sent).toEqual([['Enter'], ['Enter']]);
+      expect(composer).toBe('');
+      await expect(queue.list(scope)).resolves.toEqual([]);
+      await expect(history.list(scope)).resolves.toMatchObject([{ text: prompt }]);
+      expect(notes).toEqual([]);
+    } finally { await cleanup(); }
+  });
 
   // real footer rows must allow initial delivery, retries and verified cleanup
   it.each([

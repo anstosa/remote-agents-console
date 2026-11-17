@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { codexDraftState, codexOwnsDraft } from '../../src/adapters/codex-turns.js';
 import { codexNewConversation } from '../../src/adapters/codex-new-conversation.js';
-import { codexComposerWithFooter } from '../helpers/codex-composer.js';
+import { codexComposerWithAuxiliary, codexComposerWithFooter, codexGoalFooters } from '../helpers/codex-composer.js';
 
 // reproduce the single-dot animation that Codex draws over blank composer cells
 const sparkleDots = [...'⠁⠂⠄⠈⠐⠠⡀⢀'];
@@ -22,6 +22,42 @@ const failedFilledComposer = JSON.parse(readFileSync(new URL('../fixtures/codex/
 
 // keep composer acknowledgements independent of decorative animation
 describe('Codex draft observation', () => {
+  // goal badges remain native chrome even while the draft hides shortcut hints
+  it.each(codexGoalFooters)('owns a draft above the goal footer %s', auxiliary => {
+    // cover wide footers and narrow wrapped agent labels
+    for (const wrapped of [false, true]) {
+      const pane = codexComposerWithAuxiliary('owned draft', auxiliary, wrapped);
+      expect(codexDraftState(pane, 'owned draft ')).toBe('visible');
+      expect(codexOwnsDraft(pane, 'owned draft ')).toBe(true);
+      expect(codexOwnsDraft(pane.replace('owned draft', 'owned draft plus edits'), 'owned draft ')).toBe(false);
+    }
+  });
+
+  // goal-like authored text cannot hide arbitrary operator additions
+  it.each([
+    '  Goal stalled (/goal resume) plus operator edits',
+    '  Pursuing goal (3m 08s) plus operator edits'
+  ])('retains non-native auxiliary text %s', auxiliary => {
+    expect(codexOwnsDraft(codexComposerWithAuxiliary('owned draft', auxiliary), 'owned draft ')).toBe(false);
+  });
+
+  // only the bottom anchored footer may be removed from authored composer content
+  it('preserves goal-shaped composer paragraphs above a separate native footer', () => {
+    const authored = 'owned draft\n\n  GPT-6.2-Sol · ~/repo · main\n  Goal stalled (/goal resume)';
+    const pane = codexComposerWithAuxiliary(authored, codexGoalFooters[0]);
+    expect(codexOwnsDraft(pane, 'owned draft ')).toBe(false);
+    expect(codexOwnsDraft(pane, authored)).toBe(true);
+    expect(codexOwnsDraft('› owned draft\n  GPT-6.2-Sol · ~/repo · main\n  Goal stalled (/goal resume)', 'owned draft ')).toBe(false);
+  });
+
+  // goal recognition cannot turn a same-length hidden paste into exact content proof
+  it('keeps collapsed paste ownership inconclusive above goal chrome', () => {
+    const pane = codexComposerWithAuxiliary('[Pasted Content 81 chars]', codexGoalFooters[0]);
+    expect(codexDraftState(pane, `${'😀'.repeat(80)} `)).toBe('visible');
+    expect(codexOwnsDraft(pane, `${'😀'.repeat(80)} `)).toBeUndefined();
+    expect(codexOwnsDraft(pane, `${'😎'.repeat(80)} `)).toBeUndefined();
+  });
+
   // the real filled composer suppresses shortcuts without removing its warning row
   it('owns the exact failed native draft with its prepared trailing space', () => {
     const pane = failedFilledComposer.lines.join('\n');

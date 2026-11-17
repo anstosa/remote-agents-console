@@ -9,3 +9,22 @@ export const codexComposerWithFooter = (composer: string, warnings = true): stri
     : composer ? '' : '  \x1b[1m?\x1b[0m for shortcuts',
   ''
 ].join('\n');
+
+// preserve native goal badges beside idle or working composer hints
+export const codexGoalFooters = [
+  '                         Pursuing goal (1d 11h 51m) · ⚠ 2 warnings · f2 to view',
+  '                         Goal stalled (/goal resume) · ⚠ 1 warning · f2 to view',
+  '                         Goal paused (/goal resume)',
+  '  tab to queue message                         Pursuing goal (3m 08s)',
+  '  tab to queue message · Plan mode                         Goal stalled (/goal resume) · ⚠ 2 warnings · f2 to view'
+] as const;
+
+// reproduce native workspace anchoring and its optional wrapped agent label
+export const codexComposerWithAuxiliary = (composer: string, auxiliary: string, wrapped = false): string => [
+  `› ${composer || 'Ask Codex to do anything'}`,
+  '',
+  `  GPT-6.2-Sol xhigh Fast · ~/weather · main · Main${wrapped ? '' : ' [default]'}`,
+  ...(wrapped ? ['  [default]'] : []),
+  auxiliary,
+  ''
+].join('\n');
