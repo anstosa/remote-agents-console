@@ -434,9 +434,10 @@ test('mobile workspace context menu renders the pinned icon instead of a checkma
   await page.screenshot({ path: '/tmp/context-menu-mobile-pinned.png' });
 });
 
+// preserve prompt clipboard modes while queueing repeated rich images
 test('prompt menu preserves selection and distinguishes rich paste, plain paste and an empty clipboard', async ({ page }) => {
   await installClipboardMock(page, 'clipboard text', true);
-  await mountConsole(page);
+  const fixture = await mountConsole(page);
   const prompt = page.getByRole('textbox', { name: 'Prompt' });
   await prompt.fill('alpha beta');
   await prompt.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(6, 10));
@@ -473,6 +474,23 @@ test('prompt menu preserves selection and distinguishes rich paste, plain paste 
   menu = page.getByRole('menu', { name: 'Prompt actions' });
   await menu.getByRole('menuitem', { name: 'Paste', exact: true }).click();
   await expect(page.getByLabel('Selected attachments')).toContainText('pasted-image-1.png');
+  await prompt.click({ button: 'right' });
+  menu = page.getByRole('menu', { name: 'Prompt actions' });
+  await menu.getByRole('menuitem', { name: 'Paste', exact: true }).click();
+  await page.getByRole('button', { name: 'Queue', exact: true }).click();
+  // preserve rich clipboard image order, bytes and allocated names on the wire
+  await expect.poll(() => fixture.mutations.filter(entry => entry.path === '/api/agents/agent-1/prompt')).toEqual([{
+    method: 'POST',
+    path: '/api/agents/agent-1/prompt',
+    body: {
+      prompt: 'alpha clipboard text',
+      attachments: [
+        { name: 'pasted-image-1.png', data: 'iVBORw==' },
+        { name: 'pasted-image-1-2.png', data: 'iVBORw==' }
+      ]
+    }
+  }]);
+  await expect(page.getByRole('button', { name: 'Queue', exact: true })).toBeEnabled();
 
   await page.evaluate(() => { const state = (window as unknown as ClipboardWindow).__contextClipboard; state.text = ''; state.image = false; });
   await prompt.click({ button: 'right' });

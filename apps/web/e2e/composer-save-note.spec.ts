@@ -1,6 +1,13 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
 
 type NoteCreatePayload = { title?: string; text?: string; attachments?: Array<{ name: string; data: string }> };
+
+// paste one browser-named image into the composer
+const pasteImage = async (prompt: Locator, bytes: number[]) => await prompt.evaluate((element, payload) => {
+  const clipboard = new DataTransfer();
+  clipboard.items.add(new File([new Uint8Array(payload)], 'image.png', { type: 'image/png' }));
+  return element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+}, bytes);
 
 // serve one composer and delegate its note creation request
 const mockComposerNoteSave = async (page: Page, createNote: (route: Route) => Promise<void> | void, options: { notes?: Array<{ id: string; text: string; title?: string }>; dashboard?: object } = {}) => {
@@ -127,6 +134,36 @@ test('saves the current prompt from the notes flyout with independent empty and 
   await expect(page.getByLabel('Selected attachments')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Save this current prompt', exact: true })).toBeVisible();
   await expect(saveCurrent).toBeDisabled();
+});
+
+// keep repeated browser filenames saveable from the prompt draft
+test('saves separately pasted images that share the browser filename as a note', async ({ page }) => {
+  let submitted: NoteCreatePayload | undefined;
+  // capture the note creation request
+  await mockComposerNoteSave(page, route => {
+    const payload = route.request().postDataJSON() as NoteCreatePayload;
+    submitted = payload;
+    return route.fulfill({ status: 201, json: { id: 'note-identifier-001', title: payload.title, text: payload.text ?? '' } });
+  });
+
+  await page.goto('/');
+  const composer = page.getByRole('textbox', { name: 'Prompt', exact: true });
+  await composer.fill('Save both screenshots.');
+  expect(await pasteImage(composer, [7, 8, 9])).toBe(false);
+  expect(await pasteImage(composer, [10, 11, 12])).toBe(false);
+  await page.getByRole('button', { name: /^Notes \(/u }).click();
+  await page.getByRole('button', { name: 'Save current prompt', exact: true }).click();
+
+  await expect.poll(() => submitted).toEqual({
+    title: 'Save both screenshots.',
+    text: 'Save both screenshots.',
+    attachments: [
+      { name: 'image.png', data: 'BwgJ' },
+      { name: 'image-2.png', data: 'CgsM' }
+    ]
+  });
+  await expect(composer).toHaveValue('');
+  await expect(page.getByLabel('Selected attachments')).toHaveCount(0);
 });
 
 // keep retained drafts saveable without mounting the agent panel

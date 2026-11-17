@@ -3097,8 +3097,32 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     const next = [...attachments, ...Array.from(files)];
     // preserve earlier files when an addition exceeds the byte limit
     if (next.reduce((total, file) => total + file.size, 0) > maxAttachmentBytes) return setAttachmentError(`Attachments must total ${maxAttachmentMegabytes} MB or less.`);
+    // compare canonical names just like server validation
+    const names = new Set(attachments.map(file => file.name.trim()));
+    // keep complete code points inside the server's utf-16 filename budget
+    const truncateName = (name: string, length: number) => name.slice(0, length).replace(/[\uD800-\uDBFF]$/u, '');
+    // retain each incoming file even when clipboard or picker names collide
+    const selected = Array.from(files, file => {
+      const original = file.name.trim();
+      const dot = original.lastIndexOf('.');
+      const extension = dot > 0 ? original.slice(dot) : '';
+      const stem = original.slice(0, original.length - extension.length);
+      let selectedFile = file;
+      let number = 2;
+      // skip existing names and collisions within this addition
+      while (names.has(selectedFile.name.trim())) {
+        const suffix = `-${number++}`;
+        // keep renamed files within the server's filename budget
+        const name = suffix.length + extension.length < 240
+          ? `${truncateName(stem, 240 - suffix.length - extension.length)}${suffix}${extension}`
+          : `${truncateName(original, 240 - suffix.length)}${suffix}`;
+        selectedFile = new File([file], name, { type: file.type, lastModified: file.lastModified });
+      }
+      names.add(selectedFile.name.trim());
+      return selectedFile;
+    });
     setAttachmentError(undefined);
-    setAttachments(next);
+    setAttachments([...attachments, ...selected]);
   };
   // leave text and link drags to the browser while accepting file drops
   const dragAttachments = (event: React.DragEvent<HTMLElement>) => {
