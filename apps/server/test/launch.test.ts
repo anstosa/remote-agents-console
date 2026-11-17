@@ -24,6 +24,8 @@ import { testWorktree } from './helpers/config.js';
 import { worktreePlace } from '../src/places/places.js';
 import { fileOperations, pathRefusal, sessionPolicy, type SandboxPolicy } from '../src/adapters/pi-sandbox.js';
 import { commandWindows } from '../src/watches/commands.js';
+import { codexAdapter } from '../src/adapters/codex.js';
+import { responseUrlEnvironment } from '../src/adapters/response-urls.js';
 
 // a kind's interactive Review run arguments and dropped flags, from its Adapter
 const reviewRunArgs = (kind: ReviewAgentKind, run: ReviewRunSettings & { readDirectory?: string }) => reviewRunsFor(kind).interactive.args(run);
@@ -117,6 +119,91 @@ describe('LaunchService', () => {
     expect(expandHomeCommand('codex', '/home/ubuntu')).toContain("cd -- '/home/ubuntu' && eval 'codex'");
   });
 
+  // forward only configured Place origins across native launch modes
+  it('passes tunneled response origins to native worktree, review and directory launches', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%5' : '', stderr: '' }));
+    const tunnel = 'https://cora.tunnel.test';
+    const worktree = cora({ projectUrl: tunnel, projectPort: 4173 });
+    const config = { ...(codex as object), scratchDirectory: '/scratch', projects: [{ id: 'notes', label: 'Notes', path: '/notes', identity: '/notes', mode: 'directory', available: true, projectUrl: 'https://notes.tunnel.test', projectPort: 3000 }] };
+    const store = { launchProfiles: async () => ({}), rememberLaunchProfile: async () => {} };
+    const service = new LaunchService(config as never, { find: async () => [] }, undefined, undefined, store as never, () => [worktree]);
+    const launch = vi.spyOn(codexAdapter, 'launch');
+    let inputs: Array<Parameters<typeof codexAdapter.launch>[0]> = [];
+    try {
+      await expect(service.launch(worktree.id)).resolves.toBe(true);
+      await expect(service.resume(worktree.id)).resolves.toBe(true);
+      await expect(service.resumeConversation(worktree.id, '0198c333-3333-7333-8333-333333333333')).resolves.toBe(true);
+      await expect(service.launchReviewRun(worktree.id, 'codex', { runId: 'review-123', label: 'Review', extraArgs: reviewRunArgs('codex', {}), replacedFlags: reviewReplacedFlags('codex', {}) })).resolves.toBe(true);
+      await expect(service.launchProjectDirectory('notes')).resolves.toBe(true);
+      await expect(service.launchHome()).resolves.toBe(true);
+      inputs = launch.mock.calls.map(([input]) => input);
+    } finally {
+      launch.mockRestore();
+    }
+
+    expect(inputs.map(input => [input.mode, input.responseOrigin])).toEqual([
+      ['fresh', tunnel],
+      ['continue', tunnel],
+      ['resume', tunnel],
+      ['fresh', tunnel],
+      ['fresh', 'https://notes.tunnel.test'],
+      ['fresh', undefined]
+    ]);
+    const commands = run.mock.calls.filter(call => (call[1] as string[]).includes('new-session')).map(call => (call[1] as string[]).at(-1)!);
+    expect(commands.filter(command => command.includes('hooks.SessionStart=') && command.includes('hooks.SubagentStart=')).length).toBe(5);
+  });
+
+  // add persistent context after native model and security compilation
+  it('keeps operator instructions and prepared Codex choices beside the response URL hooks', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
+    const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
+    const worktree = cora({ projectUrl: 'https://cora.tunnel.test', projectPort: 4173 });
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
+    const config = { adapters: { codex: { program: codexProgram, args: ['-c', 'model_instructions_file="/safe/operator.md"', '--search'], env: { KEEP: '1' }, setup: 'echo ready', launchable: true } }, projects: [] };
+    const prepared = { kind: 'codex' as const, model: { model: 'gpt-6.1', effort: 'high' }, security: { filesystem: 'read-only', approvals: 'on-request', bypass: 'inherit' }, optionsRevision: 'prepared' };
+    const service = new LaunchService(config as never, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
+
+    await expect(service.launch(worktree.id, 'codex', prepared.model, false, undefined, prepared)).resolves.toBe(true);
+
+    const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
+    const command = window.at(-1)!;
+    expect(command).toContain('model_instructions_file="/safe/operator.md"');
+    expect(command).toContain('--model gpt-6.1');
+    expect(command).toContain('--sandbox read-only --ask-for-approval on-request');
+    expect(command).toContain('hooks.SessionStart=');
+    expect(command).toContain('hooks.SubagentStart=');
+    expect(command).toContain('RAC_RESPONSE_URL_INSTRUCTIONS=');
+    expect(command).toContain('KEEP=1');
+    expect(command).toContain('eval');
+  });
+
+  // reserve current context without changing ordinary operator environment precedence
+  it.each([
+    ['codex', 'https://cora.tunnel.test'],
+    ['claude', 'https://cora.tunnel.test'],
+    ['claude', undefined]
+  ] as const)('owns workspace URL environment for %s at %s', async (kind, origin) => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    const files = await mkdtemp(join(tmpdir(), 'rac-context-env-'));
+    tempDirs.push(files);
+    process.env.RAC_HOST_REPOSITORY = files;
+    process.env.RAC_ADAPTER_FILES_DIR = join(files, '.data/rendered');
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%5' : '', stderr: '' }));
+    const worktree = cora(origin === undefined ? {} : { projectUrl: origin, projectPort: 4173 });
+    const config = { adapters: { [kind]: { program: `/usr/local/bin/${kind}`, args: [], env: { RAC_RESPONSE_URL_INSTRUCTIONS: 'stale-operator-context', KEEP: 'operator-value' }, launchable: true } }, projects: [] };
+    const service = new LaunchService(config as never, { find: async () => [] }, undefined, undefined, undefined, () => [worktree]);
+
+    await expect(service.launch(worktree.id, kind)).resolves.toBe(true);
+
+    const command = (run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[]).at(-1)!;
+    expect(command).toContain(origin ?? 'RAC_RESPONSE_URL_INSTRUCTIONS=');
+    expect(command.includes('configured tunnel origin')).toBe(origin !== undefined);
+    expect(command).not.toContain('stale-operator-context');
+    expect(command).toContain('KEEP=operator-value');
+  });
+
   it('appends adapter args to the program, shell-quoting only unsafe ones', () => {
     // safe flags and validated ids stay legible; nothing appended for a fresh launch
     expect(composeCommand('codex', [])).toBe('codex');
@@ -180,7 +267,7 @@ describe('LaunchService', () => {
     // continue → --continue --settings <rendered hooks.json>, program prepended
     const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
     const descriptor = JSON.parse(await readFile(window.at(-1)!, 'utf8')) as { program: string; args: string[]; cwd: string };
-    const command = `/usr/local/bin/claude --continue --settings ${join(filesDir, 'claude', 'hooks.json')}`;
+    const command = composeLaunch('/usr/local/bin/claude', ['--continue', '--settings', join(filesDir, 'claude', 'hooks.json')], [], responseUrlEnvironment());
     expect(descriptor).toEqual({ program: interactiveShellPath(), args: ['-lc', interactiveShellBootstrap(expandHomeCommand(command, worktree.identity), '$HOME', interactiveShellPath())], cwd: worktree.identity });
     expect(panes.pastePrompt).not.toHaveBeenCalled();
     expect(panes.enter).not.toHaveBeenCalled();

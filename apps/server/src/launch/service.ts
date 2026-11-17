@@ -15,7 +15,7 @@ import { adapterFileContext, hostVisibleRepoRoot, renderAdapterFiles } from '../
 import { hostPiRuntime, verifyHostPiNode } from '../adapters/pi-runtime.js';
 import { hostHolderRuntime, verifyHostNode } from '../adapters/host-runtime.js';
 import { canonical, staticPolicy } from '../adapters/pi-sandbox.js';
-import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode, type ReplacedFlagValue } from '../adapters/types.js';
+import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode, type LaunchSpec, type ReplacedFlagValue } from '../adapters/types.js';
 import { resolveLaunchProfile, type LaunchResolution, type LaunchScope } from './resolution.js';
 import { WorktreeLaunchStore, scratchLaunchKey } from '../worktrees/store.js';
 import type { Pane, SocketRef, Worktree } from '../domain/models.js';
@@ -30,6 +30,7 @@ import { compileNativeLaunch } from './native-options.js';
 import { resolveAllowedLaunchModel } from './options.js';
 import type { NativeLaunchSecurity, PreparedLaunchChoice } from './options-types.js';
 import { claudeReplyObserverConfiguration } from '../reply-suggestions/claude-observer.js';
+import { withCodexResponseUrlContext } from '../adapters/response-urls.js';
 
 /** How a structured Agent launches: resuming one Conversation, continuing the latest, or a new one on a chosen model; Sandboxed or not. */
 export type StructuredLaunchOptions = { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; security?: NativeLaunchSecurity; nativeDefaultValidated?: true };
@@ -52,7 +53,7 @@ export function composeCommand(program: string, args: string[]): string {
 }
 
 // Compose a configured Adapter launch: [program, …adapter args, …operator args]
-// with the Adapter's environment overlaid by the operator's, rendered as a
+// with operator environment precedence except console-owned URL context, rendered as a
 // shell-quoted assignment prefix. The program, args, and env are all quoted, so
 // nothing in them expands. A configured `setup` command is the one deliberately
 // raw part — operator-trust shell (like a Project's stack commands) — run in the
@@ -64,6 +65,8 @@ export function composeCommand(program: string, args: string[]): string {
 // arguments (a Review run's read-only flags), placed last.
 export function composeLaunch(program: string, adapterArgs: string[], operatorArgs: string[], adapterEnv: Record<string, string> = {}, operatorEnv: Record<string, string> = {}, setup?: string, extraArgs: string[] = []): string {
   const env = { ...adapterEnv, ...operatorEnv };
+  // keep current or cleared workspace context authoritative only when the adapter owns it
+  if (Object.hasOwn(adapterEnv, 'RAC_RESPONSE_URL_INSTRUCTIONS')) env.RAC_RESPONSE_URL_INSTRUCTIONS = adapterEnv.RAC_RESPONSE_URL_INSTRUCTIONS!;
   const prefix = Object.entries(env).map(([name, value]) => `${name}=${shellQuote(value)}`).join(' ');
   const command = composeCommand(shellQuote(program), [...adapterArgs, ...operatorArgs, ...extraArgs]);
   const launch = prefix === '' ? command : `${prefix} ${command}`;
@@ -400,9 +403,10 @@ export class LaunchService implements HolderWindows {
     return resolutions;
   }
 
-  // Compose the inner shell command for a launch of `kind`: [program, …adapter args,
-  // …operator args] from the kind's configured entry, then a Review run's own arguments
-  // with the operator flags they replace dropped. A kind with no entry cannot launch.
+  // compose the inner shell command for a launch of `kind`: [program, …adapter args,
+  // …operator args] from the kind's configured entry, then a review run's own arguments
+  // with the operator flags they replace dropped; persistent codex context is added only
+  // after model and security compilation; a kind with no entry cannot launch
   private composeKindLaunch(kind: AgentKind, input: ChosenLaunchInput, review?: ReviewRunLaunch): string | undefined {
     const adapter = adapterFor(kind);
     const configured = this.config.adapters[kind];
@@ -421,23 +425,27 @@ export class LaunchService implements HolderWindows {
         replacements.set('-m', 'one');
         if (modelIndex < 0) extra.push('--model', selected.model);
       }
-      return composeLaunch(configured.program, spec.args, withoutFlags(configured.args, replacements), spec.env, configured.env, configured.setup, extra);
+      const reviewed: LaunchSpec = { args: [...spec.args, ...withoutFlags(configured.args, replacements), ...extra], ...(spec.env === undefined ? {} : { env: spec.env }) };
+      const contextual = withCodexResponseUrlContext(kind, input.responseOrigin, reviewed);
+      return composeLaunch(configured.program, contextual.args, [], contextual.env, configured.env, configured.setup);
     }
     const selection = input.model === undefined && input.prepared === undefined ? undefined : { ...(input.model === undefined ? {} : { model: input.model }), ...(input.prepared === undefined ? {} : { security: input.prepared.security }) };
     const compiled = compileNativeLaunch(kind, input, configured.args, selection, spec);
-    return composeLaunch(configured.program, compiled.args, [], compiled.env, configured.env, configured.setup);
+    const contextual = withCodexResponseUrlContext(kind, input.responseOrigin, compiled);
+    return composeLaunch(configured.program, contextual.args, [], contextual.env, configured.env, configured.setup);
   }
 
-  // the inner command for a worktree launch
+  // the inner command for a worktree launch with its current tunneled origin
   private async worktreeCommand(worktree: Worktree, kind: AgentKind, input: LaunchRequest): Promise<string | undefined> {
     const files = await this.adapterFiles(kind);
-    return this.composeKindLaunch(kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), cwd: worktree.identity, sandboxed: input.sandboxed, ...(input.model === undefined ? {} : { model: input.model }), ...(input.prepared === undefined ? {} : { prepared: input.prepared }), ...(files === undefined ? {} : { files }) });
+    const responseOrigin = worktreePlace(worktree).responseOrigin;
+    return this.composeKindLaunch(kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), cwd: worktree.identity, sandboxed: input.sandboxed, ...(responseOrigin === undefined ? {} : { responseOrigin }), ...(input.model === undefined ? {} : { model: input.model }), ...(input.prepared === undefined ? {} : { prepared: input.prepared }), ...(files === undefined ? {} : { files }) });
   }
 
-  // the inner command for a scratch launch
-  private async scratchCommand(kind: AgentKind, cwd: string, model?: ModelSetting, prepared?: PreparedLaunchChoice): Promise<string | undefined> {
+  // the inner command for a directory or scratch launch with its Place origin
+  private async scratchCommand(kind: AgentKind, cwd: string, responseOrigin?: string, model?: ModelSetting, prepared?: PreparedLaunchChoice): Promise<string | undefined> {
     const files = await this.adapterFiles(kind);
-    return this.composeKindLaunch(kind, { mode: 'fresh', cwd, sandboxed: false, ...(model === undefined ? {} : { model }), ...(prepared === undefined ? {} : { prepared }), ...(files === undefined ? {} : { files }) });
+    return this.composeKindLaunch(kind, { mode: 'fresh', cwd, sandboxed: false, ...(responseOrigin === undefined ? {} : { responseOrigin }), ...(model === undefined ? {} : { model }), ...(prepared === undefined ? {} : { prepared }), ...(files === undefined ? {} : { files }) });
   }
 
   // resolve the authenticated account home independently from the launch directory
@@ -630,7 +638,7 @@ export class LaunchService implements HolderWindows {
       // under the Docker bridge the host-visible path is what the host tmux can cd into; HOME is
       // the default account home for every directory-Project and Scratch launch
       const site: LaunchSite = { cwd: placeHostRoot(place), home: this.agentHome() };
-      const command = await this.scratchCommand(kind, site.cwd, model, prepared);
+      const command = await this.scratchCommand(kind, site.cwd, place.responseOrigin, model, prepared);
       if (command === undefined) { console.warn(`[launch] ${place.home}: agent kind ${kind} produced no launch command`); return false; }
       const id = randomBytes(18).toString('base64url');
       const marks: PaneMarks = { sandboxed: false, ...(spawnedBy === undefined ? {} : { spawnedBy }) };
@@ -716,7 +724,8 @@ export class LaunchService implements HolderWindows {
     try {
       const files = await this.adapterFiles(kind);
       const mode = review.conversationId === undefined ? { mode: 'fresh' as const } : { mode: 'resume' as const, conversationId: review.conversationId };
-      const command = this.composeKindLaunch(kind, { ...mode, cwd: worktree.identity, sandboxed: false, ...(files === undefined ? {} : { files }) }, review);
+      const responseOrigin = worktreePlace(worktree).responseOrigin;
+      const command = this.composeKindLaunch(kind, { ...mode, cwd: worktree.identity, sandboxed: false, ...(responseOrigin === undefined ? {} : { responseOrigin }), ...(files === undefined ? {} : { files }) }, review);
       if (command === undefined) return false;
       const id = randomBytes(18).toString('base64url');
       const site = this.worktreeSite(worktree);

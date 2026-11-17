@@ -14,9 +14,9 @@ import { commandEnv, fileOperations, pathRefusal, sessionPolicyFrom, type Sandbo
  * `dialogTitle` reads.
  *
  * At process startup it sends the launch report: that it loaded, whether the sandbox is engaged,
- * Pi's version, and the launch's nonce. The console dispatches nothing to the Agent until the
- * report arrives. It shows the sandbox state on the Agent's status line, and refuses `!` commands:
- * RAC offers none for Pi.
+ * Pi's version, and the launch's nonce. the workspace URL guidance occupies one stable system
+ * section. The console dispatches nothing to the Agent until the report arrives. It shows the
+ * sandbox state on the Agent's status line, and refuses `!` commands: RAC offers none for Pi.
  *
  * It ships `ask_user`, the Agent's way to ask the operator. Pi's dialog requests carry no tool
  * call, so every dialog this extension raises names its tool call in its title.
@@ -41,8 +41,14 @@ import { commandEnv, fileOperations, pathRefusal, sessionPolicyFrom, type Sandbo
 export default function rac(pi: ExtensionAPI): void {
   const policyFile = process.env.RAC_SANDBOX_POLICY;
   const nonce = process.env.RAC_LAUNCH_NONCE ?? '';
+  const responseUrlInstructions = process.env.RAC_RESPONSE_URL_INSTRUCTIONS ?? '';
 
   pi.on('user_bash', () => ({ result: { output: 'The console runs no ! commands for Pi; open a Terminal instead.', exitCode: 1, cancelled: false, truncated: false } }));
+
+  // keep workspace URLs in one stable system section
+  if (responseUrlInstructions !== '') {
+    pi.on('before_agent_start', event => { event.systemPromptOptions.sections.rac_workspace_urls = responseUrlInstructions; });
+  }
 
   const conductor = process.env.RAC_ROLE === 'conductor';
   if (conductor) {

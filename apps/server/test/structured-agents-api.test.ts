@@ -201,6 +201,73 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
 }
 
 describe('a structured Agent over HTTP', () => {
+  // refresh response origins only when a structured process launches
+  it('keeps the Place tunnel on relaunches, outside records, and reattaches without a launch', async () => {
+    const tunnel = 'https://repo.tunnel.test';
+    const conversation = '01a188d1-e7d9-711a-aba8-381b96066aa5';
+    const fake = fakeAgent();
+    const console = await consoleWith(fake, { project: { projectUrl: tunnel, projectPort: 4173 } });
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(console.root, 'pi'));
+    await piSession(join(console.root, 'pi'), join(console.root, 'repo'), conversation);
+    const worktree = (await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers })).json().projects[0].worktrees[0];
+    const launched = await console.app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers: console.headers, payload: { kind: 'pi' } });
+    expect(launched.statusCode).toBe(201);
+    const id: string = launched.json().agentId;
+    expect(fake.launches.at(-1)?.place.responseOrigin).toBe(tunnel);
+
+    const prompt = 'Open http://localhost:4173/a?x=1#frag\nDo not rewrite this input.';
+    const steer = 'Then check http://127.0.0.1:4173/raw exactly.';
+    expect((await console.app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers: console.headers, payload: { prompt, attachments: [] } })).statusCode).toBe(204);
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    expect((await console.app.inject({ method: 'POST', url: `/api/agents/${id}/steer`, headers: console.headers, payload: { prompt: steer } })).statusCode).toBe(204);
+    expect(fake.delivered).toEqual([prompt]);
+    expect(fake.steers()).toEqual([steer]);
+    expect((await console.app.inject({ method: 'GET', url: `/api/agents/${id}/prompt-history`, headers: console.headers })).json().prompts.map((entry: { text: string }) => entry.text)).toEqual([steer, prompt]);
+    fake.emit({ type: 'steers', pending: [] });
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+
+    fake.emit({ type: 'conversation', id: conversation });
+    await vi.waitFor(async () => expect(await console.dashboardAgent(id)).toMatchObject({ conversationId: conversation }));
+    fake.emit({ type: 'exited' });
+    await vi.waitFor(async () => expect(await console.dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'exited' } }));
+    expect((await console.app.inject({ method: 'POST', url: `/api/agents/${id}/resume`, headers: console.headers })).statusCode).toBe(204);
+    await vi.waitFor(() => expect(fake.launches).toHaveLength(2));
+    expect(fake.launches.at(-1)).toMatchObject({ id, resume: conversation, place: { responseOrigin: tunnel } });
+    await console.structuredAgents.saved();
+    expect(await readFile(join(console.root, 'structured-agents.json'), 'utf8')).not.toContain(tunnel);
+
+    const next = fakeAgent({ attached: [{ type: 'conversation', id: conversation }] });
+    const restarted = await console.restart(next);
+    await restarted.reattached;
+    expect(next.attaches).toHaveLength(1);
+    expect(next.launches).toEqual([]);
+    await vi.waitFor(async () => expect(await restarted.dashboardAgent(id)).toMatchObject({ conversationId: conversation }));
+    await expect(restarted.structuredAgents.restart(id)).resolves.toBe(true);
+    expect(next.launches).toEqual([expect.objectContaining({ id, resume: conversation, place: expect.objectContaining({ responseOrigin: tunnel }) })]);
+    await restarted.app.close();
+  });
+
+  // preserve the Place tunnel when a model choice rotates the process
+  it('keeps the Place tunnel on a structured model rotation', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-structured-origin-')));
+    dirs.push(root);
+    const fake = fakeAgent({ models: [{ id: 'opus', name: 'Opus', provider: 'anthropic', efforts: ['high'] }, { id: 'sonnet', name: 'Sonnet', provider: 'anthropic', efforts: ['low'] }] });
+    const agents = new StructuredAgents(fake.processes, { file: join(root, 'agents.json') });
+    const place = { id: 'repo:/repo', kind: 'worktree' as const, projectId: 'repo', label: 'Repo', home: root, responseOrigin: 'https://repo.tunnel.test' };
+    agents.usePlaces(async id => id === place.id ? place : undefined);
+    const id = await agents.launch(place, 'claude');
+    expect(id).toBeDefined();
+    fake.emit({ type: 'model', current: { model: 'opus', effort: 'high' } });
+    await vi.waitFor(async () => expect((await agents.agent(id!))?.structured?.model).toMatchObject({ id: 'opus', effort: 'high' }));
+
+    await expect(agents.setModel(id!, { model: 'sonnet', effort: 'low' })).resolves.toBe('ok');
+    expect(fake.launches).toEqual([
+      expect.objectContaining({ id, place: expect.objectContaining({ responseOrigin: place.responseOrigin }) }),
+      expect.objectContaining({ id, model: { model: 'sonnet', effort: 'low' }, place: expect.objectContaining({ responseOrigin: place.responseOrigin }) })
+    ]);
+    await agents.close(id!);
+  });
+
   it('launches at a Place, takes a prompt once it reports in, and is working until its Turn settles', async () => {
     const fake = fakeAgent();
     const { app, headers, dashboardAgent, root } = await consoleWith(fake);

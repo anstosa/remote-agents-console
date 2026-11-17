@@ -7,6 +7,11 @@
             "type": "command",
             "timeout": 5,
             "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention finished --hook-input"
+          },
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "node -e 'const instructions = process.env.RAC_RESPONSE_URL_INSTRUCTIONS;\n// an originless workspace must not inherit another workspace preference\nif (instructions) {\n  let input;\n  try { input = JSON.parse(require(\"node:fs\").readFileSync(0, \"utf8\")); } catch { process.exit(0); }\n  const event = input.hook_event_name;\n  // never emit context from a per-query event\n  if (event === \"SessionStart\" || event === \"SubagentStart\") {\n    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: instructions } }));\n  }\n}'"
           }
         ]
       }

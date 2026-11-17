@@ -1,5 +1,6 @@
 import { claudeAskUserTool } from '../transports/claude.js';
 import { claudeReplyObserverConfiguration } from '../reply-suggestions/claude-observer.js';
+import { responseUrlSessionHookCommand } from './response-urls.js';
 import type { AdapterFileContext, AttentionState } from './types.js';
 
 /**
@@ -18,6 +19,9 @@ export const claudeHooksFileName = 'hooks.json';
 type CommandHandler = { type: 'command'; timeout: number; command: string };
 type HookEntry = { matcher?: string; hooks: CommandHandler[] };
 type StatusLine = { type: 'command'; command: string; padding: number; refreshInterval: number };
+
+// add the launch's workspace URL guidance as session context
+const responseUrlSessionHook = { type: 'command', timeout: 5, command: responseUrlSessionHookCommand } satisfies CommandHandler;
 
 // quote one generated shell value without permitting expansion
 function shellQuote(value: string): string {
@@ -61,7 +65,7 @@ export function claudeHooksSettings(context: AdapterFileContext): { hooks: Recor
   const source = (event: string): CommandHandler[] => observer === undefined ? [] : [sourceReport(context, event, observer)];
   return {
     hooks: {
-      SessionStart: [{ hooks: [report(context, 'finished'), ...source('SessionStart')] }],
+      SessionStart: [{ hooks: [report(context, 'finished'), ...source('SessionStart'), responseUrlSessionHook] }],
       UserPromptSubmit: [{ hooks: [report(context, 'working', false, 'start'), ...source('UserPromptSubmit')] }],
       PreToolUse: [
         { matcher: 'AskUserQuestion', hooks: [report(context, 'question', true, 'question')] },
@@ -101,12 +105,13 @@ export function claudeFiles(context: AdapterFileContext): Record<string, string>
 // file beside `hooks.json` would be one more console-owned file a sandboxed model could rewrite,
 // and Claude's sandbox protects only the session's own settings. Unlike `hooks.json` they report
 // nothing into tmux (the holder's `$TMUX_PANE` is not an Agent's pane) and arm no Calendar
-// lifecycle, which follows prompts over tmux only. The one hook echoes the launch's nonce as JSON,
-// which the CLI keeps out of the model's context and the Claude client reads from `hook_response`.
+// lifecycle, which follows prompts over tmux only. one hook echoes the launch's nonce as JSON,
+// which the CLI keeps out of the model's context and the Claude client reads from `hook_response`;
+// the other adds the launch's workspace URL guidance to the model's session context.
 // The model asks through the console's `ask_user`, which needs no permission. Claude's own
 // `AskUserQuestion` is denied: under `--permission-prompt-tool stdio` it arrives as a permission
 // request, and allowing that answers none of its questions.
 export const claudeStructuredSettings = JSON.stringify({
-  hooks: { SessionStart: [{ hooks: [{ type: 'command', timeout: 5, command: `printf '{"suppressOutput":true,"rac":"%s"}\\n' "$RAC_LAUNCH_NONCE"` } satisfies CommandHandler] }] },
+  hooks: { SessionStart: [{ hooks: [{ type: 'command', timeout: 5, command: `printf '{"suppressOutput":true,"rac":"%s"}\\n' "$RAC_LAUNCH_NONCE"` } satisfies CommandHandler, responseUrlSessionHook] }] },
   permissions: { allow: [claudeAskUserTool], deny: ['AskUserQuestion'] }
 });

@@ -74,7 +74,7 @@ export type LaunchMode = 'fresh' | 'continue' | 'resume';
  * launching host sees them. The Adapter reads these and returns only arguments —
  * the console prepends the program and performs the launch.
  */
-export type LaunchInput = { mode: LaunchMode; conversationId?: string; cwd: string; sandboxed: boolean; files?: Record<string, string> };
+export type LaunchInput = { mode: LaunchMode; conversationId?: string; cwd: string; sandboxed: boolean; responseOrigin?: string; files?: Record<string, string> };
 /** The CLI arguments (and optional environment) for a launch; the console prepends the program. */
 export type LaunchSpec = { args: string[]; env?: Record<string, string> };
 /** How an operator flag dropped from a launch takes values: none, the next argument, or every argument up to the next flag. */
@@ -531,7 +531,7 @@ export interface StructuredAdapter {
  * the kind's console-rendered files, and `nonce` is what its launch report must echo. `role` launches
  * the Conductor: its client then takes the console's MCP access, and it gets the console's role prompt.
  */
-export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string; role?: 'conductor' };
+export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; responseOrigin?: string; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string; role?: 'conductor' };
 /** one ordered Allowed model for an Adapter, with its optional default Effort. */
 export type AllowedModel = { model: string; effort?: string };
 

@@ -5,6 +5,7 @@ import { piClient, piEfforts } from '../transports/pi.js';
 import { locatePiSession, piConversationName, piConversationSummaries, validPiSessionId } from './pi-conversations.js';
 import { staticPolicy } from './pi-sandbox.js';
 import { hostPiRuntime, piPackageRoot } from './pi-runtime.js';
+import { responseUrlEnvironment } from './response-urls.js';
 import type { StructuredAdapter } from './types.js';
 
 const piPackage = '@earendil-works/pi-coding-agent';
@@ -53,7 +54,7 @@ const projectResources = (cwd: string): string[] => [['--skill', '.pi/skills'], 
 export const piAdapter = {
   kind: 'pi',
   // recheck the host pin and helper bytes immediately before every launch
-  launch: ({ cwd, sandboxed, files, nonce = '', resume, continue: latest, models, role }) => {
+  launch: ({ cwd, sandboxed, responseOrigin, files, nonce = '', resume, continue: latest, models, role }) => {
     const host = hostPiRuntime();
     return {
     args: [
@@ -62,7 +63,7 @@ export const piAdapter = {
       ...(models === undefined || models.allowed.length === 0 ? [] : ['--models', models.allowed.join(',')]),
       ...(resume !== undefined ? ['--session', resume] : latest === true ? ['--continue'] : models?.start === undefined ? [] : ['--model', models.start.model, ...(models.start.effort === undefined ? [] : ['--thinking', models.start.effort])])
     ],
-    env: { RAC_LAUNCH_NONCE: nonce, ...(host === undefined ? {} : { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR! }), ...(sandboxed ? { RAC_SANDBOX_POLICY: files?.['sandbox.json'] ?? '' } : {}), ...(role === 'conductor' ? { RAC_ROLE: 'conductor' } : {}) }
+    env: { RAC_LAUNCH_NONCE: nonce, ...responseUrlEnvironment(responseOrigin), ...(host === undefined ? {} : { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR! }), ...(sandboxed ? { RAC_SANDBOX_POLICY: files?.['sandbox.json'] ?? '' } : {}), ...(role === 'conductor' ? { RAC_ROLE: 'conductor' } : {}) }
     };
   },
   client: piClient,

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeAdapter, claudeStructuredAdapter } from '../../src/adapters/claude.js';
 import { claudeStructuredSettings } from '../../src/adapters/claude-hooks.js';
+import { responseUrlEnvironment } from '../../src/adapters/response-urls.js';
 import { structuredAdapterFor } from '../../src/adapters/registry.js';
 import { claudeClient } from '../../src/transports/claude.js';
 import { holderProcesses, type HolderLaunch, type HolderWindows, type StructuredLaunch } from '../../src/transports/structured-agents.js';
@@ -13,6 +14,7 @@ import type { Place } from '../../src/places/places.js';
 const hooks = '/data/adapters/claude/hooks.json';
 const files = { 'hooks.json': hooks };
 const id = '0199a4e1-c0b7-4a90-bf22-abcdef012345';
+const responseOrigin = 'https://agents.example.com:4173';
 
 describe('claude adapter launch', () => {
   it('injects --settings after the mode flag in every mode', () => {
@@ -28,6 +30,12 @@ describe('claude adapter launch', () => {
 
   it('falls back to a fresh launch when a resume carries no conversation id', () => {
     expect(claudeAdapter.launch({ mode: 'resume', cwd: '/w', sandboxed: false, files }).args).toEqual(['--settings', hooks]);
+  });
+
+  it('sets persistent response URL context for fresh and resumed sessions, clearing inherited context without an origin', () => {
+    expect(claudeAdapter.launch({ mode: 'fresh', cwd: '/w', sandboxed: false, responseOrigin }).env).toEqual(responseUrlEnvironment(responseOrigin));
+    expect(claudeAdapter.launch({ mode: 'resume', conversationId: id, cwd: '/w', sandboxed: false, responseOrigin }).env).toEqual(responseUrlEnvironment(responseOrigin));
+    expect(claudeAdapter.launch({ mode: 'continue', cwd: '/w', sandboxed: false }).env).toEqual(responseUrlEnvironment());
   });
 });
 
@@ -65,17 +73,22 @@ describe('structured claude launch', () => {
   async function launched(launch: Partial<StructuredLaunch>, configured: Partial<AdapterLaunchConfig> = {}, at: Place = place): Promise<HolderLaunch> {
     let opened: HolderLaunch | undefined;
     const windows: HolderWindows = { openHolderWindow: async (_place, _id, holder) => { opened = holder; return undefined; }, captureHolder: async () => undefined, holderRunning: async () => false, closeHolder: async () => {} };
-    const claude: AdapterLaunchConfig = { program: '/usr/local/bin/claude', args: [], env: { SOME: '1', CLAUDE_CONFIG_DIR: config }, launchable: true, transport: 'structured', ...configured };
+    const claude: AdapterLaunchConfig = { program: '/usr/local/bin/claude', args: [], env: { SOME: '1', CLAUDE_CONFIG_DIR: config, RAC_RESPONSE_URL_INSTRUCTIONS: 'stale' }, launchable: true, transport: 'structured', ...configured };
     await holderProcesses(windows, { claude }, async () => files).start({ id: 'a', kind: 'claude', place: at, sandboxed: false, nonce: 'n0nce', ...launch }, () => {});
     return opened!;
   }
   const argsIn = async (home: string) => (await launched({}, {}, { ...place, home })).args;
 
   it('runs claude -p over stream-json with the console\'s MCP server, inline settings and nonce, never sandboxed or pinned by the console', async () => {
-    expect(await launched({})).toEqual({ kind: 'claude', program: '/usr/local/bin/claude', args: protocol, env: { SOME: '1', CLAUDE_CONFIG_DIR: config, RAC_LAUNCH_NONCE: 'n0nce' } });
+    expect(await launched({})).toEqual({ kind: 'claude', program: '/usr/local/bin/claude', args: protocol, env: { SOME: '1', CLAUDE_CONFIG_DIR: config, RAC_LAUNCH_NONCE: 'n0nce', ...responseUrlEnvironment() } });
     expect(claudeStructuredAdapter.sandbox).toBeUndefined();
     expect(claudeStructuredAdapter.pinned()).toBeUndefined();
     expect(structuredAdapterFor('claude')?.client).toBe(claudeClient);
+  });
+
+  it('sets persistent response URL context on structured fresh and resumed launches', () => {
+    expect(claudeStructuredAdapter.launch({ cwd: work, sandboxed: false, nonce: 'fresh', responseOrigin }).env).toEqual({ RAC_LAUNCH_NONCE: 'fresh', ...responseUrlEnvironment(responseOrigin) });
+    expect(claudeStructuredAdapter.launch({ cwd: work, sandboxed: false, nonce: 'resumed', resume: id, responseOrigin }).env).toEqual({ RAC_LAUNCH_NONCE: 'resumed', ...responseUrlEnvironment(responseOrigin) });
   });
 
   it('leaves out the project settings and every other MCP server in a folder Claude does not trust yet, last, and never records trust', async () => {

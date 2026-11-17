@@ -3,6 +3,7 @@ import { lstat, open, readdir, readlink, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { isCodexCommand } from '../adapters/codex-processes.js';
 import { isOmxLeaderCommand } from '../adapters/omx-processes.js';
+import { isResponseUrlHookOverride } from '../adapters/response-urls.js';
 import type { NativeReplyScope } from './types.js';
 
 type NativeKind = 'codex' | 'omx' | 'claude';
@@ -394,12 +395,12 @@ function allowedCodexMode(process: ProcessRecord): boolean {
   // malformed override syntax is ambiguous
   if (short === undefined || long === undefined) return false;
   const compact = process.argv.filter(argument => /^-c.+/u.test(argument) && !argument.startsWith('--')).map(argument => argument.slice(2));
-  // inspect only override key names, never their values
+  // ordinary overrides use keys; application hooks require exact nonrouting definitions
   for (const assignment of [...short, ...long, ...compact]) {
     const separator = assignment.indexOf('=');
     const key = separator < 0 ? '' : assignment.slice(0, separator).trim();
-    // only exact nonrouting keys preserve source ownership
-    if (!safeCodexConfigOverrides.has(key)) return false;
+    // only known nonrouting keys or the exact app-owned context hook preserve ownership
+    if (!safeCodexConfigOverrides.has(key) && !isResponseUrlHookOverride(assignment)) return false;
   }
   return true;
 }

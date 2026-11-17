@@ -90,13 +90,13 @@ function collector(describe: () => Promise<string | undefined>): { events: Struc
 // makes first), environment the CLI and its holder get beyond the stub's (the operator's
 // `adapters.<kind>.env`), the policy's extra names, and whether the place is a repository's main
 // checkout or a linked Worktree of one, and the CLI's own `settings` in its state directory.
-type LaunchOptions = { sandboxed?: boolean; replies?: StubReply[]; toolCall?: { name: string; arguments: object }; env?: Record<string, string>; sandboxEnv?: string[]; git?: 'main' | 'linked'; role?: 'conductor'; settings?: object };
+type LaunchOptions = { sandboxed?: boolean; replies?: StubReply[]; toolCall?: { name: string; arguments: object }; env?: Record<string, string>; sandboxEnv?: string[]; git?: 'main' | 'linked'; responseOrigin?: string; role?: 'conductor'; settings?: object };
 const nonce = 'contract-nonce-0123456789abcdef';
 
 // launch `client`'s CLI under the holder in a Workspace session, its events collected in order;
 // the place is `<root>/place` (a repository, or a linked Worktree of `<root>/repo`, when asked),
 // the console's private directory `<root>/private`
-async function launched(client: ContractClient, { sandboxed = false, replies, toolCall, env = {}, sandboxEnv = [], git: checkout, role, settings }: LaunchOptions = {}) {
+async function launched(client: ContractClient, { sandboxed = false, replies, toolCall, env = {}, sandboxEnv = [], git: checkout, responseOrigin, role, settings }: LaunchOptions = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-contract-')));
   const socketPath = join(root, 'tmux');
   const state = join(root, 'state');
@@ -113,7 +113,7 @@ async function launched(client: ContractClient, { sandboxed = false, replies, to
   const provider = await stubProvider(undefined, { ...(toolCall === undefined ? {} : { toolCall }), ...(replies === undefined ? {} : { replies }) });
   vi.stubEnv('RAC_ADAPTER_FILES_DIR', join(root, 'files'));
   cleanups.push(async () => { await provider.close(); await run(tmux, ['-S', socketPath, 'kill-server']); await rm(root, { recursive: true, force: true }); });
-  const place = adhocScratchPlace(home);
+  const place = { ...adhocScratchPlace(home), ...(responseOrigin === undefined ? {} : { responseOrigin }) };
   expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-c', home, 'cat', '-'])).code).toBe(0);
   expect((await run(tmux, ['-S', socketPath, 'set-option', '-t', 'work', '@rac_place', place.id])).code).toBe(0);
   const socket: SocketRef = { fingerprint: 'work', path: socketPath, device: 0, inode: 0 };
@@ -172,6 +172,24 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     const cost = ended.item.kind === 'settled' ? ended.item.cost : undefined;
     expect(cost).toBeGreaterThan(0);
     expect(await next('usage', event => event.type === 'usage' && event.usage.cost > 0)).toMatchObject({ usage: { cost: expect.closeTo(cost!, 9) } });
+  }, 60_000);
+
+  // workspace URL guidance stays in system context, never the submitted message
+  it('keeps workspace URL guidance out of the Pi user message', async () => {
+    const responseOrigin = 'https://workspace.example.test';
+    const prompt = 'Share http://localhost:3000/settings?tab=profile#name';
+    const agent = await launched(client, { responseOrigin });
+    await agent.next('report');
+    expect(await agent.connection.deliver(prompt)).toBe('started');
+    await agent.next('turn', event => event.type === 'turn' && event.turn.type === 'settled');
+
+    const request = JSON.parse(agent.bodies[0] ?? '{}') as { messages?: Array<{ role?: string; content?: unknown }> };
+    const system = request.messages?.filter(message => message.role === 'system').map(message => message.content).join('\n') ?? '';
+    const users = request.messages?.filter(message => message.role === 'user') ?? [];
+    expect(system).toContain(responseOrigin);
+    expect(users.at(-1)?.content).toEqual([{ type: 'text', text: prompt }]);
+    expect(JSON.stringify(users)).not.toContain(responseOrigin);
+    expect(agent.events).toContainEqual({ type: 'transcript', item: { id: expect.any(String), kind: 'message', role: 'user', text: prompt } });
   }, 60_000);
 
   it('shows a tool call as one line, running and then with its result', async () => {

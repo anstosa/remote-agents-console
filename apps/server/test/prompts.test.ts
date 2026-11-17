@@ -10,6 +10,7 @@ import { inlineQuestionId } from '../src/adapters/inline-questions.js';
 import { QueuedPromptService, type QueuedPrompt } from '../src/prompts/queue.js';
 import { PromptHistoryService } from '../src/prompt-history/service.js';
 import { stated } from './helpers/agent.js';
+import { testWorktree } from './helpers/config.js';
 const socket={fingerprint:'socket',path:'/tmp/sock',device:1,inode:1}; const agent=stated({id:'socket:%1',pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' },home:'/tmp',title:''});
 // records every prompt a halted queue drains into Notes, in drain order (front of the queue first)
 const drainRecorder = () => { const drained: QueuedPrompt[] = []; const drain: UndeliveredDrain = async (_scope, prompt) => { drained.push(prompt); return true; }; return { drained, drain }; };
@@ -183,6 +184,26 @@ it('records successful submissions in the Agent\'s own history', async () => {
   await expect(service.submit(agent.id, 'failed prompt')).resolves.toBe(false);
 
   expect(recorded).toEqual([[`agent:${agent.id}`, 'first prompt']]);
+});
+
+// workspace URL policy belongs to startup context, never the submitted user text
+it('keeps tunnel guidance out of native prompt text and history', async () => {
+  const prompt = 'Share http://localhost:3000/settings?tab=profile#name';
+  const worktree = testWorktree({ path: '/tmp', projectUrl: 'https://app.example.test', projectPort: 3000 });
+  const targeted = { ...agent, placeId: worktree.id };
+  const recorded: string[] = [];
+  let pasted = '';
+  const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent: targeted, socket }) };
+  const tmux = {
+    // retain the exact native submission including its existing terminator
+    pastePrompt: async (_socket: unknown, _pane: string, _buffer: string, text: string) => { pasted = text; return true; },
+    sendKeys: async () => true
+  };
+  const history = { record: async (_scope: string, text: string) => { recorded.push(text); } };
+  const service = new PromptService(discovery as never, tmux as never, history as never);
+  await expect(service.submit(targeted.id, prompt)).resolves.toBe(true);
+  expect(pasted).toBe(`${prompt} `);
+  expect(recorded).toEqual([prompt]);
 });
 
 // preserve advisor isolation for ordinary and Unicode-rich collapsed pastes

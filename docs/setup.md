@@ -372,7 +372,7 @@ boot warning.
 - `structured` (*Transcript*): the console runs Claude in print mode in a holder window of the Workspace session, as it runs Pi, and shows a transcript Panel:
 
   ```
-  claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --permission-prompts host --permission-prompt-tool stdio --mcp-config '{"mcpServers":{"rac":{"type":"sdk","name":"rac"}}}' --settings '<inline JSON: one SessionStart hook echoing the launch nonce>' [--resume <id>] [--model <m> [--effort <e>]] [--permission-mode <mode>] <adapters.claude.args>
+  claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --permission-prompts host --permission-prompt-tool stdio --mcp-config '{"mcpServers":{"rac":{"type":"sdk","name":"rac"}}}' --settings '<inline JSON: console SessionStart handlers for the launch nonce and optional workspace URL context>' [--resume <id>] [--model <m> [--effort <e>]] [--permission-mode <mode>] <adapters.claude.args>
   ```
 
   You get steer, Inline questions (the model asks through the console's `ask_user` tool, which needs no permission; Claude's own `AskUserQuestion` is denied, since over the structured Transport it arrives as a permission request that answers none of its questions), tool permission requests that only you can grant from the console (one too long to show in full can only be denied), the model picker, and the Agent panel's Conversation selector. You lose `!` shell commands and the TUI's `/model` and `/resume` pickers, which the model picker and Conversation selector replace.
@@ -940,6 +940,36 @@ that mark. See ADR 0014.
   `externalUrl` to `null`, or both `hostname` and `port` to `null`, to disable
   it. Direct and proxied fields cannot be mixed. Commands still run in the
   selected worktree's own directory.
+
+### Application URLs in agent responses
+
+When a workspace has a proxied preview (`hostname` and `port`), new agent
+processes receive its tunnel origin as session/system instructions for application
+links. Worktree overrides, including disablement, take precedence over Project
+defaults; directory Projects also use their configured tunnel. Scratch and direct
+`externalUrl` previews add no guidance. Paths, query strings, fragments, unrelated
+external links, and local command/check addresses retain their own meaning.
+
+This is startup context, not a footer added to each query. Submitted prompts,
+attachments, queues, and prompt history are unchanged. Claude uses its additive
+session hook settings; Pi uses an independent system-prompt section. Codex and
+OMX use additive session-start and subagent-start hooks without replacing existing
+operator instructions or OMX's instruction file.
+
+Codex's native hook trust check still applies. On first use, review the RAC
+**Session flags** hooks on the **Hooks need review** screen and trust them only
+if approved. Continuing without trusting, or disabling hooks, leaves that guidance
+inactive. RAC never prewrites trust state or enables a security bypass. Hook
+definitions remain stable when a workspace's tunnel URL changes. Explicit
+event-array CLI hook overrides are extended; opaque parent/quoted hook overrides
+are refused rather than silently replacing operator hooks. See the
+[Codex hooks documentation](https://developers.openai.com/codex/hooks).
+
+Already-running and reattached agents retain their current startup context. A
+new launch or process-backed resume/restart loads the latest tunnel settings.
+No live agent is automatically restarted, and
+previous responses are not rewritten. The console's own public origin is never
+substituted for an unrelated workspace application.
 
 ### Temporary previews
 

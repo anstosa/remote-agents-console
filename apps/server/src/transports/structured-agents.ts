@@ -131,7 +131,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       const continues = latest === true && adapter.conversations.latest === undefined;
       const allowed = configured.allowedModels ?? (model === undefined ? [] : [{ model: model.model }]);
       const rendered = await files(kind);
-      const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(resumed === undefined ? {} : { resume: resumed }), ...(continues ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
+      const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(place.responseOrigin === undefined ? {} : { responseOrigin: place.responseOrigin }), ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(resumed === undefined ? {} : { resume: resumed }), ...(continues ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
       // the operator's arguments, less what the launch composes itself (whatever the boot dropped,
       // for the Transport configured then), and the model and Launch menu choices, composed as for a pane
       const choice = model === undefined && security === undefined ? undefined : { ...(model === undefined ? {} : { model }), ...(security === undefined ? {} : { security }) };

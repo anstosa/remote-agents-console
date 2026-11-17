@@ -28,6 +28,25 @@ describe('configuredPlaces', () => {
     const places = configuredPlaces([worktree({ hostPath: '/host/ferry' })], [project({ hostPath: '/host/notes' })], '/home/me');
     expect(places.map(place => place.hostPath)).toEqual(['/host/ferry', '/host/notes', undefined]);
   });
+
+  // expose only effective proxied previews as response origins
+  it('carries each tunneled canonical URL without inferring one for direct or Scratch Places', () => {
+    const places = configuredPlaces([
+      worktree({ projectUrl: 'https://ferry.tunnel.test', projectPort: 4173 }),
+      worktree({ id: 'direct:/code/direct', projectId: 'direct', label: 'Direct', path: '/code/direct', identity: '/code/direct', projectUrl: 'https://direct.example.test' })
+    ], [
+      project({ projectUrl: 'https://notes.tunnel.test', projectPort: 3000 }),
+      project({ id: 'external', label: 'External', path: '/data/external', identity: '/data/external', projectUrl: 'https://external.example.test' })
+    ], '/home/me/scratch');
+
+    expect(places.map(place => [place.id, place.responseOrigin])).toEqual([
+      ['ferry:/code/ferry', 'https://ferry.tunnel.test'],
+      ['direct:/code/direct', undefined],
+      ['notes:/data/notes', 'https://notes.tunnel.test'],
+      ['external:/data/external', undefined],
+      ['scratch:/home/me/scratch', undefined]
+    ]);
+  });
 });
 
 describe('placeForRoot', () => {

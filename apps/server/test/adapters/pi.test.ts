@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LaunchService } from '../../src/launch/service.js';
 import { testConfig } from '../helpers/config.js';
 import { piAdapter } from '../../src/adapters/pi.js';
+import { responseUrlEnvironment } from '../../src/adapters/response-urls.js';
 import { adhocScratchPlace } from '../../src/places/places.js';
 import { holderProcesses, type HolderLaunch } from '../../src/transports/structured-agents.js';
 
@@ -15,6 +16,7 @@ import { holderProcesses, type HolderLaunch } from '../../src/transports/structu
 const dirs: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const worktree = async () => { const dir = await mkdtemp(join(tmpdir(), 'rac-pi-launch-')); dirs.push(dir); return dir; };
+const responseOrigin = 'https://agents.example.com:4173';
 
 describe('the Pi Adapter\'s launch', () => {
   it('loads only the console\'s extension, no project settings or packages, and an explicit tool list', async () => {
@@ -45,9 +47,15 @@ describe('the Pi Adapter\'s launch', () => {
 
   it('names the policy only when Sandboxed, failing closed without a rendered one, and always the nonce', async () => {
     const cwd = await worktree();
-    expect(piAdapter.launch({ cwd, sandboxed: false, nonce: 'n1' }).env).toEqual({ RAC_LAUNCH_NONCE: 'n1' });
-    expect(piAdapter.launch({ cwd, sandboxed: true, nonce: 'n1', files: { 'sandbox.json': '/files/pi/sandbox.json' } }).env).toEqual({ RAC_LAUNCH_NONCE: 'n1', RAC_SANDBOX_POLICY: '/files/pi/sandbox.json' });
-    expect(piAdapter.launch({ cwd, sandboxed: true, nonce: 'n1' }).env).toEqual({ RAC_LAUNCH_NONCE: 'n1', RAC_SANDBOX_POLICY: '' });
+    expect(piAdapter.launch({ cwd, sandboxed: false, nonce: 'n1' }).env).toEqual({ RAC_LAUNCH_NONCE: 'n1', ...responseUrlEnvironment() });
+    expect(piAdapter.launch({ cwd, sandboxed: true, nonce: 'n1', files: { 'sandbox.json': '/files/pi/sandbox.json' } }).env).toEqual({ RAC_LAUNCH_NONCE: 'n1', ...responseUrlEnvironment(), RAC_SANDBOX_POLICY: '/files/pi/sandbox.json' });
+    expect(piAdapter.launch({ cwd, sandboxed: true, nonce: 'n1' }).env).toEqual({ RAC_LAUNCH_NONCE: 'n1', ...responseUrlEnvironment(), RAC_SANDBOX_POLICY: '' });
+  });
+
+  it('sets persistent response URL context for fresh and resumed sessions', async () => {
+    const cwd = await worktree();
+    expect(piAdapter.launch({ cwd, sandboxed: false, responseOrigin }).env).toEqual({ RAC_LAUNCH_NONCE: '', ...responseUrlEnvironment(responseOrigin) });
+    expect(piAdapter.launch({ cwd, sandboxed: false, resume: '/sessions/one.jsonl', responseOrigin }).env).toEqual({ RAC_LAUNCH_NONCE: '', ...responseUrlEnvironment(responseOrigin) });
   });
 });
 
@@ -55,9 +63,9 @@ describe('a Pi holder launch', () => {
   it('keeps what the Adapter composes over the operator\'s env', async () => {
     const launches: HolderLaunch[] = [];
     const windows = { openHolderWindow: async (_place: unknown, _id: string, launch: HolderLaunch) => { launches.push(launch); return undefined; }, captureHolder: async () => undefined, holderRunning: async () => false, closeHolder: async () => {} };
-    const processes = holderProcesses(windows, { pi: { program: process.execPath, args: [], env: { RAC_SANDBOX_POLICY: '', RAC_LAUNCH_NONCE: 'operator', KEEP: '1' }, launchable: true } }, async () => ({ 'sandbox.json': '/files/pi/sandbox.json' }));
+    const processes = holderProcesses(windows, { pi: { program: process.execPath, args: [], env: { RAC_SANDBOX_POLICY: '', RAC_LAUNCH_NONCE: 'operator', RAC_RESPONSE_URL_INSTRUCTIONS: 'stale', KEEP: '1' }, launchable: true } }, async () => ({ 'sandbox.json': '/files/pi/sandbox.json' }));
     await processes.start({ id: 'a1', kind: 'pi', place: adhocScratchPlace(await worktree()), sandboxed: true, nonce: 'console' }, () => {});
-    expect(launches[0]?.env).toEqual({ KEEP: '1', RAC_LAUNCH_NONCE: 'console', RAC_SANDBOX_POLICY: '/files/pi/sandbox.json' });
+    expect(launches[0]?.env).toEqual({ KEEP: '1', RAC_LAUNCH_NONCE: 'console', ...responseUrlEnvironment(), RAC_SANDBOX_POLICY: '/files/pi/sandbox.json' });
   });
 });
 

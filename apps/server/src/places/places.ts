@@ -19,7 +19,12 @@ export type PlaceKind = 'worktree' | 'directory' | 'scratch';
  * `hostPath` the host-side one under the Docker bridge. Built fresh from the discovered
  * Worktrees and config, never stored.
  */
-export type Place = { id: string; kind: PlaceKind; projectId: string; label: string; home: string; hostPath?: string; adhoc?: true };
+export type Place = { id: string; kind: PlaceKind; projectId: string; label: string; home: string; hostPath?: string; responseOrigin?: string; adhoc?: true };
+
+// the canonical tunneled origin, only when the preview proxy is configured
+function responseOriginOf(place: Pick<Project, 'projectUrl' | 'projectPort'>): Pick<Place, 'responseOrigin'> {
+  return place.projectUrl === undefined || place.projectPort === undefined ? {} : { responseOrigin: place.projectUrl };
+}
 
 // the configured Places, in the order a tie between equally deep homes resolves: Worktrees,
 // then directory Projects, then the configured Scratch folder
@@ -27,7 +32,7 @@ export function configuredPlaces(worktrees: readonly Worktree[], projects: reado
   const places: Place[] = worktrees.map(worktreePlace);
   for (const project of projects) {
     if (!project.available || project.mode !== 'directory') continue;
-    places.push({ id: worktreeWireId(project.id, project.identity), kind: 'directory', projectId: project.id, label: project.label, home: project.identity, ...(project.hostPath === undefined ? {} : { hostPath: project.hostPath }) });
+    places.push({ id: worktreeWireId(project.id, project.identity), kind: 'directory', projectId: project.id, label: project.label, home: project.identity, ...(project.hostPath === undefined ? {} : { hostPath: project.hostPath }), ...responseOriginOf(project) });
   }
   // unresolved launch identity has no default scratch folder
   if (scratchHome !== undefined) places.push({ id: worktreeWireId(scratchProjectId, scratchHome), kind: 'scratch', projectId: scratchProjectId, label: scratchPlaceLabel, home: scratchHome });
@@ -36,7 +41,7 @@ export function configuredPlaces(worktrees: readonly Worktree[], projects: reado
 
 // a Worktree as a Place: its wire id, its git identity as home, its bridge host path
 export function worktreePlace(worktree: Worktree): Place {
-  return { id: worktree.id, kind: 'worktree', projectId: worktree.projectId, label: worktree.label, home: worktree.identity, ...(worktree.hostPath === undefined ? {} : { hostPath: worktree.hostPath }) };
+  return { id: worktree.id, kind: 'worktree', projectId: worktree.projectId, label: worktree.label, home: worktree.identity, ...(worktree.hostPath === undefined ? {} : { hostPath: worktree.hostPath }), ...responseOriginOf(worktree) };
 }
 
 // the Scratch Place of a folder inside no configured Place, or opened below the configured Scratch

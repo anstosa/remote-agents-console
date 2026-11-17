@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { claudeFiles, claudeHooksJson, claudeHooksSettings, claudeStructuredSettings } from '../../src/adapters/claude-hooks.js';
 import { claudeHookNonce } from '../../src/adapters/claude-conversations.js';
+import { responseUrlSessionHookCommand } from '../../src/adapters/response-urls.js';
 
 const golden = readFileSync(fileURLToPath(new URL('../fixtures/claude/hooks.json', import.meta.url)), 'utf8');
 
@@ -54,17 +55,19 @@ describe('claude hooks settings', () => {
       expect(handler.timeout).toBe(5);
     }
   });
+
 });
 
 describe('structured Claude settings', () => {
-  it('only echoes the launch nonce at SessionStart, as JSON the Claude client reads, reporting nothing into tmux', () => {
+  it('echoes the launch nonce and adds workspace URL context at SessionStart, reporting nothing into tmux', () => {
     const settings = JSON.parse(claudeStructuredSettings) as { hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; timeout: number; command: string }> }>> };
     expect(Object.keys(settings.hooks)).toEqual(['SessionStart']);
-    const [handler] = settings.hooks.SessionStart![0]!.hooks;
-    expect(handler).toMatchObject({ type: 'command', timeout: 5 });
+    const [nonceHandler, responseHandler] = settings.hooks.SessionStart![0]!.hooks;
+    expect(nonceHandler).toMatchObject({ type: 'command', timeout: 5 });
+    expect(responseHandler).toEqual({ type: 'command', timeout: 5, command: responseUrlSessionHookCommand });
     expect(claudeStructuredSettings).not.toContain('rac-attention');
     // run as Claude runs a hook: by the shell, with the launch's environment
-    const stdout = execFileSync('/bin/sh', ['-c', handler!.command], { env: { ...process.env, RAC_LAUNCH_NONCE: 'n0nce_-AZ' }, encoding: 'utf8' });
+    const stdout = execFileSync('/bin/sh', ['-c', nonceHandler!.command], { env: { ...process.env, RAC_LAUNCH_NONCE: 'n0nce_-AZ' }, encoding: 'utf8' });
     expect(JSON.parse(stdout)).toEqual({ suppressOutput: true, rac: 'n0nce_-AZ' });
     expect(claudeHookNonce(stdout)).toBe('n0nce_-AZ');
   });

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { nativeReplyScope } from '../src/reply-suggestions/native-scope.js';
+import { withCodexResponseUrlContext } from '../src/adapters/response-urls.js';
 
 const roots: string[] = [];
 const conversation = '11111111-1111-4111-8111-111111111111';
@@ -179,6 +180,35 @@ describe('native reply process scope', () => {
     const { home, config } = await fakeHome(root, 'codex');
     const program = join(root, 'bin', 'codex-101', 'codex');
     await fakeProcess(root, { pid: 101, startTime: '5001', name: 'codex', argv: [program, ...args], environment: { HOME: home, CODEX_HOME: config }, conversationId: conversation });
+    expect(await nativeReplyScope('codex', { pid: 101, startTime: '5001' }, environment, conversation)).toBeUndefined();
+  });
+
+  // preserve reply suggestions only for the exact fixed application-owned lifecycle hook
+  it.each([false, true])('validates workspace URL hook definitions with tampering=%s', async tampered => {
+    const { root, environment } = await fixture();
+    const { home, config } = await fakeHome(root, 'codex');
+    const program = join(root, 'bin', 'codex-101', 'codex');
+    const context = withCodexResponseUrlContext('codex', 'https://app.example.test', { args: [] });
+    const args = context.args.map(argument => tampered ? argument.replace('node -e', 'untrusted-command') : argument);
+    await fakeProcess(root, { pid: 101, startTime: '5001', name: 'codex', argv: [program, ...args], environment: { HOME: home, CODEX_HOME: config, ...context.env }, conversationId: conversation });
+    const scope = await nativeReplyScope('codex', { pid: 101, startTime: '5001' }, environment, conversation);
+    // a changed command must not inherit the application's routing-neutral exception
+    if (tampered) expect(scope).toBeUndefined();
+    else expect(scope).toBeDefined();
+  });
+
+  // retain source rejection for every hook definition not exclusively owned by the console
+  it.each([
+    'hooks={SessionStart=[]}',
+    'hooks.Stop=[]',
+    'hooks.SessionStart=[{hooks=[{type="command",command="operator-hook"}]}]'
+  ])('rejects generic, unrelated and operator-merged hooks: %s', async assignment => {
+    const { root, environment } = await fixture();
+    const { home, config } = await fakeHome(root, 'codex');
+    const program = join(root, 'bin', 'codex-101', 'codex');
+    const spec = { args: ['-c', assignment] };
+    const context = assignment.startsWith('hooks.SessionStart=') ? withCodexResponseUrlContext('codex', 'https://app.example.test', spec) : spec;
+    await fakeProcess(root, { pid: 101, startTime: '5001', name: 'codex', argv: [program, ...context.args], environment: { HOME: home, CODEX_HOME: config }, conversationId: conversation });
     expect(await nativeReplyScope('codex', { pid: 101, startTime: '5001' }, environment, conversation)).toBeUndefined();
   });
 

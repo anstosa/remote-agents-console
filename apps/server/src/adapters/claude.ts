@@ -5,6 +5,7 @@ import { claudeFiles, claudeHooksFileName, claudeStructuredSettings } from './cl
 import { claudeNewConversation } from './claude-new-conversation.js';
 import { claudeReviewRuns } from './claude-review-runs.js';
 import { claudeQuestionTextAnswer, claudeQuestionTextEntry, reportedClaudeQuestion } from './claude-questions.js';
+import { responseUrlEnvironment } from './response-urls.js';
 import { claudeClient, claudeEfforts, claudeMcpServer } from '../transports/claude.js';
 import type { Adapter, ReplacedFlagValue, StructuredAdapter, TmuxKey } from './types.js';
 
@@ -56,14 +57,14 @@ export const claudeAdapter = {
   recognizes,
   inferState: () => undefined,
   // fresh → --settings <file>; continue → --continue --settings <file>; resume →
-  // --resume <id> --settings <file>. Nothing else; chunk 4 selects among settings
-  // variants by availability and Sandboxed.
-  launch: ({ mode, conversationId, files }) => {
+  // --resume <id> --settings <file>; workspace URL context stays in the environment
+  launch: ({ mode, conversationId, responseOrigin, files }) => {
     const settings = files?.[claudeHooksFileName];
     const settingsArgs = settings === undefined ? [] : ['--settings', settings];
-    if (mode === 'continue') return { args: ['--continue', ...settingsArgs] };
-    if (mode === 'resume' && conversationId !== undefined) return { args: ['--resume', conversationId, ...settingsArgs] };
-    return { args: settingsArgs };
+    const env = responseUrlEnvironment(responseOrigin);
+    if (mode === 'continue') return { args: ['--continue', ...settingsArgs], env };
+    if (mode === 'resume' && conversationId !== undefined) return { args: ['--resume', conversationId, ...settingsArgs], env };
+    return { args: settingsArgs, env };
   },
   submission: {
     // both modes: paste the text and press Enter — no trailing space, never Tab
@@ -130,20 +131,20 @@ const untrustedNotice = 'This folder isn\'t trusted by Claude yet, so its projec
  * over tmux, and the Launch menu's model, Effort and permission mode are composed onto these
  * arguments as for a pane (`compileNativeLaunch`), the model on a resume too, since one does not
  * restore it. Print mode skips Claude's folder trust, so a folder Claude does not trust launches
- * without its project settings and MCP servers. The inline settings add only the hook that echoes
- * the launch's nonce. Its Conversations are the TUI's session files; continuing the latest resumes
- * the newest one listed.
+ * without its project settings and MCP servers. the inline settings add only hooks that echo the
+ * launch nonce and add workspace URL session context. Its Conversations are the TUI's session files;
+ * continuing the latest resumes the newest one listed.
  */
 export const claudeStructuredAdapter = {
   kind: 'claude',
-  launch: ({ nonce = '', resume }) => ({
+  launch: ({ nonce = '', responseOrigin, resume }) => ({
     args: [
       '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages', '--permission-prompts', 'host', '--permission-prompt-tool', 'stdio',
       '--mcp-config', JSON.stringify({ mcpServers: { [claudeMcpServer]: { type: 'sdk', name: claudeMcpServer } } }),
       '--settings', claudeStructuredSettings,
       ...(resume === undefined ? [] : ['--resume', resume])
     ],
-    env: { RAC_LAUNCH_NONCE: nonce }
+    env: { RAC_LAUNCH_NONCE: nonce, ...responseUrlEnvironment(responseOrigin) }
   }),
   client: claudeClient,
   efforts: claudeEfforts,
