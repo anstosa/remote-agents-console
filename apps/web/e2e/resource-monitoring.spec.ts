@@ -302,7 +302,7 @@ async function expectSummary(controls: ResourceControls, transport: ResourceTran
 }
 
 // resolve a theme token through the active color mode
-async function themeColor(page: Page, token: '--teal' | '--yellow' | '--red' | '--overlay-2'): Promise<string> {
+async function themeColor(page: Page, token: '--teal' | '--yellow' | '--peach' | '--red' | '--overlay-2'): Promise<string> {
   return page.evaluate(name => {
     const probe = document.createElement('span');
     probe.style.color = `var(${name})`;
@@ -619,18 +619,18 @@ test('renders WSL first with memory capacity in its label and mount-only disk ba
 
   const wsl = resources.getByRole('group', { name: 'WSL resources' });
   const host = resources.getByRole('group', { name: 'Host resources' });
-  await expect(wsl.getByText('Memory (8 GiB)', { exact: true })).toBeVisible();
-  await expect(host.getByText('Memory (16 GiB)', { exact: true })).toBeVisible();
+  await expect(wsl.getByText('Memory (9 GB)', { exact: true })).toBeVisible();
+  await expect(host.getByText('Memory (18 GB)', { exact: true })).toBeVisible();
   await expect(wsl.getByRole('meter', { name: 'Memory usage' })).toHaveAttribute('aria-valuenow', '90');
-  await expect(resources.getByText('7.2 GiB / 8 GiB', { exact: true })).toHaveCount(0);
-  await expect(resources.getByText('8 GiB / 16 GiB', { exact: true })).toHaveCount(0);
+  await expect(resources.getByText('8 GB / 9 GB', { exact: true })).toHaveCount(0);
+  await expect(resources.getByText('9 GB / 18 GB', { exact: true })).toHaveCount(0);
 
   await expect(host.locator('.server-resource-disk')).toHaveCount(2);
   await expect(wsl.locator('.server-resource-disk')).toHaveCount(2);
-  await expect(host.getByRole('meter', { name: 'C:\\ usage' })).toHaveAttribute('aria-valuetext', '100 GiB / 200 GiB');
-  await expect(wsl.getByRole('meter', { name: '/ usage' })).toHaveAttribute('aria-valuetext', '80 GiB / 160 GiB');
-  await expect(host.locator('.server-resource-disk')).toHaveText(['C:\\100 GiB / 200 GiB', 'D:\\256 GiB / 1 TiB']);
-  await expect(wsl.locator('.server-resource-disk')).toHaveText(['/80 GiB / 160 GiB', '/mnt/data500 GiB / 1,000 GiB']);
+  await expect(host.getByRole('meter', { name: 'C:\\ usage' })).toHaveAttribute('aria-valuetext', '108 GB / 215 GB');
+  await expect(wsl.getByRole('meter', { name: '/ usage' })).toHaveAttribute('aria-valuetext', '86 GB / 172 GB');
+  await expect(host.locator('.server-resource-disk')).toHaveText(['C:\\108 GB / 215 GB', 'D:\\275 GB / 1.1 TB']);
+  await expect(wsl.locator('.server-resource-disk')).toHaveText(['/86 GB / 172 GB', '/mnt/data537 GB / 1.1 TB']);
   await expect(resources.locator('.server-resource-disk').filter({ hasText: '%' })).toHaveCount(0);
   await expectSummary(controls, 'metrics', { requests: 1, aborts: 0, active: 0, maxActive: 1 });
 
@@ -644,6 +644,48 @@ test('renders WSL first with memory capacity in its label and mount-only disk ba
   const lastDisk = host.locator('.server-resource-disk').last();
   await lastDisk.scrollIntoViewIfNeeded();
   await expect(lastDisk).toBeInViewport();
+});
+
+// keep display rounding separate from precise resource geometry
+test('rounds labels upward while preserving fractional bars and gauges', async ({ page }) => {
+  const disks = diskSample();
+  disks.wsl.disks = [
+    { mount: '/', usedBytes: 1_000_000_001, totalBytes: 12_000_000_001 },
+    { mount: '/mnt/data', usedBytes: 1_250_000_000_000, totalBytes: 2_000_000_000_000 }
+  ];
+  disks.host.disks = [
+    { mount: 'C:\\', usedBytes: 999, totalBytes: 1_000 },
+    { mount: 'D:\\', usedBytes: 1_000_000, totalBytes: 1_000_000_000 }
+  ];
+  await installFixture(page, true, { metrics: metricsSample(0.1, 50.1), disks });
+  const selector = page.getByRole('button', { name: /^Switch server/u });
+  const cpuGauge = selector.locator('.server-selector-gauge-fill[data-resource="cpu"]');
+  const memoryGauge = selector.locator('.server-selector-gauge-fill[data-resource="memory"]');
+  await expect(cpuGauge).toHaveAttribute('stroke-dasharray', '0.1 100');
+  await expect(memoryGauge).toHaveAttribute('stroke-dasharray', '50.1 100');
+  await expect(selector).toHaveAttribute('aria-description', /5-minute CPU average: 1%/u);
+  await expect(selector).toHaveAttribute('aria-description', /5-minute memory average: 51%/u);
+
+  const resources = await openResources(page);
+  const wsl = resources.getByRole('group', { name: 'WSL resources' });
+  const host = resources.getByRole('group', { name: 'Host resources' });
+  const cpu = wsl.getByRole('meter', { name: 'CPU usage' });
+  const memory = wsl.getByRole('meter', { name: 'Memory usage' });
+  await expect(cpu).toHaveAttribute('aria-valuenow', '0.1');
+  await expect(cpu).toHaveAttribute('aria-valuetext', '1%');
+  await expect(memory).toHaveAttribute('aria-valuenow', '50.1');
+  await expect(memory).toHaveAttribute('aria-valuetext', '51%');
+  await expect.poll(() => cpu.evaluate(meter => meter.style.getPropertyValue('--resource-fill'))).toBe('0.1%');
+  await expect.poll(() => memory.evaluate(meter => meter.style.getPropertyValue('--resource-fill'))).toBe('50.1%');
+  await expect(cpu.locator('..').getByText('1%', { exact: true })).toBeVisible();
+  await expect(memory.locator('..').getByText('51%', { exact: true })).toBeVisible();
+  const fill = cpu.locator('.server-resource-bar-fill');
+  await expect(fill).toHaveCSS('border-top-right-radius', '0px');
+  await expect(fill).toHaveCSS('border-bottom-right-radius', '0px');
+  await expect(wsl.getByRole('meter', { name: '/ usage' })).toHaveAttribute('aria-valuetext', '2 GB / 13 GB');
+  await expect(wsl.getByRole('meter', { name: '/mnt/data usage' })).toHaveAttribute('aria-valuetext', '1.3 TB / 2.0 TB');
+  await expect(host.getByRole('meter', { name: 'C:\\ usage' })).toHaveAttribute('aria-valuetext', '999 B / 1 KB');
+  await expect(host.getByRole('meter', { name: 'D:\\ usage' })).toHaveAttribute('aria-valuetext', '1 MB / 1 GB');
 });
 
 test('draws mirrored primary-server gauges and averages only the trailing five minutes', async ({ page }) => {
@@ -669,16 +711,27 @@ test('draws mirrored primary-server gauges and averages only the trailing five m
     const svgStyle = getComputedStyle(svg);
     const transform = svgStyle.transform === 'none' ? new DOMMatrix() : new DOMMatrix(svgStyle.transform);
     const screen = svg.getScreenCTM()!;
+    // project exact endpoint coordinates into painted screen space
+    const project = (x: number, y: number) => {
+      const painted = new DOMPoint(x, y).matrixTransform(screen);
+      return { x: painted.x, y: painted.y };
+    };
     const paths = [...svg.querySelectorAll<SVGPathElement>('.server-selector-gauge-fill')].map(path => {
       const length = path.getTotalLength();
       // project one normalized path point into painted screen coordinates
       const point = (offset: number) => {
         const local = path.getPointAtLength(offset);
-        const painted = new DOMPoint(local.x, local.y).matrixTransform(screen);
-        return { x: painted.x, y: painted.y };
+        return project(local.x, local.y);
       };
       return { resource: path.dataset.resource, start: point(0), middle: point(length / 2), end: point(length), pathLength: path.getAttribute('pathLength'), filter: getComputedStyle(path).filter };
     });
+    const endpoints = svg.querySelector<SVGPathElement>('.server-selector-gauge-endpoints')!;
+    const endpointStyle = getComputedStyle(endpoints);
+    // sample the centers from the painted path itself
+    const endpointPoint = (offset: number) => {
+      const local = endpoints.getPointAtLength(offset);
+      return project(local.x, local.y);
+    };
     return {
       button: { left: buttonRect.left, right: buttonRect.right, top: buttonRect.top, bottom: buttonRect.bottom, width: buttonRect.width, height: buttonRect.height },
       svg: { left: svgRect.left, right: svgRect.right, top: svgRect.top, bottom: svgRect.bottom, width: svgRect.width, height: svgRect.height },
@@ -686,7 +739,19 @@ test('draws mirrored primary-server gauges and averages only the trailing five m
       svgOverflow: svgStyle.overflow,
       pointerEvents: svgStyle.pointerEvents,
       transform: { a: transform.a, b: transform.b, c: transform.c, d: transform.d },
-      paths
+      paths,
+      endpoints: {
+        d: endpoints.getAttribute('d'),
+        length: endpoints.getTotalLength(),
+        topCenter: endpointPoint(2),
+        bottomCenter: endpointPoint(6),
+        stroke: endpointStyle.stroke,
+        strokeWidth: endpointStyle.strokeWidth,
+        vectorEffect: endpointStyle.vectorEffect,
+        strokeLinecap: endpointStyle.strokeLinecap,
+        filter: endpointStyle.filter
+      },
+      paintOrder: [...svg.children].map(child => `${child.tagName.toLowerCase()}.${child.getAttribute('class') ?? ''}`)
     };
   });
   const afterGauge = await selector.boundingBox();
@@ -697,6 +762,14 @@ test('draws mirrored primary-server gauges and averages only the trailing five m
   expect(decoration.svgOverflow).toBe('visible');
   expect(decoration.pointerEvents).toBe('none');
   expect(decoration.transform).toEqual({ a: 1, b: 0, c: 0, d: 1 });
+  expect(decoration.paintOrder).toEqual(['g.', 'g.', 'path.server-selector-gauge-endpoints']);
+  expect(decoration.endpoints.d).toBe('M 20 -2 V 2 M 20 38 V 42');
+  expect(decoration.endpoints.length).toBe(8);
+  expect(decoration.endpoints.stroke).toBe('rgb(0, 0, 0)');
+  expect(decoration.endpoints.strokeWidth).toBe('1px');
+  expect(decoration.endpoints.vectorEffect).toBe('non-scaling-stroke');
+  expect(decoration.endpoints.strokeLinecap).toBe('butt');
+  expect(decoration.endpoints.filter).toBe('none');
   await expect(selector.locator('img')).toBeVisible();
   await expect(selector.locator('.server-switcher-attention')).toBeAttached();
   await selector.focus();
@@ -706,9 +779,13 @@ test('draws mirrored primary-server gauges and averages only the trailing five m
   expect(Math.abs(decoration.svg.right - decoration.button.right)).toBeLessThanOrEqual(edgeTolerance);
   expect(Math.abs(decoration.svg.top - decoration.button.top)).toBeLessThanOrEqual(edgeTolerance);
   expect(Math.abs(decoration.svg.bottom - decoration.button.bottom)).toBeLessThanOrEqual(edgeTolerance);
+  const centerX = decoration.button.left + decoration.button.width / 2;
+  expect(Math.abs(decoration.endpoints.topCenter.x - centerX)).toBeLessThanOrEqual(edgeTolerance);
+  expect(Math.abs(decoration.endpoints.topCenter.y - decoration.button.top)).toBeLessThanOrEqual(edgeTolerance);
+  expect(Math.abs(decoration.endpoints.bottomCenter.x - centerX)).toBeLessThanOrEqual(edgeTolerance);
+  expect(Math.abs(decoration.endpoints.bottomCenter.y - decoration.button.bottom)).toBeLessThanOrEqual(edgeTolerance);
   // compare each painted route rather than its source string
   for (const path of decoration.paths) {
-    const centerX = decoration.button.left + decoration.button.width / 2;
     const centerY = decoration.button.top + decoration.button.height / 2;
     expect(path.pathLength).toBe('100');
     expect(Math.abs(path.start.x - centerX)).toBeLessThanOrEqual(edgeTolerance);
@@ -754,6 +831,44 @@ test('draws mirrored primary-server gauges and averages only the trailing five m
   await expect.poll(() => gaugeValue(selector, 'memory')).toBe(25);
 });
 
+// retain endpoint hairlines across zero and full readings only while gauges exist
+test('keeps endpoint hairlines at zero and full usage', async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date('2026-11-17T20:00:00Z') });
+  const controls = await installFixture(page, false, { metrics: metricsSample(100, 100) });
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  const selector = page.getByRole('button', { name: /^Switch server/u });
+  const endpoints = selector.locator('.server-selector-gauge-endpoints');
+  await expect(endpoints).toHaveCount(0);
+  await enableMonitoring(page, controls);
+  await expect.poll(() => gaugeValue(selector, 'cpu')).toBe(100);
+  await expect.poll(() => gaugeValue(selector, 'memory')).toBe(100);
+  await expect(endpoints).toHaveCount(1);
+
+  const button = await selector.boundingBox();
+  expect(button).not.toBeNull();
+  // include the two-pixel overhang around the actual control
+  await page.screenshot({
+    path: testInfo.outputPath('server-resource-gauge-endpoints-100.png'),
+    clip: { x: Math.max(0, button!.x - 8), y: Math.max(0, button!.y - 8), width: button!.width + 16, height: button!.height + 16 }
+  });
+
+  // reset the average while retaining one zero and one full reading
+  const split = metricsSample(1, 1, 0, 100);
+  await controls.respond('metrics', { sampledAt: split.sampledAt, host: split.host });
+  await page.clock.fastForward(60_000);
+  await expect.poll(() => gaugeValue(selector, 'cpu')).toBeUndefined();
+  await expect.poll(() => gaugeValue(selector, 'memory')).toBe(100);
+  await expect(selector).toHaveAttribute('aria-description', /5-minute CPU average: 0%/u);
+  await expect(endpoints).toHaveCount(1);
+
+  // remove the decoration once the active namespace has no gauge readings
+  const unavailable = metricsSample(null, 1);
+  await controls.respond('metrics', { sampledAt: unavailable.sampledAt, host: unavailable.host, wsl: { ...unavailable.wsl, memory: null } });
+  await page.clock.fastForward(60_000);
+  await expect(selector.locator('.server-selector-resource-gauges')).toHaveCount(0);
+  await expect(endpoints).toHaveCount(0);
+});
+
 test('omits unavailable gauge fills, preserves a zero track, and shares disk status colors', async ({ page }) => {
   await page.clock.install({ time: new Date('2026-11-17T20:00:00Z') });
   const controls = await installFixture(page, false, { metrics: metricsSample(null, 85, 95, 95), disks: thresholdDisks(95, 85) });
@@ -764,17 +879,17 @@ test('omits unavailable gauge fills, preserves a zero track, and shares disk sta
   await expect(selector.locator('.server-selector-resource-gauges')).toBeVisible();
   await expect(selector.locator('.server-selector-gauge-fill[data-resource="cpu"]')).toHaveCount(0);
   await expect.poll(() => gaugeValue(selector, 'memory')).toBe(85);
-  const warning = await themeColor(page, '--yellow');
+  const orange = await themeColor(page, '--peach');
   const critical = await themeColor(page, '--red');
-  await expect.poll(() => selector.locator('.server-selector-gauge-fill[data-resource="memory"]').evaluate(path => getComputedStyle(path).stroke)).toBe(warning);
+  await expect.poll(() => selector.locator('.server-selector-gauge-fill[data-resource="memory"]').evaluate(path => getComputedStyle(path).stroke)).toBe(orange);
   await expect.poll(() => selector.locator('.server-selector-gauge-fill[data-resource="memory"]').evaluate(path => getComputedStyle(path).filter.match(/drop-shadow/gu)?.length)).toBe(2);
 
   const resources = await openResources(page);
   const wsl = resources.getByRole('group', { name: 'WSL resources' });
   const host = resources.getByRole('group', { name: 'Host resources' });
-  await expect.poll(() => wsl.getByRole('meter', { name: 'Memory usage' }).locator('.server-resource-bar-fill').evaluate(fill => getComputedStyle(fill).backgroundColor)).toBe(warning);
+  await expect.poll(() => wsl.getByRole('meter', { name: 'Memory usage' }).locator('.server-resource-bar-fill').evaluate(fill => getComputedStyle(fill).backgroundColor)).toBe(orange);
   await expect.poll(() => wsl.getByRole('meter', { name: '/ usage' }).locator('.server-resource-bar-fill').evaluate(fill => getComputedStyle(fill).backgroundColor)).toBe(critical);
-  await expect.poll(() => host.getByRole('meter', { name: 'C:\\ usage' }).locator('.server-resource-bar-fill').evaluate(fill => getComputedStyle(fill).backgroundColor)).toBe(warning);
+  await expect.poll(() => host.getByRole('meter', { name: 'C:\\ usage' }).locator('.server-resource-bar-fill').evaluate(fill => getComputedStyle(fill).backgroundColor)).toBe(orange);
   await expect.poll(() => host.getByRole('meter', { name: 'CPU usage' }).locator('.server-resource-bar-fill').evaluate(fill => getComputedStyle(fill).backgroundColor)).toBe(critical);
 
   // measured zero shows an opaque gray track but no active stroke
@@ -804,6 +919,59 @@ test('omits unavailable gauge fills, preserves a zero track, and shares disk sta
   await expect.poll(() => selector.locator('.server-selector-gauge-fill[data-resource="memory"]').evaluate(path => getComputedStyle(path).stroke)).toBe(critical);
 });
 
+// verify shared colors at and just above each usage cutoff
+test('uses strict yellow, orange, and red thresholds for bars and button borders', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-11-17T20:00:00Z') });
+  const disks = diskSample();
+  const diskThresholds = [50, 50.1, 75, 75.1] as const;
+  // cover every lower boundary across the four disk bars
+  for (const [disk, value] of [...disks.wsl.disks, ...disks.host.disks].map((disk, index) => [disk, diskThresholds[index]] as const)) {
+    disk.usedBytes = disk.totalBytes * value / 100;
+  }
+  const controls = await installFixture(page, false, { metrics: metricsSample(50, 50.1), disks });
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  await enableMonitoring(page, controls);
+  const selector = page.getByRole('button', { name: /^Switch server/u });
+  const normal = await themeColor(page, '--teal');
+  const yellow = await themeColor(page, '--yellow');
+  const orange = await themeColor(page, '--peach');
+  const red = await themeColor(page, '--red');
+  const cpuGauge = selector.locator('.server-selector-gauge-fill[data-resource="cpu"]');
+  const memoryGauge = selector.locator('.server-selector-gauge-fill[data-resource="memory"]');
+  await expect.poll(() => cpuGauge.evaluate(path => getComputedStyle(path).stroke)).toBe(normal);
+  await expect.poll(() => memoryGauge.evaluate(path => getComputedStyle(path).stroke)).toBe(yellow);
+
+  // switching namespace resets the gauge average at the exact orange boundary
+  const hostThresholds = metricsSample(1, 1, 75, 75.1);
+  await controls.respond('metrics', { sampledAt: hostThresholds.sampledAt, host: hostThresholds.host });
+  await page.clock.fastForward(60_000);
+  await expect.poll(() => gaugeValue(selector, 'cpu')).toBe(75);
+  await expect.poll(() => gaugeValue(selector, 'memory')).toBe(75.1);
+  await expect.poll(() => cpuGauge.evaluate(path => getComputedStyle(path).stroke)).toBe(yellow);
+  await expect.poll(() => memoryGauge.evaluate(path => getComputedStyle(path).stroke)).toBe(orange);
+
+  // switching back resets the gauge average at the exact red boundary
+  await controls.respond('metrics', metricsSample(90, 90.1));
+  await page.clock.fastForward(60_000);
+  await expect.poll(() => gaugeValue(selector, 'cpu')).toBe(90);
+  await expect.poll(() => gaugeValue(selector, 'memory')).toBe(90.1);
+  await expect.poll(() => cpuGauge.evaluate(path => getComputedStyle(path).stroke)).toBe(orange);
+  await expect.poll(() => memoryGauge.evaluate(path => getComputedStyle(path).stroke)).toBe(red);
+
+  const resources = await openResources(page);
+  const wsl = resources.getByRole('group', { name: 'WSL resources' });
+  const host = resources.getByRole('group', { name: 'Host resources' });
+  // read each rendered fill through its meter
+  const barColor = (meter: Locator) => meter.locator('.server-resource-bar-fill').evaluate(fill => getComputedStyle(fill).backgroundColor);
+  await expect.poll(() => wsl.getByRole('meter', { name: 'CPU usage' }).getAttribute('aria-valuenow')).toBe('90');
+  await expect.poll(() => barColor(wsl.getByRole('meter', { name: 'CPU usage' }))).toBe(orange);
+  await expect.poll(() => barColor(wsl.getByRole('meter', { name: 'Memory usage' }))).toBe(red);
+  await expect.poll(() => barColor(wsl.getByRole('meter', { name: '/ usage' }))).toBe(normal);
+  await expect.poll(() => barColor(wsl.getByRole('meter', { name: '/mnt/data usage' }))).toBe(yellow);
+  await expect.poll(() => barColor(host.getByRole('meter', { name: 'C:\\ usage' }))).toBe(yellow);
+  await expect.poll(() => barColor(host.getByRole('meter', { name: 'D:\\ usage' }))).toBe(orange);
+});
+
 test('keeps disk-proven WSL separate when its first metric sample is only partially available', async ({ page }) => {
   const sample = metricsSample(10, 20, 37.5, 50);
   const partial = { sampledAt: sample.sampledAt, host: sample.host, errors: ['WSL resource monitoring is unavailable.'] };
@@ -817,7 +985,7 @@ test('keeps disk-proven WSL separate when its first metric sample is only partia
   await expect.poll(() => groups.evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label')))).toEqual(['WSL resources', 'Host resources']);
   const wsl = resources.getByRole('group', { name: 'WSL resources' });
   const host = resources.getByRole('group', { name: 'Host resources' });
-  await expect(wsl.getByRole('meter', { name: '/ usage' })).toHaveAttribute('aria-valuetext', '80 GiB / 160 GiB');
+  await expect(wsl.getByRole('meter', { name: '/ usage' })).toHaveAttribute('aria-valuetext', '86 GB / 172 GB');
   await expect(wsl.getByRole('meter', { name: 'CPU usage' })).toHaveCount(0);
   await expect(host.locator('.server-resource-group-title')).toHaveText('Host');
   await expect(host.getByRole('meter', { name: 'CPU usage' })).toHaveAttribute('aria-valuenow', '37.5');
@@ -867,7 +1035,7 @@ test('retains cached values through failed metric refreshes and aborts pending w
 test('keeps cached disks visible while a flyout refresh is pending or fails', async ({ page }) => {
   const controls = await installFixture(page, true);
   await openResources(page);
-  await expect(page.getByRole('meter', { name: 'C:\\ usage' })).toHaveAttribute('aria-valuetext', '100 GiB / 200 GiB');
+  await expect(page.getByRole('meter', { name: 'C:\\ usage' })).toHaveAttribute('aria-valuetext', '108 GB / 215 GB');
   await page.keyboard.press('Escape');
 
   // hold the next open refresh and configure it to fail
@@ -875,12 +1043,12 @@ test('keeps cached disks visible while a flyout refresh is pending or fails', as
   await controls.respond('disks', { error: 'Disk usage unavailable' }, 503);
   const resources = await openResources(page);
   await expectSummary(controls, 'disks', { requests: 3, aborts: 0, active: 1, maxActive: 1 });
-  await expect(resources.getByRole('meter', { name: 'C:\\ usage' })).toHaveAttribute('aria-valuetext', '100 GiB / 200 GiB');
+  await expect(resources.getByRole('meter', { name: 'C:\\ usage' })).toHaveAttribute('aria-valuetext', '108 GB / 215 GB');
 
   // a failed refresh must retain the previous successful capacities
   await controls.release('disks');
   await expectSummary(controls, 'disks', { requests: 3, aborts: 0, active: 0, maxActive: 1 });
-  await expect(resources.getByRole('meter', { name: 'C:\\ usage' })).toHaveAttribute('aria-valuetext', '100 GiB / 200 GiB');
+  await expect(resources.getByRole('meter', { name: 'C:\\ usage' })).toHaveAttribute('aria-valuetext', '108 GB / 215 GB');
   await expect(resources).not.toContainText('Disk usage unavailable.');
   await expect(resources.getByRole('status').filter({ hasText: 'Disk refresh failed. Showing last available readings.' })).toBeVisible();
 });

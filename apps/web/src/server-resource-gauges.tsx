@@ -28,5 +28,7 @@ export function ServerResourceGauges({ averages }: { averages: ResourceAverages 
         {value > 0 && <path className={`server-selector-gauge-fill${resourceSeverityClass(value)}`} data-resource={metric} d={path} pathLength={100} strokeDasharray={`${value} 100`} />}
       </g>;
     })}
+    {/* separate the mirrored scales at zero and full usage */}
+    <path className="server-selector-gauge-endpoints" d="M 20 -2 V 2 M 20 38 V 42" />
   </svg>;
 }

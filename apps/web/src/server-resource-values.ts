@@ -1,14 +1,17 @@
-// format binary capacities consistently across host and wsl
+// format decimal capacities consistently across host and wsl
 export const resourceBytes = (value: number): string => {
-  const unit = Math.min(4, Math.floor(Math.log2(Math.max(1, value)) / 10));
-  return `${(value / 1024 ** unit).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${['B', 'KiB', 'MiB', 'GiB', 'TiB'][unit]}`;
+  const unit = Math.min(4, Math.floor(Math.log10(Math.max(1, value)) / 3));
+  const capacity = value / 1000 ** unit;
+  // round gb upward and retain one decimal for tb
+  const display = unit === 3 ? Math.ceil(capacity) : capacity;
+  return `${display.toLocaleString(undefined, { minimumFractionDigits: unit === 4 ? 1 : 0, maximumFractionDigits: unit === 3 ? 0 : 1 })} ${['B', 'KB', 'MB', 'GB', 'TB'][unit]}`;
 };
 
-// use one precision for both the flyout bars and button gauges
-export const resourcePercent = (value: number): string => `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+// round labels upward without changing bar positions or gauge averages
+export const resourcePercent = (value: number): string => `${Math.ceil(value).toLocaleString()}%`;
 
 // distinguish unavailable capacities from a settled zero reading
 export const usagePercent = (used: number | null, total: number | null): number | null => used === null || total === null || total <= 0 ? null : used / total * 100;
 
-// share thresholds across bars and gauges
-export const resourceSeverityClass = (value: number): string => value >= 95 ? ' critical' : value >= 85 ? ' warning' : '';
+// share strict usage thresholds across bars and gauges
+export const resourceSeverityClass = (value: number): string => value > 90 ? ' critical' : value > 75 ? ' warning' : value > 50 ? ' elevated' : '';
