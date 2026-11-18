@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import argon2 from 'argon2';
 import { createHmac } from 'node:crypto';
-import { buildApp } from '../src/app.js';
+import { buildApp, waitForResourceDrain } from '../src/app.js';
+import { parseResourceSnapshot } from '../src/server-admin/resource-monitor.js';
 import { worktreePlace } from '../src/places/places.js';
 import { AuthService } from '../src/auth/service.js';
 import { ControlService } from '../src/auth/control.js';
@@ -23,8 +24,20 @@ import { ChangeAskStore } from '../src/asks/changes.js';
 import { ReviewTourError, type ReviewTour } from '../src/review-tour/contracts.js';
 import { GithubRequestError } from '../src/github/github.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from '../src/dashboard/updates.js';
+import { EventEmitter } from 'node:events';
 const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen:{host:'127.0.0.1',port:8787},publicOrigin:new URL('https://agents.example.com'),trustedProxyIps:new Set(['127.0.0.1']),pollIntervalMs:500,adapters:{},projects:[] };
 const launchAdapters = { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } };
+
+it('does not miss an abort that lands before drain waiting registers', async () => {
+  const response = new EventEmitter() as EventEmitter & { destroyed: boolean };
+  response.destroyed = true;
+  const controller = new AbortController();
+  controller.abort();
+
+  await expect(waitForResourceDrain(response as never, controller.signal)).resolves.toBeUndefined();
+  expect(response.listenerCount('drain')).toBe(0);
+});
+
 let queueDirectory: string | undefined;
 // keep default queues independent of persisted developer prompts
 beforeEach(async () => {
@@ -146,6 +159,14 @@ describe('server administration API', () => {
     const reviewedPreview = { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha, fastForwardable: true, commitCount: 1, commits: [{ sha: targetSha, subject: 'Update server', author: 'Ansel', authoredAt: '2026-08-27T12:00:00-07:00' }], commitsTruncated: false, filesTruncated: false, advisory: { required: false, reasons: [] as Array<{ kind: 'config'; paths: string[] }> } };
     let preview = reviewedPreview;
     const startUpdate = vi.fn(async () => ({ id: 'server_update_operation_1234', kind: 'update' as const, state: 'queued' as const, targetSha }));
+    const disk = { mount: '/', usedBytes: 25_000, totalBytes: 50_000 };
+    const diskSnapshot = { sampledAt: '2026-11-17T20:00:10.000Z', host: { cpuPercent: null, memory: null, disks: [disk] } };
+    const metricsSnapshot = { sampledAt: '2026-11-17T20:00:00.000Z', host: { cpuPercent: 12.5, memory: { usedBytes: 5_000, totalBytes: 10_000 }, disks: [] } };
+    // pass private collector data through the production parse boundary
+    const sampleDisks = vi.fn(async () => parseResourceSnapshot(JSON.stringify({ ...diskSnapshot, host: { ...diskSnapshot.host, label: 'private-machine', disks: [{ ...disk, id: 'private-id', label: 'private-volume' }] } }))!);
+    const sampleMetrics = vi.fn(async () => parseResourceSnapshot(JSON.stringify({ ...metricsSnapshot, host: { ...metricsSnapshot.host, label: 'private-machine' } }))!);
+    // publish one complete metrics-only live record
+    const streamResources = vi.fn(async (_signal: AbortSignal, publish: (snapshot: Awaited<ReturnType<typeof sampleMetrics>>) => void | Promise<void>) => { await publish(await sampleMetrics()); });
     const serverAdmin = {
       renameServer: async (name: string) => { renamed.push(name); return name.trim() || undefined; },
       setDefaultAgent: async (kind: string) => { defaults.push(kind); return kind; },
@@ -157,11 +178,16 @@ describe('server administration API', () => {
       updatePreview: async () => preview,
       revision: revisionStatus
     };
-    const adminApp = await buildApp({ ...config, adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true } } }, { auth: new AuthService(hash, Buffer.alloc(32, 19).toString('base64url')), serverAdmin: serverAdmin as never });
+    const adminApp = await buildApp({ ...config, resourceMonitoring: true, adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true } } }, { auth: new AuthService(hash, Buffer.alloc(32, 19).toString('base64url')), serverAdmin: serverAdmin as never, resourceMonitor: { disks: sampleDisks, metrics: sampleMetrics, stream: streamResources } });
     try {
       const boot = await adminApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
+      const anonymousDisks = await adminApp.inject({ method: 'GET', url: '/api/server/resources/disks', headers: { host: 'agents.example.com' } });
+      const anonymousMetrics = await adminApp.inject({ method: 'GET', url: '/api/server/resources/metrics', headers: { host: 'agents.example.com' } });
+      const anonymousResourceStream = await adminApp.inject({ method: 'GET', url: '/api/server/resources/live', headers: { host: 'agents.example.com' } });
       const login = await adminApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
       const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
+      const authenticatedSession = await adminApp.inject({ method: 'GET', url: '/api/auth/session', headers: { host: headers.host, cookie: headers.cookie } });
+      const renamedDeviceSession = await adminApp.inject({ method: 'PATCH', url: '/api/auth/device-name', headers, payload: { deviceName: 'Workshop browser' } });
 
       const rename = await adminApp.inject({ method: 'PATCH', url: '/api/server/name', headers, payload: { name: 'Garage Server' } });
       const defaultAgent = await adminApp.inject({ method: 'PATCH', url: '/api/server/default-agent', headers, payload: { kind: 'codex' } });
@@ -175,12 +201,20 @@ describe('server administration API', () => {
       const availability = await adminApp.inject({ method: 'GET', url: '/api/server/update-available', headers: { host: headers.host, cookie: headers.cookie } });
       const revision = await adminApp.inject({ method: 'GET', url: '/api/server/revision', headers: { host: headers.host, cookie: headers.cookie } });
       const repeatedRevision = await adminApp.inject({ method: 'GET', url: '/api/server/revision', headers: { host: headers.host, cookie: headers.cookie } });
+      const disks = await adminApp.inject({ method: 'GET', url: '/api/server/resources/disks', headers: { host: headers.host, cookie: headers.cookie } });
+      const metrics = await adminApp.inject({ method: 'GET', url: '/api/server/resources/metrics', headers: { host: headers.host, cookie: headers.cookie } });
+      const headResourceStream = await adminApp.inject({ method: 'HEAD', url: '/api/server/resources/live', headers: { host: headers.host, cookie: headers.cookie } });
+      const resourceStream = await adminApp.inject({ method: 'GET', url: '/api/server/resources/live', headers: { host: headers.host, cookie: headers.cookie } });
       const updatePreview = await adminApp.inject({ method: 'GET', url: '/api/server/update-preview', headers: { host: headers.host, cookie: headers.cookie } });
       // require explicit advisor acknowledgement for flagged previews
       preview = { ...preview, advisory: { required: true, reasons: [{ kind: 'config', paths: ['.env.example'] }] } };
       const unacknowledgedUpdate = await adminApp.inject({ method: 'POST', url: '/api/server/update', headers, payload: { expectedTargetSha: targetSha } });
 
       expect(rename.json()).toMatchObject({ name: 'Garage Server', server: { name: 'Garage Server' } });
+      expect(boot.json()).not.toHaveProperty('resourceMonitoring');
+      expect(login.json().resourceMonitoring).toBe(true);
+      expect(authenticatedSession.json().resourceMonitoring).toBe(true);
+      expect(renamedDeviceSession.json().resourceMonitoring).toBe(true);
       expect(renamed).toEqual(['Garage Server']);
       expect(defaultAgent.json()).toEqual({ defaultAgent: 'codex' });
       expect(defaults).toEqual(['codex']);
@@ -197,8 +231,49 @@ describe('server administration API', () => {
       expect(availability.json()).toEqual({ available: true, commitCount: 1, targetSha });
       expect(revision.json()).toEqual({ sha: targetSha, committedAt });
       expect(repeatedRevision.json()).toEqual({ sha: targetSha, committedAt });
+      expect(anonymousDisks.statusCode).toBe(401);
+      expect(anonymousMetrics.statusCode).toBe(401);
+      expect(anonymousResourceStream.statusCode).toBe(401);
+      expect(disks.json()).toEqual(diskSnapshot);
+      expect(sampleDisks).toHaveBeenCalledTimes(1);
+      expect(metrics.json()).toEqual(metricsSnapshot);
+      expect(sampleMetrics).toHaveBeenCalledTimes(2);
+      expect(headResourceStream.statusCode).toBe(404);
+      expect(resourceStream.headers['content-type']).toBe('application/x-ndjson; charset=utf-8');
+      expect(resourceStream.body).toBe(`${JSON.stringify(metricsSnapshot)}\n`);
+      expect(streamResources).toHaveBeenCalledTimes(1);
       expect(updatePreview.json()).toEqual(reviewedPreview);
       expect(unacknowledgedUpdate.statusCode).toBe(409);
+    } finally {
+      await adminApp.close();
+    }
+  }, 15_000);
+
+  it('hides disabled resource monitoring without starting collectors', async () => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    // track every collector entry point behind the disabled gate
+    const disks = vi.fn(async () => ({ sampledAt: new Date().toISOString(), host: null }));
+    const metrics = vi.fn(async () => ({ sampledAt: new Date().toISOString(), host: null }));
+    const stream = vi.fn(async () => undefined);
+    const adminApp = await buildApp({ ...config, resourceMonitoring: false }, { auth: new AuthService(hash, Buffer.alloc(32, 24).toString('base64url')), resourceMonitor: { disks, metrics, stream } });
+    try {
+      const boot = await adminApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
+      const anonymous = await adminApp.inject({ method: 'GET', url: '/api/server/resources/metrics', headers: { host: 'agents.example.com' } });
+      const login = await adminApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+      const headers = { host: 'agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0] };
+      const responses = await Promise.all([
+        adminApp.inject({ method: 'GET', url: '/api/server/resources/disks', headers }),
+        adminApp.inject({ method: 'GET', url: '/api/server/resources/metrics', headers }),
+        adminApp.inject({ method: 'GET', url: '/api/server/resources/live', headers })
+      ]);
+
+      expect(anonymous.statusCode).toBe(401);
+      expect(login.json().resourceMonitoring).toBe(false);
+      expect(responses.map(response => response.statusCode)).toEqual([404, 404, 404]);
+      expect(responses.map(response => response.json())).toEqual([{ error: 'not found' }, { error: 'not found' }, { error: 'not found' }]);
+      expect(disks).not.toHaveBeenCalled();
+      expect(metrics).not.toHaveBeenCalled();
+      expect(stream).not.toHaveBeenCalled();
     } finally {
       await adminApp.close();
     }

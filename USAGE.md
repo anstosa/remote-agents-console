@@ -170,6 +170,22 @@ shows the published name. Save changes persists it to config, and a RAC restart
 applies it to navigation. The override affects only this console's display of the
 remote, never the remote server's own published identity.
 
+**Settings → Interface → Resource monitoring** is a server setting, off by
+default. Save and restart RAC to apply it to every browser connected to this
+server. Existing browser preferences are not carried over. The server flyout
+shows CPU, memory, and usable disk mounts with used/total capacity bars. The
+enabled console checks CPU and memory every 60 seconds. The flyout shows cached
+readings on open and updates them every second while visible. The server button
+uses the minute samples for five-minute averages of the primary server (WSL when
+applicable): CPU on the left and memory on the right, both from the bottom center.
+Disks refresh every ten minutes and on flyout open without hiding cached
+capacities. Skeletons reserve the chart layout on first load. On WSL, the lower
+**Host** group shows Windows resources and only formatted drives with a drive
+letter. Unavailable host access is reported rather than substituted with
+container or WSL totals.
+Docker installations use the configured host tmux bridge to inspect the host.
+Rolling samples are kept in browser memory only, not saved as history.
+
 A remote's icon is set only on that server. Each server publishes a hash of its
 chosen artwork; when the hash changes, this console fetches the artwork once over
 the signed peer channel, checks it against the hash and the static-SVG rules, and

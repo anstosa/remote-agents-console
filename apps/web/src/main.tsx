@@ -12,6 +12,9 @@ import { mountKeptTerminal, releaseKeptTerminal, showKeptWorkspace } from './kep
 import { attachTerminalSelection, type TerminalSelection, type TerminalSelectionController } from './terminal-selection.js';
 import { createAgentPaneConnector, createWorktreePaneConnector } from './pane-socket-client.js';
 import { FlyoutPortal } from './flyout-portal.js';
+import { ServerResources } from './server-resources.js';
+import { useServerResourceCache } from './server-resource-cache.js';
+import { resourceGaugeDescription, ServerResourceGauges } from './server-resource-gauges.js';
 import { ContextMenuHost, contextMenuOwnsFocus, openContextMenu, type ContextMenuItem } from './context-menu.js';
 import { SelectionActionsContext, openSelectionContextMenu, preserveContextMenuPress, useSelectionActions, type ClipboardContents, type SelectionActions } from './selection-context-menu.js';
 import { ContextFlyoutEvents } from './context-flyouts.js';
@@ -372,7 +375,7 @@ type ServerInfo = { name: string; url: string; icon?: string; remotes: RemoteSer
 type InstanceAttention = 'idle'|'working'|'question'|'completed'|'unavailable';
 type InstanceStatus = RemoteServer & { attention: InstanceAttention };
 type DavoSettings = { enabled: boolean; available: boolean; name: string; context: string };
-type SessionInfo = { csrfToken: string; active: boolean; deviceName?: string; controllingDeviceName?: string; defaultAgent?: AgentKind; davo?: DavoSettings; server?: ServerInfo };
+type SessionInfo = { csrfToken: string; active: boolean; deviceName?: string; controllingDeviceName?: string; defaultAgent?: AgentKind; resourceMonitoring?: boolean; davo?: DavoSettings; server?: ServerInfo };
 type CodexLimitWindow = { usedPercent: number; windowDurationMins?: number; resetsAt?: number };
 type ApiKeySpend = { status: 'available'; todayUsd: number; weekUsd: number; asOf: number } | { status: 'unconfigured' | 'unavailable' };
 type CodexAccount = { id: string; label: string; active: boolean; authMode?: 'apikey'; spend?: ApiKeySpend; email?: string; planType?: string; primary?: CodexLimitWindow; secondary?: CodexLimitWindow; resetCount?: number; error?: string };
@@ -1235,6 +1238,7 @@ type ClientSettings = {
   deviceName: string;
   serverName: string;
   serverUrl: string;
+  resourceMonitoring: boolean;
   clientUpdateAvailable: boolean;
   serverUpdateAvailable: boolean;
   serverUpdateVisible: boolean;
@@ -2466,8 +2470,10 @@ function ServerSelector() {
   const server = useContext(ServerContext) ?? fallbackServerInfo();
   const statuses = useContext(ServerStatusContext);
   const settings = useContext(ClientSettingsContext);
+  const resourceMonitoring = settings?.resourceMonitoring === true;
   const settingsSplit = useContext(ClientSettingsSplitContext);
   const [open, setOpen] = useState(false);
+  const { metrics, disks, averages } = useServerResourceCache(monitorRequest, resourceMonitoring, open);
   const [picking, setPicking] = useState(false);
   useKeyAction('choose-server', () => setPicking(true));
   const [statusIndex, setStatusIndex] = useState(0);
@@ -2515,12 +2521,15 @@ function ServerSelector() {
   const targetAttention = statuses[shownTarget.url] ?? 'idle';
   const shownAttention = showingUpdate ? 'update' : targetAttention;
   const shownLabel = showingUpdate ? `${server.name} — ${updateLabel}` : `${shownTarget.name} — ${instanceAttentionLabel(targetAttention)}`;
+  const gaugesLabel = resourceGaugeDescription(averages);
+  const selectorDescription = gaugesLabel === '' ? shownLabel : `${shownLabel} · ${gaugesLabel}`;
+  const selectorTitle = gaugesLabel === '' ? selectorLabel : `${selectorLabel} · ${gaugesLabel}`;
   const revisionLabel = revisionLoading ? 'Checking revision…' : revision === undefined ? 'Revision unavailable' : <><code>{revision.sha.slice(0, 7)}</code><time dateTime={revision.committedAt}>{updateCommitDate(revision.committedAt)}</time></>;
   // close the selector before handing focus to an administration dialog
   const rename = () => { setOpen(false); settingsSplit?.renameServer(); };
   // close the selector before opening the update review
   const showUpdate = () => { setOpen(false); settings?.openServerUpdate(); };
-  return <><button ref={anchorRef} type="button" className={`server-switcher-button server-selector${updateAvailable ? ' updates-available' : ''}${updateInProgress ? ' updates-in-progress progress-border progress-mauve' : ''}`} aria-busy={updateInProgress || undefined} aria-label={selectorLabel} aria-description={shownLabel} title={selectorLabel} data-context-flyout aria-expanded={open} onClick={() => setOpen(value => !value)}><ProgressRing busy={updateInProgress} /><span className="flyout-caret" aria-hidden="true" /><img src={serverIconPath(server)} alt="" /><span className="server-selector-name">{server.name}</span><svg className="server-selector-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg><i className={`server-switcher-attention ${shownAttention}`} aria-hidden="true" title={shownLabel} /></button>{open && <FlyoutPortal onDismiss={() => setOpen(false)}><div className="more-menu flyout-menu server-menu" ref={flyoutRef} style={style} role="group" aria-label="Remote Agents servers"><div className="server-menu-details" role="group" aria-label="Current server details"><small>CURRENT SERVER</small><strong>{settings?.serverName ?? server.name}</strong><span>{serverHostLabel(settings?.serverUrl ?? server.url)}</span><span className="server-menu-revision" role={revisionLoading ? 'status' : undefined} aria-busy={revisionLoading || undefined} aria-label={revisionLoading ? 'Loading server revision' : revision === undefined ? 'Server revision unavailable' : `Server revision ${revision.sha.slice(0, 7)}, committed ${updateCommitDate(revision.committedAt)}`}><span className={revisionLoading ? 'server-menu-revision-skeleton' : undefined}>{revisionLoading ? <><Skeleton /><Skeleton /></> : revisionLabel}</span></span><span className={`server-menu-update-state${updateAvailable ? ' available' : ''}`}>{updateLabel}</span>{settings !== undefined && <div className="server-menu-actions"><button type="button" aria-label="Rename Server" onClick={rename}>Rename</button>{updateAvailable && <button type="button" className={`server-menu-update${updateInProgress ? " progress-border progress-mauve" : " update-attention"}`} aria-busy={updateInProgress || undefined} aria-label={settings.serverUpdateMinimized ? 'Reopen server update' : 'View upstream update'} onClick={showUpdate}><ProgressRing busy={updateInProgress} />{settings.serverUpdateMinimized ? 'Reopen update' : 'View update'}</button>}</div>}</div><hr className="more-menu-divider" />{targets.map(target => <ServerTargetLink key={target.url} target={target} current={target.url === server.url} className="server-menu-item" onSelectCurrent={() => setOpen(false)} />)}</div></FlyoutPortal>}{picking && <KeyPicker title="Servers" placeholder="Switch to a server" options={targets.map(target => ({ id: target.url, label: target.name, detail: instanceAttentionLabel(statuses[target.url] ?? 'idle'), current: target.url === server.url, onSelect: () => { if (target.url !== server.url) location.assign(target.url); } }))} onClose={() => setPicking(false)} />}</>;
+  return <><button ref={anchorRef} type="button" className={`server-switcher-button server-selector${updateAvailable ? ' updates-available' : ''}${updateInProgress ? ' updates-in-progress progress-border progress-mauve' : ''}`} aria-busy={updateInProgress || undefined} aria-label={selectorLabel} aria-description={selectorDescription} title={selectorTitle} data-context-flyout aria-expanded={open} onClick={() => setOpen(value => !value)}><ProgressRing busy={updateInProgress} /><span className="flyout-caret" aria-hidden="true" /><img src={serverIconPath(server)} alt="" /><ServerResourceGauges averages={averages} /><span className="server-selector-name">{server.name}</span><svg className="server-selector-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg><i className={`server-switcher-attention ${shownAttention}`} aria-hidden="true" title={shownLabel} /></button>{open && <FlyoutPortal onDismiss={() => setOpen(false)}><div className="more-menu flyout-menu server-menu" ref={flyoutRef} style={style} role="group" aria-label="Remote Agents servers"><div className="server-menu-details" role="group" aria-label="Current server details"><small>CURRENT SERVER</small><strong>{settings?.serverName ?? server.name}</strong><span>{serverHostLabel(settings?.serverUrl ?? server.url)}</span><span className="server-menu-revision" role={revisionLoading ? 'status' : undefined} aria-busy={revisionLoading || undefined} aria-label={revisionLoading ? 'Loading server revision' : revision === undefined ? 'Server revision unavailable' : `Server revision ${revision.sha.slice(0, 7)}, committed ${updateCommitDate(revision.committedAt)}`}><span className={revisionLoading ? 'server-menu-revision-skeleton' : undefined}>{revisionLoading ? <><Skeleton /><Skeleton /></> : revisionLabel}</span></span><span className={`server-menu-update-state${updateAvailable ? ' available' : ''}`}>{updateLabel}</span>{settings !== undefined && <div className="server-menu-actions"><button type="button" aria-label="Rename Server" onClick={rename}>Rename</button>{updateAvailable && <button type="button" className={`server-menu-update${updateInProgress ? " progress-border progress-mauve" : " update-attention"}`} aria-busy={updateInProgress || undefined} aria-label={settings.serverUpdateMinimized ? 'Reopen server update' : 'View upstream update'} onClick={showUpdate}><ProgressRing busy={updateInProgress} />{settings.serverUpdateMinimized ? 'Reopen update' : 'View update'}</button>}</div>}</div>{resourceMonitoring && <ServerResources metrics={metrics} disks={disks} />}<hr className="more-menu-divider" />{targets.map(target => <ServerTargetLink key={target.url} target={target} current={target.url === server.url} className="server-menu-item" onSelectCurrent={() => setOpen(false)} />)}</div></FlyoutPortal>}{picking && <KeyPicker title="Servers" placeholder="Switch to a server" options={targets.map(target => ({ id: target.url, label: target.name, detail: instanceAttentionLabel(statuses[target.url] ?? 'idle'), current: target.url === server.url, onSelect: () => { if (target.url !== server.url) location.assign(target.url); } }))} onClose={() => setPicking(false)} />}</>;
 }
 
 // lead the tab row with the server selector and listening control
@@ -11957,8 +11966,6 @@ function App() {
   }, [applySession, clientUpdateAvailable, reloadClient]);
   // begin one restart after the shared cover is fully painted
   const beforeRestart = useCallback(() => beginFullscreenAction('restart'), [beginFullscreenAction]);
-  // release the restart cover only after a proved settled status
-  const onRestartSettled = useCallback(() => finishFullscreenAction('restart'), [finishFullscreenAction]);
   // begin connector recovery only after its fullscreen cover is painted
   const beforeTunnelReconnect = useCallback(() => beginFullscreenAction('tunnel-reconnect'), [beginFullscreenAction]);
   // release only the matching connector recovery cover
@@ -12313,6 +12320,11 @@ function App() {
       if (response.ok) applySession(await response.json() as SessionInfo);
     } catch { /* keep the current screen while the reconnect overlay handles availability */ }
   }, [applySession]);
+  // refresh effective server settings after the restart settles
+  const onRestartSettled = useCallback(() => {
+    finishFullscreenAction('restart');
+    void refreshSession();
+  }, [finishFullscreenAction, refreshSession]);
   // return an expired session to login
   const handleUnauthorized = useCallback(() => {
     setSessionInfo(undefined);
@@ -12522,7 +12534,7 @@ function App() {
           ? <ControlScreen session={sessionInfo} claimed={claimSession} />
           : <PublicEntry initialError={error} done={applySession} />;
   // expose settings without a manual server update bypass
-  const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
+  const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, resourceMonitoring: sessionInfo.resourceMonitoring === true, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, sessionInfo?.resourceMonitoring, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
   // share the current launch settings with every flyout
   // keep retry availability separate from provider and operation failures
   const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, loading: agentVersionsLoading, updating: updatingAgent, errors: Array.from(new Set([versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), retryVersions: versionCheckError ? () => { /* retry through the existing request owner */ refreshAgentVersions.current?.(); } : undefined, updateAgent: dispatchAgentUpdate }), [agentUpdateStatuses, agentVersionsLoading, updatingAgent, versionCheckError, dispatchAgentUpdate]);

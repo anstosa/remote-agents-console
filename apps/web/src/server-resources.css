@@ -1,0 +1,34 @@
+/* make usage bars primary and retain exact values as quiet supporting text */
+.server-resources { display: grid; min-width: 0; gap: .8rem; padding: .65rem .55rem; border-top: 1px solid var(--surface-1); color: var(--subtext-0); font: 600 .7rem/1.35 var(--font-mono); letter-spacing: normal; }
+.server-resource-group, .server-resource-skeleton { display: grid; min-width: 0; gap: .6rem; }
+.server-resource-group-title { color: var(--text); font-size: .73rem; overflow-wrap: anywhere; }
+.server-resource-group + .server-resource-group { border-top: 1px solid var(--surface-1); padding-top: .7rem; }
+.server-resource-metric { display: grid; min-width: 0; gap: .25rem; }
+.server-resource-metric-heading { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; }
+.server-resource-metric-heading > span { min-width: 0; color: var(--subtext-0); overflow-wrap: anywhere; }
+.server-resource-metric-heading > span > small { color: var(--overlay-1); font: inherit; }
+.server-resource-metric-heading > strong { flex: none; color: var(--text); font-size: .72rem; font-variant-numeric: tabular-nums; }
+/* all metrics share the disks' healthy, warning and critical palette */
+.server-resource-bar { --resource-color: var(--teal); height: .5rem; overflow: hidden; border-radius: .2rem; background: var(--surface-1); }
+:is(.server-resource-bar, .server-selector-gauge-fill).warning { --resource-color: var(--yellow); }
+:is(.server-resource-bar, .server-selector-gauge-fill).critical { --resource-color: var(--red); }
+.server-resource-bar-fill { display: block; width: var(--resource-fill); height: 100%; border-radius: inherit; background: var(--resource-color); transition: width .3s ease; }
+.server-resource-bar.unavailable { background: repeating-linear-gradient(135deg, var(--surface-1), var(--surface-1) .3rem, var(--surface-0) .3rem, var(--surface-0) .6rem); }
+.server-resource-mount { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server-resource-capacity { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+.server-resource-note { color: var(--overlay-1); font-size: .65rem; overflow-wrap: anywhere; }
+.server-resource-skeleton-value { flex: none; width: 2.6rem; height: .7rem; }
+.server-resource-skeleton-bar { width: 100%; height: .5rem; }
+.server-resource-skeleton-caption { justify-self: end; width: 45%; height: .6rem; }
+/* let the edge glow escape without shifting the button or its art */
+.tabs .tab-row-lead .server-selector:has(> .server-selector-resource-gauges) { overflow: visible; }
+/* center on the full button, including any update border */
+.server-selector-resource-gauges { position: absolute; top: 50%; left: 50%; z-index: 0; width: var(--standard-control-size); height: var(--standard-control-size); overflow: visible; transform: translate(-50%, -50%); fill: none; pointer-events: none; }
+/* keep the unfilled border visible without adding glow */
+.server-selector-gauge-track { stroke: var(--overlay-2); stroke-width: 1.5; }
+/* share the progress border's soft outer halo without animating a stable reading */
+.server-selector-gauge-fill { --resource-color: var(--teal); stroke: var(--resource-color); stroke-width: 1.85; filter: drop-shadow(0 0 .12rem var(--resource-color)) drop-shadow(0 0 .3rem var(--resource-color)); transition: stroke-dasharray .3s ease; }
+.tabs .tab-row-lead .server-selector:has(> .server-selector-resource-gauges):focus-visible { outline-offset: -5px; }
+/* charts respect both operating-system and browser motion preferences */
+@media (prefers-reduced-motion: reduce) { .server-resource-bar-fill, .server-selector-gauge-fill { transition: none; } }
+:root[data-motion="reduced"] :is(.server-resource-bar-fill, .server-selector-gauge-fill) { transition: none; }

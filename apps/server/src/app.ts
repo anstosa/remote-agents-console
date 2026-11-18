@@ -138,6 +138,7 @@ import { createWorkspaceTools } from './integrations/mcp/workspace-tools.js';
 import { McpFileTransferService } from './host-files/mcp-transfer.js';
 import type { HostFilesOwnerContext } from './host-files/contracts.js';
 import { ServerAdminService } from './server-admin/service.js';
+import { ResourceMonitorService } from './server-admin/resource-monitor.js';
 import { ApiKeySpendService } from './accounts/spend.js';
 import { readClaudeAccount } from './accounts/claude.js';
 import { CodexAccountService, normalizeAccountLabel, normalizeApiKey, safeAccountId, UnsupportedAccountOperationError, type AccountRateLimitWindow, type AccountSummary } from './accounts/index.js';
@@ -168,7 +169,22 @@ import { registerGoogleCalendarRoutes } from './google-calendar/routes.js';
 import { calendarLabelsForAgent } from './google-calendar/labels.js';
 import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
 
-export type Dependencies = { replySuggestions?: ReplySuggestionService; googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; pushDiagnostics?: PushDiagnostics; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses' | 'artwork'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; dashboardTimingFile?: string };
+// await response backpressure without missing a synchronous disconnect
+export const waitForResourceDrain = async (response: FastifyReply['raw'], signal: AbortSignal): Promise<void> => {
+  await new Promise<void>(resolve => {
+    const done = () => {
+      response.removeListener('drain', done);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    response.once('drain', done);
+    signal.addEventListener('abort', done, { once: true });
+    // close the registration race after a synchronous write-side abort
+    if (signal.aborted || response.destroyed) done();
+  });
+};
+
+export type Dependencies = { replySuggestions?: ReplySuggestionService; googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; pushDiagnostics?: PushDiagnostics; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; resourceMonitor?: Pick<ResourceMonitorService, 'disks' | 'metrics' | 'stream'>; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses' | 'artwork'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; dashboardTimingFile?: string };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use, and with the
 // structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
@@ -250,7 +266,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // reviews share model enforcement but never manual security
     const selected = resolveReviewLaunchModel(request.kind, config.adapters[request.kind], request);
     return selected === undefined ? request : { ...request, model: selected.model, ...(selected.effort === undefined ? {} : { effort: selected.effort }) };
-  }); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS), github); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
+  }); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS), github); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config); const resourceMonitor = deps.resourceMonitor ?? new ResourceMonitorService(config);
+  const resourceMonitoringEnabled = config.resourceMonitoring;
   // keep source and account observation off with the feature
   const replySuggestionsEnabled = config.replySuggestions === true;
   // watch the approved native profile before any managed Claude settings render
@@ -599,6 +616,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       controllingDeviceName: owner === undefined ? undefined : await devices.get(owner),
       defaultAgent: typeof launch.defaultAgent === 'function' ? launch.defaultAgent() : undefined,
       davo: publicDavoSettings(),
+      resourceMonitoring: resourceMonitoringEnabled,
       server
     };
   };
@@ -1310,6 +1328,50 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const revision = await deployedRevision;
     // keep unavailable repository metadata explicit
     return revision === undefined ? reply.code(503).send({ error: 'Server revision is unavailable on this deployment.' }) : revision;
+  });
+  // inspect disk capacities only when an authenticated client requests them
+  app.get('/api/server/resources/disks', async (request, reply) => {
+    controlled(request);
+    // avoid disk inspection while the server-wide feature is disabled
+    if (!resourceMonitoringEnabled) return reply.code(404).send({ error: 'not found' });
+    return await resourceMonitor.disks();
+  });
+  // inspect CPU and memory only when an authenticated client requests them
+  app.get('/api/server/resources/metrics', async (request, reply) => {
+    controlled(request);
+    // avoid metrics inspection while the server-wide feature is disabled
+    if (!resourceMonitoringEnabled) return reply.code(404).send({ error: 'not found' });
+    return await resourceMonitor.metrics();
+  });
+  // stream metrics only for the lifetime of the controlling client's open flyout
+  app.get('/api/server/resources/live', { exposeHeadRoute: false }, async (request, reply) => {
+    controlled(request);
+    // reject disabled streams before hijacking the response or starting work
+    if (!resourceMonitoringEnabled) return reply.code(404).send({ error: 'not found' });
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-store, no-transform',
+      'X-Accel-Buffering': 'no'
+    });
+    const controller = new AbortController();
+    const disconnect = () => controller.abort();
+    request.raw.once('aborted', disconnect);
+    reply.raw.once('close', disconnect);
+    try {
+      await resourceMonitor.stream(controller.signal, async snapshot => {
+        // stop writing immediately after disconnect
+        if (controller.signal.aborted || reply.raw.destroyed) return;
+        const ready = reply.raw.write(`${JSON.stringify(snapshot)}\n`);
+        // bound server buffering behind a slow client
+        if (!ready) await waitForResourceDrain(reply.raw, controller.signal);
+      });
+    } finally {
+      request.raw.removeListener('aborted', disconnect);
+      reply.raw.removeListener('close', disconnect);
+      // finish only a still-open response
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end();
+    }
   });
   // preview the exact fetched update range
   app.get('/api/server/update-preview', async (request, reply) => {

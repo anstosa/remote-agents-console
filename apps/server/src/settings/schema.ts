@@ -23,6 +23,11 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
     label: 'Reply suggestions',
     description: 'Show tailored, editable suggestion pills using each Agent\'s current model and account. Warning: this makes additional agent requests, increases agent usage, and may incur extra cost.'
   });
+  // explain the shared cadence and server-wide scope at the source setting
+  Object.assign(schema.properties!.resourceMonitoring!, {
+    label: 'Resource monitoring',
+    description: 'Applies to every browser connected to this server. CPU and memory update every 1 second while a server flyout is open and every 1 minute while closed. Disk usage updates every 10 minutes.'
+  });
   // keep legacy source compatibility without publishing an obsolete control
   delete schema.properties!.integrations!.properties!.multiInstance;
   delete schema.properties!.remoteServers!.items!.properties!.icon;

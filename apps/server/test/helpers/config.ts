@@ -18,6 +18,7 @@ export function testConfig(overrides: Partial<ValidatedConfig> = {}): ValidatedC
     pollIntervalMs: 500,
     adapters: {},
     replySuggestions: false,
+    resourceMonitoring: false,
     projects: [],
     ...overrides,
   };

@@ -56,6 +56,7 @@ const applicationDedicatedPaths = new Set([
   'projects',
   'buttons',
   'replySuggestions',
+  'resourceMonitoring',
   'review',
   'googleCalendar',
   'proxy',
@@ -348,6 +349,12 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
   const replySuggestions = baseSchema.properties?.replySuggestions;
   // keep the console-wide generation setting searchable on Interface
   if (replySuggestions !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'interface', replySuggestions, childValue(source.value, 'replySuggestions'), ['replySuggestions'], []);
+
+  const resourceMonitoring = baseSchema.properties?.resourceMonitoring;
+  // keep server resource inspection searchable on Interface
+  if (resourceMonitoring !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'interface', resourceMonitoring, childValue(source.value, 'resourceMonitoring'), ['resourceMonitoring'], [], {
+    keywordFor: () => 'server flyout host cpu memory ram disks drives storage usage wsl windows'
+  });
 
   const review = baseSchema.properties?.review;
   // keep permanent Review controls searchable without creating omitted configuration

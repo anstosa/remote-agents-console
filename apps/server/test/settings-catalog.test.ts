@@ -206,6 +206,7 @@ describe('settings catalog classification', () => {
     expect(appApply(['remoteServers', '0', 'name'])).toBe('rac-restart');
     expect(appApply(['remoteServers', '0', 'icon'])).toBe('rac-restart');
     expect(appApply(['integrations', 'enabled'])).toBe('rac-restart');
+    expect(appApply(['resourceMonitoring'])).toBe('rac-restart');
     expect(appApply(['listen', 'port'])).toBe('rac-restart');
   });
 
@@ -289,6 +290,17 @@ describe('settings schema metadata', () => {
       label: 'Reply suggestions',
       apply: 'rac-restart',
       description: expect.stringMatching(/suggestion pills.*current model and account\. Warning:.*additional agent requests.*increases agent usage.*extra cost/u)
+    });
+  });
+
+  // expose the server-wide scope and every monitoring cadence
+  it('describes resource monitoring as a restart-applied server setting', () => {
+    expect(applicationSettingsSchema().properties?.resourceMonitoring).toMatchObject({
+      type: 'boolean',
+      default: false,
+      label: 'Resource monitoring',
+      apply: 'rac-restart',
+      description: expect.stringMatching(/every browser.*CPU and memory.*1 second.*flyout.*1 minute.*closed.*Disk usage.*10 minutes/u)
     });
   });
 

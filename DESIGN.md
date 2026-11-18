@@ -1,7 +1,7 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-11-14. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls and reply suggestions, workspace toolbar decorators, main toolbar controls, public homepage and policies, independent file previews, conversation browsing.
+Status: Active. Updated: 2026-11-17. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls and reply suggestions, workspace toolbar decorators, main toolbar controls, public homepage and policies, independent file previews, conversation browsing, server resource monitoring.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
 Toolbar evidence: `apps/web/src/styles.css`, browser layout regressions, and the
@@ -11,6 +11,8 @@ Reply-suggestion evidence: the canonical latest-message question detection in
 `apps/web/src/main.tsx`, and `apps/web/e2e/reply-suggestions.spec.ts`.
 Homepage evidence: Google's [homepage requirements](https://support.google.com/cloud/answer/13807376)
 and [OAuth branding requirements](https://support.google.com/cloud/answer/15549049).
+Resource evidence: `server-resources.tsx`, the host collector, shared skeletons,
+and desktop/phone resource-monitoring browser fixtures.
 
 ## Brand
 Practical administration, clear ownership, and truthful status. Avoid decorative
@@ -58,6 +60,18 @@ a timeout while completing dashboard steps. Keep unsaved entries inside Settings
 discard/close protection. Never copy or return saved tokens to the browser.
 
 ## Visual language
+Resource monitoring uses horizontal usage bars as the primary visual. CPU and
+memory show percentages, with total memory in parentheses beside its label.
+Disk rows show only the mount and used/total capacity.
+All bars share status colors: teal below 85%, yellow from 85%, red from 95%.
+Two mirrored five-minute gauges glow along the actual server button edge over
+an opaque gray track, like the progress border but without an orbit. CPU is left
+and memory right, both from bottom center (0%) to top center (100%). Keep the
+icon, attention dot and focus outline visible, and expose numeric averages in
+the description.
+Omit recovery, EFI, and other non-user volumes. On WSL, leave the top group
+untitled and label the lower Windows group “Host”. Long mount paths may truncate
+visually while retaining their full accessible text and tooltip.
 Keep the prompt Send button borderless in idle and pending states while retaining
 its keyboard focus outline, gradient and in-flight progress feedback.
 Reuse existing theme variables, monospace control typography, outlined secondary
@@ -82,16 +96,23 @@ Keep legacy authority gates subordinate to the shared controls, preserving their
 runtime restrictions and the existing save/restart boundary.
 
 ## Components
+Use one feature-local resource metric chart for CPU, memory, and each disk.
+Reuse `Skeleton` for chart-shaped loading rows; do not add a chart dependency.
 Reuse `SplitConfirmation`, `SettingsRevealButton`, the Settings navigation and
 host operation status. Add one feature-local Cloudflare setup component; no new
 design-system layer or dependencies.
 
 ## Accessibility
+Resource bars expose named meters with percentage and exact-value descriptions.
+Zero is a settled empty bar; unavailable metrics never masquerade as zero. One
+busy region owns decorative loading skeletons. Do not announce every live sample.
 Use semantic labels and headings, keyboard-accessible copy/actions, visible focus,
 polite progress and assertive errors. Mask token inputs. Use the existing modal's
 focus management. Do not communicate connection state with color alone.
 
 ## Responsive behavior
+Resource charts remain a single column in the existing viewport-bounded server
+flyout, with internal scrolling for many disks and no horizontal page overflow.
 Workspace toolbar decorators keep the same corner anchors on phones and desktops:
 counts above the top-right edge, git status dots inside the top-right corner, and
 compact PR status icons inside the bottom-right corner. Only labels and control
@@ -120,6 +141,15 @@ Toasts overlap Settings content like other splits; only the wrapped Settings
 toolbar reserves space. Showing or dismissing notices must not move the tab.
 
 ## Interaction states
+Resource monitoring is an installation-wide opt-in on Interface, effective
+after a RAC restart. Browser storage never enables it. The enabled console checks
+CPU and memory every minute and disks every ten minutes. Opening the flyout shows
+cached readings immediately, then refreshes CPU and memory every second while visible
+and refreshes disks without hiding their previous capacities. Button averages
+use only the minute samples of the primary server (WSL when applicable), not
+the faster flyout readings or synthetic zeroes. Skeletons reserve chart geometry
+only before the first sample. Failed refreshes keep the latest usable readings
+and signal failure; disabling monitoring cancels polling and clears the cache.
 Completed assistant replies that ask a prose question may offer a single row of tailored
 reply suggestions at the top of the active prompt. The console-wide Reply suggestions
 toggle lives in Settings > Interface and is off by default. Its description warns about
