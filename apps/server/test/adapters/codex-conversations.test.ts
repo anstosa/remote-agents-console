@@ -185,6 +185,29 @@ async function writeListRollout(home: string, ymd: [string, string, string], id:
 }
 
 describe('Codex conversation listing', () => {
+  it('finds an older named conversation behind a full pane scan of newer child rollouts', async () => {
+    const home = await codexHome();
+    const cwd = '/wt/cora';
+    const parent = '0198c111-1111-7111-8111-111111111111';
+    const lastActiveAt = '2026-08-18T10:00:00.000Z';
+    await writeListRollout(home, ['2026', '08', '18'], parent, { cwd, lastActiveAt });
+    const names = [{ id: parent, thread_name: 'Older conversation' }];
+    // fill the whole live-pane window with newer named children in the same folder
+    for (let index = 0; index < 512; index++) {
+      const id = `0198c222-2222-7222-8222-${index.toString(16).padStart(12, '0')}`;
+      await writeListRollout(home, ['2026', '09', '02'], id, { cwd, lastActiveAt: '2026-09-02T10:00:00.000Z', parentThreadId: parent });
+      names.push({ id, thread_name: 'Child conversation' });
+    }
+    await writeSessionIndex(home, names);
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeProc(123, []);
+
+    await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toBeUndefined();
+    await expect(codexConversationSummaries([cwd])).resolves.toEqual([
+      { id: parent, name: 'Older conversation', lastActiveAt: Date.parse(lastActiveAt), directory: cwd }
+    ]);
+  });
+
   it('lists Named top-level conversations under the given directories, newest-active first', async () => {
     const home = await codexHome();
     process.env.CODEX_HOME = home;

@@ -1,5 +1,5 @@
 import { appendFile, mkdir, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { codexHome as makeCodexHome, fakeProc, tempDir } from '../helpers/codex-fixtures.js';
 
@@ -173,6 +173,25 @@ describe('transcript parsed-result caches', () => {
     expect(callsFor(boundedReads.head, fixture.rollout)).toHaveLength(1);
     expect(callsFor(boundedReads.tail, fixture.rollout)).toHaveLength(3);
     expect(callsFor(boundedReads.tail, fixture.index)).toHaveLength(1);
+  });
+
+  it('does not read unindexed rollout contents while listing Codex conversations', async () => {
+    const home = await makeCodexHome();
+    const { rollout, index } = await codexFixture(home, 'Indexed conversation');
+    const unindexedId = '0198c444-4444-7444-8444-444444444444';
+    const unindexed = join(dirname(rollout), `rollout-2026-10-07T13-00-00-${unindexedId}.jsonl`);
+    // place a newer, otherwise eligible rollout outside the name index
+    await writeFile(unindexed, jsonl([
+      { timestamp: '2026-10-07T13:00:00.000Z', type: 'session_meta', payload: { id: unindexedId, cwd: '/workspace/codex', originator: 'codex-tui' } }
+    ]));
+
+    await expect(codexConversationSummaries(['/workspace/codex'], { CODEX_HOME: home })).resolves.toEqual([
+      { id: codexId, name: 'Indexed conversation', lastActiveAt: Date.parse('2026-10-07T12:02:00.000Z'), directory: '/workspace/codex' }
+    ]);
+
+    // only the named rollout gets metadata and activity reads
+    expect(boundedReads.head.mock.calls.map(([path]) => path)).toEqual([rollout]);
+    expect(boundedReads.tail.mock.calls.map(([path]) => path)).toEqual([index, rollout]);
   });
 
   it('invalidates the shared Codex name index and isolates account roots', async () => {

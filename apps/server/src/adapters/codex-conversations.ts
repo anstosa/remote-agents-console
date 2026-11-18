@@ -46,6 +46,8 @@ const maxRolloutEntries = 4_096;
 // effectively always among the newest, so a smaller bound keeps the per-turn scan
 // cheap on a host with deep history
 const maxCwdRolloutScans = 512;
+// a catalog slot belongs to a listed conversation, not a scanned file
+const maxListedConversations = 512;
 // bound the per-rollout tail read that finds a listed row's `lastActiveAt`: the newest
 // record's timestamp sits at the very end, so a small tail suffices (mirrors Claude's list)
 const maxListTailBytes = 256 * 1024;
@@ -235,7 +237,9 @@ async function rolloutByCwd(cwd: string, createdAfter?: number): Promise<{ id: s
   // container path and an in-container `realpath` would resolve it somewhere else; the
   // canonical form is only a fallback for a genuinely symlinked local pane path.
   const canonical = await realpath(cwd).catch(() => cwd);
-  for await (const { file, metadata } of walkRollouts(codexHome())) {
+  // cap raw reads only for the live-pane fallback
+  for await (const file of rolloutFiles(codexHome(), maxCwdRolloutScans)) {
+    const metadata = await rolloutMetadataCache.get(file).catch(() => undefined);
     // match the pane's live top-level conversation in this directory, skipping any
     // rollout that predates a supplied reset instant (the pre-reset thread)
     if (metadata !== undefined && metadata.parentThreadId === undefined && (metadata.cwd === cwd || metadata.cwd === canonical)
@@ -244,25 +248,22 @@ async function rolloutByCwd(cwd: string, createdAfter?: number): Promise<{ id: s
   return undefined;
 }
 
-// Walk a Codex home's sessions tree newest-first — newest rollout within a date partition,
-// newest partition across them — yielding each rollout's path and bounded `session_meta` up to
-// the `maxCwdRolloutScans` cap. The live-pane working-directory match and the Named-conversation
-// listing share this one bounded walk (an early `break` in the caller stops the generator, so a
-// match found among the newest files never reads the rest of a deep-history home).
-async function* walkRollouts(home: string): AsyncGenerator<{ file: string; metadata: RolloutMetadata | undefined }> {
+// walk filenames newest-first so callers can choose a limit before opening transcripts
+async function* rolloutFiles(home: string, limit = Infinity): AsyncGenerator<string> {
   const pending = [join(home, 'sessions')];
   let inspected = 0;
-  while (pending.length > 0 && inspected < maxCwdRolloutScans) {
+  // visit the newest date partition first
+  while (pending.length > 0) {
     const directory = pending.pop()!;
     const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
     // newest rollout first within a partition, newest date-partition first across them
     const files = entries.filter(entry => entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')).map(entry => entry.name).sort((left, right) => right.localeCompare(left));
     const subdirectories = entries.filter(entry => entry.isDirectory()).map(entry => entry.name).sort((left, right) => left.localeCompare(right)).map(name => join(directory, name));
+    // yield paths without statting or opening transcripts
     for (const name of files) {
-      if (inspected >= maxCwdRolloutScans) break;
-      inspected += 1;
-      const file = join(directory, name);
-      yield { file, metadata: await rolloutMetadataCache.get(file).catch(() => undefined) };
+      yield join(directory, name);
+      // stop the live-pane scan at its raw-file budget
+      if (++inspected >= limit) return;
     }
     // ascending push + LIFO pop visits the highest-numbered (most recent) partition first
     pending.push(...subdirectories);
@@ -539,7 +540,7 @@ function rolloutLastActiveAtFromRecords(lines: Iterable<string>): number {
   return latest;
 }
 
-// cover all 512 rollout candidates without scan-order churn
+// cover a full catalog's recency reads without scan-order churn
 const rolloutLastActiveAtCache = new FileChangeCache(
   async file => rolloutLastActiveAtFromRecords(await readFileTail(file, maxListTailBytes)),
   { maxEntries: 1_024 }
@@ -551,21 +552,17 @@ async function rolloutLastActiveAt(file: string): Promise<number> {
 }
 
 /**
- * The Named Codex/OMX conversations started under each of the given directories, newest
- * (most recently active) first. One walk of the sessions tree — the same newest-first order
- * and 512-file cap `rolloutByCwd` uses — reads each rollout's `session_meta` first line for
- * id, cwd, originator and parentage, keeps only top-level (`parent_thread_id`-less)
- * `codex-tui` conversations whose recorded cwd matches one of the given directories raw or
- * canonical, and reads a bounded tail for `lastActiveAt`. The name is the sidecar's — a
- * rollout with no sidecar line is unnamed and omitted; `automatic` is never set for this kind,
- * which cannot tell a generated title from a typed one. Archived rollouts leave the sessions
- * tree, so they are absent. `directory` on each row is the given directory that matched (not
- * the possibly-canonical recorded cwd), so a listed row resolves back to its Worktree. On a
- * home deeper than the shared `maxCwdRolloutScans` cap the oldest Named rows are dropped, as
- * for the live-pane match.
+ * The Named Codex/OMX conversations started under the given directories. Walk active
+ * rollout filenames newest-first, opening only IDs present in the name index. Unnamed
+ * threads, children and out-of-scope directories don't consume the listing budget.
+ * Order the selected conversations by last activity, using a bounded tail read.
+ * `directory` is the given path that matched, so the row resolves back to its Worktree.
  */
 export async function codexConversationSummaries(directories: readonly string[], env: NodeJS.ProcessEnv = process.env): Promise<ConversationSummary[]> {
+  // skip stores that cannot contribute a named conversation
   if (directories.length === 0) return [];
+  const names = await codexConversationNames(env);
+  if (Object.keys(names).length === 0) return [];
   // map a recorded cwd (raw or canonical) back to the given directory it should report as
   const directoryByPath = new Map<string, string>();
   for (const directory of directories) {
@@ -573,17 +570,22 @@ export async function codexConversationSummaries(directories: readonly string[],
     const canonical = await realpath(directory).catch(() => directory);
     if (!directoryByPath.has(canonical)) directoryByPath.set(canonical, directory);
   }
-  const names = await codexConversationNames(env);
   const summaries: ConversationSummary[] = [];
-  for await (const { file, metadata } of walkRollouts(codexHome(env))) {
-    // keep only a top-level conversation started in one of the wanted directories
-    if (metadata === undefined || metadata.parentThreadId !== undefined) continue;
-    const startedIn = directoryByPath.get(metadata.cwd);
-    if (startedIn === undefined) continue;
-    // list only Named conversations — an unnamed rollout has no sidecar line
-    const conversationName = names[metadata.id];
+  // walk past unmatched filenames without reading their transcripts
+  for await (const file of rolloutFiles(codexHome(env))) {
+    const id = /-([0-9a-f-]{36})\.jsonl$/iu.exec(file)?.[1];
+    const conversationName = id === undefined ? undefined : names[id];
+    // an unindexed rollout cannot contribute a listed row
     if (conversationName === undefined) continue;
+    const metadata = await rolloutMetadataCache.get(file).catch(() => undefined);
+    // verify identity and parentage before exposing a transcript
+    if (metadata === undefined || metadata.id !== id || metadata.parentThreadId !== undefined) continue;
+    const startedIn = directoryByPath.get(metadata.cwd);
+    // preserve the requested folder scope
+    if (startedIn === undefined) continue;
     summaries.push({ id: metadata.id, name: conversationName, lastActiveAt: await rolloutLastActiveAt(file), directory: startedIn });
+    // apply the catalog limit only after all eligibility checks pass
+    if (summaries.length >= maxListedConversations) break;
   }
   summaries.sort((left, right) => right.lastActiveAt - left.lastActiveAt);
   return summaries;
