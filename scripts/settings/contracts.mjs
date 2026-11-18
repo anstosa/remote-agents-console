@@ -217,7 +217,7 @@ function validateNativeDescriptor(value, roots) {
 // parse and validate a strict queued request
 export function readRequest(path, descriptor) {
   const request = assertRecord(readJsonFile(path, MAX_REQUEST_BYTES));
-  assertKeys(request, new Set(["version", "id", "kind", "generation", "sources", "targets", "reveal", "inspect", "cloudflare"]));
+  assertKeys(request, new Set(["version", "id", "kind", "generation", "sources", "targets", "reveal", "inspect", "cloudflare", "agentStop"]));
   if (
     request.version !== PROTOCOL_VERSION ||
     !ID_PATTERN.test(request.id ?? "") ||
@@ -292,7 +292,36 @@ export function readRequest(path, descriptor) {
   } else if (request.cloudflare !== undefined) {
     throw safeError("invalid-request");
   }
+  // validate exact short-lived Agent identities for the fixed host operation
+  if (request.kind === "agents-stop") {
+    validateAgentStopRequest(request, descriptor);
+  } else if (request.agentStop !== undefined) {
+    throw safeError("invalid-request");
+  }
   return request;
+}
+
+// constrain process control to exact same-user interactive Agent lifetimes
+function validateAgentStopRequest(request, descriptor) {
+  const operation = assertRecord(request.agentStop);
+  assertKeys(operation, new Set(["deadline", "targets"]));
+  // require a near-term execution deadline so queued work cannot signal later
+  if (!Number.isSafeInteger(operation.deadline) || operation.deadline <= Date.now() || operation.deadline - Date.now() > 10_000 || !Array.isArray(operation.targets) || operation.targets.length < 1 || operation.targets.length > 20 || request.sources !== undefined || request.targets !== undefined) {
+    throw safeError("invalid-request");
+  }
+  const identities = new Set();
+  // validate every fixed target tuple without accepting commands or signals
+  operation.targets = operation.targets.map((targetValue) => {
+    const target = assertRecord(targetValue);
+    assertKeys(target, new Set(["pid", "startTime", "uid", "kind"]));
+    const identity = `${target.pid}:${target.startTime}`;
+    // bind all targets to the installed user and supported interactive kinds
+    if (!Number.isSafeInteger(target.pid) || target.pid <= 1 || typeof target.startTime !== "string" || !/^\d+$/u.test(target.startTime) || target.uid !== descriptor.uid || !["codex", "omx", "claude", "pi"].includes(target.kind) || identities.has(identity)) {
+      throw safeError("invalid-request");
+    }
+    identities.add(identity);
+    return target;
+  });
 }
 
 // constrain Cloudflare setup to its private stage and fixed CAS sources

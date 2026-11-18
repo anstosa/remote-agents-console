@@ -41,6 +41,7 @@ import { handoverControlPlane, recoverControlPlaneHandover, validateCheckoutHand
 import { withRestartWatchdog } from "./restart-watchdog.mjs";
 import { processCloudflareRequest } from "./cloudflare.mjs";
 import { projectMountsChanged, synchronizeProjectMounts } from "./project-mounts.mjs";
+import { stopAgents } from "./agent-stop.mjs";
 
 // retain helper-only effective source proof data
 const EFFECTIVE_SOURCES = Symbol("effectiveSources");
@@ -66,6 +67,8 @@ export async function processOperation(descriptor, request, options = {}) {
       return reconcileRequest(descriptor, request, options);
     case "recover":
       return recoverRequest(descriptor, request, options);
+    case "agents-stop":
+      return stopAgents(descriptor, request, options);
     case "cloudflare": {
       let nestedRestart;
       const cloudflareOptions = {

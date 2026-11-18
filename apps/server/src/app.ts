@@ -139,6 +139,8 @@ import { McpFileTransferService } from './host-files/mcp-transfer.js';
 import type { HostFilesOwnerContext } from './host-files/contracts.js';
 import { ServerAdminService } from './server-admin/service.js';
 import { ResourceMonitorService } from './server-admin/resource-monitor.js';
+import { RecoveryResourceSampler } from './server-admin/recovery-resources.js';
+import { RecoveryAgentService } from './server-admin/recovery-agents.js';
 import { ApiKeySpendService } from './accounts/spend.js';
 import { readClaudeAccount } from './accounts/claude.js';
 import { CodexAccountService, normalizeAccountLabel, normalizeApiKey, safeAccountId, UnsupportedAccountOperationError, type AccountRateLimitWindow, type AccountSummary } from './accounts/index.js';
@@ -184,7 +186,7 @@ export const waitForResourceDrain = async (response: FastifyReply['raw'], signal
   });
 };
 
-export type Dependencies = { replySuggestions?: ReplySuggestionService; googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; pushDiagnostics?: PushDiagnostics; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; resourceMonitor?: Pick<ResourceMonitorService, 'disks' | 'metrics' | 'stream'>; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses' | 'artwork'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; dashboardTimingFile?: string };
+export type Dependencies = { replySuggestions?: ReplySuggestionService; googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; conductorModels?: ConductorModelSource; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchOptions?: LaunchOptionsService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; pushDiagnostics?: PushDiagnostics; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; resourceMonitor?: Pick<ResourceMonitorService, 'disks' | 'metrics' | 'stream'>; recoveryResources?: Pick<RecoveryResourceSampler, 'sample'>; recoveryAgents?: Pick<RecoveryAgentService, 'list' | 'stop'>; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses' | 'artwork'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; piUpdatePrompts?: PiUpdatePromptCoordinatorLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; github?: GithubService; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number; paneViewportGraceMs?: number; dashboardTimingFile?: string };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use, and with the
 // structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
@@ -268,6 +270,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return selected === undefined ? request : { ...request, model: selected.model, ...(selected.effort === undefined ? {} : { effort: selected.effort }) };
   }); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS), github); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config); const resourceMonitor = deps.resourceMonitor ?? new ResourceMonitorService(config);
   const resourceMonitoringEnabled = config.resourceMonitoring;
+  const recoveryResources = deps.recoveryResources ?? new RecoveryResourceSampler();
+  const recoveryAgents = deps.recoveryAgents ?? new RecoveryAgentService();
   // keep source and account observation off with the feature
   const replySuggestionsEnabled = config.replySuggestions === true;
   // watch the approved native profile before any managed Claude settings render
@@ -665,6 +669,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // publish current pane observations on each dashboard update
   const dashboard = async ({ steps, counts }: DashboardBuild): Promise<DashboardPayload> => {
     const discovered = await timed(steps, 'discovery', () => discovery.dashboard(false, true, steps));
+    // an incomplete pane inventory cannot retire prompts, dispatches or notifications
+    if (discovered.tmuxOutage !== undefined) {
+      const { tmuxLastKnownAgents, ...current } = discovered;
+      return {
+        ...current, agents: [...current.agents, ...(tmuxLastKnownAgents ?? [])].map(agent => ({ ...agent, unread: false, queuedPromptCount: 0 })),
+        cleanupPending: 0, reviewTour: reviewTourCapability, codeReview: codeReviewCapability, reviews: []
+      };
+    }
     // share this scan with stack display without weakening fresh lifecycle checks
     const paneSnapshots = tmux.paneSnapshotsNow?.();
     Object.assign(counts, { agents: discovered.agents.length, projects: discovered.projects.length, worktrees: discovered.projects.reduce((sum, project) => sum + project.worktrees.length, 0), places: discovered.places.length });
@@ -714,6 +726,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // observe only agent state needed by cross-instance attention
   const localInstanceAttention = async () => {
     const discovered = await discovery.dashboard();
+    // preserve federated activity without emitting stale completion observations
+    if (discovered.tmuxOutage !== undefined) return instanceAttention({ agents: [...discovered.agents, ...(discovered.tmuxLastKnownAgents ?? [])].map(agent => ({ ...agent, unread: notifications.isUnread(agent) })) });
     const queuedCounts = await queuedPromptCounts(discovered.agents);
     // update completion and question state for every agent
     events.emit(observedAgents(discovered, queuedCounts));
@@ -1329,6 +1343,27 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // keep unavailable repository metadata explicit
     return revision === undefined ? reply.code(503).send({ error: 'Server revision is unavailable on this deployment.' }) : revision;
   });
+  // recover host process and resource visibility even when tmux and optional monitoring are unavailable
+  app.get('/api/server/recovery', async (request, reply) => {
+    controlled(request);
+    reply.header('Cache-Control', 'no-store');
+    // preserve whichever independent host reading still works
+    const [processes, resources] = await Promise.all([
+      recoveryAgents.list().catch(() => ({ available: false, canStop: false, agents: [] })),
+      recoveryResources.sample().catch(() => ({ sampledAt: new Date().toISOString(), host: null }))
+    ]);
+    return { ...processes, resources };
+  });
+  // send an explicit stop request through the verified host recovery boundary
+  app.post('/api/server/recovery/agents/stop', async (request, reply) => {
+    controlled(request, true);
+    const ids = body(request).ids;
+    // bound the batch before narrowing opaque process identities
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 20 || new Set(ids).size !== ids.length
+      || !ids.every(id => typeof id === 'string' && id.length > 0 && id.length <= 1024)) return reply.code(400).send({ error: 'invalid recovery selection' });
+    reply.header('Cache-Control', 'no-store');
+    return await recoveryAgents.stop(ids);
+  });
   // inspect disk capacities only when an authenticated client requests them
   app.get('/api/server/resources/disks', async (request, reply) => {
     controlled(request);
@@ -1450,7 +1485,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const target = await discovery.target(agentId, true);
       // a temporary listing failure is handled by the prompt engine's departure grace
       if (target !== undefined) await prompts.observe(target.agent);
-      else await prompts.retireDeparted((await discovery.dashboard()).agents.map(agent => agent.id));
+      else {
+        const current = await discovery.dashboard();
+        // an unresponsive socket is not evidence of a departed prompt owner
+        if (current.tmuxOutage === undefined) await prompts.retireDeparted(current.agents.map(agent => agent.id));
+      }
     },
     // retain signed directory authority until the host has opened the cwd
     directoryLease: async (place, sessionId, token) => {

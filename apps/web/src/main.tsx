@@ -13,6 +13,7 @@ import { attachTerminalSelection, type TerminalSelection, type TerminalSelection
 import { createAgentPaneConnector, createWorktreePaneConnector } from './pane-socket-client.js';
 import { FlyoutPortal } from './flyout-portal.js';
 import { ServerResources } from './server-resources.js';
+import { TmuxRecovery } from './tmux-recovery.js';
 import { useServerResourceCache } from './server-resource-cache.js';
 import { resourceGaugeDescription, ServerResourceGauges } from './server-resource-gauges.js';
 import { ContextMenuHost, contextMenuOwnsFocus, openContextMenu, type ContextMenuItem } from './context-menu.js';
@@ -217,7 +218,7 @@ type ReviewButtonState = ReviewTourIndicator & { onOpen: () => void; panel?: Rea
 // a directory-Project or Scratch Place, listed beside the Worktrees (a Worktree is a Place with the same id)
 // `adhoc` marks a Scratch folder other than the configured one: the console cannot launch into it
 type Place = { id: string; kind: 'directory' | 'scratch'; projectId: string; label: string; home: string; adhoc?: true; pinned: boolean; consoleShells?: number; launch?: LaunchResolution };
-type Dashboard = { notesRevision?: number; githubRevision?: number; githubBadge?: number; generation?: number; serverStartedAt?: number; adapters?: AdapterCapabilities; agents: Agent[]; projects: Project[]; places?: Place[]; cleanupPending?: number; cleanupTargets?: CleanupTarget[]; cleanupVersion?: CleanupVersion; scratchLaunch?: LaunchResolution; reviewTour?: ReviewTourCapability; codeReview?: CodeReviewCapability; reviews?: StoredReviewSummary[]; editor?: boolean; keys?: KeysConfig; buttons?: ButtonCatalog };
+type Dashboard = { tmuxOutage?: { unavailableSockets: number; since: string; lastHealthyAt?: string }; notesRevision?: number; githubRevision?: number; githubBadge?: number; generation?: number; serverStartedAt?: number; adapters?: AdapterCapabilities; agents: Agent[]; projects: Project[]; places?: Place[]; cleanupPending?: number; cleanupTargets?: CleanupTarget[]; cleanupVersion?: CleanupVersion; scratchLaunch?: LaunchResolution; reviewTour?: ReviewTourCapability; codeReview?: CodeReviewCapability; reviews?: StoredReviewSummary[]; editor?: boolean; keys?: KeysConfig; buttons?: ButtonCatalog };
 // every Worktree across the dashboard's Projects, flattened for tab and launcher rendering
 const allWorktrees = (dashboard: Pick<Dashboard, 'projects'>): Worktree[] => dashboard.projects.flatMap(project => project.worktrees);
 // why a Worktree's Remove is disabled (it is the Project's Main checkout, git holds a lock,
@@ -281,8 +282,11 @@ const isStoredReviewSummary = (value: unknown): value is StoredReviewSummary => 
   && typeof (value as StoredReviewSummary).fingerprint === 'string';
 const isDashboard = (value: unknown): value is Dashboard => {
   if (value === null || typeof value !== 'object') return false;
-  const dashboard = value as { serverStartedAt?: unknown; agents?: unknown; projects?: unknown; cleanupPending?: unknown; cleanupTargets?: unknown; cleanupVersion?: unknown; reviews?: unknown };
+  const dashboard = value as { serverStartedAt?: unknown; tmuxOutage?: unknown; agents?: unknown; projects?: unknown; cleanupPending?: unknown; cleanupTargets?: unknown; cleanupVersion?: unknown; reviews?: unknown };
+  const outage = dashboard.tmuxOutage as Dashboard['tmuxOutage'];
   return (dashboard.serverStartedAt === undefined || typeof dashboard.serverStartedAt === 'number' && Number.isSafeInteger(dashboard.serverStartedAt) && dashboard.serverStartedAt >= 0)
+    && (outage === undefined || outage !== null && typeof outage === 'object' && Number.isSafeInteger(outage.unavailableSockets)
+      && outage.unavailableSockets > 0 && typeof outage.since === 'string' && (outage.lastHealthyAt === undefined || typeof outage.lastHealthyAt === 'string'))
     && Array.isArray(dashboard.agents)
     && Array.isArray(dashboard.projects)
     && (dashboard.cleanupPending === undefined || Number.isInteger(dashboard.cleanupPending) && (dashboard.cleanupPending as number) >= 0)
@@ -811,6 +815,8 @@ const request = async (url: string, init: RequestInit = {}, observeReachability 
     });
   }
 };
+// keep an isolated recovery error from replacing the recovery screen
+const requestRecovery = (url: string, init?: RequestInit) => request(url, init, false);
 // accept only the bounded server reply shape before exposing model output to the composer
 function parseReplySuggestions(raw: string, sourceKey: string): ReplySuggestion[] | undefined {
   // reject oversized responses before parsing them
@@ -10069,6 +10075,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   useWorkspaceViewRevision();
   const [renameWorkspace, setRenameWorkspace] = useState<{ key: string; label: string }>();
   const [data, setData] = useState<Dashboard>();
+  const [outageDashboard, setOutageDashboard] = useState<Dashboard>();
   // the dashboard generation as reactive state, updated on every advancing snapshot even when the
   // content itself is deduped, so an open notes fly-out or pane refetches after any Run outcome
   const [dashboardGeneration, setDashboardGeneration] = useState<number>();
@@ -10343,6 +10350,13 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     if (payload.generation !== undefined && latestDashboardGeneration.current !== undefined && payload.generation < latestDashboardGeneration.current) return false;
     // retain the newest ordered snapshot boundary, and surface it reactively for the notes refetch
     if (payload.generation !== undefined) { latestDashboardGeneration.current = payload.generation; setDashboardGeneration(payload.generation); }
+    // degraded rows are display-only, not evidence of completed turns or removed panes
+    if (payload.tmuxOutage !== undefined) {
+      setOutageDashboard(payload);
+      setUnavailable(false);
+      return true;
+    }
+    setOutageDashboard(undefined);
     const retainedWorktrees: Worktree[] = [];
     const priorWorktrees = dashboardSnapshot.current === undefined ? [] : allWorktrees(dashboardSnapshot.current);
     const pendingWorktreeIds = new Set([...pendingNewTaskSources.keys(), ...pendingWorktreeLaunches.keys()]);
@@ -10571,14 +10585,14 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   }, [cleanupChecked, cleanupLoading, closeCleanup, refresh, applyCleanupTargets]);
   useEffect(() => {
     const openFromHash = () => {
-      if (location.hash === '#cleanup' && data !== undefined && !cleanupOpen) void openCleanup();
+      if (location.hash === '#cleanup' && data !== undefined && outageDashboard === undefined && !cleanupOpen) void openCleanup();
     };
     openFromHash();
     window.addEventListener('hashchange', openFromHash);
     return () => window.removeEventListener('hashchange', openFromHash);
-  }, [cleanupOpen, data !== undefined, openCleanup]);
+  }, [cleanupOpen, data !== undefined, outageDashboard !== undefined, openCleanup]);
   useEffect(() => {
-    if (!cleanupOpen) return;
+    if (!cleanupOpen || outageDashboard !== undefined) return;
     // keep keyboard focus inside the modal while its controls load or change
     const closeOnEscape = (event: KeyboardEvent) => {
       const dialog = cleanupDialogRef.current;
@@ -10602,7 +10616,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     };
     document.addEventListener('keydown', closeOnEscape);
     return () => document.removeEventListener('keydown', closeOnEscape);
-  }, [cleanupLoading, cleanupOpen, closeCleanup]);
+  }, [cleanupLoading, cleanupOpen, outageDashboard !== undefined, closeCleanup]);
   useEffect(() => pollWhileVisible(() => Date.now() < dashboardPushFreshUntil.current ? undefined : refresh(), 5_000, true, 30_000), [refresh]);
   useEffect(() => {
     let closed = false;
@@ -11468,6 +11482,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     void dismissNotification(reviewNotificationTag(worktreeId));
     return true;
   };
+  // offer independent recovery even before the first successful dashboard snapshot
+  if (outageDashboard !== undefined) {
+    const lastKnown = (data ?? outageDashboard)?.agents.map(agent => ({ id: agent.id, title: agentLabel(agent), detail: agent.worktreeLabel ?? agent.branch })) ?? [];
+    return <TmuxRecovery request={requestRecovery} retry={() => { /* probe dashboard recovery */ void refresh(); }} lastKnown={lastKnown} serverControl={<ServerSwitcher />} />;
+  }
   if (data === undefined) return <LoadingScreen label={unavailable ? 'Reconnecting to console' : 'Syncing console state'} />;
   const item = items[visibleActive];
   const cleanupControl: CleanupMenuState = { checked: cleanupChecked.size, unchecked: cleanupTargets.length - cleanupChecked.size, onOpen: () => { void openCleanup(); }, triggerRef: cleanupTriggerRef };

@@ -150,6 +150,15 @@ use only the minute samples of the primary server (WSL when applicable), not
 the faster flyout readings or synthetic zeroes. Skeletons reserve chart geometry
 only before the first sample. Failed refreshes keep the latest usable readings
 and signal failure; disabling monitoring cancels polling and clears the cache.
+
+When a tmux socket stops responding, show a dedicated recovery view instead of
+interactive workspace controls. Keep last-known dashboard agents read-only and
+separate from the live process list. Reuse the flyout's resource bars here even
+when routine monitoring is off; sample the host independently of tmux and never
+substitute container readings. Disable stopping when host signalling or fresh
+process data is unavailable. Confirm the exact selected agents and report each
+outcome without implying that a delivered signal means the process has exited.
+
 Completed assistant replies that ask a prose question may offer a single row of tailored
 reply suggestions at the top of the active prompt. The console-wide Reply suggestions
 toggle lives in Settings > Interface and is off by default. Its description warns about

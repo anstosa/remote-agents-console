@@ -238,6 +238,7 @@ export async function processClaim(path, descriptor, options = {}) {
       response: result.response,
       sourceMetadata: result.sourceMetadata,
       cloudflare: result.cloudflare,
+      agentStops: result.agentStops,
       restart,
       requestDigest: digest
     });
@@ -273,6 +274,7 @@ export function writeStatus(descriptor, id, state, kind, details = {}) {
     ...(details.response ? { response: details.response } : {}),
     ...(details.sourceMetadata ? { sourceMetadata: details.sourceMetadata } : {}),
     ...(details.cloudflare ? { cloudflare: details.cloudflare } : {}),
+    ...(details.agentStops ? { agentStops: details.agentStops } : {}),
     ...(details.restart ? { restart: details.restart } : {})
   };
   atomicWriteFile(resolve(descriptor.controlRoot, "status", `${id}.json`), `${JSON.stringify(status)}\n`, 0o600);

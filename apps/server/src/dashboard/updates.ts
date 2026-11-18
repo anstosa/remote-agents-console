@@ -49,7 +49,7 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
 };
 
 // fingerprint every dashboard field that drives browser refreshes
-export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.cleanupTargets, dashboard.cleanupVersion, dashboard.notesRevision, dashboard.githubRevision, dashboard.githubBadge, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.buttons]);
+export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.tmuxOutage, dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.cleanupTargets, dashboard.cleanupVersion, dashboard.notesRevision, dashboard.githubRevision, dashboard.githubBadge, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.buttons]);
 
 // who asked for a dashboard: GET /api/dashboard, a /ws/dashboard connect, the server's poll,
 // its first build at boot, the cleanup scan, or anything else (mutation routes, job and

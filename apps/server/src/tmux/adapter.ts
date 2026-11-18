@@ -1,9 +1,9 @@
 import type { TmuxCommandRegistry } from './command-registry.js';
-import type { Pane, PaneListingSnapshot, SocketRef } from '../domain/models.js';
+import type { Pane, PaneListingSnapshot, SocketRef, TmuxSocketHealth } from '../domain/models.js';
 import { lastPromptFromHistory, latestAgentMessageFromHistory, latestCompletedAssistantMessage } from '../adapters/codex-turns.js';
 import type { AttentionState, TmuxKey } from '../adapters/types.js';
 import { processNameOption, processPaneRole, processWorktreeOption } from './stack-sessions.js';
-import { capturePaneArgs, paneIdPattern as paneId, run, sessionIdPattern as sessionId, socketIsCurrent, tmuxBinary, tmuxFormatLiteral } from './command.js';
+import { capturePaneArgs, paneIdPattern as paneId, run, sessionIdPattern as sessionId, socketIsCurrent, tmuxBinary, tmuxFormatLiteral, type RunResult } from './command.js';
 
 const attentionStates: ReadonlySet<string> = new Set(['working', 'finished', 'question']);
 const inputBlockingPaneModes: ReadonlySet<string> = new Set(['copy-mode', 'view-mode']);
@@ -13,6 +13,11 @@ const paneModeFormat = '#{pane_in_mode}\t#{pane_mode}';
 const postEscapeDelayMs = 120;
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 const paneSnapshotTtlMs = 2_000;
+const paneReadTimeoutMs = 2_000;
+const paneRetryBaseMs = 5_000;
+const paneRetryMaxMs = 30_000;
+
+type PaneHealthEntry = { fingerprint: string; status: 'healthy'|'unavailable'; failures: number; retryAt: number; since?: number; lastHealthyAt?: number; retry?: Promise<PaneListingSnapshot> };
 
 // sanitize terminal controls without rewriting semantic SGR state
 function safeTerminalText(value: string): string {
@@ -126,6 +131,8 @@ export class TmuxAdapter {
   private readonly inputQueues = new Map<string, Promise<boolean>>();
   private commandsClosed = false;
   private readonly paneSnapshots = new Map<string, { fingerprint: string; at: number; status: 'pending'|'available'|'unavailable'; panes?: Pane[]; retryAt?: number }>();
+  private readonly paneHealth = new Map<string, PaneHealthEntry>();
+  private readonly fallbackReads = new Map<string, { fingerprint: string; value: Promise<RunResult | undefined> }>();
 
   // production supplies server-owned reads; standalone adapters retain spawned commands
   constructor(private readonly commands?: Pick<TmuxCommandRegistry, 'listPanes' | 'retainSockets' | 'closeAll'>) {}
@@ -147,6 +154,19 @@ export class TmuxAdapter {
     return snapshots;
   }
 
+  // expose only fingerprint-bound health, never pending reads or stale replacements
+  socketHealthNow(): ReadonlyMap<string, TmuxSocketHealth> {
+    const health = new Map<string, TmuxSocketHealth>();
+    // copy observations so callers cannot mutate retry state
+    for (const [path, entry] of this.paneHealth) {
+      // healthy entries always carry their latest successful observation
+      if (entry.status === 'healthy' && entry.lastHealthyAt !== undefined) health.set(path, { fingerprint: entry.fingerprint, status: 'healthy', lastHealthyAt: entry.lastHealthyAt });
+      // unavailable entries retain the first failure and last successful observation
+      else if (entry.status === 'unavailable' && entry.since !== undefined) health.set(path, { fingerprint: entry.fingerprint, status: 'unavailable', since: entry.since, ...(entry.lastHealthyAt === undefined ? {} : { lastHealthyAt: entry.lastHealthyAt }) });
+    }
+    return health;
+  }
+
   // reap sockets missing from discovery, including identities replaced at the same path
   retainSockets(sockets: readonly SocketRef[]): void {
     this.commands?.retainSockets(sockets);
@@ -156,10 +176,68 @@ export class TmuxAdapter {
       // only the same socket identity can reuse a snapshot
       if (live.get(path) !== entry.fingerprint) this.paneSnapshots.delete(path);
     }
+    // retire outage and pending fallback state with the exact socket lifetime
+    for (const [path, entry] of this.paneHealth) {
+      // replacements must begin with no inherited health or backoff
+      if (live.get(path) !== entry.fingerprint) this.paneHealth.delete(path);
+    }
+    // pending processes may finish, but their result cannot become the replacement's
+    for (const [path, entry] of this.fallbackReads) {
+      // discard only reads outside the retained lifetime
+      if (live.get(path) !== entry.fingerprint) this.fallbackReads.delete(path);
+    }
   }
 
   // app shutdown owns the persistent dashboard transport
-  closeCommands(): void { this.commandsClosed = true; this.commands?.closeAll(); this.paneSnapshots.clear(); }
+  closeCommands(): void { this.commandsClosed = true; this.commands?.closeAll(); this.paneSnapshots.clear(); this.paneHealth.clear(); this.fallbackReads.clear(); }
+
+  // advance one socket's bounded retry window after an incomplete observation
+  private markPaneReadUnavailable(socket: SocketRef, entry: { retryAt?: number }): void {
+    const now = Date.now();
+    const previous = this.paneHealth.get(socket.path);
+    const same = previous?.fingerprint === socket.fingerprint;
+    const failures = same ? previous.failures + 1 : 1;
+    const retryMs = Math.min(paneRetryMaxMs, paneRetryBaseMs * 2 ** Math.min(failures - 1, 3));
+    const health: PaneHealthEntry = {
+      fingerprint: socket.fingerprint,
+      status: 'unavailable',
+      failures,
+      retryAt: now + retryMs,
+      since: same && previous.since !== undefined ? previous.since : now,
+      ...(same && previous.lastHealthyAt !== undefined ? { lastHealthyAt: previous.lastHealthyAt } : {})
+    };
+    this.paneHealth.set(socket.path, health);
+    entry.retryAt = health.retryAt;
+  }
+
+  // clear failure history only after a complete pane listing
+  private markPaneReadHealthy(socket: SocketRef): void {
+    this.paneHealth.set(socket.path, { fingerprint: socket.fingerprint, status: 'healthy', failures: 0, retryAt: 0, lastHealthyAt: Date.now() });
+  }
+
+  // production fallback readers share one identity check and bounded process per socket
+  private async fallbackPaneListing(socket: SocketRef, args: string[]): Promise<RunResult | undefined> {
+    // standalone adapters in tests and utilities have no persistent transport to recover from
+    if (this.commands === undefined) return await run(this.binary, args, undefined, paneReadTimeoutMs).catch(() => ({ code: -1, stdout: '', stderr: 'tmux pane listing failed' }));
+    const current = this.fallbackReads.get(socket.path);
+    // coalesce only the exact socket lifetime
+    if (current?.fingerprint === socket.fingerprint) return current.value;
+    const value = (async () => {
+      const valid = await socketIsCurrent(socket).catch(() => false);
+      // shutdown and replacement identities cannot spawn a late client
+      if (this.commandsClosed || !valid) return undefined;
+      const result = await run(this.binary, args, undefined, paneReadTimeoutMs).catch(() => ({ code: -1, stdout: '', stderr: 'tmux pane listing failed' }));
+      const stillCurrent = await socketIsCurrent(socket).catch(() => false);
+      // a path replaced while the client ran cannot lend panes to the old identity
+      if (this.commandsClosed || !stillCurrent) return undefined;
+      return result;
+    })().finally(() => {
+      // release only the still-current shared read
+      if (this.fallbackReads.get(socket.path)?.value === value) this.fallbackReads.delete(socket.path);
+    });
+    this.fallbackReads.set(socket.path, { fingerprint: socket.fingerprint, value });
+    return value;
+  }
 
   // leave history views but reject unrelated selectors
   private async preparePaneInput(socket: SocketRef, pane: string): Promise<boolean> {
@@ -190,30 +268,41 @@ export class TmuxAdapter {
     return paneId.test(pane) && (await run(this.binary, ['-S', socket.path, 'copy-mode', '-q', '-t', pane])).code === 0;
   }
 
-  // read live panes while retaining dead process rows for dashboard stack state
-  async listPanes(socket: SocketRef, { backoffMissingServer = false }: { backoffMissingServer?: boolean } = {}): Promise<Pane[]> {
+  // target only live panes from a complete inventory
+  async listPanes(socket: SocketRef): Promise<Pane[]> {
+    const listing = await this.listPaneInventory(socket);
+    return listing.status === 'available' ? listing.panes.filter(pane => pane.dead !== true) : [];
+  }
+
+  // bind completeness to this read, while retaining dead rows for stack display
+  async listPaneInventory(socket: SocketRef): Promise<PaneListingSnapshot> {
     // shutdown cannot spawn a fallback from a late refresh
-    if (this.commandsClosed) return [];
-    const previous = this.paneSnapshots.get(socket.path);
-    // ordinary dashboard polls back off only confirmed absent servers
-    if (backoffMissingServer && previous?.fingerprint === socket.fingerprint && previous.status === 'unavailable' && (previous.retryAt ?? 0) > Date.now()) return [];
+    if (this.commandsClosed) return { status: 'unavailable' };
+    const health = this.paneHealth.get(socket.path);
+    // forced lifecycle reads refresh healthy sockets but cannot bypass outage cooldown
+    if (health?.fingerprint === socket.fingerprint && health.status === 'unavailable') {
+      // let at most one probe use both the control reader and fallback after expiry
+      if (health.retryAt > Date.now()) return { status: 'unavailable' };
+      health.retry ??= this.readPaneInventory(socket).finally(() => { /* release only this health observation */ health.retry = undefined; });
+      return await health.retry;
+    }
+    return await this.readPaneInventory(socket);
+  }
+
+  // publish an observation only while its exact socket read is still current
+  private async readPaneInventory(socket: SocketRef): Promise<PaneListingSnapshot> {
     const format = `#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{${processNameOption}}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_spawned_by}\t#{${processWorktreeOption}}`;
     const entry: { fingerprint: string; at: number; status: 'pending'|'available'|'unavailable'; panes?: Pane[]; retryAt?: number } = { fingerprint: socket.fingerprint, at: Date.now(), status: 'pending' };
     this.paneSnapshots.set(socket.path, entry);
     const persistent = await this.commands?.listPanes(socket, format).catch(() => undefined);
-    // only fallback pays for identity validation; healthy persistent reads do not stat
-    const current = this.commands === undefined || persistent !== undefined || await socketIsCurrent(socket);
-    // shutdown may have raced the asynchronous identity check
-    if (this.commandsClosed || !current) {
-      // a rejected identity made no pane observation
-      if (!this.commandsClosed && this.paneSnapshots.get(socket.path) === entry) this.paneSnapshots.delete(socket.path);
-      return [];
+    const out: RunResult | undefined = persistent === undefined ? await this.fallbackPaneListing(socket, ['-S', socket.path, 'list-panes', '-a', '-F', format]) : { code: 0, stdout: persistent, stderr: '' };
+    // failed or partial reads cannot claim that the stack stopped
+    if (this.commandsClosed || out === undefined || out.code !== 0 || out.timedOut || out.stdoutTruncated) {
+      entry.status = 'unavailable'; entry.at = Date.now();
+      // shutdown is not a socket outage
+      if (!this.commandsClosed && this.paneSnapshots.get(socket.path) === entry) this.markPaneReadUnavailable(socket, entry);
+      return { status: 'unavailable' };
     }
-    const out = persistent === undefined ? await run(this.binary, ['-S', socket.path, 'list-panes', '-a', '-F', format]) : { code: 0, stdout: persistent, stderr: '' };
-    // stale socket files otherwise fork a failed client on every dashboard tick
-    if (out.code === 1 && /no server running on /u.test(out.stderr)) entry.retryAt = Date.now() + 5_000;
-    // failed reads cannot claim that the stack stopped
-    if (this.commandsClosed || out.code !== 0) { entry.status = 'unavailable'; entry.at = Date.now(); return []; }
     const lines = out.stdout.split('\n').filter(Boolean);
     const panes: Pane[] = lines.flatMap((line) => {
       const [id, session, name, pid, path, command, title, displayLabel, startCommand, attention, sessionRef, sandboxed, question, consoleManaged, role, paneName, windowId, mode, placeMark, processName, reviewRun, dead, status, keyBinding, spawnedBy, ...worktree] = line.split('\t');
@@ -226,8 +315,15 @@ export class TmuxAdapter {
     entry.status = panes.length === lines.length ? 'available' : 'unavailable';
     entry.at = Date.now();
     // complete replies carry their panes, including an empty list
-    if (entry.status === 'available') entry.panes = panes;
-    return panes.filter(pane => pane.dead !== true);
+    if (entry.status === 'available') {
+      entry.panes = panes;
+      // only the newest overlapping read publishes socket health
+      if (this.paneSnapshots.get(socket.path) === entry) this.markPaneReadHealthy(socket);
+      return { status: 'available', panes };
+    }
+    // malformed replies are unavailable and use the same bounded retry window
+    if (this.paneSnapshots.get(socket.path) === entry) this.markPaneReadUnavailable(socket, entry);
+    return { status: 'unavailable' };
   }
 
   // the pane ids of one tmux session, for the pane socket's membership check: a pane may

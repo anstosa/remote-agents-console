@@ -186,6 +186,19 @@ container or WSL totals.
 Docker installations use the configured host tmux bridge to inspect the host.
 Rolling samples are kept in browser memory only, not saved as history.
 
+When tmux stops responding but RAC is still reachable, the console opens a
+recovery screen. It shows CPU, memory, and available disk readings independently
+of tmux, even if Resource monitoring is off. On WSL, recovery can show Linux
+guest readings while Windows host readings are unavailable. The last-known
+dashboard remains visible for reference only.
+
+Use **Running agents** to select verified host agent processes, then **Stop
+selected agents** and confirm the exact PIDs. This sends `SIGTERM` to the selected
+processes only; it does not kill a tmux server, session, or process group. The list
+is read-only if the host recovery helper is unavailable. Check the result and
+refresh the list before retrying an unconfirmed stop. The workspace returns when
+tmux responds again, or you can use **Retry dashboard** to check manually.
+
 A remote's icon is set only on that server. Each server publishes a hash of its
 chosen artwork; when the hash changes, this console fetches the artwork once over
 the signed peer channel, checks it against the hash and the static-SVG rules, and

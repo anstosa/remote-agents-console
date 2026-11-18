@@ -3,8 +3,10 @@ const { run } = vi.hoisted(() => ({ run: vi.fn() }));
 vi.mock('../src/tmux/command.js', async original => ({ ...await original<typeof import('../src/tmux/command.js')>(), run, socketIsCurrent: vi.fn().mockResolvedValue(true) }));
 import { socketIsCurrent } from '../src/tmux/command.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
+import { DiscoveryService } from '../src/discovery/service.js';
 import { WorktreeCommandService } from '../src/worktree-commands/service.js';
 import { testConfig, testWorktree } from './helpers/config.js';
+import { processInspector, socketFinder } from './helpers/discovery-stubs.js';
 
 const socket = { path: '/tmp/tmux-test', fingerprint: 'one', device: 1, inode: 2 };
 // include stack metadata in the shared dashboard row
@@ -30,6 +32,7 @@ describe('shared pane snapshots', () => {
 
   // fallback remains available on the same request after transport loss
   it('falls back to spawned reads and never caches a failed read as empty', async () => {
+    vi.useFakeTimers();
     const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
     const adapter = new TmuxAdapter(commands);
     run.mockResolvedValueOnce({ code: 0, stdout: row(), stderr: '' });
@@ -38,6 +41,7 @@ describe('shared pane snapshots', () => {
     run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'permission denied' });
     expect(await adapter.listPanes(socket)).toEqual([]);
     expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'unavailable' });
+    await vi.advanceTimersByTimeAsync(5_000);
     run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
     await adapter.listPanes(socket);
     expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'available', panes: [] });
@@ -47,7 +51,7 @@ describe('shared pane snapshots', () => {
   it('publishes malformed listings as unavailable observations', async () => {
     const adapter = new TmuxAdapter();
     run.mockResolvedValue({ code: 0, stdout: `${row()}malformed\n`, stderr: '' });
-    expect(await adapter.listPanes(socket)).toHaveLength(1);
+    expect(await adapter.listPanes(socket)).toEqual([]);
     expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'unavailable' });
   });
 
@@ -57,20 +61,66 @@ describe('shared pane snapshots', () => {
     const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
     const adapter = new TmuxAdapter(commands);
     run.mockResolvedValue({ code: 1, stdout: '', stderr: 'no server running on /tmp/tmux-test' });
-    expect(await adapter.listPanes(socket, { backoffMissingServer: true })).toEqual([]);
+    expect(await adapter.listPanes(socket)).toEqual([]);
     // multiple dashboard ticks reuse only the failure backoff, not an empty stack snapshot
     await vi.advanceTimersByTimeAsync(500);
-    expect(await adapter.listPanes(socket, { backoffMissingServer: true })).toEqual([]);
+    expect(await adapter.listPanes(socket)).toEqual([]);
     expect(run).toHaveBeenCalledOnce();
     expect(commands.listPanes).toHaveBeenCalledOnce();
     expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'unavailable' });
     await vi.advanceTimersByTimeAsync(4_500);
-    await adapter.listPanes(socket, { backoffMissingServer: true });
+    await adapter.listPanes(socket);
     expect(run).toHaveBeenCalledTimes(2);
     const replacement = { ...socket, fingerprint: 'new', inode: 3 };
     run.mockResolvedValue({ code: 0, stdout: row(), stderr: '' });
-    expect(await adapter.listPanes(replacement, { backoffMissingServer: true })).toHaveLength(1);
+    expect(await adapter.listPanes(replacement)).toHaveLength(1);
     expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  // transport failures use the same bounded per-socket retry as absent servers
+  it('backs off every failed fallback and resets health after a complete listing', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-18T20:00:00.000Z'));
+    const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    run.mockResolvedValue({ code: 1, stdout: '', stderr: 'server overloaded', timedOut: true });
+
+    await adapter.listPanes(socket);
+    expect(adapter.socketHealthNow().get(socket.path)).toEqual({ fingerprint: 'one', status: 'unavailable', since: Date.now() });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await adapter.listPanes(socket);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await adapter.listPanes(socket);
+    expect(run).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5_000);
+    run.mockResolvedValueOnce({ code: 0, stdout: row(), stderr: '' });
+    await adapter.listPanes(socket);
+    expect(run).toHaveBeenLastCalledWith('/usr/bin/tmux', expect.any(Array), undefined, 2_000);
+    expect(adapter.socketHealthNow().get(socket.path)).toEqual({ fingerprint: 'one', status: 'healthy', lastHealthyAt: Date.now() });
+  });
+
+  // concurrent dashboard fallbacks share one bounded process and one failure observation
+  it('coalesces spawned fallback reads for one socket lifetime', async () => {
+    const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    let finish!: (value: { code: number; stdout: string; stderr: string }) => void;
+    run.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+
+    const first = adapter.listPanes(socket);
+    const second = adapter.listPanes(socket);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+    finish({ code: 1, stdout: '', stderr: 'server overloaded' });
+
+    await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
+    expect(adapter.socketHealthNow().get(socket.path)).toMatchObject({ status: 'unavailable' });
+  });
+
+  // a full trailing row cannot prove that no earlier panes were lost
+  it('rejects a truncated listing even when the remaining rows parse', async () => {
+    const adapter = new TmuxAdapter();
+    run.mockResolvedValueOnce({ code: 0, stdout: row(), stderr: '', stdoutTruncated: true });
+    await expect(adapter.listPanes(socket)).resolves.toEqual([]);
+    expect(adapter.socketHealthNow().get(socket.path)).toMatchObject({ status: 'unavailable' });
   });
 
   // a failed discovery read is the stack display's unknown observation until retry
@@ -85,27 +135,38 @@ describe('shared pane snapshots', () => {
     const service = new WorktreeCommandService(testConfig(), { worktreesNow: () => [worktree] } as never, stackCommand);
     run.mockResolvedValue({ code: 1, stdout: '', stderr: 'no server running on /host-tmux/default' });
 
-    await adapter.listPanes(stackSocket, { backoffMissingServer: true });
+    await adapter.listPanes(stackSocket);
     await expect(service.state(worktree, adapter.paneSnapshotsNow())).resolves.toEqual({});
     await vi.advanceTimersByTimeAsync(500);
-    await adapter.listPanes(stackSocket, { backoffMissingServer: true });
+    await adapter.listPanes(stackSocket);
     await expect(service.state(worktree, adapter.paneSnapshotsNow())).resolves.toEqual({});
     expect(run).toHaveBeenCalledOnce();
     expect(stackCommand.mock.calls.filter(([, args]) => args.includes('list-panes'))).toHaveLength(0);
 
     await vi.advanceTimersByTimeAsync(4_500);
-    await adapter.listPanes(stackSocket, { backoffMissingServer: true });
+    await adapter.listPanes(stackSocket);
     expect(run).toHaveBeenCalledTimes(2);
   });
 
-  // lifecycle reads must bypass the dashboard's missing-server backoff
-  it('keeps explicit lifecycle listings fresh after an absent-server result', async () => {
+  // freshness still checks healthy sockets without racing a degraded retry
+  it('enforces outage backoff for lifecycle reads without blocking healthy sockets', async () => {
+    vi.useFakeTimers();
     const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
     const adapter = new TmuxAdapter(commands);
     run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no server running on /tmp/tmux-test' });
-    await adapter.listPanes(socket, { backoffMissingServer: true });
+    await adapter.listPanes(socket);
+    expect(await adapter.listPanes(socket)).toEqual([]);
+    expect(commands.listPanes).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+    const healthy = { ...socket, path: '/tmp/tmux-other', fingerprint: 'other' };
+    commands.listPanes.mockResolvedValueOnce(row());
+    expect(await adapter.listPanes(healthy)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5_000);
     run.mockResolvedValueOnce({ code: 0, stdout: row(), stderr: '' });
-    expect(await adapter.listPanes(socket)).toHaveLength(1);
+    const [first, second] = await Promise.all([adapter.listPanes(socket), adapter.listPanes(socket)]);
+    expect(first).toHaveLength(1);
+    expect(second).toEqual(first);
+    expect(commands.listPanes).toHaveBeenCalledTimes(3);
     expect(run).toHaveBeenCalledTimes(2);
   });
 
@@ -176,6 +237,44 @@ describe('shared pane snapshots', () => {
     const adapter = new TmuxAdapter(commands);
     expect(await adapter.listPanes(socket)).toEqual([]);
     expect(run).not.toHaveBeenCalled();
+  });
+
+  // a replacement that appears while the bounded client runs cannot inherit old identity
+  it('rejects a socket replaced during fallback', async () => {
+    vi.mocked(socketIsCurrent).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    run.mockResolvedValueOnce({ code: 0, stdout: row(), stderr: '' });
+
+    expect(await adapter.listPanes(socket)).toEqual([]);
+    expect(adapter.socketHealthNow().get(socket.path)).toMatchObject({ fingerprint: socket.fingerprint, status: 'unavailable' });
+    expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'unavailable' });
+  });
+
+  // an identity-rejected read cannot tell discovery that previously live agents left
+  it('enters and clears discovery outage after a previously healthy socket rejects fallback identity', async () => {
+    vi.useFakeTimers();
+    run.mockResolvedValue({ code: 1, stdout: '', stderr: '' });
+    const commands = { listPanes: vi.fn().mockResolvedValue(row('0', '', '/tmp')), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    const discovery = new DiscoveryService(socketFinder([socket]), adapter, processInspector());
+    const id = `${socket.fingerprint}:%1`;
+    expect((await discovery.dashboard(false, true)).agents).toMatchObject([{ id }]);
+
+    commands.listPanes.mockResolvedValueOnce(undefined);
+    vi.mocked(socketIsCurrent).mockResolvedValueOnce(false);
+    const degraded = await discovery.dashboard(false, true);
+    expect(degraded).toMatchObject({ tmuxOutage: { unavailableSockets: 1 }, agents: [], tmuxLastKnownAgents: [{ id, stale: true }] });
+    expect(await discovery.snapshotTarget(id)).toBeUndefined();
+    const commandCount = commands.listPanes.mock.calls.length;
+    expect(await discovery.target(id, true)).toBeUndefined();
+    expect(commands.listPanes).toHaveBeenCalledTimes(commandCount);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    const recovered = await discovery.dashboard(false, true);
+    expect(recovered).not.toHaveProperty('tmuxOutage');
+    expect(recovered.agents).toMatchObject([{ id }]);
+    expect(await discovery.snapshotTarget(id)).toBeDefined();
   });
 
   // socket replacement invalidates the shared snapshot as well as the transport

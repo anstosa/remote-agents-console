@@ -3,6 +3,8 @@ import type { ProjectButtons } from '../config/buttons.js';
 import type { AgentPanel, Transport } from '../transports/transport.js';
 
 export type SocketRef = { fingerprint: string; path: string; device: number; inode: number };
+// one fingerprint-bound dashboard observation; replacements never inherit health
+export type TmuxSocketHealth = { fingerprint: string; status: 'healthy'; lastHealthyAt: number } | { fingerprint: string; status: 'unavailable'; since: number; lastHealthyAt?: number };
 // `role` is the console's pane-role marker (`@rac_role`): `shell` on a Console shell the
 // operator created, so launch adoption, Remove's blind kill and cleanup all skip it, and
 // discovery can count a Worktree's shells; `process` on a Stack process's pane, whose
@@ -82,7 +84,8 @@ export type StructuredAgentState = { lifecycle: AgentLifecycle; preparing?: true
 // `transport` says how the console drives the Agent and `panel` what its Panel shows (ADR 0015).
 // A tmux Agent carries its pane details in `pane`, a structured one its process state in `structured`.
 // `spawnedBy` is the Conductor that spawned it as a worker (ADR 0018), of any kind.
-export type Agent = { id: string; transport: Transport; panel: AgentPanel; pane?: AgentPane; structured?: StructuredAgentState; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; messageReplySuggestionKey?: string; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: ShapedQuestion; reviewRun?: string; spawnedBy?: string };
+// `stale` marks a last-known tmux row for display only while its socket is unavailable.
+export type Agent = { id: string; transport: Transport; panel: AgentPanel; pane?: AgentPane; structured?: StructuredAgentState; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; messageReplySuggestionKey?: string; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: ShapedQuestion; reviewRun?: string; spawnedBy?: string; stale?: true };
 // an Agent driven over tmux, which always has its pane part
 export type TmuxAgent = Agent & { pane: AgentPane };
 // whether an Agent is an interactive Review run's own (ADR 0010): it belongs to its run, so the
@@ -148,4 +151,5 @@ export type DashboardProject = { id: string; implicit?: true; label: string; mod
 // the configured Scratch folder, and any other Scratch Place holding an Agent or a Console shell.
 // `adhoc` marks such an other Scratch Place: the console cannot launch an Agent into it.
 export type DashboardPlace = { id: string; kind: 'directory' | 'scratch'; projectId: string; label: string; home: string; adhoc?: true; pinned: boolean; consoleShells?: number };
-export type Dashboard = { generation: number; serverStartedAt?: number; adapters: Partial<Record<AgentKind, AdapterCapability>>; agents: Agent[]; projects: DashboardProject[]; places: DashboardPlace[] };
+// `tmuxOutage` describes only sockets with failed pane reads; an empty healthy inventory omits it.
+export type Dashboard = { generation: number; serverStartedAt?: number; adapters: Partial<Record<AgentKind, AdapterCapability>>; agents: Agent[]; projects: DashboardProject[]; places: DashboardPlace[]; tmuxOutage?: { unavailableSockets: number; since: string; lastHealthyAt?: string }; tmuxLastKnownAgents?: Agent[] };

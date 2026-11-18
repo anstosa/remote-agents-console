@@ -17,6 +17,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QueuedPromptService } from '../src/prompts/queue.js';
+import { PromptService } from '../src/prompts/service.js';
 import { PromptHistoryService } from '../src/prompt-history/service.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import { ReviewTourStore } from '../src/review-tour/store.js';
@@ -276,6 +277,81 @@ describe('server administration API', () => {
       expect(stream).not.toHaveBeenCalled();
     } finally {
       await adminApp.close();
+    }
+  }, 15_000);
+
+  // keep emergency diagnostics and exact stop admission independent of the flyout
+  it('serves tmux recovery with monitoring disabled and accepts only a controlled stop batch', async () => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const processes = { available: true, canStop: true, agents: [{ id: 'opaque-a', kind: 'Codex', label: 'Codex', pid: 101 }] };
+    const sample = vi.fn(async () => ({ sampledAt: '2026-11-18T17:00:00Z', host: null }));
+    const list = vi.fn(async () => processes);
+    const stop = vi.fn(async () => ({ available: true, canStop: true, results: [{ id: 'opaque-a', status: 'signal_sent' as const }, { id: 'opaque-b', status: 'stale' as const }] }));
+    const app = await buildApp({ ...config, resourceMonitoring: false }, { auth: new AuthService(hash, Buffer.alloc(32, 25).toString('base64url')), recoveryAgents: { list, stop }, recoveryResources: { sample } });
+    const host = 'agents.example.com';
+    const origin = 'https://agents.example.com';
+    const recovery = '/api/server/recovery';
+    try {
+      expect((await app.inject({ url: recovery, headers: { host } })).statusCode).toBe(401);
+      // log in without automatically acquiring an existing controller's lease
+      const login = async () => {
+        const boot = await app.inject({ url: '/api/auth/bootstrap', headers: { host } });
+        const session = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { host, origin, 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+        return { host, origin, cookie: String(session.headers['set-cookie']).split(';')[0], 'x-csrf-token': session.json().csrfToken };
+      };
+      const headers = await login();
+      const other = await login();
+      const response = await app.inject({ url: recovery, headers });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.json()).toEqual({ ...processes, resources: await sample.mock.results[0].value });
+      list.mockRejectedValueOnce(new Error('isolated process failure'));
+      expect((await app.inject({ url: recovery, headers })).json()).toMatchObject({ available: false, resources: { sampledAt: '2026-11-18T17:00:00Z' } });
+
+      const url = `${recovery}/agents/stop`;
+      const ids = ['opaque-a', 'opaque-b'];
+      expect((await app.inject({ method: 'POST', url, headers: other, payload: { ids } })).statusCode).toBe(423);
+      expect((await app.inject({ method: 'POST', url, headers: { ...headers, origin: 'https://other.example.com' }, payload: { ids } })).statusCode).toBe(403);
+      expect((await app.inject({ method: 'POST', url, headers: { ...headers, 'x-csrf-token': 'incorrect' }, payload: { ids } })).statusCode).toBe(403);
+      expect((await app.inject({ method: 'POST', url, headers, payload: { ids: ['opaque-a', 'opaque-a'] } })).statusCode).toBe(400);
+      expect(stop).not.toHaveBeenCalled();
+      const stopped = await app.inject({ method: 'POST', url, headers, payload: { ids } });
+      expect(stopped.statusCode).toBe(200);
+      expect(stopped.json().results.map((result: { status: string }) => result.status)).toEqual(['signal_sent', 'stale']);
+      expect(stop).toHaveBeenCalledExactlyOnceWith(ids);
+    } finally {
+      await app.close();
+    }
+  }, 15_000);
+
+  // preserve prompt and notification ownership until pane inventory is complete
+  it('publishes display-only outage rows without observing or retiring agents', async () => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const agent = stated({ id: 'socket:%1', title: 'Working', home: '/tmp', transport: 'tmux', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' } });
+    const notificationCoordinator = new AgentNotificationCoordinator(() => {});
+    const notify = vi.spyOn(notificationCoordinator, 'observe');
+    const observe = vi.spyOn(PromptService.prototype, 'observe').mockResolvedValue();
+    const retire = vi.spyOn(PromptService.prototype, 'retireDeparted').mockResolvedValue();
+    let app: Awaited<ReturnType<typeof buildApp>> | undefined;
+    try {
+      app = await buildApp(config, {
+        auth: new AuthService(hash, Buffer.alloc(32, 26).toString('base64url')), notifications: notificationCoordinator,
+        discovery: { dashboard: async () => ({ generation: 1, agents: [], projects: [], places: [], tmuxOutage: { unavailableSockets: 1, since: '2026-11-18T17:00:00Z' }, tmuxLastKnownAgents: [{ ...agent, stale: true }] }), worktreesNow: () => [], projectsNow: () => [] } as never
+      });
+      const host = 'agents.example.com';
+      const boot = await app.inject({ url: '/api/auth/bootstrap', headers: { host } });
+      const session = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { host, origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+      const response = await app.inject({ url: '/api/dashboard', headers: { host, cookie: String(session.headers['set-cookie']).split(';')[0] } });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ tmuxOutage: { unavailableSockets: 1 }, agents: [{ id: agent.id, stale: true }] });
+      expect((await app.inject({ url: '/healthz' })).json()).toEqual({ ok: true });
+      expect(observe).not.toHaveBeenCalled();
+      expect(retire).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+    } finally {
+      await app?.close();
+      observe.mockRestore();
+      retire.mockRestore();
     }
   }, 15_000);
 

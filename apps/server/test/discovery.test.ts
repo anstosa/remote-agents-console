@@ -100,6 +100,53 @@ describe('DiscoveryService dashboard', () => {
     expect(processes.recognizeAgent).toHaveBeenLastCalledWith(123, { reusePositive: false });
   });
 
+  // outage rows remain visible while the authoritative target snapshot fails closed
+  it('keeps failed-socket agents display-only while healthy sockets continue', async () => {
+    const first: SocketRef = { fingerprint: 'first', path: '/tmp/tmux-first', device: 1, inode: 1 };
+    const second: SocketRef = { fingerprint: 'second', path: '/tmp/tmux-second', device: 1, inode: 2 };
+    const outageSince = Date.parse('2026-11-18T20:00:00.000Z');
+    let firstUnavailable = false;
+    let firstPanes = [{ paneId: '%1', sessionId: '$1', pid: 101, path: '/tmp', title: 'First' }];
+    let secondTitle = 'Second';
+    const tmux = {
+      // pair the inventory status with the exact read
+      listPaneInventory: async (socket: SocketRef) => socket.fingerprint === first.fingerprint && firstUnavailable
+        ? { status: 'unavailable' }
+        : { status: 'available', panes: socket.fingerprint === first.fingerprint ? firstPanes : [{ paneId: '%2', sessionId: '$2', pid: 202, path: '/tmp', title: secondTitle }] },
+      markSessionPlace: async () => true,
+      socketHealthNow: () => new Map([
+        [first.path, firstUnavailable
+          ? { fingerprint: first.fingerprint, status: 'unavailable' as const, since: outageSince, lastHealthyAt: outageSince - 1_000 }
+          : { fingerprint: first.fingerprint, status: 'healthy' as const, lastHealthyAt: outageSince - 1_000 }],
+        [second.path, { fingerprint: second.fingerprint, status: 'healthy' as const, lastHealthyAt: outageSince - 1_000 }]
+      ])
+    };
+    const service = new DiscoveryService(socketFinder([first, second]), tmux as never, processInspector());
+
+    const healthy = await service.dashboard(false, true);
+    expect(healthy.agents.map(agent => agent.id)).toEqual(['first:%1', 'second:%2']);
+    expect(healthy).not.toHaveProperty('tmuxOutage');
+
+    firstUnavailable = true;
+    secondTitle = 'Second updated';
+    const steps: Record<string, number> = {};
+    const degraded = await service.dashboard(false, true, steps);
+    expect(degraded.tmuxOutage).toMatchObject({ unavailableSockets: 1, since: '2026-11-18T20:00:00.000Z' });
+    expect(steps).not.toHaveProperty('discovery.worktrees');
+    expect(degraded.tmuxOutage?.lastHealthyAt).toEqual(expect.any(String));
+    expect(degraded.tmuxLastKnownAgents).toMatchObject([{ id: 'first:%1', title: 'First', stale: true }]);
+    expect(degraded.agents.some(agent => agent.id === 'first:%1')).toBe(false);
+    expect(degraded.agents.find(agent => agent.id === 'second:%2')).toMatchObject({ title: 'Second updated' });
+    expect(await service.snapshotTarget('first:%1')).toBeUndefined();
+    expect(await service.snapshotTarget('second:%2')).toBeDefined();
+
+    firstUnavailable = false;
+    firstPanes = [];
+    const recovered = await service.dashboard(false, true);
+    expect(recovered).not.toHaveProperty('tmuxOutage');
+    expect(recovered.agents.map(agent => agent.id)).toEqual(['second:%2']);
+  });
+
   it('reports commits available from the configured branch upstream', async () => {
     const command = vi.fn(async (_binary: string, args: string[]) => args.includes('rev-parse')
       ? { code: 0, stdout: 'origin/feature\n' }

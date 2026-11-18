@@ -184,6 +184,10 @@ export class DiscoveryService {
   private socketSnapshot: SocketRef[] = [];
   private socketsRefreshedAt = 0;
   private socketRefreshInFlight?: Promise<SocketRef[]>;
+  private unavailableSocketFingerprints = new Set<string>();
+  private tmuxOutageSince?: number;
+  private lastTmuxHealthyAt?: number;
+  private readonly lastKnownTmuxAgents = new Map<string, TmuxAgent>();
   private dashboardSnapshot?: { refreshedAt: number; value: Dashboard };
   private dashboardRefreshInFlight?: Promise<Dashboard>;
   private worktreeSnapshot: Worktree[] = [];
@@ -401,7 +405,22 @@ export class DiscoveryService {
     const sockets = await this.sockets(force);
     // dashboard command connections follow the discovered socket inventory
     this.tmux.retainSockets?.(sockets);
-    const panes = (await Promise.all(sockets.map(async (socket) => (await this.tmux.listPanes(socket, { backoffMissingServer: !force })).map(pane => ({ ...pane, socket }))))).flat();
+    const listings = await Promise.all(sockets.map(async socket => ({
+      socket,
+      // legacy injected readers only model complete listings
+      inventory: this.tmux.listPaneInventory === undefined
+        ? { status: 'available' as const, panes: await this.tmux.listPanes(socket) }
+        : await this.tmux.listPaneInventory(socket)
+    })));
+    const health = this.tmux.socketHealthNow?.();
+    const unavailable = new Set<string>();
+    // completeness belongs to this read, not a previous or concurrent health record
+    for (const { socket, inventory } of listings) {
+      if (inventory.status === 'unavailable') unavailable.add(socket.fingerprint);
+    }
+    this.observeTmuxHealth(sockets, health, unavailable);
+    // incomplete listings cannot publish targets, even when some rows parsed successfully
+    const panes = listings.flatMap(({ socket, inventory }) => inventory.status === 'available' ? inventory.panes.filter(pane => pane.dead !== true).map(pane => ({ ...pane, socket })) : []);
     const panePids = new Map<string, number>();
     const agentPids = new Map<string, number>();
     const paneCwds = new Map<string, string>();
@@ -475,6 +494,27 @@ export class DiscoveryService {
     this.snapshotEpoch = epoch;
     this.generation++;
     return agents;
+  }
+
+  // retain one honest aggregate outage without treating an expected empty inventory as degraded
+  private observeTmuxHealth(sockets: readonly SocketRef[], health: ReturnType<TmuxAdapter['socketHealthNow']> | undefined, unavailable: ReadonlySet<string>): void {
+    this.unavailableSocketFingerprints = new Set(unavailable);
+    // the earliest current socket failure anchors this degraded period
+    if (unavailable.size > 0) {
+      const started = sockets.flatMap(socket => {
+        const observed = health?.get(socket.path);
+        return observed?.fingerprint === socket.fingerprint && observed.status === 'unavailable' ? [observed.since] : [];
+      });
+      this.tmuxOutageSince ??= started.length === 0 ? Date.now() : Math.min(...started);
+      return;
+    }
+    const allObservedHealthy = health === undefined || sockets.every(socket => {
+      const observed = health.get(socket.path);
+      return observed?.fingerprint === socket.fingerprint && observed.status === 'healthy';
+    });
+    // a complete nonempty inventory proves recovery; no sockets is a valid idle state
+    if (sockets.length > 0 && allObservedHealthy) this.lastTmuxHealthyAt = Date.now();
+    this.tmuxOutageSince = undefined;
   }
   // resolve known panes without blocking on dashboard enrichment
   async target(id: string, force = false): Promise<{ agent: TmuxAgent; socket: SocketRef } | undefined> {
@@ -806,7 +846,11 @@ export class DiscoveryService {
     const value = this.buildDashboard(force, freshAgents, steps)
       .then(dashboard => {
         // publish only the newest build without re-aging an older agent snapshot
-        if (this.dashboardRefreshInFlight === value) this.dashboardSnapshot = { refreshedAt: startedAt, value: dashboard };
+        if (this.dashboardRefreshInFlight === value) {
+          this.dashboardSnapshot = { refreshedAt: startedAt, value: dashboard };
+          // only a complete published dashboard becomes the display fallback
+          if (dashboard.tmuxOutage === undefined) this.rememberTmuxAgents(dashboard.agents);
+        }
         return dashboard;
       })
       .finally(() => {
@@ -907,6 +951,21 @@ export class DiscoveryService {
   // enrich live agent state with independently cached worktree metadata
   private async buildDashboard(force = false, freshAgents = false, steps?: Record<string, number>): Promise<Dashboard> {
     const discovered = [...await timed(steps, 'discovery.paneScan', () => this.refresh(force, freshAgents)), ...await timed(steps, 'discovery.structuredAgents', () => this.structuredAgents())];
+    // do not make the recovery screen wait for git, question or place enrichment
+    if (this.tmuxOutageSince !== undefined) {
+      const previous = this.dashboardSnapshot?.value;
+      return {
+        generation: this.generation, serverStartedAt: this.serverStartedAt, adapters: adapterCapabilities(this.adapters), agents: discovered,
+        projects: previous?.projects ?? [], places: previous?.places ?? [],
+        tmuxOutage: {
+          unavailableSockets: this.unavailableSocketFingerprints.size,
+          since: new Date(this.tmuxOutageSince).toISOString(),
+          ...(this.lastTmuxHealthyAt === undefined ? {} : { lastHealthyAt: new Date(this.lastTmuxHealthyAt).toISOString() })
+        },
+        tmuxLastKnownAgents: [...this.lastKnownTmuxAgents.values()].filter(agent => this.unavailableSocketFingerprints.has(agent.pane.socketFingerprint))
+          .map(agent => ({ ...agent, stale: true }))
+      };
+    }
     let worktrees = await timed(steps, 'discovery.worktrees', () => this.worktrees(force));
     // a `git worktree add` from a terminal appears within one tick: if a live agent sits
     // in a checkout we do not know yet whose repository is a configured Project, re-scan once
@@ -1033,6 +1092,16 @@ export class DiscoveryService {
       return { ...agent, hasMessageQuestion: true as const, ...(sourceKey === undefined ? {} : { messageReplySuggestionKey: sourceKey }) };
     }));
     return { generation: this.generation, serverStartedAt: this.serverStartedAt, adapters: adapterCapabilities(this.adapters), agents: presentedAgents, projects, places: listed.map(place => this.placeView(place, shellCounts)) };
+  }
+
+  // cache only rows from a complete inventory for display, never for targeting
+  private rememberTmuxAgents(agents: readonly Agent[]): void {
+    this.lastKnownTmuxAgents.clear();
+    // structured agents have independent lifetimes
+    for (const agent of agents) {
+      // keep only exact pane identities
+      if (agent.transport === 'tmux' && agent.pane !== undefined) this.lastKnownTmuxAgents.set(agent.id, { ...agent, pane: agent.pane });
+    }
   }
 
   // The directory-Project or Scratch Place with this id, as the current dashboard lists it (with
