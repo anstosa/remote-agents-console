@@ -5,6 +5,7 @@ type VoiceWindow = typeof window & {
     speech: { starts: number; aborts: number };
     audio: Array<{ path: string; volume: number }>;
     emit: (transcript: string) => void;
+    emitLate: (transcript: string) => void;
     end: () => void;
     fail: (error: string) => void;
   };
@@ -35,6 +36,7 @@ async function installVoiceMocks(page: Page, options: Pick<VoiceOptions, 'withRe
     const speech = { starts: 0, aborts: 0 };
     const audio: Array<{ path: string; volume: number }> = [];
     let active: MockSpeechRecognition | undefined;
+    let lastStarted: MockSpeechRecognition | undefined;
     class MockSpeechRecognition {
       continuous = false;
       interimResults = false;
@@ -46,7 +48,7 @@ async function installVoiceMocks(page: Page, options: Pick<VoiceOptions, 'withRe
       start() {
         speech.starts += 1;
         if (startFailure) throw new DOMException('speech start failed', 'NotAllowedError');
-        active = this;
+        active = lastStarted = this;
       }
       // close the active recognition without a microphone
       abort() {
@@ -94,6 +96,8 @@ async function installVoiceMocks(page: Page, options: Pick<VoiceOptions, 'withRe
       audio,
       // deliver one final transcript
       emit: (transcript: string) => active?.onresult?.({ resultIndex: 0, results: [[{ transcript }]] }),
+      // deliver a result even after the last recognizer was aborted
+      emitLate: (transcript: string) => lastStarted?.onresult?.({ resultIndex: 0, results: [[{ transcript }]] }),
       // model a recoverable recognition end
       end: () => {
         const ended = active;
@@ -296,6 +300,24 @@ test('swipe toggles dictation with one cue, bounce and active indicator per tran
   await expect(prompt).not.toHaveClass(/voice-listening/u);
   expect((await voiceState(page)).audio).toEqual(['/dictation-start.wav', '/dictation-stop.wav', '/dictation-start.wav', '/dictation-stop.wav']);
   await expect.poll(() => page.evaluate(() => (window as unknown as VoiceWindow).__voiceBounce?.count)).toBe(4);
+});
+
+// clearing the draft invalidates the recognition instance that owned its text
+test('clearing the prompt stops dictation and ignores late results', async ({ page }) => {
+  await mountVoicePage(page);
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await prompt.fill('typed');
+  await swipePrompt(page, prompt, 0, -64);
+  await page.evaluate(() => (window as unknown as VoiceWindow).__voiceTest.emit('dictated'));
+  await expect(prompt).toHaveValue('typed dictated');
+
+  await prompt.press('Control+c');
+  await expect(prompt).toHaveValue('');
+  await page.evaluate(() => (window as unknown as VoiceWindow).__voiceTest.emitLate('late result'));
+  await expect(prompt).toHaveValue('');
+  await expect(prompt).toBeFocused();
+  await expect(page.getByRole('status', { name: 'Dictation recording' })).toHaveCount(0);
+  expect(await voiceState(page)).toEqual({ speech: { starts: 1, aborts: 1 }, audio: ['/dictation-start.wav', '/dictation-stop.wav'] });
 });
 
 // keyboard dismissal does not depend on browser speech support

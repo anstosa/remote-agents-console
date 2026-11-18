@@ -161,9 +161,34 @@ and configure any additional Access policy deliberately. See Cloudflare's
 
 ### Keyboard shortcuts
 
-The web app's shortcuts work like tmux key tables. `root` is always active, and `C-b` switches to the `prefix` table for one key: `c` opens a Terminal, `1`–`9` and `0` go to a panel, `n`/`p`/`l` step through panels, `w` and `s` pick a Workspace, `z` expands the current panel, `x` closes it after a y/n question, `g` opens Lazygit, `:` opens the command palette and `?` lists every binding. Press `C-b` twice to send it to the focused terminal. A table waits 10 seconds for its key, and a floating indicator above the active split’s input controls shows shortcut attempts in purple and consumed bindings in green. Ordinary typing in prompts, notes, terminal output, and other fields stays hidden, as do modal and shortcut-recorder keystrokes. Leader keys remain visible while their table waits; the completed command appears alongside its leader and the whole sequence fades together. `Ctrl+?` or **Settings → Keyboard shortcuts → View active shortcuts** opens the bindings sheet, which groups every command’s shortcuts together. Direct bindings have no table label; prefixed bindings show their prefix table. Disabled commands keep their description struck through and hide their keys and edit buttons. The sheet is read-only; **Edit in Settings** opens the server’s dedicated Keyboard shortcuts settings section. Simultaneous keys are separated by **+**, with each key in its own outline and familiar modifier labels: Ctrl, Alt, Shift, and Win on Windows, Cmd on macOS, or Super elsewhere.
+The web app's shortcuts work like tmux key tables. `root` is always active, and `C-b` switches to the `prefix` table for one key: `c` opens a Terminal, `1`–`9` and `0` go to a panel, `n`/`p`/`l` step through panels, `w` and `s` pick a Workspace, `z` expands the current panel, `x` closes it after a y/n question, `g` opens Lazygit, `:` opens the command palette and `?` lists every binding. Press `C-b` twice to send it to the focused terminal. A table waits 10 seconds for its key, and a floating indicator above the active split’s input controls shows shortcut attempts in purple and consumed bindings in green. Ordinary typing in prompts, notes, terminal output, and other fields stays hidden, as do modal and shortcut-recorder keystrokes. Leader keys remain visible while their table waits; the completed command appears alongside its leader and the whole sequence fades together. `Ctrl+?` or **Settings → Keyboard shortcuts → View active shortcuts** opens the bindings sheet, which groups every command’s shortcuts together. Global direct bindings have no table label; focus bindings show their condition and prefixed bindings show their prefix table. Disabled commands keep their description struck through and hide their keys and edit buttons. The sheet is read-only; **Edit in Settings** opens the server’s dedicated Keyboard shortcuts settings section. Simultaneous keys are separated by **+**, with each key in its own outline and familiar modifier labels: Ctrl, Alt, Shift, and Win on Windows, Cmd on macOS, or Super elsewhere.
 
-In **Settings → Keyboard shortcuts**, select the pencil beside a binding, press the replacement keys and select **Apply shortcut** to stage the edit. **+ Add** stages another assignment; the red trash icon removes one. **Use prefix** chooses a direct shortcut or a leader table, and a custom dropdown selects among configured prefix tables. **Disable**, **Enable**, **Reset** and **Reset all shortcuts** also stage config changes. Reset restores built-in assignments rather than browser preferences. Browser-reserved and unsafe typing keys remain rejected; a chord already assigned to another command cannot be overwritten by the recorder.
+In **Settings → Keyboard shortcuts**, select the pencil beside a binding, press the replacement keys and select **Apply shortcut** to stage the edit. **+ Add** stages another assignment; the red trash icon removes one. **Use prefix** chooses a direct shortcut or a leader table. For direct shortcuts, **Condition** chooses where the key applies; for prefixed shortcuts, select the leader table. **Disable**, **Enable**, **Reset** and **Reset all shortcuts** also stage config changes. Reset restores built-in assignments rather than browser preferences. Browser-reserved and unsafe typing keys remain rejected; the same chord can be used in different tables but cannot overwrite another command in the same table.
+
+Condition tables apply without a leader:
+
+| Condition | Key table | Applies when |
+| --- | --- | --- |
+| Text selected | `when:text-selected` | The focused field or surface has an actual selection. `Ctrl+C`, `Cmd+C`, and `Ctrl+Shift+C` copy selected Agent or Terminal output here; normal editor copy still belongs to the browser. |
+| Prompt focused | `when:prompt` | The Agent's prompt text box owns the keyboard. Defaults include inserting a newline, saving the draft as a Note, and `Ctrl+C` to clear an unselected draft. |
+| Terminal input focused | `when:terminal-input` | A dedicated Terminal's shell input owns the keyboard. This excludes its draft editor and Agent output. |
+| Terminal selection mode | `when:terminal-selection` | A dedicated Terminal is in explicit or active selection mode, even before the selection contains text. |
+| Terminal focused | `when:terminal` | Focus is anywhere within a dedicated Terminal panel, across its input, selection, draft, and chrome modes. |
+| Agent focused | `when:agent` | Focus is within the Agent panel, including its prompt and output. |
+| Browser focused | `when:browser` | Focus is in RAC's Browser panel controls. Keys inside the embedded site stay with that site. |
+| Note editor focused | `when:note-editor` | The editable Note content text area owns the keyboard. |
+| Code/diff focused | `when:code` | Focus is within Code comparison or the read-only File preview. |
+| Files focused | `when:files` | Focus is within the Files panel. |
+
+**Text selected** is the most specific condition. A specific focus or mode such as **Prompt
+focused**, **Terminal input focused**, or **Terminal selection mode** runs before its broader
+panel condition, with global `root` last. Agent output belongs to the Agent panel, not the
+separate Terminal panels. An unbound or declined action falls through to the next applicable
+table. A pending prefix or confirmation still has first priority.
+
+Existing explicit `root` settings for a shortcut that moved to a condition still apply.
+An old removal or replacement suppresses that scoped default unless the scoped key is
+configured explicitly. Existing remap keys stay where they were configured.
 
 The application config file’s `keys` field is the source of truth for this server. All shortcut changes use the top-right **Save changes** button together with other staged Settings edits; they never write browser-local shortcut preferences. **Discard changes** restores the saved file values, and failed validation or a revision conflict retains the draft. Keyboard changes require a server restart: the non-dismissable **Restart pending** notice supplies the explicit restart action, while the quick reference and active shortcuts continue to use the running server’s bindings until then. Legacy browser overrides are ignored and are not automatically promoted to server-wide settings. **Advanced key tables and terminal commands** edits the same file-backed keys, including exact terminal commands and protected credential values. The recorder preserves full unmasked terminal commands when moving them; masked commands must be edited through the advanced controls rather than copied from a redacted dashboard label. Native editor navigation and terminal/CLI keys are unchanged.
 
@@ -173,6 +198,7 @@ The top-level `keys` adds tables and bindings, replaces default bindings, and re
 "keys": {
   "root":   { "C-b": { "table": "prefix" }, "C-g": { "table": "git" } },
   "prefix": { "x": null },
+  "when:prompt": { "C-c": null, "C-M-k": "clear-prompt" },
   "git":    { "l": { "terminal": "lazygit", "reuse": true }, "d": { "terminal": "gh dash" } }
 }
 ```
@@ -180,7 +206,7 @@ The top-level `keys` adds tables and bindings, replaces default bindings, and re
 - Chords use tmux's syntax: `C-` (Ctrl), `M-` (Alt), `S-` (Shift) and `Super-` (Win on Windows, Cmd on macOS, Super elsewhere), then a character (`?`, `%`, `L`) or a named key (`Left`, `Space`, `F1`). A key matches the character typed, so an uppercase letter is the same as `S-` plus the lowercase letter.
 - A binding is an action name such as `"next-panel"` (the command palette lists them), `{ "table": name }`, or `{ "terminal": command, "reuse"?: bool }`. A terminal binding opens a Terminal in the current Workspace that runs the command and closes when it exits. With `reuse`, the key focuses that Terminal while it runs instead of opening another. The browser sends only the binding's table and key; the command stays on the server.
 - `navigate-left` and `navigate-right` work like christoomey/vim-tmux-navigator. When the focused Terminal is running vim, the key goes to vim. Otherwise they move to the previous or next panel, wrapping at the ends. For vim to hand back at its edge, configure it to write `ESC ] 7337 ; navigate ; left|right BEL` to its terminal when there is no split in that direction. Bind them in `root`, for example `"C-h": "navigate-left", "C-l": "navigate-right"`.
-- A binding in `root` needs `C-`, `M-` or `Super-`, or a function key, so it cannot steal ordinary typing.
+- A binding in `root` or a focus table needs `C-`, `M-` or `Super-`, or a function key, so it cannot steal ordinary typing. `Shift+Enter` is also allowed for **Insert a newline in the prompt** in `when:prompt`.
 - The console refuses to start on a chord a browser keeps for itself (`C-t`, `C-n`, `C-w`, `C-q`, `C-S-t`, `C-S-n`, `C-S-w`, `C-Tab`, `C-S-Tab`, `C-PageUp`, `C-PageDown`, `C-S-p`, `C-S-u`, `C-]`), and on a binding to a table that does not exist.
 
 When `remoteServers` connects multiple console instances, configure the same

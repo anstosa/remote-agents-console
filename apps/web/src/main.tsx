@@ -3562,6 +3562,21 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
       selectionActions
     });
   };
+  // clear only the focused draft and let native copy win over a selection
+  useKeyAction('clear-prompt', event => {
+    const input = promptInput.current;
+    // a remap must not clear other editors or selected text
+    if (event === undefined || input === null || keyTarget(event) !== input || input.selectionStart !== input.selectionEnd) return false;
+    // retire dictation before any late speech result can restore the draft
+    stopVoice();
+    promptValue.current = '';
+    speechPrefix.current = '';
+    speechSegments.current.clear();
+    historyIndex.current = undefined;
+    historyDraft.current = '';
+    setValue('');
+    setCommandToken(undefined);
+  });
   const updatePrompt = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     const next = event.target.value;
     setValue(next);
@@ -6718,7 +6733,8 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
     terminalPasters.set(paneId, handle.paste);
     exitTerminalInput.set(paneId, blur);
     terminalFocusers.set(paneId, handle.focus);
-    const onFocusIn = () => setFocused(true);
+    // selection focus on the canvas does not activate shell input
+    const onFocusIn = (event: FocusEvent) => { if (event.target !== container) setFocused(true); };
     // preserve terminal mode while its contextual menu owns focus
     const onFocusOut = () => { if (!contextMenuOwnsFocus(container)) setFocused(false); };
     container.addEventListener('focusin', onFocusIn);
@@ -6776,7 +6792,7 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
       ? <form className="pane-rename" onSubmit={event => { event.preventDefault(); void submitRename(); }} onKeyDown={event => { event.stopPropagation(); if (event.key === 'Escape') { event.preventDefault(); setRenaming(false); } }}><input aria-label={`Name for terminal ${name}`} value={renameDraft} maxLength={maxTerminalNameLength} autoFocus disabled={renamePending} onChange={event => setRenameDraft(event.target.value)} /><button type="submit" className={renamePending ? 'progress-border progress-blue' : undefined} aria-busy={renamePending || undefined} disabled={renamePending || renameDraft.trim() === ''} aria-label="Save terminal name" title="Save terminal name"><ProgressRing busy={renamePending} /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg></button><button type="button" disabled={renamePending} aria-label="Cancel terminal rename" title="Cancel" onClick={() => setRenaming(false)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></form>
       : <span className="pane-title" title={name}>{name}</span>}
     </>} />
-    <div className="terminal-canvas" ref={canvas} aria-label={`Terminal ${name}`} />
+    <div className="terminal-canvas" ref={canvas} tabIndex={-1} aria-label={`Terminal ${name}`} />
     {/* editable actions remain outside the pty until explicit submission */}
     <TerminalCommandDraft draftKey={commandDraftKey} onSubmit={text => {
       // leave selection mode before intentionally sending the edited command
@@ -7742,7 +7758,10 @@ function Log({ id, workspaceKey, onTurnOff, embedded = false, codexScrollControl
     exitTerminalInput.set(id, exitInput);
     // Focusing the pane drives `.input-active` (which collapses the composer to the
     // terminal helper keys on a phone); blurring it, or focusing the composer, reverts.
-    const onFocusIn = () => { if (!disposed) setInputActive(true); };
+    const onFocusIn = (event: FocusEvent) => {
+      // canvas focus in selection mode must not switch away from the composer
+      if (!disposed && event.target !== canvas.current) setInputActive(true);
+    };
     // preserve output mode while its contextual menu owns focus
     const onFocusOut = () => { if (!disposed && canvas.current !== null && !contextMenuOwnsFocus(canvas.current)) setInputActive(false); };
     canvas.current!.addEventListener('focusin', onFocusIn);
@@ -7847,7 +7866,7 @@ function Log({ id, workspaceKey, onTurnOff, embedded = false, codexScrollControl
   </div>, document.body);
   // keep task transitions distinct from shared connection skeletons
   const loadingOverlay = processing && <div className="log-loading progress-border progress-peach" role="status" aria-busy="true" aria-label={processingLabel}><ProgressRing busy /><strong>{processingLabel}</strong>{processingDetail && <span>{processingDetail}</span>}</div>;
-  const outputBody = <><div className="log-canvas" ref={canvas} aria-label="Live log" />{processing && <div className="log-stale-overlay" aria-hidden="true" />}</>;
+  const outputBody = <><div className="log-canvas" ref={canvas} tabIndex={-1} aria-label="Live log" />{processing && <div className="log-stale-overlay" aria-hidden="true" />}</>;
   // the embedded advisor floats its status over the output; the agent panel's header shows it
   if (header === undefined) return <><div className={`log-output${inputActive ? ' input-active' : ''}${selectionActive ? ' selection-active' : ''}`}>{outputBody}{loadingOverlay}<span className={`status log-status ${visibleStatus.toLowerCase()}`}>{visibleStatus}</span></div>{selectionActions}</>;
   // shared stream skeletons stay in output while task transitions cover the split

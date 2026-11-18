@@ -16,6 +16,51 @@ export const isTableBinding = (binding: KeyBinding | null | undefined): binding 
 export const isTerminalBinding = (binding: KeyBinding | null | undefined): binding is { terminal: string; reuse?: boolean } => binding != null && typeof binding === 'object' && 'terminal' in binding;
 export type ChordEvent = { key: string; code: string; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean; isComposing?: boolean };
 
+// register focus-condition names and settings labels in their display order
+const focusKeyTableMetadata = [
+  { name: 'when:prompt', label: 'Prompt focused' },
+  { name: 'when:terminal', label: 'Terminal focused' },
+  { name: 'when:agent', label: 'Agent focused' },
+  { name: 'when:browser', label: 'Browser focused' },
+  { name: 'when:note-editor', label: 'Note editor focused' },
+  { name: 'when:code', label: 'Code/diff focused' },
+  { name: 'when:files', label: 'Files focused' },
+  { name: 'when:terminal-input', label: 'Terminal input focused' },
+  { name: 'when:terminal-selection', label: 'Terminal selection mode' },
+  { name: 'when:text-selected', label: 'Text selected' }
+] as const;
+export type FocusKeyTableName = typeof focusKeyTableMetadata[number]['name'];
+type MovedRootDefault = { table: FocusKeyTableName; binding: string };
+const movedRootDefaults: Readonly<Record<string, MovedRootDefault>> = {
+  'C-c': { table: 'when:text-selected', binding: 'copy-selection' },
+  'C-S-c': { table: 'when:text-selected', binding: 'copy-selection' },
+  'Super-c': { table: 'when:text-selected', binding: 'copy-selection' },
+  'C-Enter': { table: 'when:prompt', binding: 'prompt-newline' },
+  'S-Enter': { table: 'when:prompt', binding: 'prompt-newline' },
+  'C-S-Enter': { table: 'when:prompt', binding: 'prompt-newline' },
+  'Super-Enter': { table: 'when:prompt', binding: 'prompt-newline' },
+  'C-s': { table: 'when:prompt', binding: 'save-note' },
+  'C-S-s': { table: 'when:prompt', binding: 'save-note' },
+  'Super-s': { table: 'when:prompt', binding: 'save-note' },
+  'S-Super-s': { table: 'when:prompt', binding: 'save-note' }
+};
+// expose the legacy root coordinate that now inherits from a focus condition
+export const movedRootDefault = (chord: string): MovedRootDefault | undefined => Object.prototype.hasOwnProperty.call(movedRootDefaults, chord) ? movedRootDefaults[chord] : undefined;
+const nativeFocusDefaults: Readonly<Partial<Record<FocusKeyTableName, Readonly<Record<string, KeyBinding>>>>> = { 'when:prompt': { 'C-c': 'clear-prompt' } };
+// derive every condition's defaults from native bindings plus moved root bindings
+const focusKeyTables: readonly { name: FocusKeyTableName; label: string; bindings: Readonly<Record<string, KeyBinding>> }[] = focusKeyTableMetadata.map(table => ({
+  ...table,
+  bindings: {
+    ...(nativeFocusDefaults[table.name] ?? {}),
+    ...Object.fromEntries(Object.entries(movedRootDefaults).filter(([, moved]) => moved.table === table.name).map(([chord, moved]) => [chord, moved.binding]))
+  }
+}));
+const focusKeyTableLabels = new Map<string, string>(focusKeyTables.map(table => [table.name, table.label]));
+// name a built-in focus condition without admitting arbitrary colon tables
+export const focusKeyTableLabel = (table: string): string | undefined => focusKeyTableLabels.get(table);
+// distinguish automatically selected focus tables from ordinary leader tables
+export const isFocusKeyTable = (table: string): boolean => focusKeyTableLabel(table) !== undefined;
+
 // Every built-in action, with the description the bindings sheet and the palette show.
 // `repeat` actions stay live for a moment after they run, like tmux `bind -r`.
 export const keyActions: Record<string, { description: string; repeat?: true }> = {
@@ -52,6 +97,7 @@ export const keyActions: Record<string, { description: string; repeat?: true }> 
   'font-smaller': { description: 'Smaller terminal font' },
   'font-reset': { description: 'Reset terminal font size' },
   'copy-selection': { description: 'Copy the selected output' },
+  'clear-prompt': { description: 'Clear prompt' },
   'save-note': { description: 'Save the prompt draft as a Note' },
   'prompt-newline': { description: 'Insert a newline in the prompt' }
 };
@@ -67,10 +113,7 @@ export const defaultKeyTables: Record<string, Record<string, KeyBinding>> = {
     'C-=': 'font-larger', 'C-+': 'font-larger', 'Super-=': 'font-larger', 'Super-+': 'font-larger',
     'C--': 'font-smaller', 'Super--': 'font-smaller',
     'C-0': 'font-reset', 'Super-0': 'font-reset',
-    'C-S-c': 'copy-selection', y: 'copy-selection', 'C-c': 'copy-selection', 'Super-c': 'copy-selection',
-    // prompt handlers decline these keys outside the composer
-    'C-Enter': 'prompt-newline', 'S-Enter': 'prompt-newline', 'C-S-Enter': 'prompt-newline', 'Super-Enter': 'prompt-newline',
-    'C-s': 'save-note', 'C-S-s': 'save-note', 'Super-s': 'save-note', 'S-Super-s': 'save-note'
+    y: 'copy-selection'
   },
   prefix: {
     c: 'new-terminal',
@@ -86,7 +129,8 @@ export const defaultKeyTables: Record<string, Record<string, KeyBinding>> = {
     g: { terminal: 'lazygit', reuse: true },
     ':': 'command-palette',
     '?': 'show-bindings'
-  }
+  },
+  ...Object.fromEntries(focusKeyTables.map(table => [table.name, { ...table.bindings }]))
 };
 
 // Chords a browser keeps for itself or never delivers, from the chord probe in Firefox 155 and
@@ -155,6 +199,8 @@ export function eventChord(event: ChordEvent): string | undefined {
 }
 
 const tableName = /^[a-z][a-z0-9-]{0,31}$/u;
+// accept ordinary operator tables plus the fixed focus-condition namespace
+export const isKeyTableName = (name: string): boolean => tableName.test(name) || isFocusKeyTable(name);
 const maxTables = 32;
 const maxBindingsPerTable = 200;
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -190,7 +236,7 @@ export function parseKeysConfig(input: unknown): KeysConfig {
   if (names.length > maxTables) errors.push(`keys: at most ${maxTables} tables`);
   for (const name of names) {
     const table = input[name];
-    if (!tableName.test(name)) { errors.push(`keys.${name}: a table name is lowercase letters, digits and dashes`); continue; }
+    if (!isKeyTableName(name)) { errors.push(`keys.${name}: a table name is lowercase letters, digits and dashes, or a built-in focus table`); continue; }
     if (!isRecord(table)) { errors.push(`keys.${name}: a table is an object of chord to binding`); continue; }
     if (Object.keys(table).length > maxBindingsPerTable) errors.push(`keys.${name}: at most ${maxBindingsPerTable} bindings`);
     const parsed: Record<string, KeyBinding | null> = {};
@@ -203,9 +249,10 @@ export function parseKeysConfig(input: unknown): KeysConfig {
       if (hasOwn(parsed, chord)) { errors.push(`${where}: binds ${chord} twice`); continue; }
       const binding = parseBinding(value);
       if (Array.isArray(binding)) { errors.push(...binding.map(reason => `${where}: ${reason}`)); continue; }
-      // a root binding fires on every keystroke, so it must not steal ordinary typing
-      if (name === 'root' && binding !== null && !/^(?:C-|M-|(?:S-)?Super-)|^(?:S-)?F\d+$/u.test(chord)) {
-        errors.push(`${where}: a root binding needs C-, M- or Super-, or a function key, so it cannot steal typing`);
+      // direct bindings fire without a leader, so they must not steal ordinary typing
+      const promptShiftEnter = name === 'when:prompt' && chord === 'S-Enter' && binding === 'prompt-newline';
+      if ((name === 'root' || isFocusKeyTable(name)) && binding !== null && !promptShiftEnter && !/^(?:C-|M-|(?:S-)?Super-)|^(?:S-)?F\d+$/u.test(chord)) {
+        errors.push(`${where}: a ${name === 'root' ? 'root' : 'focus'} binding needs C-, M- or Super-, or a function key, so it cannot steal typing`);
         continue;
       }
       parsed[chord] = binding;
@@ -216,6 +263,7 @@ export function parseKeysConfig(input: unknown): KeysConfig {
   for (const [name, table] of Object.entries(keys)) for (const [chord, binding] of Object.entries(table)) {
     if (!isTableBinding(binding)) continue;
     if (binding.table === 'root') errors.push(`keys.${name}.${chord}: root is always active; switch to another table`);
+    else if (isFocusKeyTable(binding.table)) errors.push(`keys.${name}.${chord}: ${binding.table} is selected automatically and cannot be a switch target`);
     else if (!tables.has(binding.table)) errors.push(`keys.${name}.${chord}: there is no table named ${binding.table}`);
   }
   if (errors.length > 0) throw new Error(errors.join('; '));
@@ -231,7 +279,10 @@ export function resolveKeyTables(keys: KeysConfig | undefined): ResolvedKeyTable
     const overrides = keys !== undefined && hasOwn(keys, name) ? keys[name]! : {};
     const rows: Record<string, KeyRow> = {};
     for (const [chord, binding] of Object.entries(defaults)) {
-      if (!hasOwn(overrides, chord)) rows[chord] = { chord, binding, source: 'default' };
+      const moved = movedRootDefault(chord);
+      const legacyRootOverride = moved?.table === name && !hasOwn(overrides, chord) && keys !== undefined && hasOwn(keys.root ?? {}, chord);
+      if (legacyRootOverride) rows[chord] = { chord, binding, source: 'removed' };
+      else if (!hasOwn(overrides, chord)) rows[chord] = { chord, binding, source: 'default' };
       else if (overrides[chord] === null) rows[chord] = { chord, binding, source: 'removed' };
       else rows[chord] = { chord, binding: overrides[chord]!, source: 'replaced' };
     }

@@ -1,4 +1,4 @@
-import { defaultKeyTables, isTableBinding, parseChord, parseKeysConfig, resolveKeyTables, type KeyBinding, type KeyRow, type KeysConfig, type ResolvedKeyTables } from '../../server/src/config/keys.js';
+import { defaultKeyTables, isKeyTableName, isTableBinding, movedRootDefault, parseChord, parseKeysConfig, resolveKeyTables, type KeyBinding, type KeyRow, type KeysConfig, type ResolvedKeyTables } from '../../server/src/config/keys.js';
 import type { SettingsPatch } from './settings/contracts.js';
 
 // browser-local choices are keyed by the server binding's stable original identity
@@ -39,7 +39,6 @@ export type ServerKeyTableEdit =
   | { kind: 'rename-binding'; table: string; from: string; to: string }
   | { kind: 'remove-binding'; table: string; chord: string; mode: 'disable' | 'restore' };
 
-const tableName = /^[a-z][a-z0-9-]{0,31}$/u;
 const maxTables = 32;
 const maxBindingsPerTable = 200;
 const maxAliasesPerBinding = 20;
@@ -212,13 +211,14 @@ export function shortcutOrigin(base: ResolvedKeyTables, overrides: ShortcutOverr
 }
 
 // validate one recorded destination through the shared browser and root-key rules
-export function shortcutValidationError(table: string, chord: string, originalChord: string, originTable = table): string | undefined {
+export function shortcutValidationError(table: string, chord: string, originalChord: string, originTable = table, binding: KeyBinding = 'show-bindings'): string | undefined {
   // an empty recorder value means inherit the original
   if (chord === '') return undefined;
   // only a true root origin may retain its own legacy typing key
   if (table === 'root' && originTable === 'root' && chord === originalChord && hasOwn(defaultKeyTables.root!, chord)) return undefined;
   try {
-    parseKeysConfig({ [table]: { [chord]: 'show-bindings' } });
+    const validationBinding = binding === 'prompt-newline' ? binding : 'show-bindings';
+    parseKeysConfig({ [table]: { [chord]: validationBinding } });
     return undefined;
   } catch (error) {
     return error instanceof Error ? error.message : 'Invalid shortcut';
@@ -240,7 +240,7 @@ const validatedAliases = (value: unknown, originTable: string, original: string)
       : isRecord(alias) && Object.keys(alias).every(field => field === 'table' || field === 'chord') && typeof alias.table === 'string' && typeof alias.chord === 'string'
         ? { table: alias.table, chord: alias.chord }
         : undefined;
-    if (destination === undefined || !tableName.test(destination.table)) continue;
+    if (destination === undefined || !isKeyTableName(destination.table)) continue;
     let canonical: string;
     try { canonical = parseChord(destination.chord); }
     catch { continue; }
@@ -261,7 +261,7 @@ export function validateShortcutOverrides(input: unknown): ShortcutOverrides {
   for (const table of Object.keys(input).slice(0, maxTables)) {
     const storedRows = input[table];
     // ignore malformed table names and values
-    if (!tableName.test(table) || !isRecord(storedRows)) continue;
+    if (!isKeyTableName(table) || !isRecord(storedRows)) continue;
     const rows: Record<string, ShortcutAlias[] | null> = {};
     // bound the number of stored bindings inspected per table
     for (const [original, value] of Object.entries(storedRows).slice(0, maxBindingsPerTable)) {
@@ -664,8 +664,9 @@ export function editServerKeyTables(input: unknown, edit: ServerKeyTableEdit): {
     const binding = copiedStoredBinding(stored);
     const candidate = copiedServerKeys(parsed.keys);
     candidate[edit.table] ??= {};
-    // keep old built-in defaults disabled after moving their binding
-    if (defaultKeyTables[edit.table]?.[from] !== undefined) candidate[edit.table]![from] = null;
+    const leavesDefault = defaultKeyTables[edit.table]?.[from] !== undefined || edit.table === 'root' && movedRootDefault(from) !== undefined;
+    // keep old and moved built-in defaults disabled after moving their binding
+    if (leavesDefault) candidate[edit.table]![from] = null;
     else delete candidate[edit.table]![from];
     candidate[edit.table]![to] = copiedStoredBinding(binding);
     const error = serverKeysError(candidate);
@@ -673,7 +674,7 @@ export function editServerKeyTables(input: unknown, edit: ServerKeyTableEdit): {
     if (error !== undefined) return { error };
     const oldRawChord = parsed.rawChords.get(sourceCoordinate) ?? from;
     const newRawChord = parsed.rawChords.get(`${edit.table}\0${to}`) ?? to;
-    const patches: SettingsPatch[] = [defaultKeyTables[edit.table]?.[from] !== undefined
+    const patches: SettingsPatch[] = [leavesDefault
       ? { op: 'set', path: ['keys', edit.table, oldRawChord], value: null }
       : { op: 'remove', path: ['keys', edit.table, oldRawChord] }];
     patches.push({ op: 'set', path: ['keys', edit.table, newRawChord], value: copiedStoredBinding(binding) });
@@ -708,6 +709,12 @@ const removalPatch = (parsed: ParsedServerShortcuts, id: string, table: string, 
   const storedChord = parsed.rawChords.get(`${table}\0${chord}`);
   // a matching built-in must be disabled rather than uncovered
   if (defaultBinding !== undefined && serverCommandId(defaultBinding, table, chord) === id) return { op: 'set', path: ['keys', table, storedChord ?? chord], value: null };
+  const moved = table === 'root' ? movedRootDefault(chord) : undefined;
+  const configured = parsed.keys.root?.[chord];
+  // a matching legacy root leaf must keep suppressing its moved scoped default
+  if (moved !== undefined && configured !== undefined && configured !== null && serverCommandId(moved.binding, moved.table, chord) === id && serverCommandId(configured, table, chord) === id) {
+    return { op: 'set', path: ['keys', table, storedChord ?? chord], value: null };
+  }
   // configured replacements and additions disappear by removing their leaf
   return { op: 'remove', path: ['keys', table, storedChord ?? chord] };
 };
@@ -746,6 +753,21 @@ export function editServerShortcuts(input: unknown, id: string, edit: ShortcutEd
       // resetting this command restores its defaults and drops its aliases
       if (configuredMatches || defaultMatches) patches.push({ op: 'remove', path: ['keys', table, rawChord] });
     }
+    // reconcile legacy root leaves that suppress defaults now owned by focus tables
+    for (const [chord, binding] of Object.entries(parsed.keys.root ?? {})) {
+      const moved = movedRootDefault(chord);
+      // unrelated legacy coordinates are ordinary root configuration
+      if (moved === undefined || serverCommandId(moved.binding, moved.table, chord) !== id) continue;
+      const rawChord = parsed.rawChords.get(`root\0${chord}`) ?? chord;
+      // reset old disables and same-action assignments by removing the legacy leaf
+      if (binding === null || serverCommandId(binding, 'root', chord) === id) {
+        patches.push({ op: 'remove', path: ['keys', 'root', rawChord] });
+        continue;
+      }
+      const scopedChord = parsed.rawChords.get(`${moved.table}\0${chord}`) ?? chord;
+      // an unrelated root replacement stays while the moved default is restored explicitly
+      patches.push({ op: 'set', path: ['keys', moved.table, scopedChord], value: moved.binding });
+    }
     return { patches: uniquePatches(patches) };
   }
   // enabling a disabled command is the same scoped reset
@@ -764,7 +786,7 @@ export function editServerShortcuts(input: unknown, id: string, edit: ShortcutEd
   }
   // destinations must use a table known to the current server config
   if (model.tables[edit.table] === undefined) return { error: 'This key table is no longer available.' };
-  const validation = shortcutValidationError(edit.table, edit.chord, command.origins[0]?.chord ?? edit.chord, command.origins[0]?.table ?? edit.table);
+  const validation = shortcutValidationError(edit.table, edit.chord, command.origins[0]?.chord ?? edit.chord, command.origins[0]?.table ?? edit.table, command.binding);
   // apply shared browser and root-key constraints
   if (validation !== undefined) return { error: validation.replace(/\broot\b/gu, 'non-prefixed') };
   const occupant = model.tables[edit.table]![edit.chord];

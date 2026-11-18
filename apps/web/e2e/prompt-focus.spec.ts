@@ -89,9 +89,14 @@ test('focusing and submitting the prompt keeps keyboard input in the composer', 
   await expect(prompt).toBeFocused();
   await expect(outputPanel).not.toHaveClass(/input-active/u);
   await expect(page.locator('.xterm-helper-textarea:focus')).toHaveCount(0);
-  await prompt.fill('Keep this prompt');
+  // clear the draft and its command completion without leaving the composer
+  await prompt.fill('/discard');
+  await expect(prompt).toHaveAttribute('aria-expanded', 'true');
   await prompt.press('Control+c');
-  await expect(prompt).toHaveValue('Keep this prompt');
+  await expect(prompt).toHaveValue('');
+  await expect(prompt).toHaveAttribute('aria-expanded', 'false');
+  await expect(prompt).toBeFocused();
+  await expect(queue).toBeDisabled();
 
   await prompt.fill('Queue this prompt');
   await expect(queue).toBeEnabled();

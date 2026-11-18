@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { browserKeysConfig, defaultKeyTables, eventChord, keyActions, parseChord, parseKeysConfig, resolveKeyTables, terminalBindingCommand } from '../src/config/keys.js';
+import { browserKeysConfig, defaultKeyTables, eventChord, focusKeyTableLabel, isFocusKeyTable, isKeyTableName, keyActions, movedRootDefault, parseChord, parseKeysConfig, resolveKeyTables, terminalBindingCommand } from '../src/config/keys.js';
 
 const press = (key: string, modifiers: { ctrl?: boolean; alt?: boolean; shift?: boolean; meta?: boolean; code?: string; isComposing?: boolean } = {}) => ({ key, code: modifiers.code ?? '', ctrlKey: modifiers.ctrl ?? false, altKey: modifiers.alt ?? false, shiftKey: modifiers.shift ?? false, metaKey: modifiers.meta ?? false, isComposing: modifiers.isComposing ?? false });
 
@@ -76,6 +76,29 @@ describe('eventChord', () => {
 });
 
 describe('keys configuration', () => {
+  it('reserves named focus-condition tables without widening custom table names', () => {
+    // verify the labels of every resolved focus table in settings order
+    expect(Object.keys(defaultKeyTables).filter(isFocusKeyTable).map(name => [name, focusKeyTableLabel(name)])).toEqual([
+      ['when:prompt', 'Prompt focused'],
+      ['when:terminal', 'Terminal focused'],
+      ['when:agent', 'Agent focused'],
+      ['when:browser', 'Browser focused'],
+      ['when:note-editor', 'Note editor focused'],
+      ['when:code', 'Code/diff focused'],
+      ['when:files', 'Files focused'],
+      ['when:terminal-input', 'Terminal input focused'],
+      ['when:terminal-selection', 'Terminal selection mode'],
+      ['when:text-selected', 'Text selected']
+    ]);
+    expect(focusKeyTableLabel('when:text-selected')).toBe('Text selected');
+    expect(focusKeyTableLabel('__proto__')).toBeUndefined();
+    expect(isFocusKeyTable('when:agent')).toBe(true);
+    expect(isFocusKeyTable('when:other')).toBe(false);
+    expect(isKeyTableName('custom-table')).toBe(true);
+    expect(isKeyTableName('when:browser')).toBe(true);
+    expect(isKeyTableName('custom:table')).toBe(false);
+  });
+
   it('accepts tables of bindings, canonicalizing their chords', () => {
     const keys = parseKeysConfig({
       root: { 'C-g': { table: 'git' } },
@@ -105,6 +128,17 @@ describe('keys configuration', () => {
     expect(parseKeysConfig({ root: { 'M-1': 'select-panel-1', F2: 'command-palette', 'S-F3': 'show-bindings', 'Super-k': 'next-panel', y: null } })).toEqual({ root: { 'M-1': 'select-panel-1', F2: 'command-palette', 'S-F3': 'show-bindings', 'Super-k': 'next-panel', y: null } });
   });
 
+  it('applies direct-key safety to focus conditions while allowing their remaps', () => {
+    expect(() => parseKeysConfig({ 'when:prompt': { k: 'clear-prompt' } })).toThrow('a focus binding needs C-, M- or Super-');
+    expect(() => parseKeysConfig({ 'when:prompt': { 'S-Enter': 'clear-prompt' } })).toThrow('a focus binding needs C-, M- or Super-');
+    expect(() => parseKeysConfig({ 'when:note-editor': { 'S-Enter': 'prompt-newline' } })).toThrow('a focus binding needs C-, M- or Super-');
+    expect(parseKeysConfig({ 'when:prompt': { 'C-c': null, 'C-k': 'clear-prompt' }, 'when:terminal': { F2: 'command-palette' } })).toEqual({
+      'when:prompt': { 'C-c': null, 'C-k': 'clear-prompt' },
+      'when:terminal': { F2: 'command-palette' }
+    });
+    expect(parseKeysConfig({ 'when:prompt': { 'S-Enter': 'prompt-newline' } })).toEqual({ 'when:prompt': { 'S-Enter': 'prompt-newline' } });
+  });
+
   it('refuses an unknown table, an unknown action and a malformed binding', () => {
     expect(() => parseKeysConfig({ root: { 'C-g': { table: 'git' } } })).toThrow('no table named git');
     expect(() => parseKeysConfig({ prefix: { r: { table: 'root' } } })).toThrow('root is always active');
@@ -115,7 +149,13 @@ describe('keys configuration', () => {
     expect(() => parseKeysConfig({ prefix: { q: { terminal: 'htop', extra: 1 } } })).toThrow();
     expect(() => parseKeysConfig({ prefix: { q: 42 } })).toThrow();
     expect(() => parseKeysConfig({ 'Bad Name': {} })).toThrow('table name');
+    expect(() => parseKeysConfig({ 'custom:table': {} })).toThrow('table name');
     expect(() => parseKeysConfig([])).toThrow();
+  });
+
+  it('selects focus tables automatically instead of allowing table switches into them', () => {
+    expect(() => parseKeysConfig({ prefix: { p: { table: 'when:prompt' } } })).toThrow('when:prompt is selected automatically');
+    expect(parseKeysConfig({ 'when:prompt': { 'C-g': { table: 'prefix' } } })).toEqual({ 'when:prompt': { 'C-g': { table: 'prefix' } } });
   });
 
   it('refuses two spellings of one chord in a table', () => {
@@ -135,7 +175,53 @@ describe('resolveKeyTables', () => {
   it('returns the defaults when nothing is configured', () => {
     const tables = resolveKeyTables(undefined);
     expect(tables.root!['C-b']).toEqual({ chord: 'C-b', binding: { table: 'prefix' }, source: 'default' });
+    expect(tables.root!.y).toEqual({ chord: 'y', binding: 'copy-selection', source: 'default' });
+    for (const chord of ['C-c', 'C-S-c', 'Super-c', 'C-Enter', 'S-Enter', 'C-S-Enter', 'Super-Enter', 'C-s', 'C-S-s', 'Super-s', 'S-Super-s']) expect(tables.root![chord]).toBeUndefined();
     expect(tables.prefix!.c).toEqual({ chord: 'c', binding: 'new-terminal', source: 'default' });
+    expect(tables['when:prompt']!['C-c']).toEqual({ chord: 'C-c', binding: 'clear-prompt', source: 'default' });
+    expect(tables['when:prompt']!['S-Enter']).toEqual({ chord: 'S-Enter', binding: 'prompt-newline', source: 'default' });
+    expect(tables['when:prompt']!['Super-s']).toEqual({ chord: 'Super-s', binding: 'save-note', source: 'default' });
+    expect(tables['when:text-selected']!['C-c']).toEqual({ chord: 'C-c', binding: 'copy-selection', source: 'default' });
+    expect(tables['when:text-selected']!['C-S-c']).toEqual({ chord: 'C-S-c', binding: 'copy-selection', source: 'default' });
+    expect(tables['when:terminal']).toEqual({});
+  });
+
+  it('describes every moved root default from the source used by scoped defaults', () => {
+    expect(movedRootDefault('C-c')).toEqual({ table: 'when:text-selected', binding: 'copy-selection' });
+    expect(movedRootDefault('S-Enter')).toEqual({ table: 'when:prompt', binding: 'prompt-newline' });
+    expect(movedRootDefault('Super-s')).toEqual({ table: 'when:prompt', binding: 'save-note' });
+    expect(movedRootDefault('y')).toBeUndefined();
+    expect(movedRootDefault('__proto__')).toBeUndefined();
+  });
+
+  it.each([null, 'copy-selection', 'last-panel'])('lets a legacy root %s suppress its inherited scoped default', legacy => {
+    const keys = parseKeysConfig({ root: { 'C-c': legacy } });
+    const tables = resolveKeyTables(keys);
+
+    expect(tables['when:text-selected']!['C-c']).toEqual({ chord: 'C-c', binding: 'copy-selection', source: 'removed' });
+    if (legacy === null) expect(tables.root!['C-c']).toBeUndefined();
+    else expect(tables.root!['C-c']).toEqual({ chord: 'C-c', binding: legacy, source: 'config' });
+  });
+
+  it('applies legacy suppression to prompt defaults moved from root', () => {
+    const tables = resolveKeyTables(parseKeysConfig({ root: { 'S-Enter': null, 'C-s': 'save-note' } }));
+
+    expect(tables['when:prompt']!['S-Enter']).toEqual({ chord: 'S-Enter', binding: 'prompt-newline', source: 'removed' });
+    expect(tables['when:prompt']!['C-s']).toEqual({ chord: 'C-s', binding: 'save-note', source: 'removed' });
+    expect(tables.root!['C-s']).toEqual({ chord: 'C-s', binding: 'save-note', source: 'config' });
+  });
+
+  it('lets an explicit scoped leaf win over a legacy root leaf and leaves aliases alone', () => {
+    const tables = resolveKeyTables(parseKeysConfig({
+      root: { 'C-c': null, 'C-Enter': 'last-panel', 'C-k': 'copy-selection' },
+      'when:text-selected': { 'C-c': 'last-panel' },
+      'when:prompt': { 'C-Enter': 'prompt-newline' }
+    }));
+
+    expect(tables['when:text-selected']!['C-c']).toEqual({ chord: 'C-c', binding: 'last-panel', source: 'replaced' });
+    expect(tables['when:prompt']!['C-Enter']).toEqual({ chord: 'C-Enter', binding: 'prompt-newline', source: 'replaced' });
+    expect(tables.root!['C-Enter']).toEqual({ chord: 'C-Enter', binding: 'last-panel', source: 'config' });
+    expect(tables.root!['C-k']).toEqual({ chord: 'C-k', binding: 'copy-selection', source: 'config' });
   });
 
   it('merges config over the defaults per key, keeping removed defaults for the sheet', () => {

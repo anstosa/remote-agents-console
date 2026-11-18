@@ -15,7 +15,7 @@ const setup = (config: unknown = {}, decline: string[] = [], suppliedTables?: Re
       return typeof binding !== 'string' || !decline.includes(binding);
     }
   });
-  return { dispatcher, matched, ran, press: (chord: string | undefined) => dispatcher.handle(chord, undefined) };
+  return { dispatcher, matched, ran, press: (chord: string | undefined, focusTables: readonly string[] = []) => dispatcher.handle(chord, undefined, focusTables) };
 };
 
 beforeEach(() => { vi.useFakeTimers(); });
@@ -32,9 +32,58 @@ describe('key dispatcher', () => {
   it('runs a root action and lets a declining one pass', () => {
     const { press, matched, ran } = setup({}, ['copy-selection']);
     expect(press('C-?')).toBe('handled');
-    expect(press('C-c')).toBe('pass');
+    expect(press('y')).toBe('pass');
     expect(ran.map(entry => entry.binding)).toEqual(['show-bindings', 'copy-selection']);
     expect(matched).toHaveBeenCalledTimes(1);
+  });
+
+  it('copies selected text before the prompt clear condition', () => {
+    const { press, matched, ran } = setup();
+
+    expect(press('C-c', ['when:text-selected', 'when:prompt', 'when:agent'])).toBe('handled');
+    expect(press('C-c', ['when:prompt', 'when:agent'])).toBe('handled');
+    expect(ran).toEqual([
+      { binding: 'copy-selection', table: 'when:text-selected', chord: 'C-c' },
+      { binding: 'clear-prompt', table: 'when:prompt', chord: 'C-c' }
+    ]);
+    expect(matched).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses a remapped prompt action while retaining selected-text copy', () => {
+    const { press, ran } = setup({ 'when:prompt': { 'C-c': null, 'C-k': 'clear-prompt' } });
+
+    expect(press('C-k', ['when:prompt'])).toBe('handled');
+    expect(press('C-c', ['when:text-selected', 'when:prompt'])).toBe('handled');
+    expect(ran).toEqual([
+      { binding: 'clear-prompt', table: 'when:prompt', chord: 'C-k' },
+      { binding: 'copy-selection', table: 'when:text-selected', chord: 'C-c' }
+    ]);
+  });
+
+  it('falls through missing and declining focus conditions to root', () => {
+    const { press, matched, ran } = setup({ 'when:text-selected': { 'C-k': 'copy-selection' }, 'when:note-editor': { 'C-k': 'last-panel' } }, ['copy-selection']);
+
+    expect(press('C-k', ['when:text-selected', 'when:note-editor', 'when:agent'])).toBe('handled');
+    expect(ran).toEqual([
+      { binding: 'copy-selection', table: 'when:text-selected', chord: 'C-k' },
+      { binding: 'last-panel', table: 'when:note-editor', chord: 'C-k' }
+    ]);
+    expect(matched).toHaveBeenCalledOnce();
+
+    const root = setup();
+    expect(root.press('y', ['when:terminal'])).toBe('handled');
+    expect(root.ran).toEqual([{ binding: 'copy-selection', table: 'root', chord: 'y' }]);
+    expect(root.matched).toHaveBeenCalledOnce();
+  });
+
+  it('swallows a conflicted focus shortcut without falling through', () => {
+    const tables = resolveKeyTables(undefined);
+    tables['when:prompt']!['C-c'] = { ...tables['when:prompt']!['C-c']!, conflicted: true };
+    const { press, matched, ran } = setup({}, [], tables);
+
+    expect(press('C-c', ['when:prompt'])).toBe('handled');
+    expect(ran).toEqual([]);
+    expect(matched).not.toHaveBeenCalled();
   });
 
   it('reports table entries and actions but not missing or disabled bindings', () => {
@@ -180,6 +229,16 @@ describe('key dispatcher', () => {
     expect(press('C-?')).toBe('handled');
     expect(ran.map(entry => entry.binding)).toEqual(['select-panel-left', 'select-panel-left', 'show-bindings']);
     expect(matched).toHaveBeenCalledTimes(5);
+  });
+
+  it('ends a repeat by returning to the active focus conditions', () => {
+    const { press, ran, dispatcher } = setup();
+    press('C-b', ['when:prompt']);
+    press('Left', ['when:prompt']);
+
+    expect(press('C-c', ['when:prompt'])).toBe('handled');
+    expect(dispatcher.state()).toBeUndefined();
+    expect(ran.map(entry => entry.binding)).toEqual(['select-panel-left', 'clear-prompt']);
   });
 
   it('does not fall through a conflicted repeat key to its root binding', () => {

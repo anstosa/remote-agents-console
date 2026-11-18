@@ -232,10 +232,13 @@ describe('shortcut validation', () => {
     expect(shortcutValidationError('prefix', 'Hyper-x', 'c')).toContain('not a key');
   });
 
-  it('allows retained built-in root typing shortcuts but not aliases borrowed from another origin', () => {
+  it('allows retained built-in root typing shortcuts and only the prompt newline Shift+Enter exception', () => {
     expect(shortcutValidationError('root', 'y', 'y')).toBeUndefined();
     expect(shortcutValidationError('root', 'S-Left', 'S-Left')).toBeUndefined();
-    expect(shortcutValidationError('root', 'S-Enter', 'S-Enter')).toBeUndefined();
+    expect(shortcutValidationError('root', 'S-Enter', 'S-Enter')).toContain('cannot steal typing');
+    expect(shortcutValidationError('when:prompt', 'S-Enter', 'C-Enter', 'when:prompt', 'prompt-newline')).toBeUndefined();
+    expect(shortcutValidationError('when:prompt', 'S-Enter', 'C-Enter', 'when:prompt', 'clear-prompt')).toContain('cannot steal typing');
+    expect(shortcutValidationError('when:note-editor', 'S-Enter', 'C-Enter', 'when:prompt', 'prompt-newline')).toContain('cannot steal typing');
     expect(shortcutValidationError('root', 'S-Right', 'C-b')).toContain('cannot steal typing');
     expect(shortcutValidationError('root', 'S-Right', 'S-Right', 'prefix')).toContain('cannot steal typing');
     expect(shortcutValidationError('root', '', 'C-b')).toBeUndefined();
@@ -307,6 +310,77 @@ describe('shortcut labels', () => {
 });
 
 describe('server shortcut patch compiler', () => {
+  it('remaps, disables and resets clear prompt without changing root copy', () => {
+    const remapped = editServerShortcuts({}, 'action:clear-prompt', { kind: 'replace', fromTable: 'when:prompt', from: 'C-c', table: 'when:prompt', chord: 'C-k' });
+    expect(remapped).toEqual({ patches: [
+      { op: 'set', path: ['keys', 'when:prompt', 'C-c'], value: null },
+      { op: 'set', path: ['keys', 'when:prompt', 'C-k'], value: 'clear-prompt' }
+    ] });
+    expect(editServerShortcuts({}, 'action:clear-prompt', { kind: 'disable' })).toEqual({ patches: [
+      { op: 'set', path: ['keys', 'when:prompt', 'C-c'], value: null }
+    ] });
+    expect(editServerShortcuts({ 'when:prompt': { 'C-c': null, 'C-k': 'clear-prompt' } }, 'action:clear-prompt', { kind: 'reset' })).toEqual({ patches: [
+      { op: 'remove', path: ['keys', 'when:prompt', 'C-c'] },
+      { op: 'remove', path: ['keys', 'when:prompt', 'C-k'] }
+    ] });
+    expect(editServerShortcuts({}, 'action:copy-selection', { kind: 'reset' })).toEqual({ patches: [] });
+    expect(serverShortcutModel({}).commands.find(command => command.id === 'action:copy-selection')?.shortcuts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'root', chord: 'y' }),
+      expect.objectContaining({ table: 'when:text-selected', chord: 'C-c' })
+    ]));
+  });
+
+  it('keeps legacy moved defaults editable without resurrecting removed shortcuts', () => {
+    const legacy = { root: { 'C-s': 'save-note' } };
+    const model = serverShortcutModel(legacy).commands.find(command => command.id === 'action:save-note')!;
+
+    expect(model.shortcuts).toContainEqual(expect.objectContaining({ table: 'root', chord: 'C-s' }));
+    expect(model.shortcuts).not.toContainEqual(expect.objectContaining({ table: 'when:prompt', chord: 'C-s' }));
+    expect(editServerShortcuts(legacy, model.id, { kind: 'remove', table: 'root', from: 'C-s' })).toEqual({ patches: [
+      { op: 'set', path: ['keys', 'root', 'C-s'], value: null }
+    ] });
+    expect(editServerShortcuts(legacy, model.id, { kind: 'replace', fromTable: 'root', from: 'C-s', table: 'when:prompt', chord: 'M-s' })).toEqual({ patches: [
+      { op: 'set', path: ['keys', 'root', 'C-s'], value: null },
+      { op: 'set', path: ['keys', 'when:prompt', 'M-s'], value: 'save-note' }
+    ] });
+    expect(editServerShortcuts(legacy, model.id, { kind: 'disable' }).patches).toContainEqual(
+      { op: 'set', path: ['keys', 'root', 'C-s'], value: null }
+    );
+    expect(editServerShortcuts({ root: { 'C-k': 'save-note' } }, model.id, { kind: 'remove', table: 'root', from: 'C-k' })).toEqual({ patches: [
+      { op: 'remove', path: ['keys', 'root', 'C-k'] }
+    ] });
+  });
+
+  it('resets legacy moved defaults while preserving unrelated root replacements', () => {
+    const id = 'action:save-note';
+
+    expect(editServerShortcuts({ root: { 'C-s': null } }, id, { kind: 'reset' })).toEqual({ patches: [
+      { op: 'remove', path: ['keys', 'root', 'C-s'] }
+    ] });
+    expect(editServerShortcuts({ root: { 'C-s': 'save-note' } }, id, { kind: 'reset' })).toEqual({ patches: [
+      { op: 'remove', path: ['keys', 'root', 'C-s'] }
+    ] });
+    expect(editServerShortcuts({ root: { 'C-s': 'show-bindings' } }, id, { kind: 'reset' })).toEqual({ patches: [
+      { op: 'set', path: ['keys', 'when:prompt', 'C-s'], value: 'save-note' }
+    ] });
+    expect(editServerShortcuts({ root: { 'C-s': 'show-bindings' }, 'when:prompt': { 'C-s': null } }, id, { kind: 'reset' })).toEqual({ patches: [
+      { op: 'set', path: ['keys', 'when:prompt', 'C-s'], value: 'save-note' }
+    ] });
+  });
+
+  it('validates recorder actions and configured custom table switches', () => {
+    const disabled = { 'when:prompt': { 'S-Enter': null } };
+
+    expect(editServerShortcuts(disabled, 'action:prompt-newline', { kind: 'add', table: 'when:prompt', chord: 'S-Enter' })).toEqual({ patches: [
+      { op: 'set', path: ['keys', 'when:prompt', 'S-Enter'], value: 'prompt-newline' }
+    ] });
+    expect(editServerShortcuts(disabled, 'action:new-terminal', { kind: 'add', table: 'when:prompt', chord: 'S-Enter' }).error).toContain('cannot steal typing');
+    expect(editServerShortcuts({ root: { 'C-g': { table: 'custom' } }, custom: {} }, 'table:custom', { kind: 'replace', fromTable: 'root', from: 'C-g', table: 'root', chord: 'C-F6' })).toEqual({ patches: [
+      { op: 'remove', path: ['keys', 'root', 'C-g'] },
+      { op: 'set', path: ['keys', 'root', 'C-F6'], value: { table: 'custom' } }
+    ] });
+  });
+
   it('adds and moves safe bindings with minimal direct key-table patches', () => {
     const keys = {
       prefix: {
@@ -433,8 +507,15 @@ describe('structured server key tables', () => {
 
     expect(model.error).toBeUndefined();
     expect(model.hasConfig).toBe(true);
-    expect(model.tables.map(table => table.name)).toEqual(['root', 'prefix', 'git', 'empty', 'vault']);
+    expect(model.tables.map(table => table.name)).toEqual([
+      'root', 'prefix',
+      'when:prompt', 'when:terminal', 'when:agent', 'when:browser',
+      'when:note-editor', 'when:code', 'when:files',
+      'when:terminal-input', 'when:terminal-selection', 'when:text-selected',
+      'git', 'empty', 'vault'
+    ]);
     expect(model.tables.find(table => table.name === 'root')).toMatchObject({ builtIn: true, configured: true });
+    expect(model.tables.find(table => table.name === 'when:prompt')).toMatchObject({ builtIn: true, configured: false });
     expect(model.tables.find(table => table.name === 'prefix')?.rows.find(row => row.chord === 'c')).toMatchObject({ binding: null, source: 'removed', configured: true, builtInDefault: true });
     expect(model.tables.find(table => table.name === 'prefix')?.rows.find(row => row.chord === 'v')).toMatchObject({ binding: null, source: 'removed', configured: true, builtInDefault: false });
     expect(model.tables.find(table => table.name === 'empty')).toEqual({ name: 'empty', builtIn: false, configured: true, rows: [], inbound: [] });
@@ -506,6 +587,16 @@ describe('structured server key tables', () => {
     expect(editServerKeyTables({}, { kind: 'create-binding', table: 'prefix', chord: 'c', binding: null }).error).toContain('already assigned');
   });
 
+  // preserve the exact prompt newline exception through structured editor validation
+  it('admits only prompt newline at prompt Shift+Enter through advanced editing', () => {
+    const disabled = { 'when:prompt': { 'S-Enter': null } };
+
+    expect(editServerKeyTables(disabled, { kind: 'create-binding', table: 'when:prompt', chord: 'S-Enter', binding: 'prompt-newline' })).toEqual({ patches: [
+      { op: 'set', path: ['keys', 'when:prompt', 'S-Enter'], value: 'prompt-newline' }
+    ] });
+    expect(editServerKeyTables(disabled, { kind: 'create-binding', table: 'when:prompt', chord: 'S-Enter', binding: 'show-bindings' }).error).toContain('cannot steal typing');
+  });
+
   // preserve moved bindings and keep renamed built-in chords disabled at their old address
   it('renames bindings without value corruption or default resurrection', () => {
     const terminal = { terminal: '  printf safe  ', reuse: false };
@@ -520,6 +611,10 @@ describe('structured server key tables', () => {
     expect(editServerKeyTables({ prefix: { c: terminal } }, { kind: 'rename-binding', table: 'prefix', from: 'c', to: 'v' })).toEqual({ patches: [
       { op: 'set', path: ['keys', 'prefix', 'c'], value: null },
       { op: 'set', path: ['keys', 'prefix', 'v'], value: terminal }
+    ] });
+    expect(editServerKeyTables({ root: { 'C-s': 'save-note' } }, { kind: 'rename-binding', table: 'root', from: 'C-s', to: 'M-s' })).toEqual({ patches: [
+      { op: 'set', path: ['keys', 'root', 'C-s'], value: null },
+      { op: 'set', path: ['keys', 'root', 'M-s'], value: 'save-note' }
     ] });
   });
 

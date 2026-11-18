@@ -23,7 +23,12 @@ const routeApi = (page: Page, options: { keys?: unknown; shells?: unknown[]; del
   if (path === '/api/push/public-key') return route.fulfill({ json: {} });
   if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
   if (path === '/api/agents/agent-1/saved-prompts' || path === '/api/agents/agent-1/prompt-history' || path === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
+  // keep Files focus coverage on a settled, editable location field
+  if (path === '/api/agents/agent-1/message-files') return route.fulfill({ json: { files: [] } });
   if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: options.notes ?? [] } });
+  // provide the minimal Files controller contracts needed by focus-only scenarios
+  if (path === '/api/worktrees/cora/file-favorites' && request.method() === 'GET') return route.fulfill({ json: { favorites: [] } });
+  if (path === '/api/worktrees/cora/files/list') return route.fulfill({ json: { path: '/worktrees/cora', parent: '/worktrees', destinationDirectoryToken: 'directory:cora', directoryEntry: { name: 'cora', hostPath: '/worktrees/cora', kind: 'directory', owner: { uid: 1000, label: 'ubuntu' }, permissions: 'drwxr-xr-x', mode: 0o40755, modifiedAt: '2026-11-18T12:00:00.000Z', size: 4096, objectToken: 'object-token:directory:cora' }, entries: [], inaccessibleEntries: 0, limits: { maxEntries: 10_000 } } });
   if (path === '/api/worktrees/cora/panes' && request.method() === 'GET') return route.fulfill({ json: { panes: panes() } });
   if (path === '/api/worktrees/cora/shells' && request.method() === 'POST') {
     options.shells?.push(request.postDataJSON());
@@ -54,6 +59,20 @@ const openWithTerminal = async (page: Page, options: Parameters<typeof routeApi>
   await terminal.locator('.xterm-screen').click();
   await expect(terminal).toHaveClass(/focused/u);
   return terminal;
+};
+
+// create a stable xterm selection without depending on clipboard permissions
+const selectTerminalRow = async (page: Page, terminal: Locator, text: string) => {
+  const row = terminal.locator('.xterm-rows > div', { hasText: text });
+  await expect(row).toBeVisible();
+  const bounds = await row.boundingBox();
+  // require rendered geometry before dragging through terminal cells
+  if (bounds === null) throw new Error('terminal row has no rendered bounds');
+  const y = bounds.y + bounds.height / 2;
+  await page.mouse.move(bounds.x + 2, y);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + Math.min(bounds.width / 2, 140), y, { steps: 5 });
+  await page.mouse.up();
 };
 
 // open the server keyboard section in either settings navigation layout
@@ -293,6 +312,43 @@ test('the bindings sheet opens from Ctrl+?, settings and the palette, and shows 
   await expect(sheet).toBeVisible();
 });
 
+test('the shortcut editor labels and remaps Clear prompt within Prompt focus', async ({ page }) => {
+  await openWithTerminal(page);
+
+  await page.keyboard.press('Control+?');
+  const sheet = page.getByRole('dialog', { name: 'Key bindings' });
+  const reference = sheet.locator('[data-shortcut-command="action:clear-prompt"]');
+  await expect(reference).toContainText('Prompt focused');
+  await expect(reference.getByLabel('Ctrl + C', { exact: true })).toBeVisible();
+  // present prompt-specific actions and modified output copy with their real conditions
+  const newline = sheet.locator('[data-shortcut-command="action:prompt-newline"]');
+  await expect(newline).toContainText('Prompt focused');
+  await expect(newline.getByLabel('Shift + Enter', { exact: true })).toBeVisible();
+  await expect(sheet.locator('[data-shortcut-command="action:save-note"]')).toContainText('Prompt focused');
+  await expect(sheet.locator('[data-shortcut-command="action:copy-selection"]')).toContainText('Text selected');
+  await sheet.getByRole('button', { name: 'Close key bindings' }).click();
+
+  await page.getByRole('button', { name: 'Global settings' }).click();
+  const settings = await openKeyboardSettings(page);
+  await settings.getByRole('searchbox', { name: 'Find keyboard shortcuts' }).fill('Clear prompt');
+  const clear = settings.locator('[data-shortcut-command="action:clear-prompt"]');
+  await clear.getByRole('button', { name: 'Change shortcut for Clear prompt (Prompt focused: Ctrl + C)' }).click();
+  const condition = clear.getByRole('combobox', { name: 'Condition for Clear prompt', exact: true });
+  await expect(condition).toContainText('Prompt focused');
+  await condition.click();
+  const conditions = page.getByRole('listbox', { name: 'Condition for Clear prompt options' });
+  // include always plus every registered condition in the recorder
+  await expect(conditions.getByRole('option')).toHaveCount(11);
+  await expect(conditions.getByRole('option', { name: 'Text selected', exact: true })).toBeVisible();
+  await conditions.getByRole('option', { name: 'Prompt focused', exact: true }).click();
+  const recorder = clear.getByRole('textbox', { name: 'New shortcut for Clear prompt', exact: true });
+  await recorder.press('Control+Alt+k');
+  await expect(recorder).toHaveValue('Ctrl + Alt + K');
+  await clear.getByRole('button', { name: 'Apply shortcut', exact: true }).click();
+  await expect(clear.locator('[data-shortcut-table="when:prompt"][data-shortcut-chord="C-M-k"]')).toBeVisible();
+  await expect(clear.locator('[data-shortcut-table="when:prompt"][data-shortcut-chord="C-c"]')).toHaveCount(0);
+});
+
 test('opening a keyboard overlay by mouse cancels a stale leader table', async ({ page }) => {
   const shells: unknown[] = [];
   await openWithTerminal(page, { shells });
@@ -335,6 +391,230 @@ test('a root binding swallows its key, and send-prefix reaches only a terminal',
   await page.keyboard.press('Control+b');
   expect(await page.evaluate(() => (window as unknown as { __last_b: KeyboardEvent }).__last_b.defaultPrevented)).toBe(true);
   await expect(indicator(page)).toHaveAccessibleName('Key press Ctrl + B then Ctrl + B, binding matched');
+});
+
+test('clear prompt can be remapped without retaining its default chord', async ({ page }) => {
+  await openWithTerminal(page, { keys: { 'when:prompt': { 'C-c': null, 'C-M-k': 'clear-prompt' } } });
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+
+  await prompt.fill('/discard');
+  await expect(prompt).toHaveAttribute('aria-expanded', 'true');
+  await prompt.press('Control+c');
+  await expect(prompt).toHaveValue('/discard');
+  await expect(prompt).toHaveAttribute('aria-expanded', 'true');
+
+  await prompt.press('Control+Alt+k');
+  await expect(prompt).toHaveValue('');
+  await expect(prompt).toHaveAttribute('aria-expanded', 'false');
+  await expect(prompt).toBeFocused();
+});
+
+// keep an earlier root remap effective without reviving the removed default in Prompt focused
+test('a legacy prompt newline remap survives the default scope move', async ({ page }) => {
+  await openWithTerminal(page, { keys: { root: { 'S-Enter': null, 'C-M-k': 'prompt-newline' } } });
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await prompt.fill('draft');
+  await prompt.press('Shift+Enter');
+  await expect(prompt).toHaveValue('draft');
+  await prompt.press('Control+Alt+k');
+  await expect(prompt).toHaveValue('draft\n');
+});
+
+test('the same chord resolves from prompt, Terminal, Agent and Browser focus tables', async ({ page }) => {
+  await page.route('https://preview.example/**', route => route.fulfill({ contentType: 'text/html', body: '<main tabindex="0">Browser preview</main>' }));
+  const terminal = await openWithTerminal(page, {
+    agent: { projectUrl: 'https://preview.example/', projectProxied: false },
+    keys: {
+      'when:prompt': { 'C-M-k': 'clear-prompt' },
+      'when:terminal': { 'C-M-k': 'show-bindings' },
+      'when:agent': { 'C-M-k': 'command-palette' },
+      'when:browser': { 'C-M-k': 'choose-tree' }
+    }
+  });
+  const chord = 'Control+Alt+k';
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await prompt.fill('prompt-owned');
+  await prompt.press(chord);
+  await expect(prompt).toHaveValue('');
+
+  await terminal.locator('.xterm-helper-textarea').focus();
+  await page.keyboard.press(chord);
+  const bindings = page.getByRole('dialog', { name: 'Key bindings' });
+  await expect(bindings).toBeVisible();
+  await bindings.getByRole('button', { name: 'Close key bindings' }).click();
+  await expect(bindings).toHaveCount(0);
+
+  await page.locator('.log-output .xterm-helper-textarea').focus();
+  await page.keyboard.press(chord);
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  await expect(palette).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('button', { name: 'Browser', exact: true }).click();
+  const browser = page.getByRole('dialog', { name: 'Browser' });
+  const address = browser.getByRole('textbox', { name: 'Browser address' });
+  await address.focus();
+  await address.press(chord);
+  await expect(page.getByRole('dialog', { name: 'Workspaces and panels' })).toBeVisible();
+});
+
+test('Terminal focus bindings apply in chrome and selection modes', async ({ page }) => {
+  const terminal = await openWithTerminal(page, { keys: { 'when:terminal': { 'C-M-k': 'show-bindings' } } });
+  const chord = 'Control+Alt+k';
+  const bindings = page.getByRole('dialog', { name: 'Key bindings' });
+
+  await terminal.getByRole('button', { name: 'Minimize terminal build' }).focus();
+  await page.keyboard.press(chord);
+  await expect(bindings).toBeVisible();
+  await bindings.getByRole('button', { name: 'Close key bindings' }).click();
+  await expect(bindings).toHaveCount(0);
+
+  await pushBytes(page, '%5', 'Selectable terminal output\r\n');
+  await selectTerminalRow(page, terminal, 'Selectable terminal output');
+  await expect(terminal).toHaveClass(/selection-active/u);
+  await page.keyboard.press(chord);
+  await expect(bindings).toBeVisible();
+  await bindings.getByRole('button', { name: 'Close key bindings' }).click();
+  await expect(bindings).toHaveCount(0);
+  await expect(terminal).toHaveClass(/selection-active/u);
+});
+
+test('Terminal conditions prioritize selected text, selection mode, input mode and panel focus', async ({ page }) => {
+  const terminal = await openWithTerminal(page, { keys: {
+    root: { 'C-M-k': 'choose-server' },
+    'when:terminal': { 'C-M-k': 'choose-workspace' },
+    'when:terminal-input': { 'C-M-k': 'choose-tree' },
+    'when:terminal-selection': { 'C-M-k': 'command-palette' },
+    'when:text-selected': { 'C-M-k': 'show-bindings' }
+  } });
+  const chord = 'Control+Alt+k';
+
+  // xterm input takes precedence over its enclosing Terminal panel
+  await terminal.locator('.xterm-helper-textarea').focus();
+  await page.keyboard.press(chord);
+  const tree = page.getByRole('dialog', { name: 'Workspaces and panels' });
+  await expect(tree).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(tree).toHaveCount(0);
+
+  // Terminal chrome represents panel reading without an input or selection submode
+  await terminal.getByRole('button', { name: 'Minimize terminal build' }).focus();
+  await page.keyboard.press(chord);
+  const workspaces = page.getByRole('dialog', { name: 'Workspaces', exact: true });
+  await expect(workspaces).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(workspaces).toHaveCount(0);
+
+  // seed the row before selection mode pauses incoming output
+  await pushBytes(page, '%5', 'Selected Terminal precedence\r\n');
+  await expect(terminal.locator('.xterm-rows > div', { hasText: 'Selected Terminal precedence' })).toBeVisible();
+  // explicit Selection mode remains distinct even before it owns selected text
+  const canvas = terminal.locator('.terminal-canvas');
+  await canvas.click({ button: 'right' });
+  const terminalMenu = page.getByRole('menu', { name: 'Terminal build actions' });
+  await terminalMenu.getByRole('menuitemradio', { name: 'Selection', exact: true }).click();
+  await expect(canvas).toBeFocused();
+  await expect(terminal).toHaveClass(/selection-active/u);
+  const selectionActions = page.getByRole('toolbar', { name: 'Selection actions for terminal build' });
+  await expect(selectionActions).toHaveCount(0);
+  await page.keyboard.press(chord);
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  await expect(palette).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(palette).toHaveCount(0);
+
+  // real selected output outranks the active Selection submode
+  await selectTerminalRow(page, terminal, 'Selected Terminal precedence');
+  await expect(selectionActions).toBeVisible();
+  await page.keyboard.press(chord);
+  const bindings = page.getByRole('dialog', { name: 'Key bindings' });
+  await expect(bindings).toBeVisible();
+  await bindings.getByRole('button', { name: 'Close key bindings' }).click();
+  await expect(bindings).toHaveCount(0);
+
+  // outside a focus condition the root binding remains the fallback
+  await page.getByRole('button', { name: 'Global settings' }).focus();
+  await page.keyboard.press(chord);
+  await expect(page.getByRole('dialog', { name: 'Servers' })).toBeVisible();
+});
+
+test('selected Agent output outranks Agent focus for the same chord', async ({ page }) => {
+  await openWithTerminal(page, { keys: {
+    'when:agent': { 'C-M-k': 'command-palette' },
+    'when:text-selected': { 'C-M-k': 'show-bindings' }
+  } });
+  const chord = 'Control+Alt+k';
+  const output = page.locator('.log-output');
+
+  // actual Agent xterm text joins the cross-surface selected-text condition
+  await pushBytes(page, 'agent-1', 'Selected Agent precedence\r\n');
+  await selectTerminalRow(page, output, 'Selected Agent precedence');
+  await expect(output).toHaveClass(/selection-active/u);
+  await page.keyboard.press(chord);
+  const bindings = page.getByRole('dialog', { name: 'Key bindings' });
+  await expect(bindings).toBeVisible();
+  await bindings.getByRole('button', { name: 'Close key bindings' }).click();
+});
+
+test('native editor selection outranks Note editor focus', async ({ page }) => {
+  await openWithTerminal(page, {
+    notes: [{ id: 'note-cora-000001', title: 'Draft note', text: 'Selected note content' }],
+    keys: {
+      'when:note-editor': { 'C-M-k': 'command-palette' },
+      'when:text-selected': { 'C-M-k': 'show-bindings' }
+    }
+  });
+  const chord = 'Control+Alt+k';
+  await page.getByRole('button', { name: 'Notes (1)' }).click();
+  await page.getByRole('button', { name: 'Draft note', exact: true }).click();
+  await page.getByLabel('Note preview').click();
+  const editor = page.getByRole('textbox', { name: 'Note content' });
+
+  // a collapsed caret selects the Note editor condition
+  await editor.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(0, 0));
+  await editor.focus();
+  await editor.press(chord);
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  await expect(palette).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(palette).toHaveCount(0);
+
+  // a noncollapsed native range takes precedence over the same editor
+  await page.getByLabel('Note preview').click();
+  await editor.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(0, 8));
+  await editor.focus();
+  await editor.press(chord);
+  const bindings = page.getByRole('dialog', { name: 'Key bindings' });
+  await expect(bindings).toBeVisible();
+  await bindings.getByRole('button', { name: 'Close key bindings' }).click();
+});
+
+test('Code and Files descendants resolve their panel focus conditions', async ({ page }) => {
+  await openWithTerminal(page, { keys: {
+    'when:code': { 'C-M-k': 'command-palette' },
+    'when:files': { 'C-M-k': 'show-bindings' }
+  } });
+  const chord = 'Control+Alt+k';
+
+  await page.getByRole('button', { name: 'Code', exact: true }).click();
+  const code = page.getByRole('region', { name: 'Code changes' });
+  await code.getByRole('button', { name: 'Expand code panel', exact: true }).focus();
+  await page.keyboard.press(chord);
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  await expect(palette).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(palette).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  const files = page.getByRole('region', { name: 'Files' });
+  const address = files.getByRole('textbox', { name: 'Absolute path', exact: true });
+  await expect(address).toBeEnabled();
+  await address.focus();
+  await address.press(chord);
+  const bindings = page.getByRole('dialog', { name: 'Key bindings' });
+  await expect(bindings).toBeVisible();
+  await bindings.getByRole('button', { name: 'Close key bindings' }).click();
 });
 
 test('a terminal binding names the binding, never the command', async ({ page }) => {

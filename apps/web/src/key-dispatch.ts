@@ -1,4 +1,4 @@
-import { isTableBinding, keyActions, lookupKeyBinding, type KeyBinding, type ResolvedKeyTables } from '../../server/src/config/keys.js';
+import { isFocusKeyTable, isTableBinding, keyActions, lookupKeyBinding, type KeyBinding, type ResolvedKeyTables } from '../../server/src/config/keys.js';
 
 // how long a table switch waits for its key, and how long a repeatable binding stays live
 export const keyTableTimeoutMs = 10_000;
@@ -32,29 +32,35 @@ export function createKeyDispatcher<Context>({ tables, run, onMatch }: KeyDispat
   };
   const repeatable = (binding: KeyBinding | undefined) => typeof binding === 'string' && keyActions[binding]?.repeat === true;
 
-  const handleRoot = (chord: string, event: Context): 'pass' | 'handled' => {
+  // try the most specific active focus condition before the always-active root table
+  const handleDirect = (chord: string, event: Context, focusTables: readonly string[]): 'pass' | 'handled' => {
     const currentTables = tables();
-    // ambiguous root shortcuts are swallowed without running either command
-    if (currentTables.root?.[chord]?.conflicted === true) return 'handled';
-    const binding = lookupKeyBinding(currentTables, 'root', chord);
-    if (binding === undefined) return 'pass';
-    // table leaders always consume their configured key
-    if (isTableBinding(binding)) {
+    const directTables = [...new Set([...focusTables.filter(isFocusKeyTable), 'root'])];
+    // let declined condition actions fall through to less-specific conditions
+    for (const table of directTables) {
+      // ambiguous direct shortcuts are swallowed without running either command
+      if (currentTables[table]?.[chord]?.conflicted === true) return 'handled';
+      const binding = lookupKeyBinding(currentTables, table, chord);
+      if (binding === undefined) continue;
+      // table leaders always consume their configured key
+      if (isTableBinding(binding)) {
+        onMatch?.();
+        set({ table: binding.table, chord, repeat: false, expiresAt: Date.now() + keyTableTimeoutMs });
+        return 'handled';
+      }
+      // declined direct actions leave the key available to the next condition or native input
+      if (!run(binding, { table, chord, event })) continue;
       onMatch?.();
-      set({ table: binding.table, chord, repeat: false, expiresAt: Date.now() + keyTableTimeoutMs });
       return 'handled';
     }
-    // declined root actions remain ordinary input, not successful shortcut matches
-    if (!run(binding, { table: 'root', chord, event })) return 'pass';
-    onMatch?.();
-    return 'handled';
+    return 'pass';
   };
 
-  const handle = (chord: string | undefined, event: Context): 'pass' | 'handled' | 'send' => {
+  const handle = (chord: string | undefined, event: Context, focusTables: readonly string[] = []): 'pass' | 'handled' | 'send' => {
     // a bare modifier is on its way to a chord, so it neither matches nor ends a table
     if (chord === undefined) return 'pass';
     const current = state;
-    if (current === undefined) return handleRoot(chord, event);
+    if (current === undefined) return handleDirect(chord, event, focusTables);
     if (current.confirm !== undefined) {
       set(undefined);
       // report only accepted confirmation keys
@@ -70,8 +76,8 @@ export function createKeyDispatcher<Context>({ tables, run, onMatch }: KeyDispat
     }
     const binding = lookupKeyBinding(currentTables, current.table, chord);
     if (current.repeat) {
-      // only another repeatable key continues a repeat; anything else is an ordinary root key
-      if (!repeatable(binding)) { set(undefined); return handleRoot(chord, event); }
+      // only another repeatable key continues a repeat; anything else returns to direct conditions
+      if (!repeatable(binding)) { set(undefined); return handleDirect(chord, event, focusTables); }
       set({ ...current, expiresAt: Date.now() + keyRepeatMs });
       // report repeatable table matches
       onMatch?.();

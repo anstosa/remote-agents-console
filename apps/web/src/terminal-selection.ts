@@ -1,7 +1,7 @@
 import type { StreamedTerminalHandle } from './streamed-terminal.js';
 import { computeTerminalTheme } from './terminal-theme.js';
 import { subscribeTerminalFontSize } from './terminal-font-size.js';
-import { registerKeyAction, type KeyActionContext } from './keyboard.js';
+import { registerKeyAction, registerTerminalKeySelection, type KeyActionContext } from './keyboard.js';
 
 export type TerminalSelection = { text: string; top: number; left: number };
 
@@ -548,6 +548,8 @@ export function attachTerminalSelection(container: HTMLElement, handle: Streamed
     // selection mode must not keep sending keys to xterm
     if (pinnedSelectionMode) {
       terminal.blur();
+      // keep keyboard ownership without focusing xterm's input
+      container.focus({ preventScroll: true });
       shortcutOwner = container;
       setSelectionMode(true);
       return;
@@ -637,6 +639,19 @@ export function attachTerminalSelection(container: HTMLElement, handle: Streamed
   document.addEventListener('selectionchange', nativeSelectionChanged);
   document.addEventListener('copy', nativeOutputCopied);
   const unregisterCopyShortcut = registerKeyAction('copy-selection', copySelectionShortcut);
+  // keep body-level copy available during selection without claiming another focused editor
+  const unregisterKeySelection = registerTerminalKeySelection(container, target => {
+    // nonlocal targets must stay neutral or within the selected pane's chrome
+    if (!container.contains(target)) {
+      // skip panes that did not claim the current selection
+      if (shortcutOwner !== container || isEditableTarget(target)) return false;
+      const panel = container.closest('.terminal-pane, .log-output');
+      const neutral = target === document.body || target === document.documentElement;
+      // do not give a previously selected pane ownership of unrelated controls
+      if (!neutral && (panel === null || !panel.contains(target))) return false;
+    }
+    return paneIsVisible() && selectedOutput() !== '';
+  });
   // follow fullscreen and responsive visibility changes without selection events
   const selectionResizeObserver = new ResizeObserver(() => {
     // ignore callbacks queued before cleanup
@@ -686,6 +701,7 @@ export function attachTerminalSelection(container: HTMLElement, handle: Streamed
     document.removeEventListener('selectionchange', nativeSelectionChanged);
     document.removeEventListener('copy', nativeOutputCopied);
     unregisterCopyShortcut();
+    unregisterKeySelection();
     setSelectionMode(false);
     options.onSelection(undefined);
     // avoid mutating native selection nodes during teardown

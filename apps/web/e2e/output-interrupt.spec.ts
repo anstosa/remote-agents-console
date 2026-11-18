@@ -78,10 +78,15 @@ test('keys stay local when the composer or Code panel owns focus', async ({ page
   // server switcher (the stream writes top-down; the old snapshot bottom-aligned).
   await pushBytes(page, 'agent-1', '\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nUpdated apps/web/src/main.tsx.\r\n');
 
-  // Focusing the composer blurs the pane; Escape there never reaches it.
+  // focusing the composer blurs the pane and keeps control keys local
   const prompt = page.getByRole('textbox', { name: 'Prompt' });
   await prompt.focus();
   await expect(page.locator('.log-output')).not.toHaveClass(/input-active/u);
+  await prompt.fill('Clear this draft');
+  await page.keyboard.press('Control+c');
+  await expect(prompt).toHaveValue('');
+  // pressing ctrl+c again on the empty composer still does not interrupt the pane
+  await page.keyboard.press('Control+c');
   await page.keyboard.press('Escape');
   await page.waitForTimeout(100);
   expect(await paneInputText(page, 'agent-1')).toBe('');

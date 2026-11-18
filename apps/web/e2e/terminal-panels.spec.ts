@@ -438,6 +438,13 @@ test('a Terminal selection freezes only its pane and keeps keyboard ownership lo
   }
   expect(await paneInputText(page, '%5')).toBe(buildInputBeforeCopies);
 
+  // a live selection still owns modified copy when xterm has returned focus to the page
+  await build.locator('.xterm-helper-textarea').blur();
+  await expect(page.locator('body')).toBeFocused();
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  await page.keyboard.press('Control+Shift+c');
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(selectedText);
+
   // stale selection never owns another pane or text input
   await page.evaluate(() => navigator.clipboard.writeText('selection-guard'));
   await vim.locator('.xterm-helper-textarea').focus();

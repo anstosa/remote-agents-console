@@ -258,10 +258,11 @@ other architecture decisions.
 | `Enter` | Queue the current prompt |
 | `Shift+Enter` / `Ctrl+Enter` / `⌘+Enter` | Insert a newline |
 | `↑` / `↓` | Recall older/newer prompt history when the cursor is on the first line |
-| `Ctrl+S` / `⌘+S` | Save the current prompt as a draft |
+| `Ctrl+S` / `⌘+S` in the prompt | Save the prompt draft as a Note |
 | `Tab` | Insert a tab in the prompt; when pane input is focused, send Tab to the pane |
 | `$` or `/` | Open skill or slash-command completion |
-| `Ctrl+C` with selected output | Copy the selection; without a selection when pane input is focused, interrupt the process |
+| `Ctrl+C` while the prompt is focused | Copy selected prompt text, or clear the draft text if nothing is selected |
+| `Ctrl+C` / `⌘+C` / `Ctrl+Shift+C` with selected output | Copy the selection. With pane input focused and no selection, `Ctrl+C` interrupts the process. |
 
 ## Console workflows
 
