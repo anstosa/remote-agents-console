@@ -564,14 +564,18 @@ export function currentHashes(descriptor, sourceIds = Object.keys(descriptor.sou
   return hashes;
 }
 
-// build the complete desired manifest for fixed host deployments
-export function currentSourceManifest(descriptor) {
-  const desired = loadDesiredDescriptor(descriptor);
-  return Object.entries(desired.sources).map(([id, source]) => {
+// hash exactly the selected descriptor without resolving pending authority
+function descriptorSourceManifest(descriptor) {
+  return Object.entries(descriptor.sources).map(([id, source]) => {
     const existed = existsSync(source.path);
     const bytes = existed ? readBoundedFile(source.path, MAX_SOURCE_BYTES) : Buffer.alloc(0);
     return { id, existed, contentHash: sha256(bytes) };
   });
+}
+
+// build the complete desired manifest for fixed host deployments
+export function currentSourceManifest(descriptor) {
+  return descriptorSourceManifest(loadDesiredDescriptor(descriptor));
 }
 
 // apply fixed targets and prove a replacement boot
@@ -643,6 +647,9 @@ async function restartRequest(descriptor, request, options) {
           signal: forwardSignal,
           proofClock: watchdog.clock,
           beforeRacRestart: () => {
+            // reject edits made while the image was being prepared
+            if (composeValidation) verifyComposeDependencies(composeValidation.dependencySnapshot, desiredDescriptor);
+            verifyRequestedHashes(desiredDescriptor, request.sources ?? []);
             const boundaryBoot = readOptionalJson(resolve(descriptor.controlRoot, "boot.json"));
             const starting = { recoveryDeadline: watchdog.start(), state: "restarting" };
             // require durable progress before allowing the mutating command
@@ -797,9 +804,15 @@ export async function applyTargets(descriptor, targets, options = {}) {
   if (descriptor.kind === "compose") {
     const prefix = composePrefix(descriptor.compose);
     if (targets.includes("rac")) {
+      // prepare the image while the current service remains available
+      await requireSuccess(await runner("docker", [...prefix, "build", "remote-agent-console"], {
+        cwd: descriptor.compose.projectDirectory,
+        maxBytes: MAX_SOURCE_BYTES,
+        timeoutMs: options.applyTimeoutMs ?? 10 * 60_000
+      }), "apply-failed");
       // bind-mounted config changes still require an actual replacement boot
       options.beforeRacRestart?.();
-      await requireSuccess(await runner("docker", [...prefix, "up", "-d", "--build", "--wait", "--force-recreate", "remote-agent-console"], {
+      await requireSuccess(await runner("docker", [...prefix, "up", "-d", "--no-build", "--wait", "--force-recreate", "remote-agent-console"], {
         cwd: descriptor.compose.projectDirectory,
         maxBytes: MAX_SOURCE_BYTES,
         timeoutMs: options.applyTimeoutMs ?? 10 * 60_000
@@ -1415,7 +1428,16 @@ async function recoverEffectiveTarget(descriptor, target, expectedSources, optio
           nativeCloudflaredRequireExistingDropIn: true
         }
       : options;
-    const targetProofs = await applyTargets(baseline, [target], recoveryOptions);
+    const recoverySources = target === "rac" && composeValidation ? descriptorSourceManifest(baseline) : undefined;
+    const targetProofs = await applyTargets(baseline, [target], {
+      ...recoveryOptions,
+      // recovery builds must not widen the validated replacement graph either
+      ...(recoverySources === undefined ? {} : { beforeRacRestart: () => {
+        verifyComposeDependencies(composeValidation.dependencySnapshot, baseline);
+        verifyRequestedHashes(baseline, recoverySources);
+        recoveryOptions.beforeRacRestart?.();
+      } })
+    });
     // prove Cloudflare recovery consumed the encrypted baseline bytes
     if (target === "cloudflared") {
       const cloudflaredProof = await proveAppliedCloudflared(baseline, options, "recovery");

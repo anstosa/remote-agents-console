@@ -417,10 +417,13 @@ test("RAC settings apply forces replacement for unchanged Compose service inputs
   const descriptor = { ...current.descriptor, kind: "compose", compose: { projectDirectory: current.root, projectName: "test", files: [resolve(current.root, "compose.yaml")], envFiles: [], profiles: [] } };
   const calls = [];
   await applyTargets(descriptor, ["rac"], { runner: async (command, args) => { calls.push({ command, args }); return { code: 0, stdout: Buffer.from(args.includes("ps") ? "a".repeat(64) : ""), stderr: Buffer.alloc(0) }; } });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(calls[0].command, "docker");
-  assert.equal(calls[0].args.includes("--force-recreate"), true);
+  assert.equal(calls[0].args.includes("build"), true);
   assert.equal(calls[0].args.at(-1), "remote-agent-console");
+  assert.equal(calls[1].args.includes("--no-build"), true);
+  assert.equal(calls[1].args.includes("--force-recreate"), true);
+  assert.equal(calls[1].args.at(-1), "remote-agent-console");
 });
 
 test("native RAC apply pins the selected checkout and fixed entrypoint", async () => {
@@ -1470,8 +1473,9 @@ test("native Cloudflare applies before the RAC watchdog arms", async () => {
   assert.equal(recoveryProofs, 0);
 });
 
-test("compose fresh RAC proof clears the watchdog before Cloudflare replacement", async () => {
-  const current = fixture();
+// cover preparation failures and edits before the bounded replacement window
+for (const buildResult of ["success", "compose-edit", "app-edit", "build-failure", "recovery-edit", "adopted-source-recovery"]) test(`compose build ${buildResult} stays outside the RAC replacement boundary`, async () => {
+  const current = fixture({ baseline: false });
   const cloud = addNativeCloudBaseline(current);
   const clock = restartClock();
   const compose = resolve(current.root, "compose.yaml");
@@ -1488,6 +1492,18 @@ test("compose fresh RAC proof clears the watchdog before Cloudflare replacement"
     profiles: ["tunnel"],
     options: {}
   };
+  const baselineEnv = resolve(current.root, "baseline.env");
+  const adoptedEnv = resolve(current.root, "adopted.env");
+  // model a pending source adoption without replacing the active baseline's bytes
+  if (buildResult === "adopted-source-recovery") {
+    atomicWriteFile(baselineEnv, `${TEST_AUTH_ENV}VALUE=baseline\n`, 0o600);
+    atomicWriteFile(adoptedEnv, `${TEST_AUTH_ENV}VALUE=adopted\n`, 0o600);
+    current.descriptor.sources.env = { path: baselineEnv, serverPath: baselineEnv, kind: "env", apply: "rac-restart" };
+    current.descriptor.compose.envFiles = [baselineEnv];
+    const desired = { ...current.descriptor, generation: 2, sources: { ...current.descriptor.sources, env: { ...current.descriptor.sources.env, path: adoptedEnv, serverPath: adoptedEnv } }, compose: { ...current.descriptor.compose, envFiles: [adoptedEnv] } };
+    delete desired.controlRoot;
+    atomicWriteFile(resolve(current.controlRoot, "desired-installation.json"), `${JSON.stringify(desired)}\n`, 0o600);
+  }
   const model = {
     services: {
       "remote-agent-console": {
@@ -1517,10 +1533,15 @@ test("compose fresh RAC proof clears the watchdog before Cloudflare replacement"
   const cloudAfter = "c".repeat(64);
   let cloudQueries = 0;
   let racProved = false;
+  let racBuilt = false;
+  let builds = 0;
   let racHealthProofs = 0;
+  let replacements = 0;
+  let recoveries = 0;
+  const restartProgress = [];
   const sources = currentSourceManifest(current.descriptor);
   const hashes = Object.fromEntries(sources.map((source) => [source.id, source.contentHash]));
-  const result = await processOperation(current.descriptor, {
+  const operation = processOperation(current.descriptor, {
     version: 1,
     id: "restart_watchdog_compose1",
     kind: "restart",
@@ -1530,9 +1551,42 @@ test("compose fresh RAC proof clears the watchdog before Cloudflare replacement"
   }, {
     restartWatchdogClock: clock,
     expectedEnvironmentHashes: {},
+    // capture the Compose baseline rather than the fixture's former native service
+    baselineProve: async () => ({ bootNonce: "initial-compose-boot" }),
+    // retain evidence of any unexpected lifecycle or recovery mutation
+    onRestartProgress: (progress) => restartProgress.push(progress),
+    recoveryProve: async baseline => {
+      recoveries += 1;
+      // prove the original source identity rather than the pending adoption
+      if (buildResult === "adopted-source-recovery") {
+        assert.equal(baseline.generation, 1);
+        assert.equal(baseline.sources.env.path, baselineEnv);
+        assert.equal(readFileSync(baseline.sources.env.path, "utf8"), `${TEST_AUTH_ENV}VALUE=baseline\n`);
+      }
+      return { bootNonce: "recovered-rac" };
+    },
+    // enter real recovery for drift and pending source-adoption scenarios
+    ...(["recovery-edit", "adopted-source-recovery"].includes(buildResult) ? { prove: async () => { throw safeError("health-proof-failed"); } } : {}),
     runner: async (_command, args, commandOptions = {}) => {
       // provide the normalized graph for validation and environment proof
       if (args.includes("config") && args.includes("--format")) return { code: 0, stdout: Buffer.from(JSON.stringify(model)), stderr: Buffer.alloc(0) };
+      // model a healthy build taking longer than the replacement deadline
+      if ((args.includes("build") || args.includes("--build")) && args.at(-1) === "remote-agent-console") {
+        builds += 1;
+        assert.equal(clock.pending(), false);
+        assert.equal(commandOptions.timeoutMs, 10 * 60_000);
+        clock.advance(RESTART_WATCHDOG_TIMEOUT_MS * 2);
+        assert.notEqual(commandOptions.signal?.aborted, true);
+        racBuilt = true;
+        // preserve human edits rather than applying an unvalidated graph
+        if (buildResult === "compose-edit") atomicWriteFile(compose, "services: {}\n# operator edit\n", 0o600);
+        // exercise application drift separately from Compose dependencies
+        if (buildResult === "app-edit") atomicWriteFile(current.app, '{"name":"operator edit"}\n', 0o600);
+        // a failed build must leave replacement and recovery untouched
+        if (buildResult === "build-failure") return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+        // corrupt the recovery graph only after the forward replacement has failed
+        if (buildResult === "recovery-edit" && builds === 2) atomicWriteFile(compose, "services: {}\n# recovery edit\n", 0o600);
+      }
       if (args.includes("ps") && args.at(-1) === "remote-agent-console") {
         return { code: 0, stdout: Buffer.from(racContainer), stderr: Buffer.alloc(0) };
       }
@@ -1542,6 +1596,11 @@ test("compose fresh RAC proof clears the watchdog before Cloudflare replacement"
       }
       // publish the fresh boot from the replacement Compose service
       if (args.includes("up") && args.at(-1) === "remote-agent-console") {
+        replacements += 1;
+        assert.equal(racBuilt, true);
+        assert.equal(args.includes("--no-build"), true);
+        assert.equal(args.includes("--build"), false);
+        assert.equal(clock.pending(), builds === 1);
         atomicWriteFile(resolve(current.controlRoot, "boot.json"), `${JSON.stringify({
           version: 1,
           generation: 1,
@@ -1579,6 +1638,46 @@ test("compose fresh RAC proof clears the watchdog before Cloudflare replacement"
     })
   });
 
+  // recovery keeps the proven baseline while leaving adopted desired bytes available to retry
+  if (buildResult === "adopted-source-recovery") {
+    await assert.rejects(operation, { code: "health-proof-failed" });
+    assert.equal(builds, 2);
+    assert.equal(replacements, 2);
+    assert.equal(recoveries, 1);
+    assert.deepEqual(restartProgress.map(progress => progress.state), ["restarting", "recovering", "recovered"]);
+    assert.equal(readFileSync(baselineEnv, "utf8"), `${TEST_AUTH_ENV}VALUE=baseline\n`);
+    assert.equal(readFileSync(adoptedEnv, "utf8"), `${TEST_AUTH_ENV}VALUE=adopted\n`);
+    assert.equal(JSON.parse(readFileSync(resolve(current.controlRoot, "desired-installation.json"), "utf8")).sources.env.path, adoptedEnv);
+    assert.equal(sources.find(source => source.id === "env").contentHash, sha256(readFileSync(adoptedEnv)));
+    assert.equal(clock.pending(), false);
+    return;
+  }
+  // preserve the edited graph and refuse a second replacement during recovery
+  if (buildResult === "recovery-edit") {
+    await assert.rejects(operation, { code: "manual-recovery-required" });
+    assert.equal(builds, 2);
+    assert.equal(replacements, 1);
+    assert.equal(recoveries, 0);
+    assert.deepEqual(restartProgress.map(progress => progress.state), ["restarting", "recovering", "recovery-failed"]);
+    assert.equal(readFileSync(compose, "utf8"), "services: {}\n# recovery edit\n");
+    assert.equal(clock.pending(), false);
+    return;
+  }
+  // refuse preparation failures and drift without arming recovery or replacing RAC
+  if (buildResult !== "success") {
+    const code = buildResult === "compose-edit" ? "compose-dependency-conflict" : buildResult === "app-edit" ? "source-conflict" : "apply-failed";
+    await assert.rejects(operation, { code });
+    assert.equal(replacements, 0);
+    assert.equal(recoveries, 0);
+    assert.deepEqual(restartProgress, []);
+    assert.equal(clock.pending(), false);
+    // external edits remain available for correction
+    if (buildResult === "compose-edit") assert.equal(readFileSync(compose, "utf8"), "services: {}\n# operator edit\n");
+    // retain the human's application edit too
+    if (buildResult === "app-edit") assert.equal(readFileSync(current.app, "utf8"), '{"name":"operator edit"}\n');
+    return;
+  }
+  const result = await operation;
   assert.equal(result.phase, "effective");
   assert.equal(racProved, true);
   assert.equal(racHealthProofs >= 2, true);

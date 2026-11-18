@@ -98,9 +98,12 @@ Completion shows a dismissible **Server restarted successfully** toast, or a
 warning when RAC had to recover after a failed restart. Dismissing that outcome
 does not dismiss any saved changes that still require a restart.
 
-Restarting RAC arms a temporary three-minute watchdog in the host settings
-worker, independent of the RAC process and browser. The watchdog requires a new
-RAC boot with the expected settings and a healthy local listener; the old running
+For Compose installations, the host first builds the RAC image while the current
+service remains available, with a separate ten-minute build timeout. A failed
+build leaves the running service untouched. Replacing RAC then arms a temporary
+three-minute watchdog in the host settings worker, independent of the RAC process
+and browser. The watchdog requires a new RAC boot with the expected settings and
+a healthy local listener; the old running
 process does not count as a successful restart. If RAC does not return in time,
 the worker stops the forward restart commands and automatically runs the same
 last-known-healthy recovery used by the host recovery command. Recovery retains
