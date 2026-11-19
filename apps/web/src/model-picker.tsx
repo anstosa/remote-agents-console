@@ -7,8 +7,12 @@ export type AgentModel = { id: string; name?: string; effort?: string };
 type ModelRow = { id: string; name: string; provider: string; inputPrice?: number; outputPrice?: number; contextWindow?: number; efforts: string[] };
 type Request = (url: string, init?: RequestInit) => Promise<Response>;
 
-const price = (dollars: number | undefined): string => dollars === undefined ? '?' : `$${dollars}`;
-const contextWindow = (tokens: number | undefined): string => tokens === undefined ? '' : ` · ${tokens >= 1_000_000 ? `${tokens / 1_000_000}M` : `${Math.round(tokens / 1_000)}k`} context`;
+// a row's known prices and context window; an unknown part is left out rather than shown as '?'
+const details = ({ inputPrice, outputPrice, contextWindow }: ModelRow): string => {
+  const prices = [inputPrice === undefined ? '' : `$${inputPrice} in`, outputPrice === undefined ? '' : `$${outputPrice} out`].filter(Boolean).join(' · ');
+  const context = contextWindow === undefined ? '' : `${contextWindow >= 1_000_000 ? `${contextWindow / 1_000_000}M` : `${Math.round(contextWindow / 1_000)}k`} context`;
+  return [prices === '' ? '' : `${prices} per 1M`, context].filter(Boolean).join(' · ');
+};
 const failure = async (response: Response): Promise<string> => ((await response.json().catch(() => undefined)) as { error?: string } | undefined)?.error ?? 'The model could not be switched.';
 
 /**
@@ -52,7 +56,7 @@ export function ModelChip({ agentId, model, switchable, working, request, onErro
       {working && <p className="model-picker-warning" role="status">Cancel the turn to switch</p>}
       {models === undefined ? <p className="model-picker-note">Loading…</p> : models.map(row => <button key={row.id} type="button" className={`model-row${row.id === model.id ? ' current' : ''}`} aria-current={row.id === model.id || undefined} disabled={disabled} onClick={() => { if (row.id !== model.id) void choose({ model: row.id }); }}>
         <strong>{row.name}</strong><small>{row.provider}</small>
-        <span>{price(row.inputPrice)} in · {price(row.outputPrice)} out per 1M{contextWindow(row.contextWindow)}</span>
+        {details(row) !== '' && <span>{details(row)}</span>}
       </button>)}
       {current !== undefined && current.efforts.length > 0 && <>
         <p className="model-picker-heading">Effort · {current.name}</p>

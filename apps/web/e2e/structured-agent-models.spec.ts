@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 const gpt = { id: 'openai/gpt-5.6', name: 'GPT-5.6', provider: 'openai', inputPrice: 1.25, outputPrice: 10, contextWindow: 400_000, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'] };
-const opus = { id: 'openrouter/~anthropic/claude-opus-latest', name: 'Claude Opus', provider: 'openrouter', inputPrice: 5, outputPrice: 25, contextWindow: 200_000, efforts: ['off', 'low', 'medium', 'high'] };
+const opus = { id: 'openrouter/~anthropic/claude-opus-latest', name: 'Claude Opus', provider: 'openrouter', contextWindow: 200_000, efforts: ['off', 'low', 'medium', 'high'] };
 
 type Structured = { model?: { id: string; name?: string; effort?: string }; switchable: boolean };
 
@@ -49,6 +49,8 @@ test('the model chip opens a picker of Allowed models and switches model and Eff
   await expect(rows.nth(0)).toContainText('$1.25 in · $10 out per 1M · 400k context');
   await expect(rows.nth(1)).toContainText('Claude Opus');
   await expect(rows.nth(1)).toContainText('openrouter');
+  // unknown pricing is left out, not shown as '?'
+  await expect(rows.nth(1).locator('span')).toHaveText('200k context');
   // Effort offers only the current model's levels
   await expect(picker.getByRole('group', { name: 'Effort' }).getByRole('button')).toHaveText(gpt.efforts);
   await expect(picker.getByRole('button', { name: 'medium', exact: true })).toHaveAttribute('aria-pressed', 'true');
