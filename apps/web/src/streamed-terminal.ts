@@ -682,14 +682,11 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
 
   let codexWheelRemainder = 0;
   let codexWheelGeneration = outputGeneration;
-  let codexWheelDirection = 0;
-  let codexWheelSentAt = Number.NEGATIVE_INFINITY;
-  // codex disables capture under mouse-off tmux; use page keys instead of prompt arrows
+  // codex still reads sgr wheel reports when tmux mouse is off
   terminal.attachCustomWheelEventHandler(event => {
     // preserve native history and application mouse protocols outside this fallback
     if (!options.codexScrollControls || terminal.buffer.active.type !== 'alternate' || terminal.modes.mouseTrackingMode !== 'none') {
       codexWheelRemainder = 0;
-      codexWheelDirection = 0;
       return true;
     }
     // leave browser zoom and horizontal gestures alone without synthesizing arrows
@@ -698,37 +695,32 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       return false;
     }
     event.preventDefault();
-    // never carry a partial gesture or an application shortcut across stream snapshots
+    // never carry partial motion across stream snapshots
     if (codexWheelGeneration !== outputGeneration || parsedSeedGeneration !== outputGeneration) {
       codexWheelRemainder = 0;
-      codexWheelDirection = 0;
       codexWheelGeneration = outputGeneration;
       // wait until the retained screen belongs to the current stream
       if (parsedSeedGeneration !== outputGeneration) return false;
     }
-    const height = terminal.element?.querySelector('.xterm-screen')?.getBoundingClientRect().height;
-    // wait for measurable rows before accumulating fractional trackpad movement
-    if (!height) return false;
-    let amount = event.deltaY;
-    // match xterm's fractional trackpad threshold and page-sized wheel units
-    if (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL) amount = amount / (height / terminal.rows) * (Math.abs(amount) < 50 ? 0.3 : 1);
-    else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) amount *= terminal.rows;
-    const direction = Math.sign(amount);
-    // a reversed gesture must not cancel against old motion or inherit its page throttle
-    if (direction !== codexWheelDirection) {
+    const bounds = terminal.element?.querySelector('.xterm-screen')?.getBoundingClientRect();
+    // wait for measurable cells before generating coordinates
+    if (!bounds?.width || !bounds.height) return false;
+    const { cols, rows } = terminal;
+    const direction = Math.sign(event.deltaY);
+    // match xterm's pixel threshold and preserve one report per discrete step
+    if (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL) {
+      // do not offset a new direction with leftover motion
+      if (Math.sign(codexWheelRemainder) !== direction) codexWheelRemainder = 0;
+      codexWheelRemainder += event.deltaY / (bounds.height / rows) * (Math.abs(event.deltaY) < 50 ? 0.3 : 1);
+      // wait for a whole row without replaying a large wheel delta as multiple reports
+      if (Math.abs(codexWheelRemainder) < 1) return false;
+      codexWheelRemainder %= 1;
+    } else {
       codexWheelRemainder = 0;
-      codexWheelDirection = direction;
-      codexWheelSentAt = Number.NEGATIVE_INFINITY;
     }
-    codexWheelRemainder += amount;
-    const lines = Math.trunc(codexWheelRemainder);
-    codexWheelRemainder -= lines;
-    const now = performance.now();
-    // cap bursts and synthetic touch rows at one page per 150ms without queued input
-    if (lines !== 0 && now - codexWheelSentAt >= 150) {
-      // complete keyboard sequences work in both the transcript and non-mouse overlays
-      if (sendInput(lines < 0 ? '\x1b[5~' : '\x1b[6~')) codexWheelSentAt = now;
-    }
+    const column = Math.min(cols, Math.max(1, Math.floor((event.clientX - bounds.left) / (bounds.width / cols)) + 1));
+    const row = Math.min(rows, Math.max(1, Math.floor((event.clientY - bounds.top) / (bounds.height / rows)) + 1));
+    sendInput(`\x1b[<${direction < 0 ? 64 : 65};${column};${row}M`);
     return false;
   });
 

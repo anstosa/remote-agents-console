@@ -74,13 +74,13 @@ export const attachTerminalTouchScroll = (element: HTMLElement, terminal: XTerm)
       gesture.remainder -= lines * cellHeight();
       // preserve xterm's mouse encoding and alternate-screen arrow fallback
       if (scrollsProgram()) {
-        // xterm emits one application scroll report per wheel event
+        // keep each row on the part of the program where the drag began
         for (let line = 0; line < Math.abs(lines); line += 1) {
           terminalElement.dispatchEvent(new WheelEvent('wheel', {
             bubbles: true,
             cancelable: true,
-            clientX: touch.clientX,
-            clientY: touch.clientY,
+            clientX: gesture.startX,
+            clientY: gesture.startY,
             deltaMode: WheelEvent.DOM_DELTA_LINE,
             deltaY: -Math.sign(lines)
           }));
