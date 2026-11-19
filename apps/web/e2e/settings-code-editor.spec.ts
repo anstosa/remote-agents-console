@@ -196,6 +196,8 @@ async function setupCodeEditors(
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    // serve the built-in icon catalog
+    if (path === '/api/instance-icons' && request.method() === 'GET') return route.fulfill({ json: { icons: [{ name: 'terminal', valid: true }] } });
     // provide the authenticated shell
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'editor-csrf', active: true, deviceName: 'Editor test', server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] }, davo: { enabled: false, available: true, name: 'Davo', context: '' } } });
     // provide an empty dashboard

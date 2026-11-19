@@ -113,6 +113,9 @@ async function piCredentialFixture() {
   await writeFile(authPath, '{"key":"account-a"}\n');
   await chmod(stateDir, 0o700);
   await chmod(authPath, 0o600);
+  // use a whole-second timestamp so filesystem precision cannot alter the restored mtime
+  const stableTime = new Date(1_700_000_000_000);
+  await utimes(authPath, stableTime, stableTime);
   const adapter = { program: process.execPath, args: [], env: { PI_CODING_AGENT_DIR: stateDir }, launchable: true as const };
   const generation = await piReplyRuntimeGeneration(adapter);
   expect(generation).toBeDefined();
@@ -121,13 +124,13 @@ async function piCredentialFixture() {
 
 // replace credential bytes without changing the legacy fingerprint fields
 async function rewritePiCredential(authPath: string) {
-  const [before, legacyBefore] = await Promise.all([lstat(authPath, { bigint: true }), lstat(authPath)]);
+  const before = await lstat(authPath, { bigint: true });
   await new Promise(resolve => setTimeout(resolve, 20));
   await writeFile(authPath, '{"key":"account-b"}\n');
   await chmod(authPath, 0o600);
-  await utimes(authPath, legacyBefore.atimeMs / 1e3, legacyBefore.mtimeMs / 1e3);
-  const [after, legacyAfter] = await Promise.all([lstat(authPath, { bigint: true }), lstat(authPath)]);
-  expect(legacyAfter.mtimeMs).toBe(legacyBefore.mtimeMs);
+  await utimes(authPath, before.atime, before.mtime);
+  const after = await lstat(authPath, { bigint: true });
+  expect(after.mtimeNs).toBe(before.mtimeNs);
   expect(after.size).toBe(before.size);
   expect(after.ctimeNs).not.toBe(before.ctimeNs);
 }

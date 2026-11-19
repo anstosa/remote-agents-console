@@ -352,7 +352,7 @@ const attemptPowerAction = async (page: Page, name: 'Clear' | 'Restart') => {
 // read only lifecycle mutations
 const mutations = (harness: ConsoleHarness) => harness.lifecycle.map(request => `${request.method} ${decodeURIComponent(request.path)}`);
 
-test('middle-clicking a worktree tab stops every idle agent and managed shell, then closes its panels', async ({ page }) => {
+test('middle-clicking a worktree tab stops idle agents and managed shells but leaves unmanaged output', async ({ page }) => {
   const scenario: Scenario = {
     agents: [worktreeAgent('cora-1', cora), worktreeAgent('cora-2', cora, 'finished', 'claude'), worktreeAgent('delta-1', delta)],
     projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [cora, delta] }],
@@ -384,18 +384,18 @@ test('middle-clicking a worktree tab stops every idle agent and managed shell, t
     'POST /api/agents/cora-1/deactivate',
     'POST /api/agents/cora-2/deactivate'
   ]));
-  expect(mutations(harness)).not.toEqual(expect.arrayContaining([
-    'DELETE /api/worktrees/cora/panes/%6',
-    'POST /api/agents/delta-1/deactivate'
-  ]));
   const agentRequests = harness.lifecycle.filter(request => request.path.includes('/api/agents/cora-'));
   expect(agentRequests).toEqual(expect.arrayContaining([
     expect.objectContaining({ method: 'POST', contentType: 'application/json', body: '{}' }),
     expect.objectContaining({ method: 'POST', contentType: 'application/json', body: '{}' })
   ]));
-  await expect(page.locator('.terminal-pane, .browser-pane, .note-pane')).toHaveCount(0);
   await expect(page.getByRole('tab', { name: 'Cora — Agent closed' })).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Empty workspace' })).toBeVisible();
+  // recover the remaining unmanaged pane without reopening closed splits
+  await expect(page.getByRole('toolbar', { name: `Terminal vim · ${cora.path} actions` })).toBeVisible();
+  await expect(page.locator('.terminal-pane')).toHaveCount(1);
+  await expect(page.locator('.browser-pane, .note-pane')).toHaveCount(0);
+  expect(mutations(harness)).not.toContain('DELETE /api/worktrees/cora/panes/%6');
+  expect(mutations(harness)).not.toContain('POST /api/agents/delta-1/deactivate');
   expect(harness.destructive).toEqual([]);
   expect(scenario.notes?.cora).toEqual([{ id: 'note-1', title: 'Persistent note', text: 'keep this note' }]);
 });

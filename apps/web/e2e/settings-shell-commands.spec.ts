@@ -158,6 +158,9 @@ async function setupShellSettings(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    // serve the built-in icon catalog
+    if (path === "/api/instance-icons" && request.method() === "GET")
+      return route.fulfill({ json: { icons: [{ name: "terminal", valid: true }] } });
     // authenticate one controlling browser
     if (path === "/api/auth/session")
       return route.fulfill({

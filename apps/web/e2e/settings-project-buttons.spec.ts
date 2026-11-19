@@ -119,6 +119,9 @@ async function setupProjectButtons(page: Page, options: FixtureOptions = {}) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    // serve the built-in icon catalog
+    if (path === "/api/instance-icons" && request.method() === "GET")
+      return route.fulfill({ json: { icons: [{ name: "terminal", valid: true }] } });
     // publish one authenticated controller
     if (path === "/api/auth/session")
       return route.fulfill({
