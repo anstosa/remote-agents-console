@@ -7,7 +7,9 @@ const inlinePattern = /(`([^`\n]+)`|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|
 // A `#` link is one of the console's own addresses (`#worktree=<id>` opens that Workspace) and an
 // Obsidian link hands off to the app, so both stay in this tab; the rest open a new one.
 const linkTo = (key: string, href: string, children: ReactNode) => /^(?:#|obsidian:)/iu.test(href) ? <a key={key} href={href}>{children}</a> : <a key={key} href={href} target="_blank" rel="noreferrer">{children}</a>;
-const singleTildeListStrike = /(^|[^~])~([^~\n]+)~(?!~)/gu;
+// code spans pass through untouched, so `~/a` and `~/b` in one item stay paths
+const singleTildeListStrike = /(`[^`\n]+`)|(^|[^~])~([^~\n]+)~(?!~)/gu;
+const strikeSingleTildes = (text: string) => text.replace(singleTildeListStrike, (match, code: string | undefined, before: string, struck: string) => code ?? `${before}~~${struck}~~`);
 
 const trimLinkSuffix = (value: string) => {
   let end = value.length;
@@ -50,7 +52,7 @@ const inlineMarkdown = (text: string, key: string, links = true): ReactNode[] =>
 // preserve source lines inside one paragraph
 const inlineMarkdownLines = (lines: string[], key: string): ReactNode[] => lines.map((line, index) => <Fragment key={`${key}-line-${index}`}>{index > 0 && <br />}{inlineMarkdown(line, `${key}-line-${index}`)}</Fragment>);
 
-const startsBlock = (line: string) => /^(?:\s*$|#{1,6}\s+|```|>\s?|[-*+]\s+|\d+[.)]\s+|(?:-{3,}|\*{3,}|_{3,})\s*$)/u.test(line);
+const startsBlock = (line: string) => /^(?:\s*$|#{1,6}\s+|\s*```|>\s?|[-*+]\s+|\d+[.)]\s+|(?:-{3,}|\*{3,}|_{3,})\s*$)/u.test(line);
 
 type TableAlignment = 'left' | 'center' | 'right' | undefined;
 
@@ -190,8 +192,25 @@ const pseudoTable = (lines: string[], start: number): { block: ReactNode; next: 
 };
 
 type ListMarker = { indent: number; ordered: boolean; number?: number; checked?: boolean; text: string };
-type ListItem = { marker: ListMarker; lines: string[]; children: ParsedList[] };
+type ListBlock = { kind: 'text'; lines: string[] } | { kind: 'code'; language: string; code: string } | { kind: 'list'; list: ParsedList };
+type ListItem = { marker: ListMarker; blocks: ListBlock[] };
 type ParsedList = { ordered: boolean; start?: number; items: ListItem[] };
+
+// A ``` fence, at any indent so a list item can hold one; its body loses up to the fence's indent.
+const fencedCode = (lines: string[], start: number) => {
+  const open = /^(\s*)```([^\s`]*)\s*$/u.exec(lines[start] ?? '');
+  if (!open) return undefined;
+  const indent = new RegExp(`^ {0,${open[1]!.length}}`, 'u');
+  const code: string[] = [];
+  let next = start + 1;
+  while (next < lines.length && !/^\s*```\s*$/u.test(lines[next]!)) code.push(lines[next++]!.replace(indent, ''));
+  if (next < lines.length) next += 1;
+  return { language: open[2]!, code: code.join('\n'), next };
+};
+
+const codeBlock = (language: string, code: string, key: string): ReactNode => language.toLowerCase() === 'mermaid'
+  ? <MermaidDiagram key={key} source={code} />
+  : <pre key={key}><code data-language={language || undefined}>{code}</code></pre>;
 
 const listMarker = (line: string): ListMarker | undefined => {
   const match = /^(\s*)(?:(\d+)[.)]|([-*+]))\s+(?:\[([ xX])\]\s+)?(.*)$/u.exec(line);
@@ -206,6 +225,8 @@ const listMarker = (line: string): ListMarker | undefined => {
   };
 };
 
+const lineIndent = (line: string) => /^\s*/u.exec(line)![0].replace(/\t/gu, '    ').length;
+
 const parseList = (lines: string[], start: number, first: ListMarker): { list: ParsedList; next: number } => {
   const indent = first.indent;
   const list: ParsedList = { ordered: first.ordered, ...(first.number === undefined ? {} : { start: first.number }), items: [] };
@@ -213,9 +234,11 @@ const parseList = (lines: string[], start: number, first: ListMarker): { list: P
   while (index < lines.length) {
     const marker = listMarker(lines[index] ?? '');
     if (marker === undefined || marker.indent !== indent || marker.ordered !== list.ordered) break;
-    const item: ListItem = { marker, lines: [marker.text], children: [] };
+    const item: ListItem = { marker, blocks: [{ kind: 'text', lines: [marker.text] }] };
     index += 1;
     let endList = false;
+    // an indented line after a blank one continues the item as a new paragraph
+    let paragraphBreak = false;
     while (index < lines.length) {
       if (!lines[index]!.trim()) {
         let next = index + 1;
@@ -227,6 +250,7 @@ const parseList = (lines: string[], start: number, first: ListMarker): { list: P
           continue;
         }
         index = next;
+        if (nextMarker === undefined && next < lines.length && lineIndent(lines[next]!) > indent) { paragraphBreak = true; continue; }
         endList = true;
         break;
       }
@@ -235,13 +259,21 @@ const parseList = (lines: string[], start: number, first: ListMarker): { list: P
         if (nestedMarker.indent === indent) break;
         if (nestedMarker.indent < indent) { endList = true; break; }
         const nested = parseList(lines, index, nestedMarker);
-        item.children.push(nested.list);
+        item.blocks.push({ kind: 'list', list: nested.list });
         index = nested.next;
         continue;
       }
-      const continuationIndent = /^\s*/u.exec(lines[index] ?? '')?.[0].replace(/\t/gu, '    ').length ?? 0;
-      if (continuationIndent > indent) {
-        item.lines.push((lines[index] ?? '').trim());
+      if (lineIndent(lines[index]!) > indent) {
+        const fence = fencedCode(lines, index);
+        if (fence !== undefined) {
+          item.blocks.push({ kind: 'code', language: fence.language, code: fence.code });
+          index = fence.next;
+          continue;
+        }
+        const last = item.blocks.at(-1);
+        if (last?.kind === 'text' && !paragraphBreak) last.lines.push(lines[index]!.trim());
+        else item.blocks.push({ kind: 'text', lines: [lines[index]!.trim()] });
+        paragraphBreak = false;
         index += 1;
         continue;
       }
@@ -256,7 +288,13 @@ const parseList = (lines: string[], start: number, first: ListMarker): { list: P
 
 // render nested lists with paired single-tilde compatibility
 const renderList = (list: ParsedList, key: string): ReactNode => {
-  const items = list.items.map((item, index) => <li key={`${key}-item-${index}`}>{item.marker.checked !== undefined && <input type="checkbox" checked={item.marker.checked} readOnly tabIndex={-1} />}{inlineMarkdown(item.lines.join(' ').replace(singleTildeListStrike, '$1~~$2~~'), `${key}-item-${index}`)}{item.children.map((child, childIndex) => renderList(child, `${key}-item-${index}-child-${childIndex}`))}</li>);
+  const items = list.items.map((item, index) => <li key={`${key}-item-${index}`}>{item.marker.checked !== undefined && <input type="checkbox" checked={item.marker.checked} readOnly tabIndex={-1} />}{item.blocks.map((block, blockIndex) => {
+    const at = `${key}-item-${index}-${blockIndex}`;
+    if (block.kind === 'list') return renderList(block.list, at);
+    if (block.kind === 'code') return codeBlock(block.language, block.code, at);
+    const text = inlineMarkdown(strikeSingleTildes(block.lines.join(' ')), at);
+    return blockIndex === 0 ? <Fragment key={at}>{text}</Fragment> : <p key={at}>{text}</p>;
+  })}</li>);
   return list.ordered ? <ol key={key} start={list.start}>{items}</ol> : <ul key={key}>{items}</ul>;
 };
 
@@ -306,14 +344,10 @@ export function MarkdownBlocks({ text }: { text: string }) {
       index = table.next;
       continue;
     }
-    const fence = /^```([^\s`]*)\s*$/u.exec(line);
+    const fence = fencedCode(lines, index);
     if (fence) {
-      const start = index;
-      const code: string[] = [];
-      index += 1;
-      while (index < lines.length && !/^```\s*$/u.test(lines[index]!)) code.push(lines[index++]!);
-      if (index < lines.length) index += 1;
-      blocks.push(fence[1]?.toLowerCase() === 'mermaid' ? <MermaidDiagram key={`code-${start}`} source={code.join('\n')} /> : <pre key={`code-${start}`}><code data-language={fence[1] || undefined}>{code.join('\n')}</code></pre>);
+      blocks.push(codeBlock(fence.language, fence.code, `code-${index}`));
+      index = fence.next;
       continue;
     }
     const heading = /^(#{1,6})\s+(.+)$/u.exec(line);

@@ -18,6 +18,14 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
     '   with a continuation line',
     '3. Third ordered item',
     '   - ~Nested detail~',
+    '4. Refresh the catalog (outside the sandbox):',
+    '   ```sh',
+    '   pi update --models',
+    '     --dry-run',
+    '   ```',
+    '   Use the same `PI_CODING_AGENT_DIR`, `~/.pi/agent` by default.',
+    '',
+    '   Afterwards `grep gpt ~/.pi/agent/models.json` finds them.',
     '',
     'Bare links work at https://example.com/bare and www.example.org/docs.',
     'Open [the worktree](#worktree=wt%3A1) here.',
@@ -128,8 +136,14 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
   await expect(preview.locator(':scope > ol > li')).toHaveText([
     'First ordered item',
     'Second ordered item with a continuation line',
-    'Third ordered itemNested detail'
+    'Third ordered itemNested detail',
+    'Refresh the catalog (outside the sandbox):pi update --models\n  --dry-runUse the same PI_CODING_AGENT_DIR, ~/.pi/agent by default.Afterwards grep gpt ~/.pi/agent/models.json finds them.'
   ]);
+  // a fence inside an item is a code block, and the paragraph after a blank line stays in the item
+  const fencedItem = preview.locator(':scope > ol > li').nth(3);
+  await expect(fencedItem.locator('pre code[data-language="sh"]')).toHaveText('pi update --models\n  --dry-run');
+  await expect(fencedItem.locator('code')).toHaveText(['pi update --models\n  --dry-run', 'PI_CODING_AGENT_DIR', '~/.pi/agent', 'grep gpt ~/.pi/agent/models.json']);
+  await expect(fencedItem.locator('p')).toHaveText(['Use the same PI_CODING_AGENT_DIR, ~/.pi/agent by default.', 'Afterwards grep gpt ~/.pi/agent/models.json finds them.']);
   await expect(preview.locator(':scope > ol > li').nth(2).locator('ul > li')).toHaveText('Nested detail');
   await expect(preview.locator('li del')).toHaveText(['First item', 'Second ordered item', 'Nested detail']);
   await expect(preview.locator('del')).toHaveCount(3);

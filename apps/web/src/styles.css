@@ -1017,6 +1017,7 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .note-markdown p, .note-markdown ul, .note-markdown ol, .note-markdown blockquote, .note-markdown pre { margin: 0 0 .85em; }
 .note-markdown ul, .note-markdown ol { padding-left: 1.5rem; }
 .note-markdown li + li { margin-top: .2em; }
+.note-markdown li > :is(p, pre) { margin: .35em 0; }
 .note-markdown li input { margin: 0 .45em 0 0; accent-color: var(--blue); }
 .note-markdown blockquote { padding: .2rem 0 .2rem .75rem; border-left: 3px solid var(--surface-2); color: var(--subtext-0); }
 .note-markdown code { border-radius: .25rem; padding: .08em .3em; background: var(--surface-0); color: var(--peach); font: .92em var(--font-mono); }
