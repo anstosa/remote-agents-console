@@ -119,6 +119,35 @@ test('Scratch chat opens and copies a padded multiline link', async ({ page }) =
   await expectChatLink(page, scratchAgent);
 });
 
+// replay the hard rows emitted by codex for a long markdown destination
+test('either row of a wrapped Markdown file link opens the full preview', async ({ page }) => {
+  const first = '.omx/plans/p3-bookworm-cross-';
+  const last = 'closure-boundary-20261119.md';
+  const path = first + last;
+  const content = '# Workspace preview\n';
+  await mountChat(page, currentAgent);
+  // only the complete destination exists in the workspace
+  await page.route(`**/api/agents/${currentAgent.agentId}/file-preview`, route => {
+    const body = route.request().postDataJSON() as { path?: string };
+    // reproduce the real endpoint's miss for a truncated destination
+    if (body.path !== path) return route.fulfill({ status: 404, json: { error: 'file unavailable' } });
+    return route.fulfill({ json: { path, size: content.length, binary: false, truncated: false, content } });
+  });
+  await pushBytes(page, currentAgent.agentId, `  Comparison and evidence (\x1b[4m${first}\x1b[0m\r\n  \x1b[4m${last}\x1b[0m)`);
+
+  const log = page.getByLabel('Live log', { exact: true });
+  const links = log.getByRole('link', { name: /^Preview /u });
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(links).toHaveCount(2);
+  // click both physical rows through the production preview panel
+  for (const link of await links.all()) {
+    await link.click();
+    await expect(preview.getByText('Workspace preview', { exact: false })).toBeVisible();
+    await expect(link).toHaveAttribute('href', `#file-preview=${encodeURIComponent(path)}`);
+    await preview.getByRole('button', { name: 'Close file', exact: true }).click();
+  }
+});
+
 // cover captured UUID breaks through both production chat surfaces
 for (const fixture of [currentAgent, scratchAgent]) {
   // preserve the full target for opening and copying from either side of the break

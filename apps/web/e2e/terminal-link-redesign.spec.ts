@@ -253,6 +253,69 @@ test('keeps an extensionless file path separate after a complete URL', async ({ 
   await expect(page.locator('a[href*="completeconfig"]')).toHaveCount(0);
 });
 
+// reconstruct unstyled captured rows without consuming an independent path
+test('joins three enclosed file fragments and keeps the next file separate', async ({ page }) => {
+  const path = './docs/quarterly-release-checklist.md';
+  const neighbor = 'docs/other.md';
+  await mountScenario(page, `Notes (./docs/quarterly-\r\n  release-\r\n  checklist.md:12)\r\n  ${neighbor}`, { fileCapability: true });
+
+  await expect(page.getByRole('link', { name: `Preview ${path}`, exact: true })).toHaveCount(3);
+  await expect(page.getByRole('link', { name: `Preview ${neighbor}`, exact: true })).toHaveCount(1);
+  await expect(page.getByRole('link', { name: /^Preview /u })).toHaveCount(4);
+});
+
+// an unbroken filename can fill a hard row with no punctuation at the break
+test('joins an enclosed filename split at the terminal edge', async ({ page }) => {
+  const middle = 'a'.repeat(58);
+  const path = `./docs/${middle}archive.md`;
+  await mountScenario(page, `File (./docs/\r\n  ${middle}\r\n  archive.md)`, { columns: 60, fileCapability: true });
+  await expect(page.getByRole('link', { name: `Preview ${path}`, exact: true })).toHaveCount(3);
+});
+
+// withhold recognized fragments until the closing delimiter arrives
+test('waits for the wrapped file destination to finish streaming', async ({ page }) => {
+  const path = 'docs/partial-release.md';
+  await mountScenario(page, 'Notes (docs/partial-\r\n  release.md', { fileCapability: true });
+  await expect(page.getByRole('link', { name: /^Preview /u })).toHaveCount(0);
+
+  await page.evaluate(async () => {
+    const { writeTerminalLinkOutput } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    await writeTerminalLinkOutput(')');
+  });
+  await expect(page.getByRole('link', { name: `Preview ${path}`, exact: true })).toHaveCount(2);
+  await expect(page.getByRole('link', { name: /^Preview /u })).toHaveCount(2);
+});
+
+// parentheses by themselves do not prove paths share a destination
+test('keeps standalone files after prose and unrelated hard rows', async ({ page }) => {
+  await mountScenario(page, 'Files (docs/one.md\r\n  docs/two.md)\r\nNotes (see\r\n  docs/three.md)\r\nDraft (docs/partial-\r\n  docs/four.md is separate)', { fileCapability: true });
+  // retain each independent file without claiming it as a continuation
+  for (const path of ['docs/one.md', 'docs/two.md', 'docs/three.md', 'docs/four.md']) {
+    await expect(page.getByRole('link', { name: `Preview ${path}`, exact: true })).toHaveCount(1);
+  }
+});
+
+// use synthetic snapshots to exercise the resolver's explicit bounds
+test('does not expose clipped or over-budget wrapped file targets or their fragments', () => {
+  // build rows without relying on the terminal viewport clipping behavior
+  const snapshot = (lines: string[], truncatedEnd = false): LinkSnapshot => ({
+    rows: lines.map((text, line) => ({
+      line, columns: 120, wrapped: false,
+      // leave visible padding after each hard row
+      cells: [...text].map((character, column) => ({ column, text: character, width: 1, style: '0:0:false:false', accented: false }))
+    })),
+    truncatedStart: false,
+    truncatedEnd
+  });
+  const opener = 'Notes (docs/partial-';
+  const overRows = [opener, ...Array<string>(31).fill('  segment-'), '  release.md)'];
+  const overLength = [opener, ...Array<string>(5).fill(`  ${'a'.repeat(100)}-`), '  release.md)'];
+
+  expect(resolveTerminalLinks(snapshot([opener, '  release.md'], true))).toEqual([]);
+  expect(resolveTerminalLinks(snapshot(overRows))).toEqual([]);
+  expect(resolveTerminalLinks(snapshot(overLength))).toEqual([]);
+});
+
 // path punctuation cannot bond a following same-styled file to the URL
 test('keeps a styled file path separate after a URL ending in sentence colon', async ({ page }) => {
   const uri = 'https://example.com/report';

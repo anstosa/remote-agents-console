@@ -10,6 +10,10 @@ const urlStart = /https?:\/{0,2}/giu;
 const tokenEnd = /[\s\u0000"'!*(){}|\\^<>`]/u;
 // retain the existing workspace-reference grammar independently from URL inference
 const fileMention = /(?:^|[\s'"`(<\[])(@?(?:(?:file:\/\/)?(?:\/|\.{1,2}\/)?(?:[A-Za-z0-9_@.+-]+\/)+[A-Za-z0-9_@.+-]*[A-Za-z0-9_@+-]|(?:README|LICENSE|Dockerfile|Makefile)(?:\.[A-Za-z0-9_-]+)?|[A-Za-z0-9_@+-]+\.[A-Za-z0-9_-]{1,16})(?:#L\d+(?:-L\d+)?|:\d+(?::\d+)?)?)/gu;
+const completeFileMention = new RegExp(`^(?:${fileMention.source})$`, 'u');
+const openingFileFragment = /\(([A-Za-z0-9_@.+/#:-]+) *$/u;
+const fileFragment = /^[A-Za-z0-9_@.+/#:-]+$/u;
+const maxFilePathCharacters = 512;
 
 // remove display-only source line annotations from file targets
 const filePath = (value: string) => value.replace(/^@/u, '').replace(/^file:\/\//u, '').replace(/#L\d+(?:-L\d+)?$/iu, '').replace(/:\d+(?::\d+)?$/u, '');
@@ -155,6 +159,48 @@ const inferUrl = (rows: LogicalRow[], rowIndex: number, start: number) => {
   return { best: exhausted ? undefined : best, pieces };
 };
 
+// require a split marker or a full terminal row before joining path-shaped text
+const fileWrapBoundary = (previous: Piece, nextToken: string) => {
+  const before = previous.row.text.slice(previous.start, previous.end);
+  // a rooted or explicitly introduced reference is a new target
+  if (/^(?:[@/]|\.{1,2}\/|file:\/\/)/u.test(nextToken)) return false;
+  // do not join a complete filename to a new directory path at the right edge
+  if (nextToken.includes('/') && /\.[A-Za-z0-9_]{1,16}$/u.test(before)) return false;
+  const last = previous.row.points[previous.end - 1];
+  return /[-/]$/u.test(before) || (last?.row === previous.row.last.line && last.cell.column + last.cell.width === previous.row.last.columns);
+};
+
+// keep positively identified fragments even if their destination never finishes
+const inferWrappedFile = (rows: LogicalRow[], rowIndex: number, overlaps: (piece: Piece) => boolean): { path?: string; pieces: Piece[] } | undefined => {
+  const row = rows[rowIndex];
+  const opening = openingFileFragment.exec(row.text);
+  // only join when an opening delimiter owns the token at the hard break
+  if (!opening || row.clipped) return undefined;
+  const initial = opening[1];
+  const first = { row, start: opening.index + 1, end: opening.index + 1 + initial.length };
+  // url-owned cells cannot start a file candidate
+  if (overlaps(first)) return undefined;
+  let path = initial.length <= maxFilePathCharacters ? initial : undefined;
+  const pieces: Piece[] = [first];
+  // keep scanning bonded fragments in the finite snapshot even after the path exceeds its link budget
+  for (let index = rowIndex + 1; index < rows.length; index += 1) {
+    const next = rows[index];
+    const start = /^ */u.exec(next.text)![0].length;
+    const token = tokenAt(next, start);
+    const closed = next.text[token.end] === ')';
+    const piece = { row: next, start, end: token.end };
+    // stop before prose, independent references or stronger matches
+    if (!fileFragment.test(token.text) || (!closed && !token.terminal) || !fileWrapBoundary(pieces.at(-1)!, token.text) || overlaps(piece)) break;
+    pieces.push(piece);
+    path = path !== undefined && path.length + token.text.length <= maxFilePathCharacters && next.last.line - row.first.line < linkContextRows ? path + token.text : undefined;
+    // only a complete path and closing delimiter can become a link
+    if (closed) return { pieces, path: path !== undefined && completeFileMention.test(path) ? path : undefined };
+    // never promote a token cut by the snapshot
+    if (next.clipped) break;
+  }
+  return pieces.length > 1 ? { pieces } : undefined;
+};
+
 // resolve explicit targets first, then inferred URLs, then non-overlapping files
 export const resolveTerminalLinks = (snapshot: LinkSnapshot): ResolvedTerminalLink[] => {
   const links: ResolvedTerminalLink[] = [];
@@ -195,6 +241,22 @@ export const resolveTerminalLinks = (snapshot: LinkSnapshot): ResolvedTerminalLi
       if (resolved.best) links.push({ kind: 'url', uri: resolved.best.uri, source: 'inferred', ranges: rangesFor(resolved.best.pieces, resolved.best.uri.length) });
     }
   }
+  // keep files out of the cells already claimed by a stronger match
+  const overlaps = ({ row, start, end }: Piece) => occupied.get(row)?.some(range => start < range.end && end > range.start) ?? false;
+  // reserve wrapped destinations before treating their fragments as standalone files
+  for (const [index] of rows.entries()) {
+    const wrapped = inferWrappedFile(rows, index, overlaps);
+    // leave ambiguous rows available for ordinary file inference
+    if (!wrapped) continue;
+    // use the complete path on each physical row only after validation
+    if (wrapped.path !== undefined) links.push({ kind: 'file', uri: filePath(wrapped.path), source: 'inferred', ranges: rangesFor(wrapped.pieces) });
+    // keep individual fragments from becoming separate click targets
+    for (const { row, start, end } of wrapped.pieces) {
+      const ranges = occupied.get(row) ?? [];
+      ranges.push({ start, end });
+      occupied.set(row, ranges);
+    }
+  }
   // files use their own supported grammar outside explicit and inferred URLs
   for (const row of rows) {
     const matcher = new RegExp(fileMention);
@@ -204,8 +266,9 @@ export const resolveTerminalLinks = (snapshot: LinkSnapshot): ResolvedTerminalLi
       const start = match.index + match[0].length - mention.length;
       const end = start + mention.length;
       // clipped or URL-owned text cannot authorize an unrelated file preview
-      if ((row.clipped && end === row.text.length) || (snapshot.truncatedStart && row === rows[0] && start === 0) || occupied.get(row)?.some(range => start < range.end && end > range.start)) continue;
-      links.push({ kind: 'file', uri: filePath(mention), source: 'inferred', ranges: rangesFor([{ row, start, end }]) });
+      const piece = { row, start, end };
+      if ((row.clipped && end === row.text.length) || (snapshot.truncatedStart && row === rows[0] && start === 0) || overlaps(piece)) continue;
+      links.push({ kind: 'file', uri: filePath(mention), source: 'inferred', ranges: rangesFor([piece]) });
     }
   }
   return links;
