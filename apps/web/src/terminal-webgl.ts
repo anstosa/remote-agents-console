@@ -46,6 +46,9 @@ export const attachWebglRenderer = (terminal: Terminal, onRendererChange: () => 
 
   // addon 0.19 shares atlases without safely invalidating sibling glyph models (#6014)
   // preload instead of clearing shared textures; revisit with a fixed stable addon
+  // patches/@xterm__addon-webgl@0.19.0.patch re-uploads texture slots a page merge shifts
+  // another page into (fixed upstream in 0.20), and uploads atlas pages as ImageData because
+  // Firefox on Linux can swap red and blue uploading the canvas element; recheck both on upgrade
   Promise.allSettled([import('@xterm/addon-webgl'), loadTerminalFonts(terminal)]).then(([addon, fonts]) => {
     // disposed terminals must not acquire a renderer after async loading
     if (released) return;

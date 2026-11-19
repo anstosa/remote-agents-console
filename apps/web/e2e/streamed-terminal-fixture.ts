@@ -193,6 +193,8 @@ export const trackWebglAtlasResets = async () => {
 export const webglAtlasResets = () => atlasResets;
 // prove the pressure regression actually crossed the public atlas-merge boundary
 export const webglAtlasRemovals = () => atlasRemovals;
+// re-acquire the glyph atlas through a public theme write, re-uploading every page to the gpu
+export const reuploadGlyphAtlas = () => { terminal().options.theme = { ...terminal().options.theme }; };
 export const viewportY = () => terminal().buffer.active.viewportY;
 export const baseY = () => terminal().buffer.active.baseY;
 export const alternateScreen = () => terminal().buffer.active.type === 'alternate';

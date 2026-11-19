@@ -12,6 +12,7 @@ RUN printf '%s\n' 'Acquire::http::Pipeline-Depth "0";' 'Acquire::http::No-Cache 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/server/package.json apps/server/package.json
 COPY apps/web/package.json apps/web/package.json
+COPY patches ./patches
 
 RUN corepack enable && pnpm install --frozen-lockfile
 

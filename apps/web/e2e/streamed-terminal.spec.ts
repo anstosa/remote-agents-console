@@ -1458,6 +1458,70 @@ test('redraws WebGL editor output after shared glyph atlas pages merge', async (
   expect(await drive(page, 'inputData')).toBe('j');
 });
 
+// addon 0.19 skips re-uploading a texture slot when a merge shifts in a page with an equal version
+test('an idle WebGL terminal draws current atlas pages after a sibling merges them', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  // exercise real page merging quickly on a lower-capacity gpu
+  await page.addInitScript(() => {
+    const getParameter = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function (parameter: number) {
+      return parameter === this.MAX_TEXTURE_IMAGE_UNITS ? 4 : getParameter.call(this, parameter);
+    };
+  });
+  await setup(page, { width: '700px', height: '400px' }, true);
+  await drive(page, 'pushSize', 60, 16);
+  // a lazygit-like screen of short colored runs
+  const colors = [31, 32, 33, 34, 35, 36, 91, 92, 93, 94];
+  let idleScreen = '\x1b[?1049h';
+  for (let row = 1; row <= 14; row += 1) {
+    idleScreen += `\x1b[${row};1H`;
+    for (let column = 0; column < 50; column += 1) idleScreen += `\x1b[${colors[(row + column) % colors.length]}m${'abcdefghijklmnopqrstuvwxyz'[(row * 7 + column) % 26]}`;
+  }
+  await drive(page, 'pushBytes', `${idleScreen}\x1b[0m`);
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await page.evaluate(async () => {
+    const { mountStreamedTerminal } = await import('/src/streamed-terminal.ts');
+    const sibling = document.createElement('div');
+    sibling.id = 'sibling';
+    Object.assign(sibling.style, { position: 'absolute', left: '720px', top: '0', width: '860px', height: '700px' });
+    document.body.append(sibling);
+    mountStreamedTerminal(sibling, { connect: handlers => {
+      (window as unknown as { sibling: typeof handlers }).sibling = handlers;
+      setTimeout(() => {
+        handlers.onOpen();
+        handlers.onFrame({ type: 'size', cols: 100, rows: 40 });
+        handlers.onBytes(new TextEncoder().encode('\x1b[?1049hSIBLING'));
+      }, 0);
+      return { send: () => {}, close: () => {} };
+    } });
+  });
+  await expect(page.locator('#sibling .xterm-screen canvas')).not.toHaveCount(0);
+  await expect(page.locator('#sibling .streamed-terminal-status')).toBeHidden();
+  const screen = page.locator('#term .xterm-screen');
+  const frames = () => page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  // only the sibling writes, so the idle pane's pixels must match a full texture re-upload
+  for (let batch = 0; batch < 12; batch += 1) {
+    await page.evaluate(batch => {
+      let output = '\x1b[H';
+      for (let row = 1; row <= 36; row += 1) {
+        output += `\x1b[${row};1H`;
+        for (let column = 0; column < 90; column += 1) {
+          const id = batch * 3240 + (row - 1) * 90 + column + 1;
+          output += `\x1b[38;2;${id & 255};${id >> 8 & 255};${id >> 16 & 255}m${String.fromCharCode(33 + id % 90)}`;
+        }
+      }
+      (window as unknown as { sibling: { onBytes: (bytes: Uint8Array) => void } }).sibling.onBytes(new TextEncoder().encode(`${output}\x1b[0m`));
+    }, batch);
+    await frames();
+    await frames();
+    const drawn = await screen.screenshot();
+    await drive(page, 'reuploadGlyphAtlas');
+    await frames();
+    expect((await screen.screenshot()).equals(drawn), `idle pane drew stale textures after sibling batch ${batch}`).toBe(true);
+  }
+});
+
 test('renders with WebGL on a desktop browser by default', async ({ page }) => {
   await setup(page, {}, true);
   await drive(page, 'pushSize', 40, 10);
