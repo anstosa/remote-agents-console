@@ -8881,7 +8881,7 @@ function ExitedAgent({ agent, onOpenHolder, onClose, onOperationFeedback }: { ag
     <div className="transcript-exited-actions">
       <button type="button" className={progressBorder(resuming, 'blue')} aria-busy={resuming || undefined} disabled={resuming} onClick={() => void resume()}><ProgressRing busy={resuming} />{resuming ? 'Resuming…' : 'Resume'}</button>
       <button type="button" onClick={onOpenHolder}>Open holder window</button>
-      {onClose !== undefined && <button type="button" onClick={onClose}>Close</button>}
+      {onClose !== undefined && <button type="button" onClick={() => onClose()}>Close</button>}
     </div>
   </div>;
 }
