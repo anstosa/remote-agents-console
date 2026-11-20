@@ -1,7 +1,7 @@
 // The Code panel view: a Comparison's Changes rendered with `@pierre/diffs`, either as one
 // virtualized scroll of every file or filtered to a single file. This module is the app's only
 // importer of the library, and main.tsx pulls it in with a dynamic `import()` so the ~177 kB (plus
-// lazy shiki chunks) never lands in the eager dashboard bundle. It is a controlled view — the
+// its lazy highlighter chunk) never lands in the eager dashboard bundle. It is a controlled view — the
 // controller (main.tsx) or the test fixture owns which Comparison and which file it shows and hands
 // them in — so it stays free of any network code and easy to drive in isolation. What the view owns
 // itself is purely visual: the diff mode (Hunks / Full context / Plain file), unified vs split, and

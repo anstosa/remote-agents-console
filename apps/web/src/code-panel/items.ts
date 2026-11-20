@@ -7,10 +7,6 @@
 import { parseDiffFromFile, parsePatchFiles, type ChangeContent, type CodeViewDiffItem, type CodeViewFileItem, type CodeViewItem, type ContextContent, type DiffLineAnnotation, type FileDiffLoadedChangedFiles, type FileDiffMetadata, type HunkExpansionRegion, type PostRenderPhase } from '@pierre/diffs';
 import type { ComparisonFile, ComparisonFileContents, ExpandedLines, RevisionFile } from './comparison.js';
 
-// Line cap for syntax tokenization: past this a file renders as plain (un-highlighted) text so a
-// very large diff or file never blocks the main thread. From the spike's timing measurements.
-export const CODE_TOKENIZE_MAX_LINES = 2000;
-
 // baseline metrics preserve the established line-height ratio while the shared terminal setting
 // supplies the live font size; rendered css and virtualizer metrics must remain in lockstep
 export const CODE_FONT_SIZE = 13;
@@ -24,7 +20,7 @@ const codeLineHeight = (fontSize: number): number => Math.round(fontSize * CODE_
 // build matching shadow-dom font metrics
 export const codeViewStyle = (fontSize: number): Record<string, string> => ({ '--diffs-font-size': `${fontSize}px`, '--diffs-line-height': `${codeLineHeight(fontSize)}px` });
 
-// The diff-library options both renderers share (theme, highlighter, scroll/sticky behaviour, the
+// The diff-library options both renderers share (theme, highlighter, scroll/sticky behaviour, and
 // freeze cap, and the itemMetrics that track the font metrics above). Each renderer spreads this and
 // adds its own view-specific keys — diffStyle, and the Code panel's full-context expandUnchanged /
 // loadDiffFiles. `themeType` is driven from color-theme.ts. Literals are pinned so the object stays
@@ -33,12 +29,13 @@ export const codeViewStyle = (fontSize: number): Record<string, string> => ({ '-
 export const codeViewBaseOptions = (themeType: 'light' | 'dark', fontSize: number) => ({
   theme: { dark: 'catppuccin-mocha', light: 'catppuccin-latte' } as const,
   themeType,
-  preferredHighlighter: 'shiki-js' as const,
+  // Highlights tokenizes a 12k-line TSX file in ~35 ms where shiki-js took ~16 s, so a file expanded
+  // to its full length stays highlighted under the library's default line cap
+  preferredHighlighter: 'highlights' as const,
   overflow: 'scroll' as const,
   hunkSeparators: 'line-info' as const,
   stickyHeaders: true,
   enableLineSelection: true,
-  tokenizeMaxLength: CODE_TOKENIZE_MAX_LINES,
   itemMetrics: { lineHeight: codeLineHeight(fontSize), diffHeaderHeight: codeLineHeight(fontSize) + 24 }
 });
 

@@ -581,6 +581,28 @@ test('expands a collapsed hunk gap in Hunks mode without first visiting Full con
   await expect(panel(page).getByText('line 25', { exact: true })).toBeVisible();
 });
 
+test('keeps a long file highlighted once its hidden lines expand', async ({ page }) => {
+  // expanding loads the whole file into the diff, and the old highlighter's 2000-line cap then
+  // turned every line of it plain
+  const baseLines = Array.from({ length: 3000 }, (_, index) => `const value${index + 1} = ${index + 1};`);
+  const workingLines = baseLines.map((line, index) => (index === 1 ? 'const value2 = 0;' : index === 2949 ? 'const value2950 = 0;' : line));
+  // a hunk near each end leaves the gap between them to expand
+  const hunk = (start: number) => [`@@ -${start},5 +${start},5 @@`, ` ${baseLines[start - 1]}`, `-${baseLines[start]}`, `+${workingLines[start]}`, ...baseLines.slice(start + 1, start + 4).map(line => ` ${line}`)];
+  const patch = ['diff --git a/src/long.ts b/src/long.ts', 'index 1111111..2222222 100644', '--- a/src/long.ts', '+++ b/src/long.ts', ...hunk(1), ...hunk(2949)].join('\n') + '\n';
+  const file: ComparisonFile = { change: { code: ' M', path: 'src/long.ts', additions: 2, deletions: 2 }, kind: 'tracked', patch, capped: false };
+  await mountPanel(page, patchOf([file]), { 'src/long.ts': contentsOf('src/long.ts', `${baseLines.join('\n')}\n`, `${workingLines.join('\n')}\n`) });
+  await panel(page).getByTitle('src/long.ts').click();
+
+  const line = (text: string) => panel(page).locator('diffs-container [data-line]').filter({ hasText: text }).last();
+  // a highlighted line colors its keyword apart from its identifier; a plain one is a single color
+  const colorCount = (text: string) => line(text).evaluate(row => new Set([...row.querySelectorAll('span')].filter(span => span.children.length === 0 && span.textContent?.trim()).map(span => getComputedStyle(span).color)).size);
+  await expect.poll(() => colorCount('const value2 = 0;')).toBeGreaterThan(1);
+  await panel(page).locator('diffs-container').getByText(/unmodified lines/iu).first().click();
+  await expect(line('const value6 = 6;')).toBeVisible();
+  await expect.poll(() => colorCount('const value6 = 6;')).toBeGreaterThan(1);
+  await expect.poll(() => colorCount('const value2 = 0;')).toBeGreaterThan(1);
+});
+
 test('keeps view controls directly in the top-level header flyout on a narrow panel', async ({ page }) => {
   // a narrow root (below the header's fold width) stands in for a phone / squeezed column
   await mountPanel(page, patchOf([trackedFile('src/app.ts'), trackedFile('src/widget.ts')]), {}, false, 380);

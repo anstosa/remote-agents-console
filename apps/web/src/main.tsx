@@ -6088,8 +6088,8 @@ const saveSplitSizes = (worktreeId: string | undefined, signature: string, sizes
   try { localStorage.setItem(splitSizesKey(worktreeId, signature), JSON.stringify(sizes)); }
   catch { /* browser storage is optional */ }
 };
-// The Code panel is dynamically imported so `@pierre/diffs` (~177 kB gzip plus its lazy shiki
-// grammar/theme chunks) never lands in the dashboard's eager bundle — it loads the first time a
+// The Code panel is dynamically imported so `@pierre/diffs` (~177 kB gzip plus its lazy
+// highlighter and theme chunks) never lands in the dashboard's eager bundle — it loads the first time a
 // reviewer opens changes. Its module is the app's only importer of the library.
 const CodePanel = lazy(() => import('./code-panel/code-panel.js'));
 // share lazy syntax and image rendering without coupling split state
