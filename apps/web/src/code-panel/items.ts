@@ -83,7 +83,7 @@ export const isDiffable = (file: ComparisonFile): boolean => !file.capped && (fi
 // and every line stays addressable as (key, side, line).
 export const diffItemForPatch = (key: string, patch: string): CodeViewDiffItem | undefined => {
   const version = contentHash(patch);
-  const parsed = parsePatchFiles(patch, `${key}#${version}`, false);
+  const parsed = parsePatchFiles(patch, { cacheKeyPrefix: `${key}#${version}` });
   const fileDiff = parsed.flatMap(entry => entry.files)[0];
   if (fileDiff === undefined) return undefined;
   return { id: `diff:${key}`, type: 'diff', fileDiff, version };

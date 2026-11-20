@@ -11,7 +11,7 @@
 // position, handed back on mount so a remounted step returns to where it was read.
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CodeViewLineSelection, DiffLineAnnotation, FileDiffLoadedChangedFiles, FileDiffMetadata, SelectedLineRange } from '@pierre/diffs';
-import { CodeView, type CodeViewHandle, type CodeViewItem, type CodeViewReactOptions } from '@pierre/diffs/react';
+import { CodeView, type CodeViewAnnotationArgs, type CodeViewHandle, type CodeViewItem, type CodeViewReactOptions } from '@pierre/diffs/react';
 import { useColorTheme } from '../color-theme.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useIgnoreWhitespace, useObservedWidth } from './diff-layout.js';
@@ -360,7 +360,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
 
   const commentsById = useMemo(() => new Map(comments.map(comment => [comment.id, comment])), [comments]);
   const suggestionsById = useMemo(() => new Map(suggestions.map(suggestion => [suggestion.id, suggestion])), [suggestions]);
-  const renderAnnotation = (annotation: { metadata?: Annotation }) => {
+  const renderAnnotation = (...[annotation]: CodeViewAnnotationArgs<Annotation>) => {
     // the "+" choice on picked lines
     if (annotation.metadata !== undefined && 'choice' in annotation.metadata) {
       const picked = choice;
