@@ -3,9 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RecoveryAgentService } from '../src/server-admin/recovery-agents.js';
+import { recoveryProcessKey } from '../src/server-admin/recovery-proc.js';
 import type { HostReply, HostRequest, Installation } from '../src/settings/contracts.js';
 
-const { beforeProcRead } = vi.hoisted(() => ({ beforeProcRead: vi.fn<() => Promise<void>>() }));
+const { beforeProcRead, afterCommandRead } = vi.hoisted(() => ({
+  beforeProcRead: vi.fn<() => Promise<void>>(), afterCommandRead: vi.fn<(path: string) => Promise<void>>()
+}));
 // delay the directory read while retaining the real bounded proc parser
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
@@ -14,12 +17,23 @@ vi.mock('node:fs/promises', async original => {
     return fs.readdir(...args);
   } };
 });
+// change only the test process lifetime after its command has been sampled
+vi.mock('../src/server-admin/recovery-proc.js', async original => {
+  const proc = await original<typeof import('../src/server-admin/recovery-proc.js')>();
+  return { ...proc, readBoundedText: async (path: string, maxBytes?: number) => {
+    const result = await proc.readBoundedText(path, maxBytes);
+    // keep the real bounded file implementation under the deterministic race
+    if (path.endsWith('/cmdline')) await afterCommandRead(path);
+    return result;
+  } };
+});
 
 const roots: string[] = [];
 
 // remove only fake proc trees created by this suite
 afterEach(async () => {
   beforeProcRead.mockReset();
+  afterCommandRead.mockReset();
   // clean every isolated fixture
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -65,6 +79,19 @@ async function fakeProc(): Promise<string> {
 }
 
 describe('RecoveryAgentService', () => {
+  // reject a recovery row that might combine two different process lifetimes
+  it('does not issue a token when a same-kind process replaces a pid during inspection', async () => {
+    const root = await fakeProc();
+    await addProcess(root, { pid: 100, comm: 'codex', argv: ['codex'], startTime: '1000' });
+    afterCommandRead.mockImplementationOnce(async () => {
+      await writeFile(join(root, '100', 'stat'), stat(100, 'codex', 1, '2000'));
+    });
+    const token = vi.fn(() => 'T'.repeat(32));
+    const service = new RecoveryAgentService({ procRoot: root, hostUid: 1200, token, transport: { installation: async () => installation(1200), request: vi.fn() } });
+    await expect(service.list()).resolves.toMatchObject({ available: true, agents: [] });
+    expect(token).not.toHaveBeenCalled();
+  });
+
   it('lists top-level interactive Agents without tmux and keeps ids stable across repolls', async () => {
     const root = await fakeProc();
     await Promise.all([
@@ -87,9 +114,9 @@ describe('RecoveryAgentService', () => {
     const second = await service.list();
 
     expect(first).toEqual({ available: true, canStop: true, agents: [
-      { id: 'A'.repeat(32), kind: 'codex', label: 'Codex · project', pid: 100 },
-      { id: 'B'.repeat(32), kind: 'omx', label: 'OMX · project', pid: 200 },
-      { id: 'C'.repeat(32), kind: 'pi', label: 'Pi · skills', pid: 601 }
+      { id: 'A'.repeat(32), kind: 'codex', label: 'Codex · project', pid: 100, recoveryProcessKey: recoveryProcessKey('codex', 100, '1000') },
+      { id: 'B'.repeat(32), kind: 'omx', label: 'OMX · project', pid: 200, recoveryProcessKey: recoveryProcessKey('omx', 200, '2000') },
+      { id: 'C'.repeat(32), kind: 'pi', label: 'Pi · skills', pid: 601, recoveryProcessKey: recoveryProcessKey('pi', 601, '6010') }
     ] });
     expect(second.agents).toEqual(first.agents);
     expect(transport.request).not.toHaveBeenCalled();

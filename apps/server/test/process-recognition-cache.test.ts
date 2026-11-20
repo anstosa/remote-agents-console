@@ -139,6 +139,20 @@ describe('established agent recognition', () => {
     expect((await recognize(inspector))?.pid).toBe(102);
   });
 
+  // do not label a replacement with command evidence read from the previous lifetime
+  it('rejects pid reuse during a fresh command read even for the same agent kind', async () => {
+    const read = readFile.getMockImplementation()!;
+    readFile.mockImplementation(async (path: string) => {
+      const observed = await read(path);
+      // keep pid and command unchanged while moving to the next lifetime
+      if (path === `${proc}/101/cmdline`) processNode(101, 100, 'codex', ['codex'], [], '200');
+      return observed;
+    });
+    const inspector = new ProcInspector();
+    await expect(inspector.recognizeAgent(100)).resolves.toBeUndefined();
+    await expect(inspector.recognizeAgent(100)).resolves.toMatchObject({ pid: 101, startTime: '200' });
+  });
+
   // exec can change argv without changing pid, starttime or comm
   it('recognizes an agent-kind change in an unchanged node launcher', async () => {
     processNode(101, 100, 'MainThread', ['node', '/usr/bin/codex']);

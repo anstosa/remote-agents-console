@@ -38,6 +38,18 @@ test("checkout adoption requires the exact host runtime protocol", () => {
   } finally { rmSync(current.root, { recursive: true, force: true }); }
 });
 
+// include the fixed collector and its dependencies in checkout handover proof
+for (const source of ["scripts/resource-monitor.mjs", "scripts/resource-monitor-disks.mjs", "scripts/settings/recovery-resources.mjs"]) {
+  // isolate each mismatch so no other file can satisfy the rejection
+  test(`checkout adoption rejects a changed ${source}`, () => {
+    const current = fixture();
+    try {
+      writeFileSync(resolve(current.to, source), "incompatible collector", { mode: 0o644 });
+      assert.throws(() => validateCheckoutHandover(current.active, current.desired), { code: "checkout-helper-incompatible" });
+    } finally { rmSync(current.root, { recursive: true, force: true }); }
+  });
+}
+
 // complete a proved handover without retaining the previous checkout locator
 test("promoted checkout keeps queue and recovery locators after the old checkout disappears", async () => {
   const current = fixture();

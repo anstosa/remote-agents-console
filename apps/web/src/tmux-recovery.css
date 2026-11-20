@@ -1,30 +1,43 @@
 .tmux-recovery {
+  position: fixed;
+  inset: 0;
   box-sizing: border-box;
-  height: var(--app-height, 100dvh);
-  overflow-y: auto;
-  padding: clamp(.75rem, 5vw, 3rem);
-  background: var(--crust);
+  width: min(calc(100% - 1.5rem), 44rem);
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
   color: var(--text);
 }
 
+/* leave the workspace visible while the native modal owns interaction */
+.tmux-recovery::backdrop {
+  background: rgb(0 0 0 / .28);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
 .tmux-recovery-card {
-  position: relative;
   display: grid;
   gap: .75rem;
-  width: min(100%, 44rem);
-  min-height: 19rem;
   box-sizing: border-box;
-  margin-inline: auto;
+  max-height: calc(var(--app-height, 100dvh) - 1.5rem);
+  overflow: auto;
+  overscroll-behavior: contain;
   padding: clamp(.75rem, 3vw, 1.5rem);
   border: 1px solid var(--surface-1);
   border-radius: var(--control-radius);
   background: var(--base);
+  box-shadow: 0 1.25rem 3.5rem color-mix(in srgb, var(--crust) 62%, transparent);
   overflow-wrap: anywhere;
 }
 
 .tmux-recovery-card :is(h1, h2, p, fieldset) { margin: 0; }
 /* keep the confirmation on screen over long process lists */
-.tmux-recovery-card > .split-confirmation-overlay { position: fixed; }
+.tmux-recovery > .split-confirmation-overlay { position: fixed; }
 .tmux-recovery-card h1 { font-size: 1.4rem; color: var(--yellow); }
 .tmux-recovery-card h2 { font-size: 1rem; }
 .tmux-recovery-card p { color: var(--subtext-1); }
@@ -38,7 +51,7 @@
   flex-wrap: wrap;
 }
 
-.tmux-recovery-card :is(button, summary) { cursor: pointer; }
+.tmux-recovery-card button { cursor: pointer; }
 .tmux-recovery-card button:disabled { cursor: default; }
 .tmux-recovery-stop { color: var(--red); }
 
@@ -52,7 +65,8 @@
 }
 
 .tmux-recovery-agent {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1rem 1.15rem minmax(0, 1fr);
   align-items: center;
   gap: .65rem;
   min-height: 2.75rem;
@@ -60,5 +74,9 @@
 }
 
 .tmux-recovery-agent + .tmux-recovery-agent { border-top: 1px solid var(--surface-1); }
-.tmux-recovery-agent span { display: grid; gap: .15rem; }
-.tmux-recovery-agent small { color: var(--subtext-0); }
+.tmux-recovery-agent > input { margin: 0; }
+.tmux-recovery-agent-badge { display: inline-flex; grid-column: 2; }
+.tmux-recovery-agent-copy { display: grid; grid-column: 3; min-width: 0; gap: .15rem; }
+.tmux-recovery-agent small, .tmux-recovery-confirm-caption { color: var(--subtext-0); }
+.tmux-recovery-agent-unverified { color: var(--subtext-1); }
+.tmux-recovery-confirm-caption { display: block; }

@@ -6,8 +6,11 @@ import { SettingsError, settingsRestartProgress, type HostReply, type HostReques
 import { readBounded, writePrivate } from './files.js';
 import { iconSourceName } from '../instance-icon-name.js';
 import { instanceIconDirectory } from '../instance-icon.js';
+import { isResourceUsage, type ResourceUsage } from '../domain/resource-usage.js';
 
 export type SettingsTransport = { installation(): Promise<Installation | undefined>; request(request: HostRequest, wait?: boolean, published?: () => void): Promise<HostReply>; read(sourceId: string, context?: RevealContext): Promise<string | undefined>; inspect?(sourceId: string): Promise<NonNullable<HostReply['sourceMetadata']>> };
+export const recoveryResourceTransportMs = 4_500;
+const recoveryResourceDeadlineMs = 4_000;
 // frame disclosure identities with unambiguous bounded lengths
 export function revealBinding(fields: (string | number | boolean)[]): string { return Buffer.concat([Buffer.from([1]), ...fields.flatMap(field => { const bytes = Buffer.from(String(field)); const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length); return [length, bytes]; })]).toString('base64url'); }
 const pathSchema = z.string().max(4096).refine(value => isAbsolute(value) && !/[\0\r\n]/u.test(value));
@@ -117,6 +120,33 @@ export class HostSettingsTransport implements SettingsTransport {
       if (metadata?.sourceId !== sourceId || !/^[0-9a-f]{64}$/u.test(metadata.contentHash) || typeof metadata.existed !== 'boolean') throw new SettingsError('settings_helper_invalid', 503);
       return metadata;
     } finally { await rm(join(this.root, 'status', `${id}.json`), { force: true }); }
+  }
+  // request only the fixed Windows telemetry operation on the installed host
+  async recoveryResources(): Promise<ResourceUsage | null> {
+    const installation = await this.installation();
+    // an uninstalled bridge cannot inspect Windows
+    if (installation === undefined) return null;
+    const id = randomBytes(24).toString('base64url');
+    const file = `${id}.json`;
+    try {
+      const { hostResources } = await this.request({
+        version: 1, id, kind: 'recovery-resources', generation: installation.generation,
+        resourceSample: { deadline: Date.now() + recoveryResourceDeadlineMs }
+      });
+      // keep malformed host responses separate from valid WSL readings
+      if (!isResourceUsage(hostResources)) return null;
+      const { cpuPercent, memory, disks, diskError } = hostResources;
+      return {
+        cpuPercent,
+        memory: memory === null ? null : { usedBytes: memory.usedBytes, totalBytes: memory.totalBytes },
+        disks: disks.map(({ mount, usedBytes, totalBytes }) => { /* expose only the public volume fields */ return { mount, usedBytes, totalBytes }; }),
+        ...(diskError === undefined ? {} : { diskError })
+      };
+    } finally {
+      // clean up only this call's telemetry if the helper is busy or finished
+      await rm(join(this.root, 'queued', file), { force: true }).catch(() => {});
+      await rm(join(this.root, 'status', file), { force: true }).catch(() => {});
+    }
   }
   // transfer explicitly requested host bytes without durable plaintext
   async read(sourceId: string, context?: RevealContext): Promise<string | undefined> {

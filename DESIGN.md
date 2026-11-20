@@ -1,7 +1,7 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-11-17. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls and reply suggestions, workspace toolbar decorators, main toolbar controls, public homepage and policies, independent file previews, conversation browsing, server resource monitoring.
+Status: Active. Updated: 2026-11-20. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls and reply suggestions, workspace toolbar decorators, main toolbar controls, public homepage and policies, independent file previews, conversation browsing, server resource monitoring, tmux recovery.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
 Toolbar evidence: `apps/web/src/styles.css`, browser layout regressions, and the
@@ -151,13 +151,19 @@ the faster flyout readings or synthetic zeroes. Skeletons reserve chart geometry
 only before the first sample. Failed refreshes keep the latest usable readings
 and signal failure; disabling monitoring cancels polling and clears the cache.
 
-When a tmux socket stops responding, show a dedicated recovery view instead of
-interactive workspace controls. Keep last-known dashboard agents read-only and
-separate from the live process list. Reuse the flyout's resource bars here even
-when routine monitoring is off; sample the host independently of tmux and never
-substitute container readings. Disable stopping when host signalling or fresh
-process data is unavailable. Confirm the exact selected agents and report each
-outcome without implying that a delivered signal means the process has exited.
+When a tmux socket stops responding, center the recovery modal over the inert
+workspace with a lightly dimmed, blurred backdrop. Keep the card and agent list
+scrollable in narrow viewports. Show a single agent list: attach last-known
+dashboard details only to an exact live process match, and show unmatched
+entries read-only. Reuse the workspace tab's Agent icons and show the full
+dashboard name of identified Worktrees. Reuse the flyout's resource bars even
+when routine monitoring is off; sample independently of tmux. On WSL, show guest readings separately
+from Windows CPU, memory, and volumes sampled through the read-only host bridge.
+If that bridge is unavailable, keep showing WSL readings without substituting
+them for Windows data. Real outages recover automatically;
+the manual preview uses the same stop controls and has a Return to dashboard action.
+Disable stopping without fresh process data or host signalling, confirm only
+the selected live agents, and distinguish signal delivery from confirmed exit.
 
 Completed assistant replies that ask a prose question may offer a single row of tailored
 reply suggestions at the top of the active prompt. The console-wide Reply suggestions

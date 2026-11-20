@@ -8,12 +8,13 @@ import { atomicWriteFile, readBoundedFile, readJsonFile, safeError } from "./fs.
 // enumerate the complete fixed host protocol instead of accepting authored imports
 export const CHECKOUT_RUNTIME_FILES = [
   "scripts/apply-settings.mjs", "scripts/settings-recovery.mjs", "scripts/update-server.sh",
+  "scripts/resource-monitor.mjs", "scripts/resource-monitor-disks.mjs",
   "scripts/settings/baseline.mjs", "scripts/settings/checkout-handover.mjs", "scripts/settings/command.mjs",
   "scripts/settings/constants.mjs", "scripts/settings/contracts.mjs", "scripts/settings/crypto.mjs",
   "scripts/settings/dependencies.mjs", "scripts/settings/fs.mjs", "scripts/settings/inspection.mjs",
   "scripts/settings/install.mjs", "scripts/settings/lock.mjs", "scripts/settings/migrations.mjs",
   "scripts/settings/operations.mjs", "scripts/settings/queue.mjs", "scripts/settings/recovery-command.mjs",
-  "scripts/settings/pi-update.mjs", "scripts/settings/update.mjs", "scripts/settings/validate.mjs",
+  "scripts/settings/pi-update.mjs", "scripts/settings/recovery-resources.mjs", "scripts/settings/update.mjs", "scripts/settings/validate.mjs",
   "systemd/remote-agent-console.service.in", "systemd/remote-agent-settings-apply.service.in",
   "systemd/remote-agent-settings-apply.path.in"
 ];

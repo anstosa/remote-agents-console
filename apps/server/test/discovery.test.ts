@@ -5,6 +5,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DiscoveryService, gitUpstreamSummary, ProcSocketFinder } from '../src/discovery/service.js';
+import { recoveryProcessKey } from '../src/server-admin/recovery-proc.js';
 import { inlineQuestionId } from '../src/adapters/inline-questions.js';
 import { pendingOmxQuestion } from '../src/adapters/omx-questions.js';
 import { adapterFor } from '../src/adapters/registry.js';
@@ -77,17 +78,28 @@ describe('DiscoveryService dashboard', () => {
   // native replacement must not inherit a persistent pane shell's identity
   it('tracks the recognized agent pid separately from the pane pid', async () => {
     let pid = 456;
+    let startTime = '100';
     // retain the shell while replacing its recognized native descendant
-    const processes = { recognizeAgent: async () => ({ kind: 'codex' as const, pid, wrapped: false }) };
+    const processes = { recognizeAgent: async () => ({ kind: 'codex' as const, pid, startTime, wrapped: false }) };
     const service = new DiscoveryService(socketFinder(), paneLister([{ paneId: '%1', sessionId: '$0', pid: 123, path: '/tmp', title: 'Ready' }]) as never, processes);
     const [first] = await service.refresh(true);
     expect(first).toBeDefined();
     expect(service.paneProcessId(first!.id)).toBe(123);
     expect(service.agentProcessId(first!.id)).toBe(456);
+    expect(first!.recoveryProcessKey).toBe(recoveryProcessKey('codex', 456, '100'));
+    const [unchanged] = await service.refresh(true);
+    expect(unchanged!.recoveryProcessKey).toBe(first!.recoveryProcessKey);
+    startTime = '200';
+    const [replacement] = await service.refresh(true);
+    expect(service.agentProcessId(first!.id)).toBe(456);
+    expect(replacement!.recoveryProcessKey).toBe(recoveryProcessKey('codex', 456, '200'));
+    expect(replacement!.recoveryProcessKey).not.toBe(first!.recoveryProcessKey);
     pid = 789;
-    await service.refresh(true);
+    const [second] = await service.refresh(true);
     expect(service.paneProcessId(first!.id)).toBe(123);
     expect(service.agentProcessId(first!.id)).toBe(789);
+    expect(second!.recoveryProcessKey).toBe(recoveryProcessKey('codex', 789, '200'));
+    expect(second!.recoveryProcessKey).not.toBe(replacement!.recoveryProcessKey);
   });
 
   // only non-forced scans may reuse established process recognition

@@ -197,7 +197,7 @@ function CleanupSkeletons() {
 // `worktreeLabel`/`worktreeOrder` are no longer on the wire (the server carries them on the
 // Worktree); they remain as optional read-only fallbacks the tab bar consults when an Agent's
 // Worktree is not present in the payload, absent from the real server.
-type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; messageReplySuggestionKey?: string; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; notificationSuppressed?: boolean; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
+type Agent = { id: string; recoveryProcessKey?: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; messageReplySuggestionKey?: string; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; notificationSuppressed?: boolean; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
 type Worktree = { id: string; projectId: string; label: string; customLabel?: boolean; path: string; main: boolean; detached: boolean; locked: boolean; branch?: string; sha?: string; consoleShells?: number; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; available: boolean; pinned: boolean; order: number; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; stack?: Stack; launch?: LaunchResolution };
 // `mode: 'directory'` marks a non-git Project the console launches in place (like Scratch);
 // `launch` is its resolved Launch profile for the Project-level Launch button. A git
@@ -10076,6 +10076,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const [renameWorkspace, setRenameWorkspace] = useState<{ key: string; label: string }>();
   const [data, setData] = useState<Dashboard>();
   const [outageDashboard, setOutageDashboard] = useState<Dashboard>();
+  const [previewTmuxRecovery, setPreviewTmuxRecovery] = useState(false);
   // the dashboard generation as reactive state, updated on every advancing snapshot even when the
   // content itself is deduped, so an open notes fly-out or pane refetches after any Run outcome
   const [dashboardGeneration, setDashboardGeneration] = useState<number>();
@@ -10352,6 +10353,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     if (payload.generation !== undefined) { latestDashboardGeneration.current = payload.generation; setDashboardGeneration(payload.generation); }
     // degraded rows are display-only, not evidence of completed turns or removed panes
     if (payload.tmuxOutage !== undefined) {
+      setPreviewTmuxRecovery(false);
       setOutageDashboard(payload);
       setUnavailable(false);
       return true;
@@ -10958,6 +10960,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // a key typed into a Terminal running vim is vim's; vim at its edge hands back over OSC 7337
   const typedIntoVim = (event: KeyboardEvent | undefined) => event !== undefined && isVimCommand(keyTarget(event)?.closest<HTMLElement>('.streamed-terminal')?.dataset.foreground);
   useKeyActions({
+    // open a local preview without fabricating a dashboard snapshot
+    'preview-tmux-recovery': () => { setPreviewTmuxRecovery(true); },
     'new-terminal': onPanels(view => view.openTerminal()),
     // the split is columns only, so beside and below both open a Terminal panel
     'split-beside': onPanels(view => view.openTerminal()),
@@ -11482,12 +11486,32 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     void dismissNotification(reviewNotificationTag(worktreeId));
     return true;
   };
-  // offer independent recovery even before the first successful dashboard snapshot
-  if (outageDashboard !== undefined) {
-    const lastKnown = (data ?? outageDashboard)?.agents.map(agent => ({ id: agent.id, title: agentLabel(agent), detail: agent.worktreeLabel ?? agent.branch })) ?? [];
-    return <TmuxRecovery request={requestRecovery} retry={() => { /* probe dashboard recovery */ void refresh(); }} lastKnown={lastKnown} serverControl={<ServerSwitcher />} />;
-  }
-  if (data === undefined) return <LoadingScreen label={unavailable ? 'Reconnecting to console' : 'Syncing console state'} />;
+  // render recovery above the last healthy dashboard without remounting it
+  const showRecovery = outageDashboard !== undefined || previewTmuxRecovery;
+  const preview = outageDashboard === undefined;
+  const recoveryDashboard = showRecovery ? data ?? outageDashboard : undefined;
+  // a cold outage can still carry the server's cached worktree names
+  const recoveryWorktreeNames = data === undefined && recoveryDashboard !== undefined
+    ? new Map(allWorktrees(recoveryDashboard).map(worktree => { /* retain the canonical worktree name */ return [worktree.id, worktree.label] as const; }))
+    : worktreeLabelById;
+  const lastKnown = recoveryDashboard?.agents.map(agent => {
+    // resolve worktrees by identity rather than by the agent's working-directory basename
+    const placeId = agent.worktreeId ?? agent.placeId;
+    const worktreeName = (placeId === undefined ? undefined : recoveryWorktreeNames.get(placeId)) ?? agent.worktreeLabel
+      ?? (agent.worktreeId === undefined ? undefined : agent.branch);
+    // recognize the reserved scratch place id even when no worktree is listed
+    const scratch = typeof agent.placeId === 'string' && agent.placeId.startsWith('scratch:/');
+    const workspaceName = scratch ? 'Scratch' : worktreeName;
+    const label = agentLabel(agent);
+    const title = scratch && label === '~ Scratch' ? 'Scratch' : label;
+    return { id: agent.id, kind: agent.kind, title, workspaceName, recoveryProcessKey: agent.recoveryProcessKey };
+  }) ?? [];
+  const recovery = showRecovery ? <TmuxRecovery key={preview ? 'preview' : 'outage'} preview={preview} request={requestRecovery} retry={() => {
+    // exit previews locally; only a real outage needs a fresh dashboard probe
+    if (preview) setPreviewTmuxRecovery(false);
+    else void refresh();
+  }} lastKnown={lastKnown} serverControl={<ServerSwitcher />} /> : null;
+  if (data === undefined) return <><LoadingScreen label={unavailable ? 'Reconnecting to console' : 'Syncing console state'} />{recovery}</>;
   const item = items[visibleActive];
   const cleanupControl: CleanupMenuState = { checked: cleanupChecked.size, unchecked: cleanupTargets.length - cleanupChecked.size, onOpen: () => { void openCleanup(); }, triggerRef: cleanupTriggerRef };
   const cleanupKindLabel: Record<CleanupTarget['kind'], string> = {
@@ -11898,7 +11922,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     if (open === undefined) return;
     githubNewWorktree(open)?.(githubItem, action, context);
   };
-  const withConfiguredButtons = (content: ReactNode) => <ConfiguredButtonsProvider catalog={data.buttons} serverStartedAt={data.serverStartedAt} context={configuredButtonContext} request={request} onFeedback={showOperationFeedback} onEdit={editConfiguredAction}><OpenFolderContext.Provider value={showOpenFolder}><GithubWorkspaceContext.Provider value={{ request: githubOpenRequest, consume: id => { /* clear only the command this workspace accepted */ setGithubOpenRequest(current => current?.id === id ? undefined : current); }, newWorktree: openGithubNewWorktree, dynamicWorktrees, feedback: feedback => { /* refresh holder truth after checkout success or refusal */ showOperationFeedback(feedback); void refresh(); } }}>{content}</GithubWorkspaceContext.Provider></OpenFolderContext.Provider></ConfiguredButtonsProvider>;
+  const withConfiguredButtons = (content: ReactNode) => <><ConfiguredButtonsProvider catalog={data.buttons} serverStartedAt={data.serverStartedAt} context={configuredButtonContext} request={request} onFeedback={showOperationFeedback} onEdit={editConfiguredAction}><OpenFolderContext.Provider value={showOpenFolder}><GithubWorkspaceContext.Provider value={{ request: githubOpenRequest, consume: id => { /* clear only the command this workspace accepted */ setGithubOpenRequest(current => current?.id === id ? undefined : current); }, newWorktree: openGithubNewWorktree, dynamicWorktrees, feedback: feedback => { /* refresh holder truth after checkout success or refusal */ showOperationFeedback(feedback); void refresh(); } }}>{content}</GithubWorkspaceContext.Provider></OpenFolderContext.Provider></ConfiguredButtonsProvider>{recovery}</>;
   // separate status text from each tab background and indicator
   const tabBar = <><nav className={`tabs${phone ? ' workspace-dropdown-row' : ''}`} ref={node => { /* anchor phone launchers to the full tab row */ tabsRef.current = node; if (phone) launcherRef.current = node; }} role="tablist" aria-label="Agents and worktrees"><TabRowLead />{phone ? <WorkspaceDropdown items={items} current={visibleActive} onSelect={index => select(index)} onNewWorkspace={() => setLauncherOpen(true)} onRenameWorktree={setRenameWorktreeId} renameDisabled={creatingAgent} onContextMenu={workspaceContextMenu} onTurnOff={entry => void turnOffWorkspace(entry)} /> : items.map((entry, index) => {
     const { transition, label, className, progress, busy } = tabStatus(entry);

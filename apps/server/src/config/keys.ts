@@ -93,6 +93,7 @@ export const keyActions: Record<string, { description: string; repeat?: true }> 
   'rename-workspace': { description: 'Rename the current Workspace' },
   'close-workspace': { description: 'Turn off the current Workspace' },
   'choose-server': { description: 'Switch server' },
+  'preview-tmux-recovery': { description: 'Preview tmux disconnected screen' },
   'font-larger': { description: 'Larger terminal font' },
   'font-smaller': { description: 'Smaller terminal font' },
   'font-reset': { description: 'Reset terminal font size' },

@@ -15,6 +15,7 @@ import { recoverControlPlaneHandover } from "./checkout-handover.mjs";
 
 const REQUEST_NAME = /^([A-Za-z0-9_-]{20,64})\.json$/;
 const TERMINAL = new Set(["complete", "failed"]);
+const EPHEMERAL_STATUS_KINDS = new Set(["inspect", "recovery-resources", "unknown"]);
 const RESTART_STATES = new Set(["restarting", "recovering", "restarted", "recovered", "recovery-failed"]);
 
 // retain only the fixed public restart progress contract
@@ -127,8 +128,8 @@ export function removeExpiredDisclosureStatuses(descriptor, now = Date.now()) {
     try {
       inspectOwnedPath(path);
       const status = readJsonFile(path, 2 * MAX_REQUEST_BYTES);
-      // abandoned identity inspections are ephemeral, not deployment receipts
-      if (status.version === PROTOCOL_VERSION && TERMINAL.has(status.state) && status.kind === "inspect" && Number.isFinite(Date.parse(status.updatedAt)) && Date.parse(status.updatedAt) + 60_000 <= now) {
+      // abandoned inspections, telemetry and unvalidated claims are not deployment receipts
+      if (status.version === PROTOCOL_VERSION && TERMINAL.has(status.state) && EPHEMERAL_STATUS_KINDS.has(status.kind) && Number.isFinite(Date.parse(status.updatedAt)) && Date.parse(status.updatedAt) + 60_000 <= now) {
         unlinkSync(path);
         continue;
       }
@@ -194,10 +195,12 @@ export async function processClaim(path, descriptor, options = {}) {
   }
   let request;
   try {
-    request = readRequest(path, descriptor);
-    if (request.id !== fileId) {
+    const candidate = readRequest(path, descriptor);
+    // only a validated claim for this file can publish a settings receipt
+    if (candidate.id !== fileId) {
       throw safeError("invalid-request");
     }
+    request = candidate;
     writeStatus(descriptor, request.id, "running", request.kind, { phase: "claimed", restart, requestDigest: digest });
     const recoveredReceipt = recoverClaimedTransaction(descriptor, request);
     if (recoveredReceipt) {
@@ -239,6 +242,7 @@ export async function processClaim(path, descriptor, options = {}) {
       sourceMetadata: result.sourceMetadata,
       cloudflare: result.cloudflare,
       agentStops: result.agentStops,
+      hostResources: result.hostResources,
       restart,
       requestDigest: digest
     });
@@ -259,8 +263,9 @@ export async function processClaim(path, descriptor, options = {}) {
   }
 }
 
-// publish durable operation and latest status
+// publish one operation status and any durable settings pointer
 export function writeStatus(descriptor, id, state, kind, details = {}) {
+  const durable = kind !== "recovery-resources" && kind !== "unknown";
   const status = {
     version: PROTOCOL_VERSION,
     id,
@@ -270,14 +275,18 @@ export function writeStatus(descriptor, id, state, kind, details = {}) {
     ...(details.phase ? { phase: details.phase } : {}),
     ...(details.error ? { error: details.error } : {}),
     ...(details.errorMetadata ? { errorMetadata: details.errorMetadata } : {}),
-    ...(details.receipt ? { privateRecord: { ...details.receipt, requestDigest: details.requestDigest } } : { privateRecord: { requestDigest: details.requestDigest } }),
+    // ephemeral claims retain only the digest for replay checks
+    privateRecord: { ...(durable ? details.receipt : undefined), requestDigest: details.requestDigest },
     ...(details.response ? { response: details.response } : {}),
     ...(details.sourceMetadata ? { sourceMetadata: details.sourceMetadata } : {}),
     ...(details.cloudflare ? { cloudflare: details.cloudflare } : {}),
     ...(details.agentStops ? { agentStops: details.agentStops } : {}),
+    ...(Object.hasOwn(details, "hostResources") ? { hostResources: details.hostResources } : {}),
     ...(details.restart ? { restart: details.restart } : {})
   };
   atomicWriteFile(resolve(descriptor.controlRoot, "status", `${id}.json`), `${JSON.stringify(status)}\n`, 0o600);
+  // telemetry and unvalidated claims must not replace a settings receipt pointer
+  if (!durable) return;
   const latest = {
     version: PROTOCOL_VERSION,
     id,

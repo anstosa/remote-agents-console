@@ -1,4 +1,12 @@
+import { createHmac, randomBytes } from 'node:crypto';
 import { access, open } from 'node:fs/promises';
+
+const processCorrelationSalt = randomBytes(32);
+
+// correlate exact process lifetimes within one server process without exposing host identity fields
+export function recoveryProcessKey(kind: string, pid: number, startTime: string): string {
+  return createHmac('sha256', processCorrelationSalt).update(`${kind}\0${pid}\0${startTime}`).digest('base64url').slice(0, 22);
+}
 
 // read one bounded proc record without trusting the reported file size
 export async function readBoundedText(path: string, maxBytes = 64 * 1024): Promise<string> {

@@ -76,6 +76,15 @@ describe('eventChord', () => {
 });
 
 describe('keys configuration', () => {
+  // keep the recovery preview opt-in on each installation
+  it('allows mapping the tmux recovery preview but does not bind it by default', () => {
+    const action = 'preview-tmux-recovery';
+    expect(Object.values(defaultKeyTables).flatMap(table => Object.values(table))).not.toContain(action);
+    const keys = parseKeysConfig({ root: { 'Super-M-t': action } });
+    expect(resolveKeyTables(keys).root!['M-Super-t']?.binding).toBe(action);
+    expect(eventChord(press('t', { alt: true, meta: true, code: 'KeyT' }))).toBe('M-Super-t');
+  });
+
   it('reserves named focus-condition tables without widening custom table names', () => {
     // verify the labels of every resolved focus table in settings order
     expect(Object.keys(defaultKeyTables).filter(isFocusKeyTable).map(name => [name, focusKeyTableLabel(name)])).toEqual([

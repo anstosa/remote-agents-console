@@ -1,6 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { recognizeProcess } from '../adapters/registry.js';
 import type { AgentKind } from '../adapters/types.js';
+import { parseProcStat, sameLiveProcStat, type ProcStat } from '../domain/proc-stat.js';
 // srt/bwrap are the sandbox wrappers; an agent found beneath one is `wrapped`.
 const sandboxWrapper = /^(?:bwrap|srt)$/u;
 
@@ -13,8 +14,8 @@ export type RecognizedAgent = { kind: AgentKind; pid: number; startTime?: string
 
 export type RecognitionOptions = { reusePositive?: boolean };
 export interface ProcessInspector { recognizeAgent(pid: number, options?: RecognitionOptions): Promise<RecognizedAgent | undefined>; }
-type ProcessCommand = Pick<HostProcess, 'pid' | 'comm' | 'cmdline'>;
-type Recognition = { agent?: RecognizedAgent; path: ProcessCommand[] };
+type ProcessCommand = Pick<HostProcess, 'pid' | 'comm' | 'cmdline'> & { stat?: ProcStat };
+type Recognition = { agent?: RecognizedAgent; path?: HostProcess[] };
 type CachedRecognition = { agent: RecognizedAgent; path: HostProcess[]; expiresAt: number };
 export class ProcInspector implements ProcessInspector {
   private readonly procRoot = process.env.RAC_HOST_PROC ?? '/proc';
@@ -58,48 +59,55 @@ export class ProcInspector implements ProcessInspector {
     this.established.delete(root);
     // expiry is fixed at full-scan completion rather than extended on cache hits
     if (cached !== undefined && cached.expiresAt > Date.now()) {
-      const path = await this.identifyPath(cached.path);
-      // slow validation cannot extend expiry; lifetime and parent identity must still match
-      if (cached.expiresAt > Date.now() && path?.every((node, index) => node.startTime === cached.path[index]!.startTime && node.parentPid === cached.path[index]!.parentPid)) return { agent: cached.agent, cached };
+      const valid = await this.recheckCachedPath(cached.path);
+      // slow validation cannot extend expiry
+      if (valid && cached.expiresAt > Date.now()) return { agent: cached.agent, cached };
     }
     const { agent, path } = await this.walk(root);
     // never cache absence: an unchanged shell may launch an agent at any moment
     if (agent === undefined) return {};
-    // a direct agent already needs only two reads and has no descendant walk to avoid
-    if (path.length === 1) return { agent };
-    const identified = await this.identifyPath(path, false);
-    // restricted proc mounts still support ordinary uncached recognition
-    if (identified === undefined) return { agent };
-    return { agent, cached: { agent, path: identified, expiresAt: Date.now() + ProcInspector.recognitionTtlMs } };
+    // uncached recognition covers restricted mounts and direct agents
+    if (path === undefined || path.length === 1) return { agent };
+    return { agent, cached: { agent, path, expiresAt: Date.now() + ProcInspector.recognitionTtlMs } };
   }
 
-  // stat supplies comm and lifetime; cache hits also recheck argv for exec changes
-  private async identifyPath(path: ProcessCommand[], recheckCommands = true): Promise<HostProcess[] | undefined> {
+  // read one optional proc identity without losing dashboard-only discovery
+  private async readStat(pid: number): Promise<ProcStat | undefined> {
+    const raw = await readFile(`${this.procRoot}/${pid}/stat`, 'utf8').catch(() => undefined);
+    return raw === undefined ? undefined : parseProcStat(raw, pid);
+  }
+
+  // compare exact cache identities and bracket argv reads across the lineage
+  private async recheckCachedPath(path: HostProcess[]): Promise<boolean> {
     try {
-      const result: HostProcess[] = [];
-      // bound each lineage to at most two in-flight proc reads
-      for (const observed of path) {
-        const { pid, cmdline: observedCommand } = observed;
-        const [stat, cmdline] = await Promise.all([
-          readFile(`${this.procRoot}/${pid}/stat`, 'utf8'),
-          // the initial walk already read argv; do not pay for that read twice
-          recheckCommands ? readFile(`${this.procRoot}/${pid}/cmdline`, 'utf8') : observedCommand
-        ]);
-        const open = stat.indexOf('(');
-        const close = stat.lastIndexOf(')');
-        const fields = stat.slice(close + 2).trim().split(/\s+/u);
-        const parentPid = Number(fields[1]);
-        const startTime = fields[19];
-        // fail closed when proc cannot establish a live process identity
-        if (open < 0 || close <= open || Number(stat.slice(0, open).trim()) !== pid || !Number.isInteger(parentPid) || parentPid < 0 || startTime === undefined || !/^\d+$/u.test(startTime) || fields[0] === 'Z' || fields[0] === 'X') return undefined;
-        const node = { pid, parentPid, startTime, comm: stat.slice(open + 1, close).trim(), cmdline };
-        const parent = result.at(-1);
-        // preserve both top-down adapter precedence and path-local wrapper recognition
-        if (node.comm !== observed.comm || node.cmdline !== observed.cmdline || (parent !== undefined && node.parentPid !== parent.pid)) return undefined;
-        result.push(node);
+      const observed: ProcessCommand[] = [];
+      // read only the cached path, not siblings
+      for (const node of path) {
+        const stat = await this.readStat(node.pid);
+        // reject pid reuse, exit, reparenting or an obvious exec before reading argv
+        if (stat === undefined || !sameLiveProcStat({ ...node, live: true }, stat)) return false;
+        const cmdline = await readFile(`${this.procRoot}/${node.pid}/cmdline`, 'utf8');
+        // argv matters for adapter precedence even if comm has not changed
+        if (cmdline !== node.cmdline) return false;
+        observed.push({ ...node, stat });
       }
-      return result;
-    } catch { return undefined; /* exited or unreadable identities are not reusable */ }
+      return Array.isArray(await this.identifyPath(observed));
+    } catch { return false; /* exited or unreadable identities are not reusable */ }
+  }
+
+  // distinguish an inaccessible lifetime from a contradicted snapshot
+  private async identifyPath(path: ProcessCommand[]): Promise<HostProcess[] | 'unproven' | undefined> {
+    const proven: HostProcess[] = [];
+    // close the lineage only after reading all commands along it
+    for (const [index, node] of path.entries()) {
+      const after = await this.readStat(node.pid);
+      // without either stat read, the command is only dashboard evidence
+      if (node.stat === undefined && after === undefined) continue;
+      // discard torn snapshots rather than attributing old metadata to a new lifetime
+      if (node.stat === undefined || after === undefined || !sameLiveProcStat(node.stat, after) || (index > 0 && after.parentPid !== path[index - 1]!.pid)) return undefined;
+      proven.push({ pid: node.pid, comm: node.comm, cmdline: node.cmdline, parentPid: after.parentPid, startTime: after.startTime });
+    }
+    return proven.length === path.length ? proven : 'unproven';
   }
 
   // walk one pane tree, asking every registered Adapter (registry order) per process
@@ -114,17 +122,22 @@ export class ProcInspector implements ProcessInspector {
       if (seen.has(pid)) continue;
       seen.add(pid);
       try {
-        const comm = (await readFile(`${this.procRoot}/${pid}/comm`, 'utf8')).trim();
+        const stat = await this.readStat(pid);
+        // dead processes cannot represent a live dashboard agent
+        if (stat?.live === false) continue;
+        const comm = stat?.comm ?? (await readFile(`${this.procRoot}/${pid}/comm`, 'utf8')).trim();
         const cmdline = await readFile(`${this.procRoot}/${pid}/cmdline`, 'utf8');
         const adapter = recognizeProcess({ comm, argv: cmdline.split('\0').filter(Boolean) });
-        const lineage = [...path, { pid, comm, cmdline }];
+        const lineage = [...path, { pid, comm, cmdline, stat }];
         // keep the command evidence only along the winning ancestor path
         if (adapter !== undefined) {
-          const rawStat = await readFile(`${this.procRoot}/${pid}/stat`, 'utf8').catch(() => undefined);
-          const fields = rawStat?.slice(rawStat.lastIndexOf(')') + 2).trim().split(/\s+/u);
-          const startTime = fields?.[19];
-          // retain reply identity when proc exposes a valid lifetime, without weakening dashboard recognition
-          return { agent: { kind: adapter.kind, pid, ...(startTime !== undefined && /^\d+$/u.test(startTime) ? { startTime } : {}), wrapped: wrappedAbove }, path: lineage };
+          const identified = await this.identifyPath(lineage);
+          // continue to other candidates if the observed lineage changed
+          if (identified === undefined) continue;
+          const agent = { kind: adapter.kind, pid, wrapped: wrappedAbove };
+          // publish a lifetime only when both reads prove a coherent path
+          if (identified === 'unproven') return { agent };
+          return { agent: { ...agent, startTime: identified.at(-1)!.startTime }, path: identified };
         }
         const wrappedBelow = wrappedAbove || sandboxWrapper.test(comm);
         const children = (await readFile(`${this.procRoot}/${pid}/task/${pid}/children`, 'utf8')).trim().split(/\s+/).filter(Boolean).map(Number);
@@ -135,7 +148,7 @@ export class ProcInspector implements ProcessInspector {
         }
       } catch { /* exited/unreadable is not an agent */ }
     }
-    return { path: [] };
+    return {};
   }
 
   async listProcesses(): Promise<HostProcess[]> {

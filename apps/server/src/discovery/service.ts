@@ -24,6 +24,7 @@ import { accountHome, adhocScratchPlace, configuredPlaces, markedPlace, placeFor
 import { inheritedHomeEnvironment } from '../places/launch-home.js';
 import { implicitProject } from '../config/schema.js';
 import { timed } from '../dashboard/timing.js';
+import { recoveryProcessKey } from '../server-admin/recovery-proc.js';
 
 // share the adapter's environment-aware listing contract
 type ConversationList = NonNullable<NonNullable<Adapter['conversations']>['list']>;
@@ -450,7 +451,9 @@ export class DiscoveryService {
       const attention = resolveAttention({ kind: recognized.kind, title: pane.title, reported, hasQuestion: false });
       const conversationId = pane.reportedSession !== undefined && pane.reportedSession.length > 0 ? pane.reportedSession : undefined;
       const agentPane: AgentPane = { paneId: pane.paneId, sessionId: `${pane.socket.fingerprint}:${pane.sessionId}`, socketFingerprint: pane.socket.fingerprint, ...(pane.paneMode === undefined ? {} : { paneMode: pane.paneMode }) };
-      const agent: Agent = { id, home, title: pane.title, kind: recognized.kind, attention, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), ...(pane.spawnedBy === undefined ? {} : { spawnedBy: pane.spawnedBy }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
+      // expose only an opaque match hint when discovery proved one exact process lifetime
+      const processKey = recognized.startTime === undefined ? {} : { recoveryProcessKey: recoveryProcessKey(recognized.kind, recognized.pid, recognized.startTime) };
+      const agent: Agent = { id, home, title: pane.title, kind: recognized.kind, attention, ...processKey, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), ...(pane.spawnedBy === undefined ? {} : { spawnedBy: pane.spawnedBy }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
       // reply inference requires a closed native kind and a proven process lifetime
       if ((recognized.kind === 'codex' || recognized.kind === 'omx' || recognized.kind === 'claude') && recognized.startTime !== undefined) {
         replyCandidates.set(id, {

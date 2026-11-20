@@ -3,9 +3,10 @@ import { readdir, readlink } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { codexProgramName, nodeProgramName, omxProgramName } from '../adapters/program-names.js';
 import type { AgentKind } from '../adapters/types.js';
+import { parseProcStat, sameLiveProcStat } from '../domain/proc-stat.js';
 import type { AgentStopResult, HostReply, HostRequest, Installation } from '../settings/contracts.js';
 import { HostSettingsTransport, settingsControlRoot } from '../settings/transport.js';
-import { containerized, readBoundedText } from './recovery-proc.js';
+import { containerized, readBoundedText, recoveryProcessKey } from './recovery-proc.js';
 
 const nodeValueFlags = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '-C', '--conditions']);
 const nodeSwitches = new Set(['--no-warnings', '--enable-source-maps', '--preserve-symlinks', '--preserve-symlinks-main']);
@@ -18,7 +19,7 @@ const stopDeadlineMs = 8_000;
 const maxTargets = 20;
 const scanCacheMs = 1_000;
 
-export type RecoveryAgent = { id: string; kind: Extract<AgentKind, 'codex' | 'omx' | 'claude' | 'pi'>; label: string; pid: number };
+export type RecoveryAgent = { id: string; kind: Extract<AgentKind, 'codex' | 'omx' | 'claude' | 'pi'>; label: string; pid: number; recoveryProcessKey: string };
 export type RecoveryAgentList = { available: boolean; canStop: boolean; agents: RecoveryAgent[]; reason?: string };
 export type RecoveryAgentStopStatus = AgentStopResult['status'];
 export type RecoveryAgentStopOutcome = { id: string; status: RecoveryAgentStopStatus; message?: string };
@@ -108,29 +109,30 @@ async function racPiProcess(procRoot: string, comm: string, argv: readonly strin
   }
 }
 
-// read one live same-user process identity from proc
+// bracket same-user command and cwd reads with the exact proc lifetime
 async function inspectProcess(procRoot: string, pid: number, uid: number): Promise<RecoveryIdentity | undefined> {
   try {
     const root = join(procRoot, String(pid));
-    const [comm, rawCmdline, stat, status, cwd] = await Promise.all([
-      readBoundedText(join(root, 'comm'), 4_096),
+    const statPath = join(root, 'stat');
+    const before = parseProcStat(await readBoundedText(statPath, 4_096), pid);
+    // skip unreadable or dead processes before interpreting command metadata
+    if (!before?.live) return undefined;
+    const [rawCmdline, status, cwd] = await Promise.all([
       readBoundedText(join(root, 'cmdline')),
-      readBoundedText(join(root, 'stat'), 4_096),
       readBoundedText(join(root, 'status'), 16_384),
       readlink(join(root, 'cwd')).catch(() => '')
     ]);
-    const close = stat.lastIndexOf(')');
-    const fields = close < 0 ? [] : stat.slice(close + 2).trim().split(/\s+/u);
-    const parentPid = Number(fields[1]);
-    const startTime = fields[19];
     const uids = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/mu.exec(status)?.slice(1).map(Number);
-    // require a live exact lifetime and unchanged user credentials
-    if (fields[0] === 'Z' || fields[0] === 'X' || !Number.isSafeInteger(parentPid) || parentPid < 0 || startTime === undefined || !/^\d+$/u.test(startTime) || uids === undefined || uids.slice(0, 3).some(value => value !== uid)) return undefined;
+    // require the process's real, effective and saved user to match
+    if (uids === undefined || uids.slice(0, 3).some(value => value !== uid)) return undefined;
     const argv = rawCmdline.replace(/\0+$/u, '').split('\0');
-    const kind = interactiveKind(argv) ?? (await racPiProcess(procRoot, comm.trim(), argv, parentPid, uid) ? 'pi' : undefined);
+    const kind = interactiveKind(argv) ?? (await racPiProcess(procRoot, before.comm, argv, before.parentPid, uid) ? 'pi' : undefined);
     // expose only proven interactive terminals or exact RAC Pi RPC children
     if (kind === undefined) return undefined;
-    return { pid, parentPid, startTime, uid, kind, cwd, cmdline: rawCmdline };
+    const after = parseProcStat(await readBoundedText(statPath, 4_096), pid);
+    // discard metadata if the process changed during inspection
+    if (after === undefined || !sameLiveProcStat(before, after)) return undefined;
+    return { pid, parentPid: before.parentPid, startTime: before.startTime, uid, kind, cwd, cmdline: rawCmdline };
   } catch {
     return undefined;
   }
@@ -241,7 +243,7 @@ export class RecoveryAgentService {
       } else record.expiresAt = now + tokenTtlMs;
       const kind = process.kind === 'omx' ? 'OMX' : process.kind === 'codex' ? 'Codex' : process.kind === 'pi' ? 'Pi' : 'Claude';
       const location = basename(process.cwd).replace(/[\u0000-\u001f\u007f]/gu, '').slice(0, 64) || 'unknown location';
-      return { id: record.id, kind: process.kind, label: `${kind} · ${location}`, pid: process.pid };
+      return { id: record.id, kind: process.kind, label: `${kind} · ${location}`, pid: process.pid, recoveryProcessKey: recoveryProcessKey(process.kind, process.pid, process.startTime) };
     });
     const canStop = await this.capability();
     return { available: true, canStop, agents, ...(canStop ? {} : { reason: 'Safe host process control is unavailable.' }) };

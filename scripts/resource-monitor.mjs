@@ -11,6 +11,7 @@ import { linuxDiskUsage } from './resource-monitor-disks.mjs';
 const execute = promisify(execFile);
 const sampleDelayMs = 250;
 const powershellTimeoutMs = 8_000;
+const recoveryPowershellTimeoutMs = 3_000;
 const windowsFreshnessMs = 3_000;
 const maxPowershellBufferBytes = 512_000;
 const liveLeaseTimeoutMs = 5_000;
@@ -134,6 +135,23 @@ const powershellMetricsScript = String.raw`${powershellHelpers}
 Get-RacMetrics | ConvertTo-Json -Compress -Depth 5
 `;
 
+const powershellRecoveryScript = String.raw`${powershellHelpers}
+$metrics = $null
+$disks = @()
+$diskError = $null
+# keep partial host data when one Windows counter family is unavailable
+try { $metrics = Get-RacMetrics } catch {}
+try { $disks = @(Get-RacVolumes) } catch { $diskError = 'Disk usage is unavailable.' }
+$result = [ordered]@{
+  cpuPercent = if ($null -eq $metrics) { $null } else { $metrics.cpuPercent }
+  memory = if ($null -eq $metrics) { $null } else { $metrics.memory }
+  disks = $disks
+}
+# publish volume failure independently from CPU and memory
+if (-not [string]::IsNullOrEmpty($diskError)) { $result['diskError'] = $diskError }
+[pscustomobject]$result | ConvertTo-Json -Compress -Depth 5
+`;
+
 const powershellStreamScript = String.raw`${powershellHelpers}
 while ($true) {
   # self-stop Windows inspection when its parent lease ends
@@ -221,10 +239,10 @@ const startWindowsStream = async (stopSignal, liveLease) => {
 
 // inspect the Windows host through the documented WSL interop boundary
 const windowsSnapshot = async mode => {
-  const script = mode === 'disks' ? powershellDiskScript : powershellMetricsScript;
+  const script = mode === 'disks' ? powershellDiskScript : mode === 'recovery-host' ? powershellRecoveryScript : powershellMetricsScript;
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded];
-  const options = { encoding: 'utf8', timeout: powershellTimeoutMs, maxBuffer: 512_000, windowsHide: true };
+  const options = { encoding: 'utf8', timeout: mode === 'recovery-host' ? recoveryPowershellTimeoutMs : powershellTimeoutMs, maxBuffer: maxPowershellBufferBytes, windowsHide: true };
   let command = 'powershell.exe';
   let stdout;
   try { ({ stdout } = await execute(command, args, options)); }
@@ -388,7 +406,7 @@ process.once('SIGHUP', stopCollector);
 process.once('SIGINT', stopCollector);
 process.once('SIGTERM', stopCollector);
 
-// require an explicit live, metrics or disk mode
+// require one explicit fixed collector mode
 if (process.argv.includes('--stream')) {
   const leaseExpired = await stream(stop.signal);
   // remove only this collector's exact bounded files after parent loss
@@ -398,8 +416,9 @@ if (process.argv.includes('--stream')) {
   }
 } else if (process.argv.includes('--metrics')) await publish(await collectMetrics());
 else if (process.argv.includes('--disks')) await publish(await collectDisks());
+else if (process.argv.includes('--recovery-host')) await publish(await windowsSnapshot('recovery-host'));
 else {
   // do not inspect the host on an unqualified invocation
-  process.stderr.write('Specify --metrics, --disks, or --stream.\n');
+  process.stderr.write('Specify --metrics, --disks, --recovery-host, or --stream.\n');
   process.exitCode = 2;
 }

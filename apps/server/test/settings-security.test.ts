@@ -304,6 +304,27 @@ describe('settings host transport', () => {
     for (const path of paths) await expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  // enforce a fixed request envelope and clean up after working or malformed telemetry
+  it.each([42, 101])('validates and consumes Windows recovery telemetry (cpu %d)', async cpuPercent => {
+    const root = await fixtureRoot();
+    await writePrivate(join(root, 'installation.json'), JSON.stringify(installation(root)));
+    const transport = new HostSettingsTransport(root, 20);
+    const files: string[] = [];
+    const reading = { cpuPercent, memory: { usedBytes: 100, totalBytes: 200 }, disks: [{ mount: 'C:\\', usedBytes: 500, totalBytes: 1000 }] };
+    transport.request = async request => {
+      // telemetry carries no paths, commands, or settings mutations
+      expect(request).toEqual({ version: 1, id: expect.any(String), kind: 'recovery-resources', generation: 1, resourceSample: { deadline: expect.any(Number) } });
+      expect(request.resourceSample!.deadline).toBeGreaterThan(Date.now());
+      files.push(join(root, 'status', `${request.id}.json`), join(root, 'queued', `${request.id}.json`));
+      // simulate a bounded response and a leftover queued file
+      for (const path of files) await writePrivate(path, '{}');
+      return { version: 1, id: request.id, kind: request.kind, state: 'complete', hostResources: reading };
+    };
+    await expect(transport.recoveryResources()).resolves.toEqual(cpuPercent <= 100 ? reading : null);
+    // no private status or request remains for a consumed telemetry sample
+    for (const path of files) await expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   // decrypt only an authenticated response bound to the ephemeral request
   it('reads a host-only source through an authenticated ephemeral envelope', async () => {
     const root = await fixtureRoot();

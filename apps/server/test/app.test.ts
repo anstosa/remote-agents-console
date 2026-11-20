@@ -283,7 +283,7 @@ describe('server administration API', () => {
   // keep emergency diagnostics and exact stop admission independent of the flyout
   it('serves tmux recovery with monitoring disabled and accepts only a controlled stop batch', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
-    const processes = { available: true, canStop: true, agents: [{ id: 'opaque-a', kind: 'Codex', label: 'Codex', pid: 101 }] };
+    const processes = { available: true, canStop: true, agents: [{ id: 'opaque-a', kind: 'codex' as const, label: 'Codex', pid: 101, recoveryProcessKey: 'process-a' }] };
     const sample = vi.fn(async () => ({ sampledAt: '2026-11-18T17:00:00Z', host: null }));
     const list = vi.fn(async () => processes);
     const stop = vi.fn(async () => ({ available: true, canStop: true, results: [{ id: 'opaque-a', status: 'signal_sent' as const }, { id: 'opaque-b', status: 'stale' as const }] }));

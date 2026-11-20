@@ -5,6 +5,7 @@ import {
   ICON_SOURCE_PATTERN,
   MAX_ICON_SOURCES,
   MAX_REQUEST_BYTES,
+  MAX_RESOURCE_SAMPLE_TTL_MS,
   MAX_REVEAL_TTL_MS,
   PROTOCOL_VERSION,
   REQUEST_KINDS,
@@ -217,7 +218,7 @@ function validateNativeDescriptor(value, roots) {
 // parse and validate a strict queued request
 export function readRequest(path, descriptor) {
   const request = assertRecord(readJsonFile(path, MAX_REQUEST_BYTES));
-  assertKeys(request, new Set(["version", "id", "kind", "generation", "sources", "targets", "reveal", "inspect", "cloudflare", "agentStop"]));
+  assertKeys(request, new Set(["version", "id", "kind", "generation", "sources", "targets", "reveal", "inspect", "cloudflare", "agentStop", "resourceSample"]));
   if (
     request.version !== PROTOCOL_VERSION ||
     !ID_PATTERN.test(request.id ?? "") ||
@@ -298,7 +299,24 @@ export function readRequest(path, descriptor) {
   } else if (request.agentStop !== undefined) {
     throw safeError("invalid-request");
   }
+  // validate one deadline-only read-only host sample
+  if (request.kind === "recovery-resources") {
+    validateRecoveryResourceRequest(request);
+  } else if (request.resourceSample !== undefined) {
+    throw safeError("invalid-request");
+  }
   return request;
+}
+
+// constrain recovery telemetry to one near-term fixed collector request
+function validateRecoveryResourceRequest(request) {
+  const operation = assertRecord(request.resourceSample);
+  assertKeys(operation, new Set(["deadline"]));
+  const now = Date.now();
+  // accept expired positive epochs for classified rejection at the execution boundary
+  if (!Number.isSafeInteger(operation.deadline) || operation.deadline <= 0 || operation.deadline - now > MAX_RESOURCE_SAMPLE_TTL_MS || request.sources !== undefined || request.targets !== undefined) {
+    throw safeError("invalid-request");
+  }
 }
 
 // constrain process control to exact same-user interactive Agent lifetimes
