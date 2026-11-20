@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, readdir, readlink, realpath } from 'node:fs/promises';
+import { readFile, readdir, readlink, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readFileHead, readFileTail } from './bounded-file.js';
@@ -11,7 +11,7 @@ import type { CompletionBaseline, CompletionEvent, Conversation, ConversationSum
 /**
  * Codex conversation lookup, gathered behind the Adapter (ADR 0002). These are
  * the only filesystem-touching functions the Codex Adapter owns: the `/proc`
- * fd-walk that finds the rollout files a pane holds open, the bounded
+ * fd-walk that finds the rollout files and writer locks a pane holds open, the bounded
  * `session_meta` read that picks the single top-level Conversation, the
  * discover-time title scan, and the Conversation-name read from the
  * `session_index.jsonl` sidecar. Roots are injectable through the same
@@ -76,12 +76,24 @@ function validRolloutRef(value: RolloutRef): boolean {
     && value.relativePath.endsWith(`-${value.id}.jsonl`);
 }
 
-// collect exact rollout identities held open by one pane process tree
-export async function openRollouts(root: number): Promise<RolloutRef[]> {
+// require an exclusive writer lock on this profile's file across host mounts
+async function ownsWriterLock(proc: string, pid: number, descriptor: string, id: string): Promise<boolean> {
+  const info = await readFile(`${proc}/${pid}/fdinfo/${descriptor}`, 'utf8').catch(() => '');
+  // opening the file alone does not prove ownership
+  const owner = /^lock:\s+\d+:\s+FLOCK\s+ADVISORY\s+WRITE\s+(\d+)\s/mu.exec(info)?.[1];
+  if (owner !== String(pid)) return false;
+  const held = await stat(`${proc}/${pid}/fd/${descriptor}`, { bigint: true }).catch(() => undefined);
+  const local = await stat(join(codexHome(), 'thread-writer-locks', `${id}.lock`), { bigint: true }).catch(() => undefined);
+  return held !== undefined && local !== undefined && held.dev === local.dev && held.ino === local.ino;
+}
+
+// collect exact rollout and writer identities held by one pane process tree
+export async function openPaneThreads(root: number): Promise<{ rollouts: RolloutRef[]; writers: Set<string> }> {
   const proc = procRoot();
   const pending = [root];
   const seen = new Set<number>();
   const rollouts = new Map<string, RolloutRef>();
+  const writers = new Set<string>();
   let inspectedDescriptors = 0;
   // bound process and descriptor traversal
   while (pending.length > 0 && seen.size < 256 && inspectedDescriptors < maxRolloutEntries) {
@@ -93,10 +105,9 @@ export async function openRollouts(root: number): Promise<RolloutRef[]> {
       const children = (await readFile(`${proc}/${pid}/task/${pid}/children`, 'utf8').catch(() => '')).trim().split(/\s+/u).filter(Boolean).map(Number);
       // retain live descendants
       for (const child of children) if (Number.isInteger(child) && child > 0) pending.push(child);
-      // read bounded open-file targets (a confined service cannot readlink a
-      // sandboxed pane's descriptors: the readlink then fails and the pane's
-      // rollout is instead matched by its working directory, below)
+      // use the directory fallback only when exact file evidence is unavailable
       const descriptors = await readdir(`${proc}/${pid}/fd`).catch(() => []);
+      // inspect the bounded descriptor set for either native history format
       for (const descriptor of descriptors) {
         if (inspectedDescriptors >= maxRolloutEntries) break;
         inspectedDescriptors += 1;
@@ -104,12 +115,15 @@ export async function openRollouts(root: number): Promise<RolloutRef[]> {
         const match = /(?:^|\/)(sessions\/[^\0]{1,3800}\/rollout-[^/]*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl)$/iu.exec(target);
         // retain exact Codex rollout filenames only
         if (match?.[1] !== undefined && match[2] !== undefined && !match[1].split('/').includes('..')) rollouts.set(`${match[2]}:${match[1]}`, { id: match[2], relativePath: match[1] });
+        const writer = /(?:^|\/)thread-writer-locks\/([^/]+)\.lock$/u.exec(target)?.[1];
+        // paginated and unwritten threads may hold only a writer lock
+        if (writer !== undefined && validCodexThreadId(writer) && await ownsWriterLock(proc, pid, descriptor, writer)) writers.add(writer);
       }
     } catch {
       // ignore exited or unreadable processes
     }
   }
-  return [...rollouts.values()];
+  return { rollouts: [...rollouts.values()], writers };
 }
 
 // parse bounded metadata from one Codex rollout
@@ -270,11 +284,47 @@ async function* rolloutFiles(home: string, limit = Infinity): AsyncGenerator<str
   }
 }
 
-// the pane's single top-level rollout: the exact fd-walk, else the privilege-free
-// working-directory match when a confined service cannot readlink the descriptors
+// resolve writer ids exactly and exclude proven subagents
+async function rolloutByWriters(writers: ReadonlySet<string>, open: readonly RolloutRef[]): Promise<{ id: string; file: string } | undefined> {
+  const home = codexHome();
+  const unresolved = new Set(writers);
+  const main: Array<{ id: string; file: string }> = [];
+  // classify only the current writers with matching metadata
+  const inspect = async (id: string, file: string): Promise<void> => {
+    // skip unrelated or already resolved ids
+    if (!unresolved.has(id)) return;
+    const metadata = await rolloutMetadataCache.get(file).catch(() => undefined);
+    // a missing or mismatched rollout cannot rule out another top-level thread
+    if (metadata?.id !== id) return;
+    unresolved.delete(id);
+    // classify children without selecting them
+    if (metadata.parentThreadId === undefined) main.push({ id, file });
+  };
+  // use the pane's open rollouts first
+  for (const ref of open) {
+    // open only valid paths in this store
+    if (validRolloutRef(ref)) await inspect(ref.id, join(home, ref.relativePath));
+  }
+  // paginated history may not hold a file open, so find only its exact filename
+  if (unresolved.size > 0) {
+    // scan bounded filenames for unresolved writers
+    for await (const file of rolloutFiles(home, maxRolloutEntries)) {
+      const id = /-([0-9a-f-]{36})\.jsonl$/iu.exec(file)?.[1];
+      // ignore filenames without a thread suffix
+      if (id !== undefined) await inspect(id, file);
+      // stop once every writer is classified
+      if (unresolved.size === 0) break;
+    }
+  }
+  return unresolved.size === 0 && main.length === 1 ? main[0] : undefined;
+}
+
+// the pane's single top-level rollout or the legacy directory fallback
 async function paneRollout(pane: { pid: number; cwd?: string }): Promise<{ id: string; file: string } | undefined> {
-  return await selectTopLevelRollout(await openRollouts(pane.pid))
-    ?? (pane.cwd === undefined ? undefined : await rolloutByCwd(pane.cwd));
+  const { rollouts, writers } = await openPaneThreads(pane.pid);
+  // a known writer must never inherit a different thread's history
+  if (writers.size > 0) return await rolloutByWriters(writers, rollouts);
+  return await selectTopLevelRollout(rollouts) ?? (pane.cwd === undefined ? undefined : await rolloutByCwd(pane.cwd));
 }
 
 /** one exact live Codex rollout's current reply-suggestion evidence */

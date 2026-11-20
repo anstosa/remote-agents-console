@@ -1,7 +1,7 @@
 import { appendFile, mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { codexConversationName, codexConversationSummaries, codexLatestMessage, latestCodexMessageFromRecords, discoverCodexConversation, openRollouts, validCodexThreadId } from '../../src/adapters/codex-conversations.js';
+import { codexConversationName, codexConversationSummaries, codexLatestMessage, latestCodexMessageFromRecords, discoverCodexConversation, openPaneThreads, validCodexThreadId } from '../../src/adapters/codex-conversations.js';
 import { codexHome, fakeProc, tempDir } from '../helpers/codex-fixtures.js';
 
 // write one representative Codex rollout, returning its absolute path
@@ -21,6 +21,19 @@ async function writeSession(home: string, name: string, session: { id: string; c
 async function writeSessionIndex(home: string, entries: Array<{ id: string; thread_name: string }>): Promise<void> {
   const lines = entries.map(entry => JSON.stringify({ id: entry.id, thread_name: entry.thread_name, updated_at: '2026-09-02T20:53:25.975357809Z' }));
   await writeFile(join(home, 'session_index.jsonl'), `${lines.join('\n')}\n`);
+}
+
+// mirror the held file and ownership record in a private proc fixture
+async function fakeWriterProc(home: string, ids: readonly string[], { owner = 123, open = [] }: { owner?: number; open?: string[] } = {}): Promise<string> {
+  const lockDir = join(home, 'thread-writer-locks');
+  await mkdir(lockDir, { recursive: true });
+  const files = ids.map(id => join(lockDir, `${id}.lock`));
+  await Promise.all(files.map(file => writeFile(file, '')));
+  const proc = await fakeProc(123, [...files, ...open]);
+  const info = join(proc, '123', 'fdinfo');
+  await mkdir(info);
+  await Promise.all(ids.map((_, index) => writeFile(join(info, String(index + 3)), `lock:\t1: FLOCK  ADVISORY  WRITE ${owner} 08:30:123 0 EOF\n`)));
+  return proc;
 }
 
 describe('Codex conversation lookup', () => {
@@ -62,6 +75,98 @@ describe('Codex conversation lookup', () => {
     await expect(discoverCodexConversation({ pid: 123 })).resolves.toBeUndefined();
   });
 
+  // a new writer can exist before codex saves its first turn
+  it('does not label an unwritten conversation with older history from its directory', async () => {
+    const home = await codexHome();
+    const cwd = '/home/ubuntu/adsb';
+    const id = '0198c777-7777-7777-8777-777777777777';
+    await writeSession(home, 'rollout-2026-08-20T12-00-00', { id: '0198c666-6666-7666-8666-666666666666', cwd, prompt: 'Older conversation' });
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(home, [id]);
+
+    await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toBeUndefined();
+  });
+
+  // paginated history need not hold the rollout file open
+  it('follows the live writer id even when another saved conversation is newer', async () => {
+    const home = await codexHome();
+    const cwd = '/home/ubuntu/adsb';
+    const id = '0198c777-7777-7777-8777-777777777777';
+    await writeSession(home, 'rollout-2026-08-20T11-00-00', { id, cwd, prompt: 'Resumed conversation' });
+    await writeSession(home, 'rollout-2026-08-20T12-00-00', { id: '0198c666-6666-7666-8666-666666666666', cwd, prompt: 'Unrelated conversation' });
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(home, [id]);
+
+    await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toEqual({ id, title: 'Resumed conversation' });
+  });
+
+  // multiple writers do not say which conversation is foreground
+  it('does not guess using the directory when several writers are active', async () => {
+    const home = await codexHome();
+    const cwd = '/home/ubuntu/adsb';
+    const first = '0198c666-6666-7666-8666-666666666666';
+    const second = '0198c777-7777-7777-8777-777777777777';
+    await writeSession(home, 'rollout-2026-08-20T12-00-00', { id: first, cwd, prompt: 'One of several threads' });
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(home, [first, second]);
+
+    await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toBeUndefined();
+  });
+
+  // a known child writer does not obscure its sole parent
+  it('resolves the sole top-level conversation when a subagent also holds a writer lock', async () => {
+    const home = await codexHome();
+    const cwd = '/home/ubuntu/adsb';
+    const id = '0198c666-6666-7666-8666-666666666666';
+    const child = '0198c777-7777-7777-8777-777777777777';
+    const primary = await writeSession(home, 'rollout-2026-08-20T11-00-00', { id, cwd, prompt: 'Parent conversation' });
+    await writeSession(home, 'rollout-2026-08-20T12-00-00', { id: child, cwd, prompt: 'Child conversation', parentThreadId: id });
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(home, [id, child], { open: [primary] });
+
+    await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toEqual({ id, title: 'Parent conversation' });
+  });
+
+  // a previous rollout can stay open while the new thread is unwritten
+  it('does not let a stale rollout descriptor override the new writer', async () => {
+    const home = await codexHome();
+    const cwd = '/home/ubuntu/adsb';
+    const stale = await writeSession(home, 'rollout-2026-08-20T12-00-00', { id: '0198c666-6666-7666-8666-666666666666', cwd, prompt: 'Previous conversation' });
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(home, ['0198c777-7777-7777-8777-777777777777'], { open: [stale] });
+
+    await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toBeUndefined();
+  });
+
+  // an observed descriptor is not a writer lock without exclusive ownership
+  it('keeps the legacy fallback when a lock is not owned by the pane process', async () => {
+    const home = await codexHome();
+    const cwd = '/home/ubuntu/adsb';
+    const id = '0198c666-6666-7666-8666-666666666666';
+    await writeSession(home, 'rollout-2026-08-20T12-00-00', { id, cwd, prompt: 'Legacy history' });
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(home, ['0198c777-7777-7777-8777-777777777777'], { owner: 456 });
+
+    await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toEqual({ id, title: 'Legacy history' });
+  });
+
+  // a valid owner and filename cannot authorize a different profile's inode
+  it('ignores a matching writer lock from another Codex profile', async () => {
+    const home = await codexHome();
+    const foreign = await codexHome();
+    const cwd = '/home/ubuntu/adsb';
+    const id = '0198c666-6666-7666-8666-666666666666';
+    const writer = '0198c777-7777-7777-8777-777777777777';
+    await writeSession(home, 'rollout-2026-08-20T12-00-00', { id, cwd, prompt: 'Local history' });
+    const localLocks = join(home, 'thread-writer-locks');
+    await mkdir(localLocks);
+    await writeFile(join(localLocks, `${writer}.lock`), '');
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(foreign, [writer]);
+
+    await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toEqual({ id, title: 'Local history' });
+  });
+
   it('fails closed when the pane holds two top-level rollouts', async () => {
     const home = await codexHome();
     const first = await writeSession(home, 'rollout-2026-08-20T10-00-00', { id: '0198c111-1111-7111-8111-111111111111', cwd: '/home/ubuntu/cora', prompt: 'First open chat' });
@@ -77,7 +182,7 @@ describe('Codex conversation lookup', () => {
     const file = await writeSession(home, 'rollout-2026-08-20T12-00-00', { id: '0198c444-4444-7444-8444-444444444444', cwd: '/home/ubuntu/cora', prompt: 'Held open' });
     process.env.RAC_HOST_PROC = await fakeProc(123, [file]);
 
-    await expect(openRollouts(123)).resolves.toEqual([{ id: '0198c444-4444-7444-8444-444444444444', relativePath: 'sessions/2026/08/20/rollout-2026-08-20T12-00-00-0198c444-4444-7444-8444-444444444444.jsonl' }]);
+    await expect(openPaneThreads(123)).resolves.toEqual({ rollouts: [{ id: '0198c444-4444-7444-8444-444444444444', relativePath: 'sessions/2026/08/20/rollout-2026-08-20T12-00-00-0198c444-4444-7444-8444-444444444444.jsonl' }], writers: new Set() });
   });
 
   it('reads a conversation name from the session_index sidecar, last write wins', async () => {
