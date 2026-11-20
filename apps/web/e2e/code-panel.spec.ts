@@ -1368,12 +1368,12 @@ test('returns to the place read below a diff whose expansion is restored', async
   await remount(page);
 
   await expect.poll(async () => Math.abs(await offsetInView() - before.offset)).toBeLessThan(24);
-  // and still there once the expansion above has loaded its files and grown
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.fileFetches)).toBeGreaterThan(0);
   await page.waitForTimeout(300);
   expect(Math.abs(await offsetInView() - before.offset)).toBeLessThan(24);
+  // the expansion above is put back once its diff renders again
   await view.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
   await expect(panel(page).getByText('line 25', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.fileFetches)).toBeGreaterThan(0);
 });
 
 test('a changed patch comes back without the old expansions', async ({ page }) => {

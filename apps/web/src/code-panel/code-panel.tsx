@@ -19,6 +19,7 @@ import { useTerminalFontSize } from '../terminal-font-size.js';
 import { groupComparisonFiles, previewImageByteLimit, type CodePanelCommit, type CodePanelMode, type CodePanelState, type CodePanelView, type CodePanelViewMode, type ExpandedLines, type ScrollAnchor, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView, type PreviewImage, type RevisionFile } from './comparison.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useIgnoreWhitespace, useObservedWidth, useShowSupporting } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, isPlaceRelativePath, type EditorTarget } from './editor-jump.js';
+import { HighlightPool } from './highlight-pool.js';
 import { annotatedItem, codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, hunkLinesOnlyCSS, loadedFilesFromContents, rememberExpandedLines, withoutWhitespaceChanges } from './items.js';
 import { useMovedLines } from './moved-lines.js';
 import { orderedRange, patchRowIndex, patchRows } from './patch-rows.js';
@@ -225,7 +226,12 @@ function codeContextMenu(event: ReactMouseEvent<HTMLElement>, actions: Selection
 }
 
 // render controlled comparisons and split-local file actions
-export default function CodePanel({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, loadCommits, onSelectCommit, onCloseFile, onClose, onRetry, deleteFile, onOpenInEditor, savedView, onSaveView, ask }: CodePanelProps) {
+// Every diff in the panel highlights through one worker, kept while the panel is open.
+export default function CodePanel(props: CodePanelProps) {
+  return <HighlightPool><CodePanelView {...props} /></HighlightPool>;
+}
+
+function CodePanelView({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, loadCommits, onSelectCommit, onCloseFile, onClose, onRetry, deleteFile, onOpenInEditor, savedView, onSaveView, ask }: CodePanelProps) {
   const selectionActions = useSelectionActions();
   const theme = useColorTheme();
   const fontSize = useTerminalFontSize();
@@ -852,7 +858,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
               </ul>
             )}
             {/* add one disclosure control to each diff header */}
-            <CodeView ref={viewRef} className="code-pane-view" options={options} items={visibleItems} renderHeaderPrefix={item => item.type === 'diff' ? <button type="button" className="code-pane-file-collapse" aria-label={`${item.collapsed ? 'Expand' : 'Collapse'} ${item.fileDiff.name}`} aria-expanded={!item.collapsed} title={item.collapsed ? 'Expand file' : 'Collapse file'} onClick={() => toggleFileCollapse(item.id.slice(5))}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg></button> : null} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} renderAnnotation={(...[annotation]) => annotation.metadata === undefined ? null : ask?.threadFor(annotation.metadata.askId) ?? null} selectedLines={selection} onSelectedLinesChange={setSelection} disableWorkerPool />
+            <CodeView ref={viewRef} className="code-pane-view" options={options} items={visibleItems} renderHeaderPrefix={item => item.type === 'diff' ? <button type="button" className="code-pane-file-collapse" aria-label={`${item.collapsed ? 'Expand' : 'Collapse'} ${item.fileDiff.name}`} aria-expanded={!item.collapsed} title={item.collapsed ? 'Expand file' : 'Collapse file'} onClick={() => toggleFileCollapse(item.id.slice(5))}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg></button> : null} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} renderAnnotation={(...[annotation]) => annotation.metadata === undefined ? null : ask?.threadFor(annotation.metadata.askId) ?? null} selectedLines={selection} onSelectedLinesChange={setSelection} />
             </>}
           </>}
         </div>
@@ -915,7 +921,7 @@ function ImageRevision({ revision, side, options, onOpenInEditor }: { revision: 
   } else {
     let preview = <p className="code-pane-status">Text preview unavailable.</p>;
     // available bounded source uses the established file renderer
-    if (revision.content !== undefined) preview = <CodeView className="code-pane-view" options={options} items={items} onSelectedLinesChange={setSelection} disableWorkerPool />;
+    if (revision.content !== undefined) preview = <CodeView className="code-pane-view" options={options} items={items} onSelectedLinesChange={setSelection} />;
     body = <div className="code-pane-revision-text">
       {preview}
       {/* comparison text retains its separate two-mib cap */}
@@ -1034,7 +1040,7 @@ export function PreviewPanel({ filePreview, onBack, onClose, onRetry, onEdit, on
   const expanded = usePanelExpand('preview')?.expanded === true;
   // keep syntax highlighting consistent with the code split
   const options = useMemo<PanelOptions>(() => codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', fontSize), [theme, fontSize]);
-  return <FileView key={filePreview.path} panelKey="preview" filePreview={filePreview} options={options} style={codeViewStyle(fontSize) as CSSProperties} expanded={expanded} onBack={onBack} onClose={onClose} onRetry={onRetry} onEdit={onEdit} onOpenInEditor={onOpenInEditor} />;
+  return <HighlightPool><FileView key={filePreview.path} panelKey="preview" filePreview={filePreview} options={options} style={codeViewStyle(fontSize) as CSSProperties} expanded={expanded} onBack={onBack} onClose={onClose} onRetry={onRetry} onEdit={onEdit} onOpenInEditor={onOpenInEditor} /></HighlightPool>;
 }
 
 // render source bytes without changing the comparison's selected file
@@ -1079,7 +1085,7 @@ function FileView({ filePreview, options, style, expanded, onBack, onClose, onOp
             {/* keep unsupported and oversized binaries readable as metadata */}
             {preview.binary && preview.image === undefined && <p className="code-pane-status">{isImagePath(path) && preview.size > previewImageByteLimit ? 'Image exceeds the 5 MiB preview limit.' : 'Binary file — no preview available.'}</p>}
             {/* ordinary source remains highlighted code */}
-            {!preview.binary && <CodeView className="code-pane-view" options={options} items={items} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} onSelectedLinesChange={setSelection} disableWorkerPool />}
+            {!preview.binary && <CodeView className="code-pane-view" options={options} items={items} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} onSelectedLinesChange={setSelection} />}
             {/* the text cap does not describe metadata-only image fallbacks */}
             {!preview.binary && preview.truncated && <footer className="code-pane-file-truncated">Preview limited to the first 256 KB.</footer>}
           </>}

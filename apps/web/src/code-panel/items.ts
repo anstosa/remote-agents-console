@@ -20,18 +20,19 @@ const codeLineHeight = (fontSize: number): number => Math.round(fontSize * CODE_
 // build matching shadow-dom font metrics
 export const codeViewStyle = (fontSize: number): Record<string, string> => ({ '--diffs-font-size': `${fontSize}px`, '--diffs-line-height': `${codeLineHeight(fontSize)}px` });
 
-// The diff-library options both renderers share (theme, highlighter, scroll/sticky behaviour, and
-// freeze cap, and the itemMetrics that track the font metrics above). Each renderer spreads this and
+// The Catppuccin flavours the diff library themes code with, shared by every CodeView and the
+// highlight worker pool (highlight-pool.tsx).
+export const codeTheme = { dark: 'catppuccin-mocha', light: 'catppuccin-latte' } as const;
+
+// The diff-library options both renderers share (theme, scroll/sticky behaviour, and the
+// itemMetrics that track the font metrics above). Each renderer spreads this and
 // adds its own view-specific keys — diffStyle, and the Code panel's full-context expandUnchanged /
 // loadDiffFiles. `themeType` is driven from color-theme.ts. Literals are pinned so the object stays
 // assignable to `CodeViewReactOptions` when spread, without importing the React entry here.
 // build matching virtualizer metrics
 export const codeViewBaseOptions = (themeType: 'light' | 'dark', fontSize: number) => ({
-  theme: { dark: 'catppuccin-mocha', light: 'catppuccin-latte' } as const,
+  theme: codeTheme,
   themeType,
-  // Highlights tokenizes a 12k-line TSX file in ~35 ms where shiki-js took ~16 s, so a file expanded
-  // to its full length stays highlighted under the library's default line cap
-  preferredHighlighter: 'highlights' as const,
   overflow: 'scroll' as const,
   hunkSeparators: 'line-info' as const,
   stickyHeaders: true,

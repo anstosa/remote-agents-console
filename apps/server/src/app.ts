@@ -736,12 +736,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   dashboardUpdates.setLoader(dashboard, deps.dashboardTimingFile === undefined ? undefined : dashboardTimingReport(jsonlLog(deps.dashboardTimingFile)));
   // keep sensitive browser capabilities scoped to the console origin
   app.addHook('onSend', async (request, reply, payload) => {
-    // authorize WebAssembly only in the isolated formatter worker, never in the page
-    const formatterPolicy = /^\/assets\/shell-format-worker-[\w-]+\.js(?:\?.*)?$/u.test(request.url) ? "script-src 'self' 'wasm-unsafe-eval'; " : '';
+    // authorize WebAssembly only in the isolated shell-formatter and diff-highlight workers, never in the page
+    const wasmWorkerPolicy = /^\/assets\/(?:shell-format|diff-highlight)-worker-[\w-]+\.js(?:\?.*)?$/u.test(request.url) ? "script-src 'self' 'wasm-unsafe-eval'; " : '';
     // Vite content-hashes everything under /assets/; other static files revalidate by ETag
     const staticFile = request.routeOptions.url === '/*' && reply.statusCode < 400;
     const cacheControl = !staticFile ? 'no-store' : request.url.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache';
-    reply.header('Cache-Control', cacheControl).header('X-Frame-Options', 'DENY').header('X-Content-Type-Options', 'nosniff').header('Referrer-Policy', 'no-referrer').header('Permissions-Policy', 'camera=(), microphone=(self), geolocation=(self), clipboard-read=(self), clipboard-write=(self)').header('Cross-Origin-Opener-Policy', 'same-origin-allow-popups').header('Cross-Origin-Resource-Policy', 'same-origin').header('Content-Security-Policy', `default-src 'self'; ${formatterPolicy}connect-src 'self' ${websocketScheme}://${expectedHost}${integrationConfig.realtime.enabled ? ' https://api.openai.com' : ''}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; ${frameSourcePolicy}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+    reply.header('Cache-Control', cacheControl).header('X-Frame-Options', 'DENY').header('X-Content-Type-Options', 'nosniff').header('Referrer-Policy', 'no-referrer').header('Permissions-Policy', 'camera=(), microphone=(self), geolocation=(self), clipboard-read=(self), clipboard-write=(self)').header('Cross-Origin-Opener-Policy', 'same-origin-allow-popups').header('Cross-Origin-Resource-Policy', 'same-origin').header('Content-Security-Policy', `default-src 'self'; ${wasmWorkerPolicy}connect-src 'self' ${websocketScheme}://${expectedHost}${integrationConfig.realtime.enabled ? ' https://api.openai.com' : ''}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; ${frameSourcePolicy}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
     // isolate editable static artwork from the application policy, keyed on the matched route so no spelling of the path escapes it
     if (request.routeOptions.url === '/favicon.svg' || request.routeOptions.url?.startsWith('/instance-icons/')) reply.header('Content-Security-Policy', "default-src 'none'; style-src 'none'; sandbox; base-uri 'none'; frame-ancestors 'none'");
     // publish HSTS only for HTTPS deployments

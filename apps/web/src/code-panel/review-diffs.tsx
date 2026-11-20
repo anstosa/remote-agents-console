@@ -16,6 +16,7 @@ import { useColorTheme } from '../color-theme.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useIgnoreWhitespace, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, type EditorTarget } from './editor-jump.js';
+import { HighlightPool } from './highlight-pool.js';
 import { annotatedItem, codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch, hunkLinesOnlyCSS, rememberExpandedLines, withoutWhitespaceChanges } from './items.js';
 import type { ExpandedLines } from './comparison.js';
 import { useMovedLines } from './moved-lines.js';
@@ -237,7 +238,12 @@ function SuggestedComment({ suggestion, onKeep, onDismiss, onRestore }: { sugges
 }
 
 // render one tour step with current display settings
-export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, threadFor, asks = [], notes = [], renderNote, onAskStart, askLabel = 'Ask', onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll, expandedLines }: ReviewDiffsProps) {
+// The tour's diffs highlight through one worker, kept while the tour is open.
+export default function ReviewDiffs(props: ReviewDiffsProps) {
+  return <HighlightPool><ReviewDiffsView {...props} /></HighlightPool>;
+}
+
+function ReviewDiffsView({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, threadFor, asks = [], notes = [], renderNote, onAskStart, askLabel = 'Ask', onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll, expandedLines }: ReviewDiffsProps) {
   const theme = useColorTheme();
   const codeView = useRef<CodeViewHandle<Annotation, undefined>>(null);
   // the lines the gutter "+" was last clicked on, while they show the choice of a comment or a question
@@ -408,7 +414,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
           ))}
         </ul>
       )}
-      {items.length > 0 && <CodeView ref={codeView} className="review-tour-diff-scroll" options={options} items={items} renderAnnotation={renderAnnotation} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} selectedLines={selection} onSelectedLinesChange={setSelection} {...(onScroll === undefined ? {} : { onScroll })} disableWorkerPool />}
+      {items.length > 0 && <CodeView ref={codeView} className="review-tour-diff-scroll" options={options} items={items} renderAnnotation={renderAnnotation} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} selectedLines={selection} onSelectedLinesChange={setSelection} {...(onScroll === undefined ? {} : { onScroll })} />}
     </div>
   );
 }

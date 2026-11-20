@@ -729,6 +729,7 @@ test('keeps the step scroll across a Workspace switch and a minimize', async ({ 
   await expect.poll(scrollTops).toEqual([0, 0]);
 
   // leaving the step for the summary forgets its place
+  await expect(diffs.getByText('const line0 = 0;')).toBeVisible();
   await narration.evaluate(element => { element.scrollTop = 300; });
   await diffs.evaluate(element => { element.scrollTop = 900; });
   await expect.poll(scrollTops).toEqual([300, 900]);
