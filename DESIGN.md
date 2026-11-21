@@ -116,8 +116,9 @@ flyout, with internal scrolling for many disks and no horizontal page overflow.
 Workspace toolbar decorators keep the same corner anchors on phones and desktops:
 counts above the top-right edge, git status dots inside the top-right corner, and
 compact PR status icons inside the bottom-right corner. Only labels and control
-widths adapt; do not move decorators into the centered content row. PR cards keep
-their separate inline status presentation.
+widths adapt; do not move decorators into the centered content row. Button badges
+paint in front of flyout markers where they overlap. PR cards keep their separate
+inline status presentation.
 Hide the main toolbar's Launch (+) control on phones; New Workspace in the
 workspace chooser retains launch access. Icon-only GitHub Overview uses the
 shared square control size, with its badge remaining in the corner.
