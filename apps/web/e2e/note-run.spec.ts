@@ -17,12 +17,13 @@ const emitAttention = (page: Page, generation: number, attention: 'working' | 'f
 // send and queue retain one prompt action while attention changes
 test('sends or queues a note with the matching icon as agent attention changes', async ({ page }) => {
   await installDashboardSocket(page);
-  const queuedPrompts: Array<{ prompt: string; attachments: unknown[] }> = [];
+  const queuedPrompts: Array<{ prompt: string; attachments: unknown[]; noteId?: string }> = [];
   const notes = [
     { id: 'note-identifier-001', text: 'Draft the weekly report' },
     { id: 'note-identifier-002', text: 'Summarize the launch plan' }
   ];
   let failPrompt = false;
+  let autoDeleteNoteId: string | undefined;
   // control each independent queued confirmation timer
   await page.clock.install();
 
@@ -37,9 +38,12 @@ test('sends or queues a note with the matching icon as agent attention changes',
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes } });
     if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') {
-      queuedPrompts.push(request.postDataJSON() as { prompt: string; attachments: unknown[] });
+      const prompt = request.postDataJSON() as { prompt: string; attachments: unknown[]; noteId?: string };
+      queuedPrompts.push(prompt);
       if (failPrompt) return route.fulfill({ status: 503, json: { error: 'temporary dispatch failure' } });
-      return route.fulfill({ json: { ok: true } });
+      // delete only the selected flyout note
+      if (prompt.noteId === autoDeleteNoteId) return route.fulfill({ status: 200, json: { deletedNote: { id: prompt.noteId, undoToken: 'undo-flyout-note' } } });
+      return route.fulfill({ status: 204 });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -54,7 +58,7 @@ test('sends or queues a note with the matching icon as agent attention changes',
   await expect(send.locator('path')).toHaveAttribute('d', sendPath);
   await expect(send.locator('svg')).toHaveCSS('fill', 'none');
   await send.click();
-  await expect.poll(() => queuedPrompts).toEqual([{ prompt: 'Draft the weekly report', attachments: [] }]);
+  await expect.poll(() => queuedPrompts).toEqual([{ prompt: 'Draft the weekly report', attachments: [], noteId: notes[0]!.id }]);
   const sentCheck = page.getByRole('button', { name: /^Note queued: Draft the weekly report/u });
   await expect(sentCheck.locator('path')).toHaveAttribute('d', checkPath);
   await expect(secondSend.locator('path')).toHaveAttribute('d', sendPath);
@@ -73,7 +77,7 @@ test('sends or queues a note with the matching icon as agent attention changes',
   await expect(queue.locator('svg')).toHaveCSS('fill', 'none');
   await queue.click();
   await expect.poll(() => queuedPrompts).toHaveLength(2);
-  expect(queuedPrompts[1]).toEqual({ prompt: 'Draft the weekly report', attachments: [] });
+  expect(queuedPrompts[1]).toEqual({ prompt: 'Draft the weekly report', attachments: [], noteId: notes[0]!.id });
   await expect(page.getByRole('button', { name: /^Note queued: Draft the weekly report/u }).locator('path')).toHaveAttribute('d', checkPath);
   await page.clock.fastForward(1_000);
   await secondQueue.click();
@@ -122,6 +126,14 @@ test('sends or queues a note with the matching icon as agent attention changes',
   // missing attention defaults to send
   await emitAttention(page, 5, undefined);
   await expect(pane.getByRole('button', { name: 'Send note as prompt', exact: true })).toBeVisible();
+
+  // a flyout send consumes the deletion receipt without affecting the open first note
+  autoDeleteNoteId = notes[1]!.id;
+  await page.getByRole('button', { name: 'Notes (2)' }).click();
+  await page.getByRole('button', { name: /^Send note: Summarize the launch plan/u }).click();
+  await expect.poll(() => queuedPrompts).toHaveLength(6);
+  await expect(page.getByRole('button', { name: /^Send note: Summarize the launch plan/u })).toHaveCount(0);
+  await expect(page.getByRole('status', { name: 'Note deleted' })).toContainText('Note “Summarize the launch plan…” was deleted');
 });
 
 // Run a note from an idle worktree tab: the flyout explains Run becomes Launch and run, the
@@ -155,7 +167,7 @@ test('launches and runs a note from an idle worktree tab', async ({ page }) => {
     if (runMatch && request.method() === 'POST') {
       // capture the note text the server would read at run time — proves the draft was persisted first
       runRequest = { url: url.pathname, persistedText: notes.find(candidate => candidate.id === runMatch[1])?.text ?? '' };
-      return route.fulfill({ status: 201, json: { agentId: 'agent-2' } });
+      return route.fulfill({ status: 201, json: { agentId: 'agent-2', deletedNote: { id: runMatch[1], undoToken: 'undo-launched-note' } } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -182,4 +194,6 @@ test('launches and runs a note from an idle worktree tab', async ({ page }) => {
   // the draft was persisted before the Run fired, so the server reads the current text
   expect(runRequest?.persistedText).toBe('Summarize the standup');
   await expect(page.getByRole('status').filter({ hasText: 'main is running the note' })).toBeVisible();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole('status', { name: 'Note deleted' })).toContainText('Note “Summarize the standup…” was deleted');
 });

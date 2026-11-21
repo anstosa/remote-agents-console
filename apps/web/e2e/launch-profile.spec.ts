@@ -13,12 +13,12 @@ type Dashboard = Record<string, unknown>;
 type LaunchPost = { path: string; body: unknown };
 
 // Mount the app against a stubbed dashboard, recording every launch-family POST body.
-async function mount(page: Page, dashboard: Dashboard, options?: unknown, updates: unknown = { agents: [] }): Promise<LaunchPost[]> {
+async function mount(page: Page, dashboard: Dashboard, options?: unknown, updates: unknown = { agents: [] }, flyoutMarkers = false): Promise<LaunchPost[]> {
   const posts: LaunchPost[] = [];
   await page.route('**/api/**', async (route: Route) => {
     const request = route.request();
     const url = new URL(request.url());
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', flyoutMarkers } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: dashboard });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (request.method() === 'GET' && url.pathname === '/api/agents/updates') return route.fulfill({ json: updates });
@@ -122,10 +122,8 @@ test('empty worktree primary still launches its resolved agent in one click', as
 
 // a phone has one full-size Launch target; choosing a row, not tapping the target, starts an Agent
 test('mobile Launch is one menu button in the toolbar and empty Workspace', async ({ page }) => {
-  // opt in for marker geometry checks
-  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
   await page.setViewportSize({ width: 390, height: 844 });
-  const posts = await mount(page, { generation: 1, adapters: { codex, claude }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'claude', origin: 'worktree' })] }] });
+  const posts = await mount(page, { generation: 1, adapters: { codex, claude }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'claude', origin: 'worktree' })] }] }, undefined, undefined, true);
   const trigger = toolbar(page).locator('.launch-menu-only button');
   await expect(trigger).toHaveCount(1);
   await expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
@@ -161,10 +159,8 @@ test('mobile Launch is one menu button in the toolbar and empty Workspace', asyn
 
 // even without a resolved default, the phone Launch target opens the configured-agent chooser
 test('mobile Launch opens its menu without a resolved default', async ({ page }) => {
-  // opt in for marker visibility checks
-  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
   await page.setViewportSize({ width: 700, height: 844 });
-  const posts = await mount(page, { generation: 1, adapters: { codex }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree(undefined)] }] });
+  const posts = await mount(page, { generation: 1, adapters: { codex }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree(undefined)] }] }, undefined, undefined, true);
   const trigger = toolbar(page).locator('.launch-menu-only button');
   await expect(trigger).toHaveCount(1);
   await expect(trigger.locator(':scope > .flyout-caret')).toBeVisible();

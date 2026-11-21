@@ -25,6 +25,10 @@ type BrowserFixtureState = {
   fileSaveStatus: number;
   renameStatus: number;
   renameGate?: Gate;
+  fileOpenAction: "preview" | "edit";
+  flyoutMarkers: boolean;
+  dynamicWorktrees: boolean;
+  usagePace: boolean;
 };
 
 // resolve a held browser rename from the test
@@ -51,6 +55,10 @@ function applicationSource(state: BrowserFixtureState) {
     apply: "rac-restart",
     value: {
       title: state.fileTitle,
+      fileOpenAction: state.fileOpenAction,
+      flyoutMarkers: state.flyoutMarkers,
+      dynamicWorktrees: state.dynamicWorktrees,
+      usagePace: state.usagePace,
       items: ["Saved item"],
       integrations: { realtime: { enabled: false, name: "Davo", context: "" } },
       keys: {
@@ -63,6 +71,10 @@ function applicationSource(state: BrowserFixtureState) {
       label: "Application",
       properties: {
         title: { type: "string", label: "Service title" },
+        fileOpenAction: { type: "enum", label: "Default file action", options: ["preview", "edit"], default: "edit", apply: "rac-restart" },
+        flyoutMarkers: { type: "boolean", label: "Flyout markers", default: false, apply: "rac-restart" },
+        dynamicWorktrees: { type: "boolean", label: "Dynamic worktrees", default: true, apply: "rac-restart" },
+        usagePace: { type: "boolean", label: "Usage pace", default: true, apply: "rac-restart" },
         items: {
           type: "array",
           label: "Items",
@@ -122,13 +134,41 @@ function applyFileChanges(
     if (change.sourceId !== "app") continue;
     // apply each authored patch
     for (const patch of change.patches ?? []) {
-      // project the fixture title only
+      // project the fixture title
       if (
         patch.op === "set" &&
         patch.path.join(".") === "title" &&
         typeof patch.value === "string"
       )
         state.fileTitle = patch.value;
+      // project the fixture file action
+      if (
+        patch.op === "set" &&
+        patch.path.join(".") === "fileOpenAction" &&
+        (patch.value === "preview" || patch.value === "edit")
+      )
+        state.fileOpenAction = patch.value;
+      // project the fixture flyout behavior
+      if (
+        patch.op === "set" &&
+        patch.path.join(".") === "flyoutMarkers" &&
+        typeof patch.value === "boolean"
+      )
+        state.flyoutMarkers = patch.value;
+      // project the fixture worktree behavior
+      if (
+        patch.op === "set" &&
+        patch.path.join(".") === "dynamicWorktrees" &&
+        typeof patch.value === "boolean"
+      )
+        state.dynamicWorktrees = patch.value;
+      // project the fixture pace behavior
+      if (
+        patch.op === "set" &&
+        patch.path.join(".") === "usagePace" &&
+        typeof patch.value === "boolean"
+      )
+        state.usagePace = patch.value;
     }
   }
 }
@@ -147,6 +187,10 @@ async function setupBrowserDrafts(page: Page, files = false) {
     validationValid: true,
     fileSaveStatus: 200,
     renameStatus: 200,
+    fileOpenAction: "edit",
+    flyoutMarkers: false,
+    dynamicWorktrees: true,
+    usagePace: true,
   };
   const status = {
     pending: false,
@@ -179,6 +223,10 @@ async function setupBrowserDrafts(page: Page, files = false) {
             remotes: [],
           },
           davo: { enabled: false, available: true, name: "Davo", context: "" },
+          fileOpenAction: state.fileOpenAction,
+          flyoutMarkers: state.flyoutMarkers,
+          dynamicWorktrees: state.dynamicWorktrees,
+          usagePace: state.usagePace,
         },
       });
     // capture a browser identity commit
@@ -207,6 +255,10 @@ async function setupBrowserDrafts(page: Page, files = false) {
             remotes: [],
           },
           davo: { enabled: false, available: true, name: "Davo", context: "" },
+          fileOpenAction: state.fileOpenAction,
+          flyoutMarkers: state.flyoutMarkers,
+          dynamicWorktrees: state.dynamicWorktrees,
+          usagePace: state.usagePace,
         },
       });
     }
@@ -308,8 +360,8 @@ async function selectSection(settings: Locator, id: string, label: string) {
     .click();
 }
 
-// stage every browser-backed preference across its owning pages
-async function stageAllBrowserPreferences(settings: Locator) {
+// stage client-specific preferences across their owning pages
+async function stageBrowserPreferences(settings: Locator) {
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
@@ -319,13 +371,6 @@ async function stageAllBrowserPreferences(settings: Locator) {
   await settings
     .getByRole("switch", { name: "Reduced motion", exact: true })
     .check();
-  await settings
-    .getByRole("switch", { name: "Flyout markers", exact: true })
-    .check();
-  await selectSection(settings, "projects", "Projects");
-  await settings
-    .getByRole("switch", { name: "Dynamic worktrees", exact: true })
-    .uncheck();
   await selectSection(settings, "browser", "This browser");
   await settings
     .getByRole("button", { name: "Rename browser name", exact: true })
@@ -353,18 +398,64 @@ test("saves notification sounds from Interface without changing files", async ({
   await expect(sounds).not.toBeChecked();
 });
 
-// keep the usage pace display on until this browser opts out
-test("saves usage pace from Interface without changing files", async ({ page }) => {
+// identify every remaining client-specific setting beside its label
+test("labels only client-specific settings with a This browser pill", async ({ page }) => {
+  const { settings } = await setupBrowserDrafts(page, true);
+  // each interface-local setting owns one adjacent scope pill
+  for (const path of ["terminalFontSize", "webglTerminals", "colorTheme", "reducedMotion", "notificationSounds"]) {
+    const setting = settings.locator(`[data-settings-path=${JSON.stringify(path)}]`);
+    await expect(setting.locator(".client-settings-setting-copy > header > .client-settings-scope-pill")).toHaveText("This browser");
+  }
+  await selectSection(settings, "browser", "This browser");
+  await expect(settings.locator('[data-settings-path="deviceName"] .client-settings-scope-pill')).toHaveText("This browser");
+
+  await selectSection(settings, "interface", "Interface");
+  await expect(settings.locator('[data-settings-path="flyoutMarkers"] .client-settings-scope-pill')).toHaveCount(0);
+  await selectSection(settings, "projects", "Projects");
+  await expect(settings.locator('[data-settings-path="dynamicWorktrees"] .client-settings-scope-pill')).toHaveCount(0);
+  await selectSection(settings, "agents", "Agents");
+  await expect(settings.locator('[data-settings-path="usagePace"] .client-settings-scope-pill')).toHaveCount(0);
+  await selectSection(settings, "files", "Files");
+  await expect(settings.locator('[data-settings-path="fileOpenAction"] .client-settings-scope-pill')).toHaveCount(0);
+});
+
+// save the flyout marker setting through the application source
+test("saves flyout markers from Interface", async ({ page }) => {
   const { settings, state } = await setupBrowserDrafts(page, true);
+  const markers = settings.getByRole("switch", { name: "Flyout markers", exact: true });
+  await expect(markers).not.toBeChecked();
+  await markers.check();
+  await actions(settings).save.click();
+  await expect.poll(() => state.fileSaves.length).toBe(1);
+  expect(state.fileSaves[0]!.changes.flatMap(change => change.patches ?? [])).toContainEqual(expect.objectContaining({ op: "set", path: ["flyoutMarkers"], value: true }));
+});
+
+// save worktree launcher behavior through the application source
+test("saves dynamic worktrees from Projects", async ({ page }) => {
+  const { settings, state } = await setupBrowserDrafts(page, true);
+  await selectSection(settings, "projects", "Projects");
+  const dynamic = settings.getByRole("switch", { name: "Dynamic worktrees", exact: true });
+  await expect(dynamic).toBeChecked();
+  await dynamic.uncheck();
+  await actions(settings).save.click();
+  await expect.poll(() => state.fileSaves.length).toBe(1);
+  expect(state.fileSaves[0]!.changes.flatMap(change => change.patches ?? [])).toContainEqual(expect.objectContaining({ op: "set", path: ["dynamicWorktrees"], value: false }));
+});
+
+// save the account pace display as an application setting
+test("saves usage pace from Agents", async ({ page }) => {
+  const { settings, state } = await setupBrowserDrafts(page, true);
+  await selectSection(settings, "agents", "Agents");
   const pace = settings.getByRole("switch", { name: "Usage pace", exact: true });
   await expect(pace).toBeChecked();
   await pace.uncheck();
   await settings.getByRole("button", { name: "Save changes", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.usage-pace"))).toBe("disabled");
-  expect(state.fileSaves).toHaveLength(0);
+  await expect.poll(() => state.fileSaves.length).toBe(1);
+  expect(state.fileSaves[0]!.changes.flatMap(change => change.patches ?? [])).toContainEqual(expect.objectContaining({ op: "set", path: ["usagePace"], value: false }));
   await pace.check();
   await settings.getByRole("button", { name: "Save changes", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.usage-pace"))).toBeNull();
+  await expect.poll(() => state.fileSaves.length).toBe(2);
+  expect(state.fileSaves[1]!.changes.flatMap(change => change.patches ?? [])).toContainEqual(expect.objectContaining({ op: "set", path: ["usagePace"], value: true }));
 });
 
 // keep terminals on the WebGL renderer until this browser opts out
@@ -381,19 +472,19 @@ test("saves WebGL terminals from Interface without changing files", async ({ pag
   await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.terminal-webgl"))).toBeNull();
 });
 
-// stage and persist the browser-local file activation default
-test("saves the default file action from Interface", async ({ page }) => {
+// stage and persist the application file activation default
+test("saves the default file action from Files", async ({ page }) => {
   const { settings, state } = await setupBrowserDrafts(page, true);
+  await selectSection(settings, "files", "Files");
   const edit = settings.getByRole("radio", { name: "Edit", exact: true });
   const preview = settings.getByRole("radio", { name: "Preview", exact: true });
   await expect(edit).toHaveAttribute("aria-checked", "true");
   await preview.click();
   await expect(preview).toHaveAttribute("aria-checked", "true");
-  expect(await page.evaluate(() => localStorage.getItem("rac.file-open-action"))).toBeNull();
   await settings.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect(settings.getByRole("button", { name: "Save changes", exact: true })).toHaveCount(0);
-  expect(await page.evaluate(() => localStorage.getItem("rac.file-open-action"))).toBe("preview");
-  expect(state.fileSaves).toHaveLength(0);
+  expect(state.fileSaves).toHaveLength(1);
+  expect(state.fileSaves[0]!.changes.flatMap(change => change.patches ?? [])).toContainEqual(expect.objectContaining({ op: "set", path: ["fileOpenAction"], value: "preview" }));
 });
 
 // read only applied browser state outside the settings draft
@@ -402,8 +493,6 @@ const appliedBrowserState = (page: Page) =>
     theme: document.documentElement.dataset.theme ?? null,
     font: localStorage.getItem("rac.terminal-font-size"),
     motion: document.documentElement.dataset.motion ?? null,
-    flyout: document.documentElement.dataset.flyoutMarkers ?? null,
-    dynamic: localStorage.getItem("rac.dynamic-worktrees"),
   }));
 
 // locate the global transaction actions
@@ -420,17 +509,15 @@ const defaultAppliedState = {
   theme: null,
   font: null,
   motion: null,
-  flyout: null,
-  dynamic: null,
 };
 
 test.describe.configure({ timeout: 90_000 });
 
-test("stages all browser preferences and applies them together without file writes", async ({
+test("stages client-specific preferences and applies them together without file writes", async ({
   page,
 }) => {
   const { settings, state } = await setupBrowserDrafts(page);
-  await stageAllBrowserPreferences(settings);
+  await stageBrowserPreferences(settings);
   const navigation = settings.getByRole("navigation", {
     name: "Settings sources",
     exact: true,
@@ -444,22 +531,12 @@ test("stages all browser preferences and applies them together without file writ
     navigation.getByRole("button", { name: /^Interface.*Unsaved changes$/u }),
   ).toBeVisible();
   await expect(
-    navigation.getByRole("button", { name: /^Projects.*Unsaved changes$/u }),
-  ).toBeVisible();
-  await expect(
     settings.getByRole("radio", { name: "Light theme", exact: true }),
   ).toHaveAttribute("aria-checked", "true");
   await expect(settings).toContainText("12px");
   await expect(
     settings.getByRole("switch", { name: "Reduced motion", exact: true }),
   ).toBeChecked();
-  await expect(
-    settings.getByRole("switch", { name: "Flyout markers", exact: true }),
-  ).toBeChecked();
-  await selectSection(settings, "projects", "Projects");
-  await expect(
-    settings.getByRole("switch", { name: "Dynamic worktrees", exact: true }),
-  ).not.toBeChecked();
   await selectSection(settings, "browser", "This browser");
   await expect(
     settings.getByRole("group", { name: "Name", exact: true }),
@@ -479,8 +556,6 @@ test("stages all browser preferences and applies them together without file writ
     theme: "latte",
     font: "12",
     motion: "reduced",
-    flyout: "enabled",
-    dynamic: "disabled",
   });
 });
 
@@ -630,7 +705,7 @@ test("collapses reverted browser drafts and discards unapplied values", async ({
 }) => {
   const { settings, state } = await setupBrowserDrafts(page);
   const controls = actions(settings);
-  await stageAllBrowserPreferences(settings);
+  await stageBrowserPreferences(settings);
   await settings
     .getByRole("radio", { name: "Dark theme", exact: true })
     .click();
@@ -640,13 +715,6 @@ test("collapses reverted browser drafts and discards unapplied values", async ({
   await settings
     .getByRole("switch", { name: "Reduced motion", exact: true })
     .uncheck();
-  await settings
-    .getByRole("switch", { name: "Flyout markers", exact: true })
-    .uncheck();
-  await selectSection(settings, "projects", "Projects");
-  await settings
-    .getByRole("switch", { name: "Dynamic worktrees", exact: true })
-    .check();
   await selectSection(settings, "browser", "This browser");
   await settings
     .getByRole("button", { name: "Rename browser name", exact: true })
@@ -679,7 +747,7 @@ test("collapses reverted browser drafts and discards unapplied values", async ({
 
 test("drops browser drafts when Settings closes", async ({ page }) => {
   const { settings, state } = await setupBrowserDrafts(page);
-  await stageAllBrowserPreferences(settings);
+  await stageBrowserPreferences(settings);
   await settings
     .getByRole("button", { name: "Close settings", exact: true })
     .click();
@@ -697,13 +765,6 @@ test("drops browser drafts when Settings closes", async ({ page }) => {
   await expect(
     reopened.getByRole("switch", { name: "Reduced motion", exact: true }),
   ).not.toBeChecked();
-  await expect(
-    reopened.getByRole("switch", { name: "Flyout markers", exact: true }),
-  ).not.toBeChecked();
-  await selectSection(reopened, "projects", "Projects");
-  await expect(
-    reopened.getByRole("switch", { name: "Dynamic worktrees", exact: true }),
-  ).toBeChecked();
   await selectSection(reopened, "browser", "This browser");
   await expect(
     reopened.getByRole("group", { name: "Name", exact: true }),
@@ -849,7 +910,7 @@ test("locks visible browser controls and page changes while the shared save is p
   const { settings, state } = await setupBrowserDrafts(page);
   const held = deferred<{ status: number }>();
   state.renameGate = held.promise;
-  await stageAllBrowserPreferences(settings);
+  await stageBrowserPreferences(settings);
   await actions(settings).save.click();
   await expect.poll(() => state.renames.length).toBe(1);
   await expect(
@@ -864,16 +925,6 @@ test("locks visible browser controls and page changes while the shared save is p
   await expect(
     settings.getByRole("switch", { name: "Reduced motion", exact: true }),
   ).toBeDisabled();
-  await expect(
-    settings.getByRole("switch", { name: "Flyout markers", exact: true }),
-  ).toBeDisabled();
-  await selectSection(settings, "projects", "Projects");
-  await expect(
-    settings.getByRole("heading", { name: "Interface", exact: true, level: 2 }),
-  ).toBeVisible();
-  await expect(
-    settings.getByRole("switch", { name: "Dynamic worktrees", exact: true }),
-  ).toHaveCount(0);
   await expect(actions(settings).validate).toHaveCount(0);
   await expect(actions(settings).discard).toBeDisabled();
   await expect(
@@ -886,8 +937,6 @@ test("locks visible browser controls and page changes while the shared save is p
     theme: "latte",
     font: "12",
     motion: "reduced",
-    flyout: "enabled",
-    dynamic: "disabled",
   });
 });
 

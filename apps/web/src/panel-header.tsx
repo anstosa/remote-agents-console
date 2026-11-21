@@ -29,6 +29,12 @@ export const panelIcons = {
   format: 'M4 5h16M9 10h11M9 15h11M4 20h16m-16-10 3 2.5L4 15'
 };
 
+// share workspace glyphs with settings navigation
+export const workspacePanelGlyphs = {
+  notes: <g fill="none"><path d="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M15 21v-6h6" /></g>,
+  files: <><path d="M3 7h7l2 2h9v10H3z" /><path d="M3 7V5h7l2 2" /></>
+};
+
 const matchesPhone = () => typeof window !== 'undefined' && window.matchMedia(phoneQuery).matches;
 const subscribePhone = (listener: () => void) => {
   const media = window.matchMedia(phoneQuery);
@@ -171,8 +177,9 @@ const actionButton = (action: PanelAction, row = false) => {
   return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}${busy && action.progressKind === 'loading' ? ' progress-loading' : ''}`} style={action.style} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onPointerDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onMouseDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onContextMenu={action.onContextMenu} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{(row || action.showLabel === true || action.icon === undefined) && <span>{action.label}</span>}</button>;
 };
 
-export function PanelIcon({ path }: { path: string }) {
-  return <svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><path d={path} /></svg>;
+// render a single path or a shared multi-part glyph
+export function PanelIcon({ path, glyph }: { path: string; glyph?: never } | { path?: never; glyph: ReactNode }) {
+  return <svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true">{path === undefined ? glyph : <path d={path} />}</svg>;
 }
 
 type PanelHeaderProps = {

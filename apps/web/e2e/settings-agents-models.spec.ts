@@ -143,21 +143,23 @@ async function chooseOption(control: Locator, value: string) {
 }
 
 // omission keeps registry priority without writing configuration
-test('shows an automatic default adapter above collapsed cards on mobile', async ({ page }) => {
+test('shows adapter stars beside the names of collapsed cards on mobile', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const { settings, saves } = await setupAgentModels(page, { conductorEnabled: false, expandPi: false });
   const field = settings.locator('[data-settings-path="defaultAgent"]');
-  const control = field.getByRole('combobox', { name: 'Default adapter', exact: true });
-  await expect(control).toHaveAttribute('data-value', '');
-  await expect(control).toContainText('Automatic (first available)');
+  await expect(field).toContainText('Automatic uses the first available adapter.');
+  await expect(field.getByRole('combobox')).toHaveCount(0);
   await expect(settings.locator('.settings-adapter-card[open]')).toHaveCount(0);
-  const fieldBounds = await field.boundingBox();
-  const cardBounds = await settings.locator('.settings-adapter-card').first().boundingBox();
-  expect(fieldBounds).not.toBeNull();
-  expect(cardBounds).not.toBeNull();
-  expect(fieldBounds!.x).toBeGreaterThanOrEqual(8);
-  expect(fieldBounds!.x + fieldBounds!.width).toBeLessThanOrEqual(382);
-  expect(fieldBounds!.y + fieldBounds!.height).toBeLessThan(cardBounds!.y);
+  const pi = settings.locator('[data-settings-path="adapters.pi"]');
+  const star = pi.getByRole('button', { name: 'Make Pi the default adapter', exact: true });
+  await expect(star).toHaveAttribute('aria-pressed', 'false');
+  await expect(star).toBeEnabled();
+  const nameBounds = await pi.getByRole('heading', { name: 'Pi', exact: true }).boundingBox();
+  const starBounds = await star.boundingBox();
+  expect(starBounds).not.toBeNull();
+  expect(nameBounds).not.toBeNull();
+  expect(starBounds!.x).toBeGreaterThanOrEqual(nameBounds!.x + nameBounds!.width);
+  expect(starBounds!.x + starBounds!.width).toBeLessThanOrEqual(390);
   await expect(settings.getByRole('button', { name: 'Save changes', exact: true })).toHaveCount(0);
   expect(saves).toEqual([]);
 });
@@ -169,14 +171,15 @@ test('saves a configured default adapter and marks the Agents page dirty', async
     expandPi: false,
     adapters: { codex: {} }
   });
-  const control = settings.getByRole('combobox', { name: 'Default adapter', exact: true });
-  await control.click();
-  const options = page.getByRole('listbox', { name: 'Default adapter options', exact: true });
-  await expect(options.getByRole('option')).toHaveCount(3);
-  await expect(options.getByRole('option', { name: 'Automatic (first available)', exact: true })).toBeVisible();
-  await expect(options.getByRole('option', { name: 'Codex', exact: true })).toBeVisible();
-  await expect(options.getByRole('option', { name: 'Pi', exact: true })).toBeVisible();
-  await options.locator('[role="option"][data-value="codex"]').click();
+  await expect(settings.getByRole('button', { name: 'Make Claude the default adapter', exact: true })).toBeDisabled();
+  const star = settings.getByRole('button', { name: 'Make Codex the default adapter', exact: true });
+  await star.focus();
+  await star.press('Enter');
+  const selected = settings.getByRole('button', { name: 'Codex is the default adapter', exact: true });
+  await expect(selected).toHaveAttribute('aria-pressed', 'true');
+  await expect(selected.locator('svg')).not.toHaveCSS('fill', 'none');
+  await expect(settings.locator('.settings-adapter-card[open]')).toHaveCount(0);
+  await expect(settings.getByRole('button', { name: 'Make Pi the default adapter', exact: true })).toHaveAttribute('aria-pressed', 'false');
   const navigation = settings.getByRole('navigation', { name: 'Settings sources' });
   await expect(navigation.getByRole('button', { name: 'Agents Unsaved changes', exact: true })).toBeVisible();
   await settings.getByRole('button', { name: 'Save changes', exact: true }).click();
@@ -194,19 +197,31 @@ test('preserves an unconfigured explicit default adapter without writing', async
     expandPi: false,
     defaultAgent: 'claude'
   });
-  const control = settings.getByRole('combobox', { name: 'Default adapter', exact: true });
-  await expect(control).toHaveAttribute('data-value', 'claude');
-  await expect(control).toContainText('Claude (unavailable)');
+  const star = settings.getByRole('button', { name: 'Claude is the default adapter', exact: true });
+  await expect(star).toHaveAttribute('aria-pressed', 'true');
+  await expect(star).toBeDisabled();
+  await expect(settings.locator('[data-settings-path="defaultAgent"]').getByRole('note')).toContainText('(Claude) is unavailable');
   await expect(settings.getByRole('button', { name: 'Save changes', exact: true })).toHaveCount(0);
   expect(source.value.defaultAgent).toBe('claude');
   expect(saves).toEqual([]);
 });
 
 // read-only application settings keep the visible default choice locked
-test('disables the default adapter selector for read-only settings', async ({ page }) => {
+test('disables default adapter stars for read-only settings', async ({ page }) => {
   const { settings, saves } = await setupAgentModels(page, { conductorEnabled: false, expandPi: false, readOnly: true });
-  await expect(settings.getByRole('combobox', { name: 'Default adapter', exact: true })).toBeDisabled();
+  await expect(settings.getByRole('button', { name: 'Make Pi the default adapter', exact: true })).toBeDisabled();
   expect(saves).toEqual([]);
+});
+
+// explicit defaults can return to the unauthored registry choice
+test('can return an explicit adapter default to automatic', async ({ page }) => {
+  const { settings, saves, source } = await setupAgentModels(page, { conductorEnabled: false, expandPi: false, defaultAgent: 'pi' });
+  await settings.getByRole('button', { name: 'Use automatic', exact: true }).click();
+  await expect(settings.getByRole('button', { name: 'Make Pi the default adapter', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await settings.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0]!.changes.flatMap(change => change.patches ?? [])).toEqual([expect.objectContaining({ op: 'remove', path: ['defaultAgent'] })]);
+  expect(source.value).not.toHaveProperty('defaultAgent');
 });
 
 test('selects catalog models, reorders the default, and preserves per-model effort metadata', async ({ page }) => {
@@ -668,8 +683,10 @@ test('removes an explicit HOME override while keeping the permanent field', asyn
     expect.objectContaining({ op: 'remove', path: ['adapters', 'pi', 'env'] })
   ]));
   expect(source.value.adapters.pi.env).toBeUndefined();
-  // saved settings remount with adapter cards collapsed
-  if (await card.getAttribute('open') === null) await card.locator('summary').click();
+  // wait for the saved snapshot before reopening a remounted card
+  await expect(settings.getByRole('button', { name: 'Save changes', exact: true })).toHaveCount(0);
+  // select the adapter name rather than the adjacent star
+  if (await card.getAttribute('open') === null) await card.locator('summary h3').click();
   await expect(card.getByRole('region', { name: 'Pi Environment & keys', exact: true }).getByLabel('HOME', { exact: true })).toHaveAttribute('placeholder', 'Inherited from launch user’s home');
 });
 

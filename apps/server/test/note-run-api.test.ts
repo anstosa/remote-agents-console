@@ -32,9 +32,9 @@ async function stores(): Promise<{ notes: WorktreeNoteService; queued: QueuedPro
   return { notes, queued: new QueuedPromptService(join(root, 'queue.json')), noteId: created!.id };
 }
 
-async function runApp({ queued, ...deps }: Record<string, unknown>) {
+async function runApp({ queued, autoDeleteSentNotes = false, ...deps }: Record<string, unknown>) {
   // pass the per-test queue under the key buildApp reads, so tests never share the default file
-  return await buildApp(testConfig({ publicOrigin: new URL(`https://${host}`), projects: [testProject({ id: 'proj' })] }), { auth, control, dashboardUpdates, launchPollDelay: zeroPollDelay, queuedPrompts: queued, ...deps } as never);
+  return await buildApp(testConfig({ publicOrigin: new URL(`https://${host}`), autoDeleteSentNotes: autoDeleteSentNotes === true, projects: [testProject({ id: 'proj' })] }), { auth, control, dashboardUpdates, launchPollDelay: zeroPollDelay, queuedPrompts: queued, ...deps } as never);
 }
 
 const run = (noteId: string, worktreeId = 'wt-main', kind = 'codex') =>
@@ -72,11 +72,67 @@ describe('POST /api/worktrees/:id/notes/:noteId/run', () => {
       const response = await server.inject(run(noteId));
       expect(response.statusCode).toBe(201);
       expect(response.json()).toEqual({ agentId: 'agent-1' });
+      await expect(notes.resolve('proj', noteId)).resolves.toMatchObject({ note: { id: noteId } });
       // the requested kind reached the launch handoff
       expect(launch.kinds).toEqual(['codex']);
       // the note's saved text was pasted (only reachable once readiness passed)
       expect(tmux.pasted.some(text => text.includes('Draft the weekly report'))).toBe(true);
     } finally { await server.close(); }
+  }, 15_000);
+
+  // consume a successful manual run and return an undoable deletion receipt
+  it('deletes an unlocked note after a successful manual run and restores it through undo', async () => {
+    const { notes, queued, noteId } = await stores();
+    const tmux = recordingTmux();
+    const discovery = appearingDiscovery({ worktree, agent: codexAgent(), socket: testSocket, working: () => tmux.submits > 0 });
+    const server = await runApp({ notes, queued, tmux, launch: launchFake(), discovery, autoDeleteSentNotes: true });
+    try {
+      const response = await server.inject(run(noteId));
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toEqual({ agentId: 'agent-1', deletedNote: { id: noteId, undoToken: expect.any(String) } });
+      await expect(notes.resolve('proj', noteId)).resolves.toBeUndefined();
+
+      const restored = await server.inject({ method: 'POST', url: `/api/notes/deletions/${response.json().deletedNote.undoToken as string}/undo`, headers: mutate });
+      expect(restored.statusCode).toBe(200);
+      expect(restored.json()).toMatchObject({ id: noteId, text: 'Draft the weekly report' });
+      await expect(notes.resolve('proj', noteId)).resolves.toMatchObject({ note: { id: noteId } });
+    } finally {
+      await server.close();
+    }
+  }, 15_000);
+
+  // preserve locked notes after the same successful manual run
+  it('keeps a locked note after a successful manual run', async () => {
+    const { notes, queued, noteId } = await stores();
+    await notes.setLocked('proj', noteId, true);
+    const tmux = recordingTmux();
+    const discovery = appearingDiscovery({ worktree, agent: codexAgent(), socket: testSocket, working: () => tmux.submits > 0 });
+    const server = await runApp({ notes, queued, tmux, launch: launchFake(), discovery, autoDeleteSentNotes: true });
+    try {
+      const response = await server.inject(run(noteId));
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toEqual({ agentId: 'agent-1' });
+      await expect(notes.resolve('proj', noteId)).resolves.toMatchObject({ note: { id: noteId, locked: true } });
+    } finally {
+      await server.close();
+    }
+  }, 15_000);
+
+  // scheduled runs update their note instead of consuming it
+  it('keeps a scheduled note after a successful scheduled launch when cleanup is enabled', async () => {
+    const { notes, queued, noteId } = await stores();
+    await notes.setSchedule('proj', noteId, { cron: '0 9 * * *', kind: 'codex', enabled: true, updatedAt: new Date().toISOString(), target: { worktreeId: 'wt-main' } });
+    const tmux = recordingTmux();
+    const discovery = appearingDiscovery({ worktree, agent: codexAgent(), socket: testSocket, working: () => tmux.submits > 0 });
+    const server = await runApp({ notes, queued, tmux, launch: launchFake(), discovery, autoDeleteSentNotes: true });
+    try {
+      const response = await server.inject({ method: 'POST', url: `/api/worktrees/wt-main/notes/${noteId}/schedule/run`, headers: mutate });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().schedule.lastRun).toMatchObject({ status: 'launched', agentId: 'agent-1' });
+      await expect(notes.resolve('proj', noteId)).resolves.toMatchObject({ note: { id: noteId, schedule: { lastRun: { status: 'launched' } } } });
+    } finally {
+      await server.close();
+    }
   }, 15_000);
 
   it('launches with the worktree default kind when the request omits one (the fly-out path)', async () => {
@@ -127,12 +183,13 @@ describe('POST /api/worktrees/:id/notes/:noteId/run', () => {
     const { notes, queued, noteId } = await stores();
     const tmux = recordingTmux();
     const discovery = appearingDiscovery({ worktree, agent: codexAgent(), socket: testSocket });
-    const server = await runApp({ notes, queued, tmux, launch: launchFake({ refuse: true }), discovery });
+    const server = await runApp({ notes, queued, tmux, launch: launchFake({ refuse: true }), discovery, autoDeleteSentNotes: true });
     try {
       const response = await server.inject(run(noteId));
       expect(response.statusCode).toBe(409);
       expect(response.json().error).toMatch(/Could not start/i);
       expect(tmux.pasted).toEqual([]);
+      await expect(notes.resolve('proj', noteId)).resolves.toMatchObject({ note: { id: noteId } });
     } finally { await server.close(); }
   });
 

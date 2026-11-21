@@ -6,6 +6,7 @@ import staticPlugin from '@fastify/static';
 import { fileURLToPath } from 'node:url';
 import { readFile, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { ValidatedConfig } from './config/schema.js';
 import { registerHealthRoute } from './settings/health-proof.js';
 import { AuthService, type Session } from './auth/service.js';
@@ -66,7 +67,7 @@ import { isPaneTheme } from './tmux/terminal-colors.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardBuild, type DashboardPayload } from './dashboard/updates.js';
 import { dashboardTimingReport, timed } from './dashboard/timing.js';
 import { jsonlLog } from './logs/jsonl-log.js';
-import { WorktreeNoteService, type NoteAuthor, type WorktreeNote } from './notes/service.js';
+import { WorktreeNoteService, type NoteAuthor, type WorktreeNote, type WorktreeNoteLocation } from './notes/service.js';
 import { promptNoteContent } from './notes/from-prompt.js';
 import { cronError, previewRuns, scheduleNextRun } from './schedule/cron.js';
 import { Scheduler } from './schedule/scheduler.js';
@@ -620,6 +621,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       controllingDeviceName: owner === undefined ? undefined : await devices.get(owner),
       defaultAgent: typeof launch.defaultAgent === 'function' ? launch.defaultAgent() : undefined,
       davo: publicDavoSettings(),
+      fileOpenAction: config.fileOpenAction,
+      flyoutMarkers: config.flyoutMarkers,
+      dynamicWorktrees: config.dynamicWorktrees,
+      usagePace: config.usagePace,
       resourceMonitoring: resourceMonitoringEnabled,
       server
     };
@@ -1573,8 +1578,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // serialize schedule execution and deletion around each canonical note
   const scheduleRunsInFlight = new Set<string>();
   const noteDeletionsInFlight = new Set<string>();
-  const deleteNoteWithUndo = async (saveKey: string, noteId: string, by: NoteAuthor = 'operator') => {
-    const resolved = await notes.resolve(saveKey, noteId);
+  // protect the sent note's original key when a dispatch supplies a snapshot
+  const deleteNoteWithUndo = async (saveKey: string, noteId: string, by: NoteAuthor = 'operator', expected?: WorktreeNoteLocation) => {
+    const resolved = expected ?? await notes.resolve(saveKey, noteId);
     // hide notes outside the requesting scope
     if (resolved === undefined) return undefined;
     const flightKey = `${resolved.key}:${noteId}`;
@@ -1583,7 +1589,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (noteDeletionsInFlight.has(flightKey)) return 'deleting' as const;
     noteDeletionsInFlight.add(flightKey);
     try {
-      return await notes.deleteWithUndo(saveKey, noteId, by);
+      return await notes.deleteWithUndo(saveKey, noteId, by, expected);
     } finally {
       noteDeletionsInFlight.delete(flightKey);
     }
@@ -1603,6 +1609,20 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     notesRevision += 1;
     // follow an overlapping refresh when it captured the prior revision
     void dashboardUpdates.refresh().then(snapshot => snapshot?.notesRevision === notesRevision ? undefined : dashboardUpdates.refresh()).catch(() => undefined);
+  };
+  // offer undo only after consuming a successfully dispatched unlocked note
+  const consumeSentNote = async (saveKey: string, sent: WorktreeNoteLocation) => {
+    // keep the note when the setting is off or the snapshot was locked
+    if (!config.autoDeleteSentNotes || sent.note.locked === true) return undefined;
+    // a storage failure cannot make an accepted dispatch appear to fail
+    const deletion = await deleteNoteWithUndo(saveKey, sent.note.id, 'operator', sent).catch(() => {
+      app.log.warn('Could not auto-delete a sent note');
+      return undefined;
+    });
+    // skip changed, locked or busy notes without hiding the accepted prompt
+    if (typeof deletion !== 'object') return undefined;
+    publishNotesRevision();
+    return { id: deletion.note.id, undoToken: deletion.undoToken };
   };
   // publish mutations that can change another workspace's visible note
   const publishSharedNoteRevision = (note: WorktreeNote) => {
@@ -1797,6 +1817,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // require one current agent
     if (agent === undefined) return undefined;
     return { agent, ...await homePersistence(agent) };
+  };
+  // prove that a note belongs to the target and matches the dispatch payload
+  const sentNoteSource = async (agentId: string, noteId: string, prompt: string, attachments: PromptAttachment[]) => {
+    const persistence = await agentPersistence(agentId);
+    // an ordinary prompt remains valid when its note cannot be verified
+    if (persistence === undefined) return undefined;
+    const sent = await notes.resolve(persistence.saveKey, noteId);
+    // a modified draft or stale attachment list must not consume the stored note
+    if (sent === undefined || sent.note.locked === true || sent.note.text !== prompt || !isDeepStrictEqual(sent.note.attachments ?? [], attachments)) return undefined;
+    return { saveKey: persistence.saveKey, sent };
   };
   // a live Agent's current Conversation id: a structured Agent reports it, a pane's is discovered
   const currentConversationId = async (id: string): Promise<string | undefined> =>
@@ -2914,10 +2944,15 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const id = (request.params as { id: string }).id;
     const structured = attachments.length === 0 ? undefined : await structuredAgents.agent(id);
     if (structured !== undefined && structuredAdapterFor(structured.kind)?.attachments !== true) return reply.code(400).send({ error: 'This agent does not take attachments yet.' });
+    // read a note snapshot before dispatch so concurrent edits can veto deletion
+    const source = config.autoDeleteSentNotes && typeof data.noteId === 'string'
+      ? await sentNoteSource(id, data.noteId, data.prompt, attachments).catch(() => undefined)
+      : undefined;
     if (!await prompts.submit(id, data.prompt, attachments)) return reply.code(404).send({ error: 'target unavailable' });
     // a prompt to an Exited Agent waits in its queue while the Agent resumes
     if ((await structuredAgents.agent(id))?.structured?.lifecycle === 'exited') void prompts.withExternalActivity(id, async () => await structuredAgents.resume(id), result => result === true).catch(error => { console.error(`[structured] ${id} could not resume:`, error); });
-    return reply.code(204).send();
+    const deletedNote = source === undefined ? undefined : await consumeSentNote(source.saveKey, source.sent);
+    return deletedNote === undefined ? reply.code(204).send() : reply.code(200).send({ deletedNote });
   });
   // a structured Agent's Raw events: the latest lines between the console and its process
   app.get('/api/agents/:id/raw-events', async (request, reply) => {
@@ -4200,7 +4235,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return place.adhoc === true ? undefined : { scratch: true };
   };
   // Launch and run one Note on an idle Place tab — the fresh-launch entry into the Run
-  // primitive (Scheduled prompts). It records nothing on the Note and returns the new agent id
+  // primitive (Scheduled prompts). It returns the new agent id and any opted-in note deletion
   // so the web can switch to its tab; the primitive keeps the 409 / 504 / 502 contract /launch
   // uses (a blocked or slow readiness closes the pane it created), mapped from the outcome.
   app.post('/api/worktrees/:id/notes/:noteId/run', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
@@ -4213,14 +4248,21 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (model.error !== undefined) return reply.code(400).send({ error: model.error });
     const place = await resolvePlace(id);
     if (place === undefined) return reply.code(404).send({ error: 'place unavailable' });
-    const note = (await notes.list(placeNoteKey(place)))?.find(candidate => candidate.id === noteId);
-    if (note === undefined) return reply.code(404).send({ error: 'note unavailable' });
+    const saveKey = placeNoteKey(place);
+    const sent = await notes.resolve(saveKey, noteId);
+    // bind the launch and optional deletion to the same note
+    if (sent === undefined) return reply.code(404).send({ error: 'note unavailable' });
+    const { note } = sent;
     // never launch an agent for a note without prompt content
     if (!validPrompt(note.text, note.attachments ?? [])) return reply.code(400).send({ error: 'note is empty' });
     const target = placeRunTarget(place);
     if (target === undefined) return reply.code(409).send({ error: 'The console cannot launch an agent in this folder.' });
     const outcome = await performRun({ text: note.text, attachments: note.attachments ?? [], kind: kind.kind, target, ...(model.model === undefined ? {} : { model: model.model }) });
-    if (outcome.status === 'launched') return reply.code(201).send({ agentId: outcome.agentId });
+    // only a confirmed manual launch and delivery consumes the note
+    if (outcome.status === 'launched') {
+      const deletedNote = await consumeSentNote(saveKey, sent);
+      return reply.code(201).send({ agentId: outcome.agentId, ...(deletedNote === undefined ? {} : { deletedNote }) });
+    }
     const failure = runFailureReply(outcome);
     return reply.code(failure.code).send({ error: failure.error });
   });

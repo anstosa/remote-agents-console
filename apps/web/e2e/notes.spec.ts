@@ -63,7 +63,9 @@ test('creates, previews, edits, autosaves, and deletes per-worktree notes', asyn
   const notesButton = page.getByRole('button', { name: 'Notes' });
   await expect(notesButton).toBeVisible();
   await expect(notesButton).toHaveAccessibleName('Notes (0)');
-  await expect(notesButton.locator('.notes-icon-sheet')).toHaveAttribute('d', 'M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z');
+  const sheet = notesButton.locator('.notes-icon path').first();
+  await expect(sheet).toHaveAttribute('d', 'M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z');
+  await expect(sheet).toHaveCSS('fill', 'none');
 
   // creating a note must reveal it beside an expanded sibling
   await page.getByRole('button', { name: 'Expand agent output' }).click();

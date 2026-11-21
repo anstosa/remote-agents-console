@@ -4,13 +4,11 @@ import { installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock.js'
 import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions.js';
 
 test('keeps the active tab, output, and prompt controls inside a narrow viewport', async ({ page }) => {
-  // opt in for marker geometry checks
-  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
   await page.setViewportSize({ width: 428, height: 952 });
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', flyoutMarkers: true } });
     if (url.pathname === '/api/dashboard') return route.fulfill({
       json: {
         generation: 1,
@@ -229,8 +227,6 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
 
 // keep desktop flyout affordances directional without covering button content
 test('desktop flyout triggers show edge carets and remain clickable', async ({ page }, testInfo) => {
-  // opt in for marker geometry checks
-  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
   await page.setViewportSize({ width: 1400, height: 900 });
   await installPaneMock(page);
   // serve the bundled server artwork instead of Vite's html fallback
@@ -240,7 +236,7 @@ test('desktop flyout triggers show edge carets and remain clickable', async ({ p
     const request = route.request();
     const url = new URL(request.url());
     // keep the desktop session active
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', flyoutMarkers: true } });
     // expose one agent with every toolbar section
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/carets', gitStatus: { files: 2, staged: 1, unstaged: 1, untracked: 0, conflicted: 0 }, displayLabel: '🥔 Cora', title: 'Ready', attention: 'finished', stack: { actions: ['start'], tunnel: false } }], projects: [] } });
     // skip optional push setup

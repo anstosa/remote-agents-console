@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { SettingsHeaderActionsContext, SettingsHeaderSearchContext } from './header-actions.js';
 import { appendSettingsPatch, effectiveSettingsPatches, hasSettingsDraftChanges, type SettingsDraft } from './draft-changes.js';
 import { settingsDefaultPatches } from './schema-defaults.js';
+import { applicationPreferences, type ApplicationPreferencePage } from './application-preferences.js';
 import { applyAuthoredProjectPatch } from '../../../server/src/settings/project-normalization.js';
 import type { LaunchKindManifest, LaunchOptionsResponse } from '../../../server/src/launch/options-types.js';
 import { SettingsError } from '../../../server/src/settings/contracts.js';
@@ -17,7 +18,7 @@ import { useSettingsTerminalEditor } from './terminal-editor.js';
 import { openBindingsSheet } from '../keyboard.js';
 import { KeyboardConfigurationEditor } from './key-tables-editor.js';
 import { RemoteServerFields, type RemoteServerDefaults } from './remote-server-fields.js';
-import { PanelIcon, panelIcons } from '../panel-header.js';
+import { PanelIcon, panelIcons, workspacePanelGlyphs } from '../panel-header.js';
 import { SplitConfirmation } from '../split-confirmation.js';
 import { SettingsSourceHandover, type SettingsHandoverChoices } from './source-handover.js';
 import { isTmuxSettingsChange, tmuxEnvironmentKeys, tmuxEnvironmentKeysForInstallation } from './tmux-settings.js';
@@ -78,7 +79,7 @@ const pendingSourceFormats = { app: 'json', env: 'env', installation: 'installat
 // reuse the authoritative labels before the installation catalog arrives
 const pendingSourceNavigation: Pick<SettingsSource, 'id' | 'label' | 'format' | 'path'>[] = Object.entries(pendingSourceFormats).map(([id, format]) => ({ id, label: sourceLabels[id] ?? id, format }));
 // keep dedicated and automatically derived controls out of the application field tree
-const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'conductor', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', 'replySuggestions', 'resourceMonitoring', 'proxy', 'integrations.multiInstance', 'integrations.mcp', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
+const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'conductor', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', ...applicationPreferences.map(({ key }) => key), 'proxy', 'integrations.multiInstance', 'integrations.mcp', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
 // keep dedicated source selectors with their application and tmux consumers
 const dedicatedInstallationPaths = new Set(['version', 'sources']);
 
@@ -1130,10 +1131,10 @@ function ConductorEditor({ source, schema, issues, disabled, onPatch, ...fields 
   </section>;
 }
 
-// distinguish the selected policy default without adding another text action
-function ModelDefaultStar({ model, selected, disabled, onSelect }: { model: string; selected: boolean; disabled: boolean; onSelect: () => void }) {
-  const label = selected ? `${model} is the default model` : `Make ${model} default`;
-  return <button type="button" className={`settings-agent-default-button${selected ? ' selected' : ''}`} aria-label={label} aria-pressed={selected} title={selected ? 'Current default model' : `Make ${model} the default model`} disabled={disabled} onClick={onSelect}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.7 2.5 5.1 5.6.8-4.1 4 1 5.6-5-2.7-5 2.7 1-5.6-4.1-4 5.6-.8Z" /></svg></button>;
+// share default selection between model rows and adapter headers
+function DefaultStar({ name, kind, selected, disabled, onSelect }: { name: string; kind: 'model' | 'adapter'; selected: boolean; disabled: boolean; onSelect: () => void }) {
+  const label = selected ? `${name} is the default ${kind}` : kind === 'model' ? `Make ${name} default` : `Make ${name} the default adapter`;
+  return <button type="button" className={`settings-agent-default-button${selected ? ' selected' : ''}`} aria-label={label} aria-pressed={selected} title={selected ? `Current default ${kind}` : `Make ${name} the default ${kind}`} disabled={disabled} onClick={event => { /* select without expanding the adapter card */ event.preventDefault(); event.stopPropagation(); onSelect(); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.7 2.5 5.1 5.6.8-4.1 4 1 5.6-5-2.7-5 2.7 1-5.6-4.1-4 5.6-.8Z" /></svg></button>;
 }
 
 // render an ordered policy list backed by the canonical launch manifest
@@ -1230,7 +1231,7 @@ function AgentModelsField({ source, schema, value, path, issues, disabled, onPat
           <span className="settings-agent-model-copy"><strong>{label}</strong><small>{index === 0 ? 'Default for new agents' : 'Allowed model'}{entry.model === requiredModel ? ' · Required by Conductor' : ''}</small></span>
           <span className="settings-agent-model-controls">
             {effortOptions.length > 1 && <SettingsSelect menuOnly label={`${entry.model} default effort`} value={entry.effort ?? ''} options={effortOptions} disabled={disabled} onChange={effort => { /* retain effort with its model */ setEffort(entry.model, effort); }} />}
-            <ModelDefaultStar model={entry.model} selected={index === 0} disabled={disabled} onSelect={() => { /* move only this selected model and retain its metadata */ makeDefault(entry.model); }} />
+            <DefaultStar name={entry.model} kind="model" selected={index === 0} disabled={disabled} onSelect={() => { /* move only this selected model and retain its metadata */ makeDefault(entry.model); }} />
           </span>
         </div>;
       })}
@@ -1239,10 +1240,15 @@ function AgentModelsField({ source, schema, value, path, issues, disabled, onPat
   </div>;
 }
 
+// keep the top-level default draft beside the cards it controls
+const AdapterDefaultContext = createContext<{ selected: string | undefined; eligible: ReadonlySet<string>; select: (kind: string) => void } | undefined>(undefined);
+
 // group each adapter without discarding hidden drafts or retaining disclosures
 function AdapterSettingsCard({ label, path, configured, unimplemented, disabled, navigationDisabled, onCollapse, onRemove, children }: { label: string; path: string[]; configured: boolean; unimplemented: boolean; disabled: boolean; navigationDisabled: boolean; onCollapse: () => void; onRemove?: () => void; children: ReactNode }) {
   // start every adapter collapsed until opened or revealed by search
   const [expanded, setExpanded] = useState(false);
+  const defaults = useContext(AdapterDefaultContext);
+  const kind = path[1]!;
   return <details className={`settings-adapter-card${unimplemented ? ' settings-unimplemented-field' : ''}`} data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)} open={expanded} onToggle={event => {
     const next = event.currentTarget.open;
     // keep the transaction's captured disclosure boundary visible until it unlocks
@@ -1250,7 +1256,7 @@ function AdapterSettingsCard({ label, path, configured, unimplemented, disabled,
     // revoke secrets only when an expanded adapter is deliberately hidden
     if (!next && expanded) onCollapse();
     setExpanded(next);
-  }}><summary aria-label={`${label} adapter`} aria-disabled={navigationDisabled || undefined} tabIndex={navigationDisabled ? -1 : 0} onClick={event => { /* block native disclosure toggles while a transaction owns its values */ if (navigationDisabled) event.preventDefault(); }}><h3>{label}</h3>{(!expanded || !configured || unimplemented) && <span className={configured && !unimplemented ? 'settings-adapter-status-configured' : undefined}>{unimplemented ? 'Unimplemented' : configured ? 'Configured' : 'Not configured'}</span>}</summary>{expanded && configured && !unimplemented && onRemove !== undefined && <span className="settings-adapter-card-action"><SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} label={`Remove ${label}`} disabled={disabled} onClick={onRemove} /></span>}<div className="settings-adapter-card-body">{children}</div></details>;
+  }}><summary aria-label={`${label} adapter`} aria-disabled={navigationDisabled || undefined} tabIndex={navigationDisabled ? -1 : 0} onClick={event => { /* block native disclosure toggles while a transaction owns its values */ if (navigationDisabled) event.preventDefault(); }}><h3>{label}</h3>{defaults !== undefined && <DefaultStar name={label} kind="adapter" selected={defaults.selected === kind} disabled={disabled || !defaults.eligible.has(kind)} onSelect={() => { /* stage only an eligible adapter */ defaults.select(kind); }} />}{(!expanded || !configured || unimplemented) && <span className={configured && !unimplemented ? 'settings-adapter-status-configured' : undefined}>{unimplemented ? 'Unimplemented' : configured ? 'Configured' : 'Not configured'}</span>}</summary>{expanded && configured && !unimplemented && onRemove !== undefined && <span className="settings-adapter-card-action"><SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} label={`Remove ${label}`} disabled={disabled} onClick={onRemove} /></span>}<div className="settings-adapter-card-body">{children}</div></details>;
 }
 
 // render every schema kind with collection-preserving patches
@@ -1402,6 +1408,10 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
     const resettable = conductorEffort || reviewField && (schema.optional || defaulted);
     // present the adapter kind without changing its stored identity
     control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: conductorField && path[1] === 'kind' && option === 'pi' ? 'Pi' : calendarMomentLabel(path, option) ?? transportLabel(path, option) ?? option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
+    // keep the two file actions visible side by side
+    if (source.id === 'app' && path.length === 1 && path[0] === 'fileOpenAction') {
+      control = <div className="client-settings-segmented" role="radiogroup" aria-label={label}>{/* use only the choices supported by the server */}{schema.options?.map(option => <button key={option} type="button" role="radio" aria-checked={effectiveValue === option} className={effectiveValue === option ? 'active' : undefined} disabled={disabled} onClick={() => { /* stage the file action in application config */ if (effectiveValue !== option) stagePatch(source, { op: 'set', path, value: option }); }}>{labelForKey(option)}</button>)}</div>;
+    }
   // render booleans as accessible switches
   } else if (schema.type === 'boolean') {
     control = <label className="client-settings-toggle"><input id={controlId} aria-label={label} type="checkbox" role="switch" checked={effectiveValue === true} disabled={disabled} onChange={event => stagePatch(source, { op: 'set', path, value: event.target.checked })} /><span className="client-settings-switch-state">{effectiveValue === true ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label>;
@@ -1702,7 +1712,7 @@ const sourceGroup = (source: Pick<SettingsSource, 'id' | 'format'>): string => {
 // flag backing sources and the dedicated pages that own their invalid controls
 function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
   const pages = new Set<string>();
-  const applicationPages: Record<string, string> = { defaultAgent: 'agents', adapters: 'agents', conductor: 'conductor', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', replySuggestions: 'interface', resourceMonitoring: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
+  const applicationPages: Record<string, string> = { defaultAgent: 'agents', adapters: 'agents', conductor: 'conductor', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard', ...Object.fromEntries(applicationPreferences.map(({ key, page }) => [key, page])) };
   // route only authoritative issue identities never field values or error text
   for (const { sourceId, path } of issues) {
     pages.add(sourceId);
@@ -1742,8 +1752,22 @@ function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
   return pages;
 }
 
+// keep the git diamond and branch nodes readable without a solid fill
+const projectsIcon = <PanelIcon glyph={<>
+  <desc>Adapted as an outline from the Git logomark by Jason Long, https://git-scm.com/community/logos, licensed under https://creativecommons.org/licenses/by/3.0/.</desc>
+  <path d="M10.6 3.4a2 2 0 0 1 2.8 0l7.2 7.2a2 2 0 0 1 0 2.8l-7.2 7.2a2 2 0 0 1-2.8 0l-7.2-7.2a2 2 0 0 1 0-2.8z" />
+  <g strokeWidth="1.5">
+    <path d="m7 7 3 3m2 2 1.7 1.7M11 12.4V15" />
+    <circle cx="11" cy="11" r="1.4" /><circle cx="11" cy="16.4" r="1.4" /><circle cx="14.7" cy="14.7" r="1.4" />
+  </g>
+</>} />;
+
 // paint a consistent section glyph in both navigation layouts
 const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode => {
+  // use the same note and folder shapes as the workspace toolbar
+  if (id === 'notes' || id === 'files') return <PanelIcon glyph={workspacePanelGlyphs[id]} />;
+  // distinguish repository projects from file navigation
+  if (id === 'projects') return projectsIcon;
   const glyphs = {
     browser: 'M3 4h18v13H3zM8 21h8m-4-4v4',
     interface: 'M3 4h18v16H3zM3 9h18M8 9v11m4-7h5m-5 3h3',
@@ -1755,18 +1779,17 @@ const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode =
     mcp: 'M8 3v5H3m18 0h-5V3M3 16h5v5m8 0v-5h5M8 8h8v8H8z',
     reviews: 'M5 3h14v18H5zM8 7h8M8 11h5m-5 5 2 2 5-5',
     storage: 'M20 6c0 2-3.6 3-8 3S4 8 4 6s3.6-3 8-3 8 1 8 3v12c0 2-3.6 3-8 3s-8-1-8-3V6m0 6c0 2 3.6 3 8 3s8-1 8-3',
-    projects: 'M3 6h6l2 2h10v12H3zM3 6V4h7l2 2h7v2',
     tmux: 'M3 4h18v16H3zm9 0v16M3 12h9',
     json: 'm8 4-5 8 5 8m8-16 5 8-5 8m-3-17-2 18',
     env: 'M11 12a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM11 12h11m-4 0v4m3-4v3',
-    installation: 'M3 6h7l2 3h9v11H3z',
+    installation: 'M12 3v10m-4-4 4 4 4-4M4 14v6h16v-6',
     compose: 'm12 3 9 5v8l-9 5-9-5V8zm-9 5 9 5 9-5m-9 5v8',
     cloudflared: 'M6 18a4 4 0 1 1 0-8 6 6 0 0 1 12 0 4 4 0 1 1 0 8z',
     credentials: 'M7 10V7a5 5 0 0 1 10 0v3M5 10h14v11H5zm7 4v3',
     wrapper: 'M3 4h18v16H3zm3 5 3 3-3 3m6 0h4',
     svg: 'M3 3h18v18H3zM3 16l6-6 6 6 3-3 3 3M16 7h.01'
   };
-  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : id === 'browser' || id === 'interface' || id === 'voice' || id === 'google-calendar' || id === 'keyboard' || id === 'tmux' || id === 'projects' || id === 'agents' || id === 'conductor' || id === 'mcp' || id === 'reviews' || id === 'storage' ? glyphs[id] : glyphs[format ?? 'json']} />;
+  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : Object.hasOwn(glyphs, id) ? glyphs[id as keyof typeof glyphs] : glyphs[format ?? 'json']} />;
 };
 
 // bind tmux controls and wrapper contents to their existing installed sources
@@ -2247,8 +2270,14 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'projects' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('projects');
   // keep review edits attached to their original application transaction
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'review' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('reviews');
-  // surface dedicated application drafts on Interface
-  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'buttons' || next.path[0] === 'replySuggestions' || next.path[0] === 'resourceMonitoring' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('interface');
+  // surface button drafts on Interface
+  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'buttons' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('interface');
+  const applicationChange = changes.find(change => change.sourceId === 'app');
+  // mark dedicated setting pages without moving their backing patches
+  for (const { key, page } of applicationPreferences) {
+    // whole-file changes can affect every dedicated page
+    if (applicationChange?.content !== undefined || applicationChange?.remove === true || applicationChange?.patches?.some(next => next.path[0] === key || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) changedSourceIds.add(page);
+  }
   // retain one browser transaction while marking each preference's visible page
   for (const pageId of browserDraft.dirtyPageIds) changedSourceIds.add(pageId);
   // include setup entries and nested legacy edits in the unified dirty guard
@@ -2398,6 +2427,26 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   const voiceFileDraft = voiceSource === undefined || !changedSourceIds.has(voiceSource.id) ? undefined : drafts[voiceSource.id];
   // share the application source lock across every structured policy editor
   const applicationFieldsDisabled = loading || saving || !runtime.canMutate || voiceSource === undefined || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true;
+  const applicationRaw = rawSourceIds.has('app');
+
+  // render each simple preference from its canonical application field
+  const renderApplicationPreferences = (page: ApplicationPreferencePage) => applicationPreferences.filter(field => field.page === page).map(({ key, label }) => {
+    const schema = voiceSource?.schema?.properties?.[key];
+    // style interface preferences as neighboring rows
+    const className = page === 'interface' ? 'settings-schema-section settings-interface-preference' : 'settings-schema-section';
+    return <section key={key} className={className} aria-label={label}>
+      {voiceSource === undefined ? <p role="note">Load Application configuration before editing {label}.</p>
+        : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing {label}.</p>
+          : schema === undefined ? <p role="note">This setting is unavailable in this configuration.</p>
+            : <>
+              {!voiceSource.writable && <p role="note">This setting is read-only in this installation.</p>}
+              {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing {label}.</p>}
+              {applicationRaw && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing {label}.</p>}
+              {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing {label}.</p>}
+              <SchemaField key={`${key}:${catalogEditorEpoch}`} source={voiceSource} schema={schema} value={valueAt(voiceSource.value, [key])} path={[key]} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || applicationRaw} onPatch={patch} onReveal={reveal} onRemask={remask} />
+            </>}
+    </section>;
+  });
 
   // retain blank voice names locally until the operator corrects them
   const voiceNameInvalid = changes.some(change => change.sourceId === 'app' && change.patches?.some(patch => patch.op === 'set' && patch.path.join('.') === 'integrations.realtime.name' && typeof patch.value === 'string' && !patch.value));
@@ -2468,15 +2517,16 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   const adaptersSchema = voiceSource?.schema?.properties?.adapters;
   const defaultAgentSchema = voiceSource?.schema?.properties?.defaultAgent;
   const defaultAgentValue = valueAt(voiceSource?.value, ['defaultAgent']);
-  const selectedDefaultAgent = typeof defaultAgentValue === 'string' ? defaultAgentValue : '';
+  const selectedDefaultAgent = typeof defaultAgentValue === 'string' ? defaultAgentValue : undefined;
   const supportedDefaultAgents = defaultAgentSchema?.options ?? Object.keys(adaptersSchema?.properties ?? {});
-  // expose only configured launch adapters in registry order
-  const configuredDefaultAgents = supportedDefaultAgents.filter(kind => kind !== 'opencode' && Object.hasOwn(agentAdapters, kind));
-  const defaultAgentOptions: SettingsSelectOption[] = [
-    { value: '', label: 'Automatic (first available)' },
-    ...configuredDefaultAgents.map(kind => ({ value: kind, label: kind === 'omx' ? 'OMX' : adaptersSchema?.properties?.[kind]?.label ?? labelForKey(kind) })),
-    ...(selectedDefaultAgent !== '' && !configuredDefaultAgents.includes(selectedDefaultAgent) ? [{ value: selectedDefaultAgent, label: `${selectedDefaultAgent === 'omx' ? 'OMX' : selectedDefaultAgent === 'opencode' ? 'OpenCode' : adaptersSchema?.properties?.[selectedDefaultAgent]?.label ?? labelForKey(selectedDefaultAgent)} (unavailable)` }] : [])
-  ];
+  // allow only configured and implemented adapters to become the default
+  const configuredDefaultAgents = new Set(supportedDefaultAgents.filter(kind => kind !== 'opencode' && Object.hasOwn(agentAdapters, kind)));
+  // change the same optional application field previously used by the selector
+  const setDefaultAdapter = (kind?: string) => {
+    // ignore stale clicks and redundant selections
+    if (voiceSource === undefined || applicationFieldsDisabled || applicationRaw || kind === selectedDefaultAgent || kind !== undefined && !configuredDefaultAgents.has(kind)) return;
+    patch(voiceSource, kind === undefined ? { op: 'remove', path: ['defaultAgent'] } : { op: 'set', path: ['defaultAgent'], value: kind });
+  };
   // revoke both backing sources before an adapter's environment controls disappear
   const hideAgentCollection: HideCollection = (source, path) => {
     hideCollection(source, path);
@@ -2511,6 +2561,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   };
   // reuse adapter schemas and source locks without creating a competing configuration source
   const agentsEditor = <AgentModelCatalogProvider>
+    {renderApplicationPreferences('agents')}
     {voiceSource === undefined ? <p role="note">Load Application configuration before editing agents.</p>
       : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing agents.</p>
         : adaptersSchema === undefined ? <p role="note">Agent configuration is unavailable in this installation.</p>
@@ -2520,11 +2571,13 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
             {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application configuration back to the structured editor before editing agents.</p>}
             {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing agents.</p>}
             <div className="settings-field" data-settings-path="defaultAgent" data-settings-search-path={JSON.stringify(['defaultAgent'])}>
-              <div className="settings-field-summary"><span className="settings-field-copy"><strong>Default adapter</strong><small>Used when a launch does not choose an adapter.</small></span></div>
-              <SettingsSelect menuOnly label="Default adapter" value={selectedDefaultAgent} options={defaultAgentOptions} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} onChange={kind => { /* preserve automatic registry priority through omission */ patch(voiceSource, kind === '' ? { op: 'remove', path: ['defaultAgent'] } : { op: 'set', path: ['defaultAgent'], value: kind }); }} />
+              <div className="settings-field-summary"><span className="settings-field-copy"><strong>Default adapter</strong><small>Star an adapter to use it when a launch does not choose one. Automatic uses the first available adapter.</small></span>{selectedDefaultAgent !== undefined && <button type="button" disabled={applicationFieldsDisabled || applicationRaw} onClick={() => { /* restore automatic adapter choice */ setDefaultAdapter(); }}>Use automatic</button>}</div>
+              {selectedDefaultAgent !== undefined && !configuredDefaultAgents.has(selectedDefaultAgent) && <p role="note" className="settings-field-guidance">The configured default adapter ({adaptersSchema.properties?.[selectedDefaultAgent]?.label ?? labelForKey(selectedDefaultAgent)}) is unavailable.</p>}
               <FieldIssues issues={issues} sourceId={voiceSource.id} path={['defaultAgent']} />
             </div>
-            <SchemaField key={`agents:${catalogEditorEpoch}`} renderAdapterEnvironment={renderAdapterEnvironment} source={voiceSource} schema={adaptersSchema} value={valueAt(voiceSource.value, ['adapters'])} path={['adapters']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideAgentCollection} />
+            <AdapterDefaultContext.Provider value={{ selected: selectedDefaultAgent, eligible: configuredDefaultAgents, select: setDefaultAdapter }}>
+              <SchemaField key={`agents:${catalogEditorEpoch}`} renderAdapterEnvironment={renderAdapterEnvironment} source={voiceSource} schema={adaptersSchema} value={valueAt(voiceSource.value, ['adapters'])} path={['adapters']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || applicationRaw} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideAgentCollection} />
+            </AdapterDefaultContext.Provider>
           </>}
   </AgentModelCatalogProvider>;
   const scratchSchema = voiceSource?.schema?.properties?.scratchDirectory;
@@ -2545,7 +2598,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // reuse the original project schema and source identity without competing with raw edits
   const projectsSchema = voiceSource?.schema?.properties?.projects;
   const projectsEditor = <div className="settings-projects">
-    {browserDraft.projectsContent}
+    {renderApplicationPreferences('projects')}
     {voiceSource === undefined ? <p role="note">Load Application configuration before editing projects.</p>
       : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing projects.</p>
         : projectsSchema === undefined ? <p role="note">Project settings are unavailable in this configuration.</p>
@@ -2556,37 +2609,11 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
             <SchemaField key={`projects:${catalogEditorEpoch}`} source={voiceSource} schema={projectsSchema} value={valueAt(voiceSource.value, ['projects'])} path={['projects']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} installationKind={snapshot?.installationKind} />
           </>}
   </div>;
-  // keep browser appearance and shared application controls on Interface
+  // keep appearance, flyouts and buttons together on Interface
   const buttonsSchema = voiceSource?.schema?.properties?.buttons;
-  const replySuggestionsSchema = voiceSource?.schema?.properties?.replySuggestions;
-  const resourceMonitoringSchema = voiceSource?.schema?.properties?.resourceMonitoring;
   const interfaceEditor = <div className="settings-interface">
     {browserDraft.interfaceContent}
-    <section className="settings-schema-section" aria-label="Resource monitoring"><header><h3>Resource monitoring</h3></header>
-      {voiceSource === undefined ? <p role="note">Load Application configuration before editing resource monitoring.</p>
-        : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing resource monitoring.</p>
-          : resourceMonitoringSchema === undefined ? <p role="note">Resource monitoring is unavailable in this configuration.</p>
-            : <>
-              {!voiceSource.writable && <p role="note">Resource monitoring is read-only in this installation.</p>}
-              {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing resource monitoring.</p>}
-              {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing resource monitoring.</p>}
-              {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing resource monitoring.</p>}
-              <SchemaField key={`resource-monitoring:${catalogEditorEpoch}`} source={voiceSource} schema={resourceMonitoringSchema} value={valueAt(voiceSource.value, ['resourceMonitoring'])} path={['resourceMonitoring']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} onPatch={patch} onReveal={reveal} onRemask={remask} />
-            </>}
-    </section>
-    <section className="settings-schema-section" aria-label="Reply suggestions"><header><h3>Reply suggestions</h3></header>
-      <p className="settings-preference-description">This setting applies to this console in every browser.</p>
-      {voiceSource === undefined ? <p role="note">Load Application configuration before editing reply suggestions.</p>
-        : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing reply suggestions.</p>
-          : replySuggestionsSchema === undefined ? <p role="note">Reply suggestions are unavailable in this configuration.</p>
-            : <>
-              {!voiceSource.writable && <p role="note">Reply suggestions are read-only in this installation.</p>}
-              {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing reply suggestions.</p>}
-              {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing reply suggestions.</p>}
-              {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing reply suggestions.</p>}
-              <SchemaField key={`reply-suggestions:${catalogEditorEpoch}`} source={voiceSource} schema={replySuggestionsSchema} value={valueAt(voiceSource.value, ['replySuggestions'])} path={['replySuggestions']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} onPatch={patch} onReveal={reveal} onRemask={remask} />
-            </>}
-    </section>
+    {renderApplicationPreferences('interface')}
     <section className="settings-schema-section" aria-label="Custom buttons"><header><h3>Custom buttons</h3></header>
       {voiceSource === undefined ? <p role="note">Load Application configuration before editing custom buttons.</p>
         : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing custom buttons.</p>
@@ -2675,7 +2702,9 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     { id: 'browser', group: 'Console', label: 'This browser', keywords: 'client browser device rename identity name', content: browserDraft.content },
     { id: 'voice', group: 'Console', label: 'Voice', keywords: `davo voice assistant name context enable write tools advanced OpenAI realtime MCP ${[...voiceEnvironmentKeys].join(' ')}`, content: <>{voiceEditor}{voiceFieldsEditor}{voiceEnvironmentEditor}</> },
     { id: 'keyboard', group: 'Console', label: 'Keyboard shortcuts', keywords: 'keyboard shortcuts bindings keys prefix terminal command', content: keyboardSettings },
-    { id: 'interface', group: 'Application', label: 'Interface', keywords: 'reply suggestions agent usage requests costs custom buttons actions slots shell command agent prompt appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers resource monitoring cpu memory disk storage wsl', content: interfaceEditor },
+    { id: 'interface', group: 'Application', label: 'Interface', keywords: 'custom buttons actions slots shell command appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers resource monitoring cpu memory disk storage wsl', content: interfaceEditor },
+    { id: 'notes', group: 'Application', label: 'Notes', keywords: 'sent queued unlocked locked notes cleanup auto delete undo', content: renderApplicationPreferences('notes') },
+    { id: 'files', group: 'Application', label: 'Files', keywords: 'default file action open preview edit editor', content: renderApplicationPreferences('files') },
     { id: 'projects', group: 'Application', label: 'Projects', keywords: 'projects repositories directories dynamic worktrees launcher paths overrides commands tasks button overrides', content: projectsEditor },
     { id: 'reviews', group: 'Application', label: 'Reviews', keywords: 'review tours code review presets prompts model effort codex claude headless interactive', content: reviewsEditor },
     { id: 'mcp', group: 'Application', label: 'MCP', keywords: 'mcp capabilities permissions read write tools conductor davo access', content: mcpEditor },
@@ -2683,7 +2712,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     { id: 'tmux', group: 'Application', label: 'TMUX', keywords: `tmux polling pollIntervalMs wrapper executable connection discovery socket ${[...tmuxEnvironmentKeys].join(' ')} ${sources.find(source => source.id === 'wrapper')?.path ?? ''}`, content: <TmuxSettings sources={sources} installationKind={snapshot?.installationKind} drafts={drafts} disclosures={disclosures} issues={issues} disabled={loading || saving || !runtime.canMutate} navigationDisabled={loading || saving} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} /> },
     { id: 'storage', group: 'Application', label: 'Storage', keywords: `storage data .data files paths directories scratchDirectory scratch notes prompts history worktrees integrations previews ${[...storageEnvironmentKeys].join(' ')}`, content: storageEditor },
     // group external services without changing their backing sources
-    { id: 'agents', group: 'Integrations', label: 'Agents', keywords: `default adapter defaultAgent automatic adapters codex omx claude pi opencode program arguments environment setup teardown updates accounts usage cost ${[...agentEnvironmentKeys].join(' ')}`, content: agentsEditor },
+    { id: 'agents', group: 'Integrations', label: 'Agents', keywords: `default adapter defaultAgent automatic star adapters codex omx claude pi opencode program arguments environment setup reply suggestions usage pace teardown updates accounts usage cost ${[...agentEnvironmentKeys].join(' ')}`, content: agentsEditor },
     { id: 'google-calendar', group: 'Integrations', label: 'Google Calendar', keywords: `google calendar oauth events activity lifecycle work start finish question retry delivery ${[...googleCalendarEnvironmentKeys].join(' ')}`, content: googleCalendarEditor },
     { id: 'cloudflare', group: 'Deployment', label: 'Cloudflare', keywords: 'cloudflare tunnel remote access hostname token connector dns public origin instructions', content: <CloudflareSettings setup={cloudflare} disabled={loading || saving || !runtime.canMutate} blockedByDrafts={fileAndBrowserDirtyCount > 0 || runtime.status?.pending === true} confirmationTarget={confirmationTarget} advanced={sources.some(source => (source.id === 'cloudflared' || source.id === 'cloudflared-credentials') && source.exists) ? sources.filter(source => source.id === 'cloudflared' || source.id === 'cloudflared-credentials').map(source => <section key={source.id}><h3>{source.label}</h3><RawSourceEditor source={source} draft={drafts[source.id]} disclosure={disclosures.get(disclosureKey(source.id, []))} issues={issues} disabled={loading || saving || !runtime.canMutate || !source.writable} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} /></section>) : undefined} /> }
   ];
@@ -2700,7 +2729,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // share the concise application name with its header and scroll region
   const selectedLabel = selected?.id === 'app' ? 'Application' : selectedPreference?.label ?? selected?.label ?? navigationSources.find(source => source.id === selectedId)?.label ?? 'This browser';
   // lock every tab during reads and retain unavailable-source guards afterward
-  const sectionDisabled = (id: string): boolean => loading || snapshot === undefined && (id === 'tmux' || id === 'agents' || id === 'conductor' || id === 'mcp' || id === 'reviews' || id === 'storage' || id === 'google-calendar' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
+  const sectionDisabled = (id: string): boolean => loading || snapshot === undefined && (id === 'tmux' || id === 'agents' || id === 'conductor' || id === 'mcp' || id === 'reviews' || id === 'storage' || id === 'projects' || id === 'notes' || id === 'files' || id === 'google-calendar' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
   const issuePageIds = settingsIssuePageIds(issues);
   // announce validation failures before ordinary unsaved changes
   const navigationLabel = (id: string, label: string): string => `${label}${issuePageIds.has(id) ? ' · Validation issues' : changedSourceIds.has(id) ? ' · Unsaved changes' : ''}`;
@@ -2767,7 +2796,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   const feedbackWarnings = [...new Set([...snapshot?.warnings ?? [], ...warnings])];
   // retain transaction status without a redundant page introduction
   return <section className="settings-center" aria-label="Settings center" aria-busy={saving}>
-    {!loading && snapshot === undefined && <div className="settings-catalog-state" role="alert"><span>Installation files are unavailable. Browser preferences remain available in This browser, Interface, and Projects; file settings are unavailable.</span><button type="button" onClick={() => { /* retry without discarding browser preferences */ void reloadFiles(); }}>Retry files</button></div>}
+    {!loading && snapshot === undefined && <div className="settings-catalog-state" role="alert"><span>Installation files are unavailable. Browser preferences remain available in This browser and Interface; file settings are unavailable.</span><button type="button" onClick={() => { /* retry without discarding browser preferences */ void reloadFiles(); }}>Retry files</button></div>}
     {/* keep query and navigation ownership while moving the control into the header */}
     {headerSearchTarget !== null && createPortal(<SettingsSearch index={searchIndex} onSelect={selectSearchResult} active={active} />, headerSearchTarget)}
     <div className="settings-center-layout">

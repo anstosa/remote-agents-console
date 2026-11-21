@@ -23,10 +23,32 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
     label: 'Reply suggestions',
     description: 'Show tailored, editable suggestion pills using each Agent\'s current model and account. Warning: this makes additional agent requests, increases agent usage, and may incur extra cost.'
   });
-  // explain the shared cadence and server-wide scope at the source setting
+  // preserve the former browser preference presentation at server scope
+  Object.assign(schema.properties!.fileOpenAction!, {
+    label: 'Default file action',
+    description: 'Choose what clicking a file does. Edit falls back to Preview when no editor is configured.'
+  });
+  Object.assign(schema.properties!.flyoutMarkers!, {
+    label: 'Flyout markers',
+    description: 'Show little carets on buttons that open flyouts.'
+  });
+  Object.assign(schema.properties!.dynamicWorktrees!, {
+    label: 'Dynamic worktrees',
+    description: 'Create and manage multiple worktrees from the launcher.'
+  });
+  Object.assign(schema.properties!.usagePace!, {
+    label: 'Usage pace',
+    description: 'Show how far each account limit is over (+) or under (−) an even pace to its reset.'
+  });
+  // explain which note state is eligible for automatic deletion
+  Object.assign(schema.properties!.autoDeleteSentNotes!, {
+    label: 'Auto-delete sent notes',
+    description: 'Delete unlocked notes after you send them, queue them, or choose Launch and run. Locked notes and scheduled runs are unaffected. Use Undo to restore a deleted note.'
+  });
+  // explain the collection cadence without a scope label
   Object.assign(schema.properties!.resourceMonitoring!, {
     label: 'Resource monitoring',
-    description: 'Applies to every browser connected to this server. CPU and memory update every 1 second while a server flyout is open and every 1 minute while closed. Disk usage updates every 10 minutes.'
+    description: 'CPU and memory update every 1 second while a server flyout is open and every 1 minute while closed. Disk usage updates every 10 minutes.'
   });
   // keep legacy source compatibility without publishing an obsolete control
   delete schema.properties!.integrations!.properties!.multiInstance;

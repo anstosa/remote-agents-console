@@ -301,9 +301,11 @@ test("shows the complete omitted Reviews form without mutation controls or a dra
   await expect(
     panel.getByRole("heading", { name: "Reviews", exact: true, level: 2 }),
   ).toBeVisible();
-  await expect(panel.locator(":scope > .settings-source-header")).toContainText(
-    "Server settings",
-  );
+  await expect(
+    panel.locator(
+      ":scope > .settings-source-header .settings-source-kicker",
+    ),
+  ).toHaveText("Settings");
   for (const path of [
     "review.agents",
     "review.agents.codex",

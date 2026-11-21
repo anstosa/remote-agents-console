@@ -78,10 +78,14 @@ Reuse existing theme variables, monospace control typography, outlined secondary
 buttons, purple primary action, and compact single-column Settings spacing.
 Copy blocks wrap or scroll within the content pane, never the page.
 Use light purple for section headings to distinguish groups from field labels.
-Every Settings page uses one shared header: a nonempty scope eyebrow, the page's
-navigation title, and one concise purpose sentence. Use only Browser settings,
-Server settings, or Deployment settings for the eyebrow. File format, presence,
-and path are subordinate source metadata, never the eyebrow or description.
+Every Settings page uses one shared header: a Settings (or Deployment settings)
+eyebrow, the navigation title, and one concise purpose sentence. Show a small
+**This browser** pill beside each browser preference's label. Don't add a scope
+label to shared settings. File format, presence, and path are subordinate source
+metadata, never the eyebrow or description.
+Keep Default file action on Files and sent-note cleanup on Notes. Put Reply
+suggestions and Usage pace on Agents. Stars next to adapter names choose the
+default using the same treatment as model stars, without opening the adapter card.
 Keep page actions top-right beside the title, with the description spanning the
 full header width below that row. Loading and unavailable states retain the same
 header contract on reachable pages.
@@ -168,7 +172,7 @@ the selected live agents, and distinguish signal delivery from confirmed exit.
 
 Completed assistant replies that ask a prose question may offer a single row of tailored
 reply suggestions at the top of the active prompt. The console-wide Reply suggestions
-toggle lives in Settings > Interface and is off by default. Its description warns about
+toggle lives in Settings > Agents and is off by default. Its description warns about
 additional agent requests, increased agent usage and possible extra cost. When disabled,
 do not observe suggestion sources or expose the generation endpoint. Generate them on demand from bounded
 current-conversation context using the exact selected model and the Agent's own existing
@@ -296,7 +300,7 @@ File paths and stored Note attachment filenames open a dedicated Preview split t
 the existing scoped preview routes, independently of Code comparisons. Reuse highlighted
 source and bounded raster rendering with loading, failure, binary and truncation states.
 Files menus offer Preview and, only with a configured editor, Edit. Filename and favorite
-activation follows the browser Interface setting Default file action; preserve Edit as
+activation follows the Files setting Default file action; preserve Edit as
 the initial default and fall back to Preview when no editor is configured or launch fails.
 Explicit Preview never launches an editor. Settings base-file previews remain redacted
 and read-only. Preview shares split resizing, expand/close, keyboard navigation and the

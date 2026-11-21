@@ -428,6 +428,11 @@ describe('configuration safety', () => {
     expect(config.name).toBe('Remote Agents');
     expect(config.defaultAgent).toBeUndefined();
     expect(config.replySuggestions).toBe(false);
+    expect(config.fileOpenAction).toBe('edit');
+    expect(config.flyoutMarkers).toBe(false);
+    expect(config.dynamicWorktrees).toBe(true);
+    expect(config.usagePace).toBe(true);
+    expect(config.autoDeleteSentNotes).toBe(false);
     expect(config.resourceMonitoring).toBe(false);
     expect(config.integrations).toEqual({ enabled: false, mcp: { readEnabled: true, writeEnabled: false, dangerousEnabled: false }, realtime: { enabled: false, name: 'Davo', context: defaultDavoContext, writeToolsEnabled: false }, multiInstance: { enabled: false } });
   });
@@ -438,6 +443,23 @@ describe('configuration safety', () => {
   // reject truthy nonboolean values instead of spending unexpectedly
   it.each(['true', 'false', 1, null])('rejects invalid reply suggestions enablement: %s', async replySuggestions => {
     await expect(validateConfig({ ...scratch, replySuggestions })).rejects.toThrow();
+  });
+  // preserve valid server interface preferences and reject malformed values
+  it('validates shared file, flyout, worktree, and usage preferences', async () => {
+    const configured = await validateConfig({ ...scratch, fileOpenAction: 'preview', flyoutMarkers: true, dynamicWorktrees: false, usagePace: false });
+    expect(configured).toMatchObject({ fileOpenAction: 'preview', flyoutMarkers: true, dynamicWorktrees: false, usagePace: false });
+    await expect(validateConfig({ ...scratch, fileOpenAction: 'open' })).rejects.toThrow();
+    await expect(validateConfig({ ...scratch, flyoutMarkers: 'true' })).rejects.toThrow();
+    await expect(validateConfig({ ...scratch, dynamicWorktrees: 1 })).rejects.toThrow();
+    await expect(validateConfig({ ...scratch, usagePace: null })).rejects.toThrow();
+  });
+  // preserve explicit automatic note cleanup choices
+  it.each([true, false])('preserves explicit automatic sent-note deletion: %s', async autoDeleteSentNotes => {
+    expect((await validateConfig({ ...scratch, autoDeleteSentNotes })).autoDeleteSentNotes).toBe(autoDeleteSentNotes);
+  });
+  // reject nonboolean automatic note cleanup values
+  it.each(['true', 'false', 1, null])('rejects invalid automatic sent-note deletion: %s', async autoDeleteSentNotes => {
+    await expect(validateConfig({ ...scratch, autoDeleteSentNotes })).rejects.toThrow();
   });
   // preserve explicit server-wide resource monitoring choices
   it.each([true, false])('preserves explicit resource monitoring enablement: %s', async resourceMonitoring => {

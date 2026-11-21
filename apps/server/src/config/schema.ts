@@ -197,6 +197,16 @@ export const sourceSchema = z.object({
   review: reviewConfigSchema.optional(),
   // opt in to extra agent inference requests
   replySuggestions: z.boolean().default(false),
+  // choose the shared behavior of file links throughout the console
+  fileOpenAction: z.enum(['preview', 'edit']).default('edit'),
+  // choose whether flyout buttons show their small caret marker
+  flyoutMarkers: z.boolean().default(false),
+  // choose whether launchers expose dynamic worktree management
+  dynamicWorktrees: z.boolean().default(true),
+  // choose whether account limits show their pace to reset
+  usagePace: z.boolean().default(true),
+  // retain sent or queued notes unless the operator opts in to cleanup
+  autoDeleteSentNotes: z.boolean().default(false),
   // opt in to server-wide host resource inspection
   resourceMonitoring: z.boolean().default(false),
   buttons: applicationButtonsSchema,
@@ -222,7 +232,7 @@ export type DavoSettings = z.output<typeof davoSettingsSchema>;
  */
 export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; permissions?: McpPermissions; spawnKinds: ConductorSpawnKind[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
 // launchHome is runtime-only; null means account lookup failed, omission supports legacy callers
-export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: string; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; launchHome?: string | null; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; replySuggestions: boolean; resourceMonitoring: boolean; buttons?: ButtonSlots; projects: Project[] };
+export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: string; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; launchHome?: string | null; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; replySuggestions: boolean; fileOpenAction: 'preview' | 'edit'; flyoutMarkers: boolean; dynamicWorktrees: boolean; usagePace: boolean; autoDeleteSentNotes: boolean; resourceMonitoring: boolean; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable
 // programs, a crossed OMX/Codex program); `checkExecutables` runs the boot X_OK probe
 // and is skipped under the host bridge, where `program` is a host path the container
@@ -551,5 +561,5 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
   }
   // retain disabled source configuration without exposing a running Conductor or its tools
   const conductor = parsed.conductor === undefined || parsed.conductor.enabled === false ? undefined : conductorConfig(parsed.conductor, projects, adapters);
-  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), launchHome: launchHome ?? null, ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), ...(conductor === undefined ? {} : { conductor }), googleCalendar: parsed.googleCalendar, review, replySuggestions: parsed.replySuggestions, resourceMonitoring: parsed.resourceMonitoring, buttons: parsed.buttons, projects };
+  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), launchHome: launchHome ?? null, ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), ...(conductor === undefined ? {} : { conductor }), googleCalendar: parsed.googleCalendar, review, replySuggestions: parsed.replySuggestions, fileOpenAction: parsed.fileOpenAction, flyoutMarkers: parsed.flyoutMarkers, dynamicWorktrees: parsed.dynamicWorktrees, usagePace: parsed.usagePace, autoDeleteSentNotes: parsed.autoDeleteSentNotes, resourceMonitoring: parsed.resourceMonitoring, buttons: parsed.buttons, projects };
 }

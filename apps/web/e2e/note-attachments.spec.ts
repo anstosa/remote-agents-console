@@ -12,7 +12,7 @@ type NoteFixture = {
   attachmentWrites: NoteAttachment[][];
   attachmentDeletes: string[];
   noteDeletes: number;
-  prompts: Array<{ prompt: string; attachments: NoteAttachment[] }>;
+  prompts: Array<{ prompt: string; attachments: NoteAttachment[]; noteId?: string }>;
   failAttachmentRead: boolean;
   failAttachmentWrite: boolean;
   failAttachmentDelete: boolean;
@@ -100,7 +100,7 @@ const mockNoteApi = async (page: Page, fixture: NoteFixture) => {
     }
     // capture the hydrated prompt submission
     if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') {
-      fixture.prompts.push(request.postDataJSON() as { prompt: string; attachments: NoteAttachment[] });
+      fixture.prompts.push(request.postDataJSON() as { prompt: string; attachments: NoteAttachment[]; noteId?: string });
       return route.fulfill({ status: 202, json: { queued: true } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -397,7 +397,7 @@ test('keeps attachment-only notes and hydrates bytes before sending them', async
 
   fixture.failAttachmentRead = false;
   await send.click();
-  await expect.poll(() => fixture.prompts).toEqual([{ prompt: '', attachments: [image] }]);
+  await expect.poll(() => fixture.prompts).toEqual([{ prompt: '', attachments: [image], noteId: fixture.note.id }]);
   await dialog.getByRole('button', { name: 'Close note' }).click();
   expect(fixture.noteDeletes).toBe(0);
   await expect(page.getByRole('button', { name: 'Notes (1)' })).toBeVisible();
@@ -425,7 +425,7 @@ test('uploads more than ten note attachments and retains them across reload and 
   dialog = await openNote(page, 'Many files');
   await expect(dialog.getByRole('button', { name: /^Remove note attachment:/u })).toHaveCount(13);
   await dialog.getByRole('button', { name: 'Send note as prompt' }).click();
-  await expect.poll(() => fixture.prompts).toEqual([{ prompt: 'Read every attachment.', attachments: expected }]);
+  await expect.poll(() => fixture.prompts).toEqual([{ prompt: 'Read every attachment.', attachments: expected, noteId: fixture.note.id }]);
 });
 
 // retain filename and size safeguards without restricting the file count

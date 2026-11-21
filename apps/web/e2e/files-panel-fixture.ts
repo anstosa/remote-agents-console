@@ -27,7 +27,7 @@ const fileEntry = (name: string, kind: 'file' | 'directory', token = objectToken
 });
 
 // install a complete authenticated files fixture
-export async function installFilesFixture(page: Page, options: { entryCount?: number } = {}): Promise<FilesFixture> {
+export async function installFilesFixture(page: Page, options: { entryCount?: number; fileOpenAction?: 'preview' | 'edit' } = {}): Promise<FilesFixture> {
   const records: FilesRequestRecord[] = [];
   let currentPath = '/home/ubuntu/project';
   let favorites: unknown[] = [];
@@ -71,7 +71,7 @@ export async function installFilesFixture(page: Page, options: { entryCount?: nu
     const body = contentType.includes('application/json') && request.postData() !== null ? request.postDataJSON() : undefined;
     records.push({ path: url.pathname, method, body, headers: request.headers(), ...(contentType.includes('application/octet-stream') ? { bytes: request.postDataBuffer() ?? undefined } : {}) });
     // authenticate one active worktree workspace
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Files test' } });
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Files test', ...(options.fileOpenAction === undefined ? {} : { fileOpenAction: options.fileOpenAction }) } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/home/ubuntu/project', placeId: 'cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', branch: 'main', queuedPromptCount: 0 }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });

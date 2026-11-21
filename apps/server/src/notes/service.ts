@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { maxStoredAttachmentFootprintBytes, promptAttachmentBytes, promptAttachmentName, promptAttachmentsStorageFootprint, validPromptAttachments, type PromptAttachment } from '../prompts/validation.js';
 import { type Schedule, type ScheduleLastRun, validSchedule } from '../schedule/types.js';
 
@@ -244,7 +245,7 @@ export class WorktreeNoteService {
   }
 
   // delete one note and retain an exact, short-lived restoration snapshot
-  async deleteWithUndo(worktreeId: string, noteId: string, by: NoteAuthor = 'operator'): Promise<WorktreeNoteDeletion | 'locked' | undefined> {
+  async deleteWithUndo(worktreeId: string, noteId: string, by: NoteAuthor = 'operator', expected?: WorktreeNoteLocation): Promise<WorktreeNoteDeletion | 'locked' | undefined> {
     // reject malformed identifiers before entering the mutation queue
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId)) return undefined;
     return await this.serialize(async () => {
@@ -253,6 +254,8 @@ export class WorktreeNoteService {
       const resolved = this.visibleNote(stored, worktreeId, noteId);
       // hide notes outside the requesting scope
       if (resolved === undefined) return undefined;
+      // consume only the exact note snapshot that was sent
+      if (expected !== undefined && !isDeepStrictEqual(resolved, expected)) return undefined;
       const notes = stored[resolved.key] ?? [];
       const index = notes.findIndex(note => note.id === noteId);
       if (index < 0) return undefined;

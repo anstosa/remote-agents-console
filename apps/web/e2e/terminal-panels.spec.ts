@@ -25,12 +25,12 @@ const agentPanes: Pane[] = [
 // a live-mutable pane set + prompt capture, so a spec can change what the panes API returns
 // (a reload dropping a gone pane, a New shell appearing) between navigations. A DELETE prunes
 // the ended pane and records its query, a PATCH renames one, mirroring the real panes API.
-const routeApi = (page: Page, options: { panes: () => Pane[]; onShell?: () => string; prompts?: string[]; deleted?: string[]; deleteStatus?: (paneId: string, confirmed: boolean) => number | { status: number; busy?: boolean }; renamed?: { paneId: string; name: string }[]; notes?: Note[]; savedNotes?: string[]; noteCreateStatus?: () => number; noteCreateGate?: Promise<void> } = { panes: () => agentPanes }) =>
+const routeApi = (page: Page, options: { panes: () => Pane[]; flyoutMarkers?: boolean; onShell?: () => string; prompts?: string[]; deleted?: string[]; deleteStatus?: (paneId: string, confirmed: boolean) => number | { status: number; busy?: boolean }; renamed?: { paneId: string; name: string }[]; notes?: Note[]; savedNotes?: string[]; noteCreateStatus?: () => number; noteCreateGate?: Promise<void> } = { panes: () => agentPanes }) =>
   page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', flyoutMarkers: options.flyoutMarkers === true } });
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Working', attention: 'working', queuedPromptCount: 0 }], projects: [] } });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
@@ -154,10 +154,8 @@ test('default WebGL renders agent and Console terminal lifecycles', async ({ pag
 
 // the toolbar's Terminal button: labelled on desktop, a square icon button on the phone
 test('terminal picker is the toolbar’s Terminal button on desktop and phone', async ({ page }) => {
-  // opt in for terminal picker marker checks
-  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
   await installPaneMock(page);
-  await routeApi(page);
+  await routeApi(page, { panes: () => agentPanes, flyoutMarkers: true });
   await page.goto('/');
   await seedPaneSize(page, 'agent-1', 80, 24);
 

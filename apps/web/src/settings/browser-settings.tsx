@@ -1,15 +1,11 @@
 import { type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { type ColorTheme, setColorTheme, useColorTheme } from '../color-theme.js';
-import { setDynamicWorktrees, useDynamicWorktrees } from '../dynamic-worktrees.js';
-import { type FileOpenAction, setFileOpenAction, useFileOpenAction } from '../file-open-action.js';
-import { setFlyoutMarkers, useFlyoutMarkers } from '../flyout-markers.js';
 import { setNotificationSounds, useNotificationSounds } from '../notification-sounds.js';
 import { PanelIcon, panelIcons } from '../panel-header.js';
 import { setReducedMotion, useReducedMotion } from '../reduced-motion.js';
 import { defaultTerminalFontSize, maxTerminalFontSize, minTerminalFontSize, setTerminalFontSize, useTerminalFontSize } from '../terminal-font-size.js';
 import { setWebglTerminals, useWebglTerminals } from '../terminal-webgl.js';
-import { setUsagePace, useUsagePace } from '../usage-pace.js';
 
 export type BrowserSettingsIdentity = {
   deviceName: string;
@@ -23,10 +19,6 @@ type BrowserSettingsValues = {
   colorTheme: ColorTheme;
   reducedMotion: boolean;
   notificationSounds: boolean;
-  flyoutMarkers: boolean;
-  usagePace: boolean;
-  dynamicWorktrees: boolean;
-  fileOpenAction: FileOpenAction;
 };
 
 export type BrowserDraft = Partial<BrowserSettingsValues>;
@@ -46,17 +38,16 @@ const browserNameError = (name: string): string | undefined => {
   return undefined;
 };
 
+// identify preferences stored only by this browser
+const BrowserScopePill = () => <span className="client-settings-scope-pill">This browser</span>;
+
 // stage browser-only preferences for the shared settings transaction
-export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locked: boolean, operationPending: RefObject<boolean>, browserDraft: ReturnType<typeof useSettingsBrowserDraftState>): { content: ReactNode; interfaceContent: ReactNode; projectsContent: ReactNode; dirtyPageIds: ReadonlySet<string>; dirty: boolean; validate: () => string | undefined; save: () => Promise<string | undefined>; discard: () => void } {
+export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locked: boolean, operationPending: RefObject<boolean>, browserDraft: ReturnType<typeof useSettingsBrowserDraftState>): { content: ReactNode; interfaceContent: ReactNode; dirtyPageIds: ReadonlySet<string>; dirty: boolean; validate: () => string | undefined; save: () => Promise<string | undefined>; discard: () => void } {
   const liveTerminalFontSize = useTerminalFontSize();
   const liveWebglTerminals = useWebglTerminals();
   const liveColorTheme = useColorTheme();
   const liveReducedMotion = useReducedMotion();
   const liveNotificationSounds = useNotificationSounds();
-  const liveFlyoutMarkers = useFlyoutMarkers();
-  const liveUsagePace = useUsagePace();
-  const liveDynamicWorktrees = useDynamicWorktrees();
-  const liveFileOpenAction = useFileOpenAction();
   const [draft, setDraft] = browserDraft;
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState(identity.deviceName);
@@ -71,10 +62,6 @@ export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locke
   const colorTheme = draft.colorTheme ?? liveColorTheme;
   const reducedMotion = draft.reducedMotion ?? liveReducedMotion;
   const notificationSounds = draft.notificationSounds ?? liveNotificationSounds;
-  const flyoutMarkers = draft.flyoutMarkers ?? liveFlyoutMarkers;
-  const usagePace = draft.usagePace ?? liveUsagePace;
-  const dynamicWorktrees = draft.dynamicWorktrees ?? liveDynamicWorktrees;
-  const fileOpenAction = draft.fileOpenAction ?? liveFileOpenAction;
   const shownRenameValue = renameTouched ? renameValue : deviceName;
   const terminalFontIsDefault = terminalFontSize === defaultTerminalFontSize();
 
@@ -84,14 +71,14 @@ export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locke
       const next = { ...current };
       let changed = false;
       // remove only drafts that now equal their applied values
-      for (const [key, live] of Object.entries({ deviceName: identity.deviceName, terminalFontSize: liveTerminalFontSize, webglTerminals: liveWebglTerminals, colorTheme: liveColorTheme, reducedMotion: liveReducedMotion, notificationSounds: liveNotificationSounds, flyoutMarkers: liveFlyoutMarkers, usagePace: liveUsagePace, dynamicWorktrees: liveDynamicWorktrees, fileOpenAction: liveFileOpenAction }) as Array<[keyof BrowserSettingsValues, BrowserSettingsValues[keyof BrowserSettingsValues]]>) {
+      for (const [key, live] of Object.entries({ deviceName: identity.deviceName, terminalFontSize: liveTerminalFontSize, webglTerminals: liveWebglTerminals, colorTheme: liveColorTheme, reducedMotion: liveReducedMotion, notificationSounds: liveNotificationSounds }) as Array<[keyof BrowserSettingsValues, BrowserSettingsValues[keyof BrowserSettingsValues]]>) {
         if (next[key] !== live) continue;
         delete next[key];
         changed = true;
       }
       return changed ? next : current;
     });
-  }, [identity.deviceName, liveColorTheme, liveDynamicWorktrees, liveFileOpenAction, liveFlyoutMarkers, liveNotificationSounds, liveReducedMotion, liveTerminalFontSize, liveUsagePace, liveWebglTerminals]);
+  }, [identity.deviceName, liveColorTheme, liveNotificationSounds, liveReducedMotion, liveTerminalFontSize, liveWebglTerminals]);
 
   // retain only an explicit staged value
   const stage = useCallback(<Key extends keyof BrowserSettingsValues>(key: Key, value: BrowserSettingsValues[Key], live: BrowserSettingsValues[Key]) => {
@@ -134,16 +121,12 @@ export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locke
     if (draft.colorTheme !== undefined && draft.colorTheme !== liveColorTheme) setColorTheme(draft.colorTheme);
     if (draft.reducedMotion !== undefined && draft.reducedMotion !== liveReducedMotion) setReducedMotion(draft.reducedMotion);
     if (draft.notificationSounds !== undefined && draft.notificationSounds !== liveNotificationSounds) setNotificationSounds(draft.notificationSounds);
-    if (draft.flyoutMarkers !== undefined && draft.flyoutMarkers !== liveFlyoutMarkers) setFlyoutMarkers(draft.flyoutMarkers);
-    if (draft.usagePace !== undefined && draft.usagePace !== liveUsagePace) setUsagePace(draft.usagePace);
-    if (draft.dynamicWorktrees !== undefined && draft.dynamicWorktrees !== liveDynamicWorktrees) setDynamicWorktrees(draft.dynamicWorktrees);
-    if (draft.fileOpenAction !== undefined && draft.fileOpenAction !== liveFileOpenAction) setFileOpenAction(draft.fileOpenAction);
     setDraft({});
     setRenameOpen(false);
     setRenameTouched(false);
     setRenameError('');
     return undefined;
-  }, [draft, identity, liveColorTheme, liveDynamicWorktrees, liveFileOpenAction, liveFlyoutMarkers, liveNotificationSounds, liveReducedMotion, liveTerminalFontSize, liveUsagePace, liveWebglTerminals, validate]);
+  }, [draft, identity, liveColorTheme, liveNotificationSounds, liveReducedMotion, liveTerminalFontSize, liveWebglTerminals, validate]);
 
   // reset drafts against the newest external browser state
   const discard = useCallback(() => {
@@ -206,42 +189,32 @@ export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locke
     controls.at(next)?.focus();
   };
 
-  const terminalFontSetting = <div className="client-settings-setting client-settings-terminal-font" data-settings-path="terminalFontSize" role="group" aria-label="Terminal font"><div className="client-settings-setting-copy"><header><small>TERMINAL FONT</small></header><span className="client-settings-terminal-preview" aria-label="Terminal font preview" style={{ fontSize: `${terminalFontSize}px` }}>Aa ~/agent $</span></div><div className="client-settings-terminal-control client-settings-setting-control"><div className="client-settings-stepper"><button className={`client-settings-font-reset${terminalFontIsDefault ? ' reserved' : ''}`} type="button" aria-label="Reset terminal font" aria-hidden={terminalFontIsDefault} tabIndex={terminalFontIsDefault ? -1 : undefined} disabled={controlsLocked || terminalFontIsDefault} onClick={() => { /* stage the browser font default */ stage('terminalFontSize', defaultTerminalFontSize(), liveTerminalFontSize); }}>Reset</button><button type="button" aria-label="Smaller terminal font" disabled={controlsLocked || terminalFontSize <= minTerminalFontSize} onClick={() => { /* stage a smaller terminal size */ stage('terminalFontSize', Math.max(minTerminalFontSize, terminalFontSize - 1), liveTerminalFontSize); }}>−</button><strong aria-live="polite">{terminalFontSize}px</strong><button type="button" aria-label="Larger terminal font" disabled={controlsLocked || terminalFontSize >= maxTerminalFontSize} onClick={() => { /* stage a larger terminal size */ stage('terminalFontSize', Math.min(maxTerminalFontSize, terminalFontSize + 1), liveTerminalFontSize); }}>+</button></div></div></div>;
-  const webglTerminalsSetting = <div className="client-settings-setting client-settings-webgl-terminals" data-settings-path="webglTerminals" role="group" aria-label="WebGL terminals setting"><div className="client-settings-setting-copy"><header><small>WEBGL TERMINALS</small></header><span>Draw terminals on the GPU for faster full-screen redraws. Applies to terminals opened after saving; phones and Safari keep the standard renderer.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="WebGL terminals" role="switch" type="checkbox" checked={webglTerminals} disabled={controlsLocked} onChange={event => { /* stage this browser's terminal renderer */ stage('webglTerminals', event.currentTarget.checked, liveWebglTerminals); }} /><span className="client-settings-switch-state">{webglTerminals ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
-  const themeSetting = <div className="client-settings-setting client-settings-color-theme" data-settings-path="colorTheme" role="group" aria-label="Theme"><div className="client-settings-setting-copy"><header><small>THEME</small></header><span>Use a dark or light appearance in this browser.</span></div><div className="client-settings-segmented client-settings-setting-control" role="radiogroup" aria-label="Theme">{/* render each staged theme choice */}{([['mocha', 'Dark'], ['latte', 'Light']] as const).map(([theme, label]) => <button key={theme} type="button" role="radio" aria-checked={colorTheme === theme} aria-label={`${label} theme`} className={colorTheme === theme ? 'active' : undefined} disabled={controlsLocked} onClick={() => { /* stage this browser's appearance */ stage('colorTheme', theme, liveColorTheme); }}>{label}</button>)}</div></div>;
-  const reducedMotionSetting = <div className="client-settings-setting client-settings-reduced-motion" data-settings-path="reducedMotion" role="group" aria-label="Reduced motion setting"><div className="client-settings-setting-copy"><header><small>REDUCED MOTION</small></header><span>Keep status colours, use compact spinners, and stop shimmers and pulses.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Reduced motion" role="switch" type="checkbox" checked={reducedMotion} disabled={controlsLocked} onChange={event => { /* stage this browser's motion preference */ stage('reducedMotion', event.currentTarget.checked, liveReducedMotion); }} /><span className="client-settings-switch-state">{reducedMotion ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
-  const notificationSoundsSetting = <div className="client-settings-setting client-settings-notification-sounds" data-settings-path="notificationSounds" role="group" aria-label="Notification sounds setting"><div className="client-settings-setting-copy"><header><small>NOTIFICATION SOUNDS</small></header><span>Play a sound with agent alerts. Notifications still show when this is off.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Notification sounds" role="switch" type="checkbox" checked={notificationSounds} disabled={controlsLocked} onChange={event => { /* stage this browser's alert sounds */ stage('notificationSounds', event.currentTarget.checked, liveNotificationSounds); }} /><span className="client-settings-switch-state">{notificationSounds ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
-  const flyoutMarkersSetting = <div className="client-settings-setting client-settings-flyout-markers" data-settings-path="flyoutMarkers" role="group" aria-label="Flyout markers setting"><div className="client-settings-setting-copy"><header><small>FLYOUT MARKERS</small></header><span>Show little carets on buttons that open flyouts.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Flyout markers" role="switch" type="checkbox" checked={flyoutMarkers} disabled={controlsLocked} onChange={event => { /* stage this browser's markers */ stage('flyoutMarkers', event.currentTarget.checked, liveFlyoutMarkers); }} /><span className="client-settings-switch-state">{flyoutMarkers ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
-  const fileOpenActionSetting = <div className="client-settings-setting client-settings-file-open-action" data-settings-path="fileOpenAction" role="group" aria-label="Default file action"><div className="client-settings-setting-copy"><header><small>DEFAULT FILE ACTION</small></header><span>Choose what clicking a file does. Edit falls back to Preview when no editor is configured.</span></div><div className="client-settings-segmented client-settings-setting-control" role="radiogroup" aria-label="Default file action">{/* render each staged file action */}{([['preview', 'Preview'], ['edit', 'Edit']] as const).map(([action, label]) => <button key={action} type="button" role="radio" aria-checked={fileOpenAction === action} className={fileOpenAction === action ? 'active' : undefined} disabled={controlsLocked} onClick={() => { /* stage this browser's file action */ stage('fileOpenAction', action, liveFileOpenAction); }}>{label}</button>)}</div></div>;
-  const dynamicWorktreesSetting = <div className="client-settings-setting client-settings-dynamic-worktrees" data-settings-path="dynamicWorktrees" role="group" aria-label="Dynamic worktrees setting"><div className="client-settings-setting-copy"><header><small>DYNAMIC WORKTREES</small></header><span>Create and manage multiple worktrees from the launcher in this browser.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Dynamic worktrees" role="switch" type="checkbox" checked={dynamicWorktrees} disabled={controlsLocked} onChange={event => { /* stage the browser launcher mode */ stage('dynamicWorktrees', event.currentTarget.checked, liveDynamicWorktrees); }} /><span className="client-settings-switch-state">{dynamicWorktrees ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
-  const usagePaceSetting = <div className="client-settings-setting client-settings-usage-pace" data-settings-path="usagePace" role="group" aria-label="Usage pace setting"><div className="client-settings-setting-copy"><header><small>USAGE PACE</small></header><span>Show how far each account limit is over (+) or under (−) an even pace to its reset.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Usage pace" role="switch" type="checkbox" checked={usagePace} disabled={controlsLocked} onChange={event => { /* stage this browser's pace display */ stage('usagePace', event.currentTarget.checked, liveUsagePace); }} /><span className="client-settings-switch-state">{usagePace ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
+  // label each remaining browser-only preference
+  const terminalFontSetting = <div className="client-settings-setting client-settings-terminal-font" data-settings-path="terminalFontSize" role="group" aria-label="Terminal font"><div className="client-settings-setting-copy"><header><small>TERMINAL FONT</small><BrowserScopePill /></header><span className="client-settings-terminal-preview" aria-label="Terminal font preview" style={{ fontSize: `${terminalFontSize}px` }}>Aa ~/agent $</span></div><div className="client-settings-terminal-control client-settings-setting-control"><div className="client-settings-stepper"><button className={`client-settings-font-reset${terminalFontIsDefault ? ' reserved' : ''}`} type="button" aria-label="Reset terminal font" aria-hidden={terminalFontIsDefault} tabIndex={terminalFontIsDefault ? -1 : undefined} disabled={controlsLocked || terminalFontIsDefault} onClick={() => { /* stage the browser font default */ stage('terminalFontSize', defaultTerminalFontSize(), liveTerminalFontSize); }}>Reset</button><button type="button" aria-label="Smaller terminal font" disabled={controlsLocked || terminalFontSize <= minTerminalFontSize} onClick={() => { /* stage a smaller terminal size */ stage('terminalFontSize', Math.max(minTerminalFontSize, terminalFontSize - 1), liveTerminalFontSize); }}>−</button><strong aria-live="polite">{terminalFontSize}px</strong><button type="button" aria-label="Larger terminal font" disabled={controlsLocked || terminalFontSize >= maxTerminalFontSize} onClick={() => { /* stage a larger terminal size */ stage('terminalFontSize', Math.min(maxTerminalFontSize, terminalFontSize + 1), liveTerminalFontSize); }}>+</button></div></div></div>;
+  const webglTerminalsSetting = <div className="client-settings-setting client-settings-webgl-terminals" data-settings-path="webglTerminals" role="group" aria-label="WebGL terminals setting"><div className="client-settings-setting-copy"><header><small>WEBGL TERMINALS</small><BrowserScopePill /></header><span>Draw terminals on the GPU for faster full-screen redraws. Applies to terminals opened after saving; phones and Safari keep the standard renderer.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="WebGL terminals" role="switch" type="checkbox" checked={webglTerminals} disabled={controlsLocked} onChange={event => { /* stage this browser's terminal renderer */ stage('webglTerminals', event.currentTarget.checked, liveWebglTerminals); }} /><span className="client-settings-switch-state">{webglTerminals ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
+  const themeSetting = <div className="client-settings-setting client-settings-color-theme" data-settings-path="colorTheme" role="group" aria-label="Theme"><div className="client-settings-setting-copy"><header><small>THEME</small><BrowserScopePill /></header><span>Use a dark or light appearance in this browser.</span></div><div className="client-settings-segmented client-settings-setting-control" role="radiogroup" aria-label="Theme">{/* render each staged theme choice */}{([['mocha', 'Dark'], ['latte', 'Light']] as const).map(([theme, label]) => <button key={theme} type="button" role="radio" aria-checked={colorTheme === theme} aria-label={`${label} theme`} className={colorTheme === theme ? 'active' : undefined} disabled={controlsLocked} onClick={() => { /* stage this browser's appearance */ stage('colorTheme', theme, liveColorTheme); }}>{label}</button>)}</div></div>;
+  const reducedMotionSetting = <div className="client-settings-setting client-settings-reduced-motion" data-settings-path="reducedMotion" role="group" aria-label="Reduced motion setting"><div className="client-settings-setting-copy"><header><small>REDUCED MOTION</small><BrowserScopePill /></header><span>Keep status colours, use compact spinners, and stop shimmers and pulses.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Reduced motion" role="switch" type="checkbox" checked={reducedMotion} disabled={controlsLocked} onChange={event => { /* stage this browser's motion preference */ stage('reducedMotion', event.currentTarget.checked, liveReducedMotion); }} /><span className="client-settings-switch-state">{reducedMotion ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
+  const notificationSoundsSetting = <div className="client-settings-setting client-settings-notification-sounds" data-settings-path="notificationSounds" role="group" aria-label="Notification sounds setting"><div className="client-settings-setting-copy"><header><small>NOTIFICATION SOUNDS</small><BrowserScopePill /></header><span>Play a sound with agent alerts. Notifications still show when this is off.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Notification sounds" role="switch" type="checkbox" checked={notificationSounds} disabled={controlsLocked} onChange={event => { /* stage this browser's alert sounds */ stage('notificationSounds', event.currentTarget.checked, liveNotificationSounds); }} /><span className="client-settings-switch-state">{notificationSounds ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
   const renameDialog = !renameOpen ? null : createPortal(<div className="dialog client-rename-dialog" role="dialog" aria-modal="true" aria-labelledby="browser-settings-rename-title" onKeyDown={renameKey}><div><header><div><small>GLOBAL SETTINGS</small><h2 id="browser-settings-rename-title">Rename browser</h2></div><button type="button" aria-label="Close rename browser" disabled={controlsLocked} onClick={closeRename}><PanelIcon path={panelIcons.close} /></button></header><form onSubmit={finishRename}><label>Name<input autoFocus type="text" value={shownRenameValue} maxLength={64} autoComplete="off" disabled={controlsLocked} onChange={event => { /* retain only an explicit browser-name edit */ if (!locked && !operationPending.current) { setRenameValue(event.target.value); setRenameTouched(true); } }} /></label>{renameError && <span className="auth-error" role="alert">{renameError}</span>}<footer><button type="button" disabled={controlsLocked} onClick={closeRename}>Cancel</button><button type="submit" disabled={controlsLocked || !shownRenameValue.trim()}>Done</button></footer></form></div></div>, document.body);
   const content = <><div className="client-settings-overview">
     <div className="client-settings-setting client-settings-identity" data-settings-path="deviceName" role="group" aria-label="Name">
-      <div className="client-settings-setting-copy"><header><small>NAME</small></header><strong>{deviceName}</strong></div>
+      <div className="client-settings-setting-copy"><header><small>NAME</small><BrowserScopePill /></header><strong>{deviceName}</strong></div>
       <span className="client-settings-setting-actions client-settings-setting-control"><button ref={renameButton} type="button" aria-label="Rename browser name" disabled={controlsLocked} onClick={beginRename}>Rename</button></span>
     </div>
   </div>{renameDialog}</>;
   // share one transaction while rendering each preference on its owning page
-  const interfaceContent = <><p className="settings-preference-description">Interface preferences apply only to this browser.</p><div className="client-settings-overview">{terminalFontSetting}{webglTerminalsSetting}{themeSetting}{fileOpenActionSetting}{reducedMotionSetting}{notificationSoundsSetting}{flyoutMarkersSetting}{usagePaceSetting}</div></>;
-  const projectsContent = <div className="client-settings-overview">{dynamicWorktreesSetting}</div>;
+  const interfaceContent = <div className="client-settings-overview">{terminalFontSetting}{webglTerminalsSetting}{themeSetting}{reducedMotionSetting}{notificationSoundsSetting}</div>;
   const browserDirty = draft.deviceName !== undefined && draft.deviceName !== identity.deviceName;
   const interfaceDirty = draft.terminalFontSize !== undefined && draft.terminalFontSize !== liveTerminalFontSize
     || draft.webglTerminals !== undefined && draft.webglTerminals !== liveWebglTerminals
     || draft.colorTheme !== undefined && draft.colorTheme !== liveColorTheme
     || draft.reducedMotion !== undefined && draft.reducedMotion !== liveReducedMotion
-    || draft.notificationSounds !== undefined && draft.notificationSounds !== liveNotificationSounds
-    || draft.flyoutMarkers !== undefined && draft.flyoutMarkers !== liveFlyoutMarkers
-    || draft.usagePace !== undefined && draft.usagePace !== liveUsagePace
-    || draft.fileOpenAction !== undefined && draft.fileOpenAction !== liveFileOpenAction;
-  const projectsDirty = draft.dynamicWorktrees !== undefined && draft.dynamicWorktrees !== liveDynamicWorktrees;
+    || draft.notificationSounds !== undefined && draft.notificationSounds !== liveNotificationSounds;
   // mark the visible owner of each staged browser preference
   const dirtyPageIds = new Set<string>();
   // keep identity changes on this browser
   if (browserDirty) dirtyPageIds.add('browser');
   // keep appearance changes on interface
   if (interfaceDirty) dirtyPageIds.add('interface');
-  // keep launcher changes on projects
-  if (projectsDirty) dirtyPageIds.add('projects');
-  return { content, interfaceContent, projectsContent, dirtyPageIds, dirty: dirtyPageIds.size > 0, validate, save, discard };
+  return { content, interfaceContent, dirtyPageIds, dirty: dirtyPageIds.size > 0, validate, save, discard };
 }

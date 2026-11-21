@@ -24,7 +24,7 @@ const tmuxAdapter = (capability: Record<string, unknown>) => ({ ...capability, t
 test.describe.configure({ timeout: 180_000 });
 
 // create one isolated settings backend
-async function setupAccountSettings(page: Page, initialAccounts: Account[], renameFailures: RenameFailure[] = []) {
+async function setupAccountSettings(page: Page, initialAccounts: Account[], renameFailures: RenameFailure[] = [], usagePace = true) {
   const state = {
     accounts: structuredClone(initialAccounts),
     accountQueries: 0,
@@ -38,7 +38,7 @@ async function setupAccountSettings(page: Page, initialAccounts: Account[], rena
     const request = route.request();
     const path = new URL(request.url()).pathname;
     // restore one controlling browser
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'account-settings-csrf', active: true, deviceName: 'Test device', server: { name: 'Test server', url: 'https://agents.example.com', remotes: [] } } });
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'account-settings-csrf', active: true, deviceName: 'Test device', usagePace, server: { name: 'Test server', url: 'https://agents.example.com', remotes: [] } } });
     // expose configured Codex without live agents
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } }, agents: [], projects: [], scratchLaunch: { kind: 'codex', origin: 'default' }, cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
     // authorize the inert dashboard socket
@@ -639,12 +639,10 @@ test('shows the Claude account and usage in launch menus', async ({ page }) => {
   await expect(menu.getByRole('group', { name: 'Codex agent' }).getByRole('menuitem', { name: 'Codex accounts', exact: true })).toBeVisible();
 });
 
-// compare the default pace display with its explicit browser opt-out
+// compare the default pace display with the server setting disabled
 for (const disabled of [false, true]) {
   test(`${disabled ? 'hides' : 'shows'} usage pace ${disabled ? 'when disabled' : 'by default'}`, async ({ page }) => {
-    await setupAccountSettings(page, []);
-    // retain an explicit choice against the default
-    if (disabled) await page.addInitScript(() => localStorage.setItem('rac.usage-pace', 'disabled'));
+    await setupAccountSettings(page, [], [], !disabled);
     const now = Math.floor(Date.now() / 1000);
     await page.route('**/api/dashboard', route => route.fulfill({ json: { generation: 1, adapters: { claude: { program: '/usr/local/bin/claude', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false } }, agents: [], projects: [], scratchLaunch: { kind: 'claude', origin: 'default' }, cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } }));
     // 40% through the 5h window with 37% used, half way through the 7d window with 82% used

@@ -111,6 +111,8 @@
 /* separate environment sections from their file-backed fields */
 .settings-storage-environment, .settings-voice-environment { margin-top: 1.5rem; }
 .settings-schema-section + .settings-schema-section { padding-top: 1rem; border-top: 1px solid var(--surface-1); }
+/* separate consecutive interface preferences with the existing grid gap */
+.settings-interface > .settings-interface-preference + .settings-interface-preference { padding-top: 0; border-top: 0; }
 .settings-schema-section > header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .75rem; }
 .settings-schema-section > header > div { display: grid; gap: .12rem; }
 .settings-schema-section h3 { margin: 0; color: var(--lavender); font: 800 .78rem var(--font-mono); }
@@ -125,6 +127,8 @@
 .settings-adapter-card > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: var(--control-radius); }
 .settings-adapter-card > summary[aria-disabled='true'] { cursor: default; }
 .settings-adapter-card > summary h3 { margin: 0; color: var(--lavender); font: 800 .78rem var(--font-mono); }
+/* keep the adapter star beside its name at narrow widths */
+.settings-adapter-card > summary > .settings-agent-default-button { flex: none; }
 .settings-adapter-card > summary > span { min-width: 0; margin-left: auto; color: var(--overlay-1); font: 500 .6rem/1.4 var(--font-mono); overflow-wrap: anywhere; }
 .settings-adapter-card > summary > .settings-adapter-status-configured { color: var(--green); font-weight: 700; }
 .settings-adapter-card-action { position: absolute; z-index: 1; top: .42rem; right: .55rem; }

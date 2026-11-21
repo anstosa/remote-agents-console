@@ -72,13 +72,20 @@ path:LINE`, say) is not supported by the jump.
 
 ### Browser preferences
 
-In **Settings → This browser**, Name, terminal font, WebGL terminals, theme, reduced motion,
-notification sounds, flyout markers, usage pace and dynamic worktrees remain drafts until the top-right
-**Save changes** action. **Done** in the Rename dialog stages the name; it does
-not save it. **Validate** does not apply preferences, and **Discard changes**
-restores the currently applied values. Browser-only saves remain available
-when installation files cannot load. When saving browser and file edits
-together, failed file validation or saving leaves browser preferences unapplied.
+Settings marked **This browser** apply only to the current browser: **Name** on
+the **This browser** page, plus **Terminal font**, **WebGL terminals**, **Theme**,
+**Reduced motion**, and **Notification sounds** on **Interface**. These remain
+drafts until **Save changes**. **Done** in the Rename dialog stages the name;
+it does not save it. **Validate** does not apply preferences, and **Discard changes**
+restores the currently applied values. Browser-only saves remain available when
+installation files cannot load. When saving browser and file edits together,
+failed file validation or saving leaves browser preferences unapplied.
+
+Set **Flyout markers** on **Interface**, **Dynamic worktrees** on **Projects**,
+**Default file action** on **Files**, and **Usage pace** and **Reply suggestions**
+on **Agents**. These are application settings and take effect after restart; old
+browser overrides no longer apply. To set the default adapter, star a configured
+agent on **Agents**, or choose **Use automatic** to use the first available adapter.
 
 Settings lists start as compact item summaries. Use **Edit** to open an item's
 fields; closing the editor keeps its staged changes. Arrow buttons reorder
@@ -1180,6 +1187,13 @@ in place of Delete in the sticky flyout. Open the note and unlock it before
 deleting it. Locking does not prevent editing, renaming, attachments, or running
 the note; even an empty locked note is retained when closed. Protection is saved
 with the note and enforced by the server.
+
+**Settings → Notes** can auto-delete unlocked notes after you send them,
+queue them, or choose **Launch and run**. This server-wide setting is off by
+default. The note is removed only after the prompt is sent or accepted into the
+queue, and **Undo** restores it without cancelling the prompt. Lock a note to keep
+it, including a shared note you want to keep available in every workspace.
+Scheduled runs do not auto-delete notes.
 
 Notes have no attachment-count limit; attachments may total 25 MB per note. Use
 the paperclip beside **Send** (also beside existing attachments), drop files onto a note, or

@@ -207,7 +207,8 @@ for (const width of [1440, 390]) test(`renders Google Calendar settings safely a
     await expect(options.getByRole('group', { name: 'Application', exact: true }).getByRole('option', { name: /^(Agents|Google Calendar)$/u })).toHaveCount(0);
     await page.keyboard.press('Escape');
   }
-  await expect(settings.getByText('Server settings', { exact: true })).toBeVisible();
+  const panel = settings.getByRole('region', { name: 'Google Calendar settings content', exact: true });
+  await expect(panel.locator(':scope > .settings-source-header .settings-source-kicker')).toHaveText('Settings');
   await expect(settings.getByRole('switch', { name: 'Enable Google Calendar', exact: true })).not.toBeChecked();
   await expect(settings.getByRole('textbox', { name: 'Event title template', exact: true })).toHaveValue('{worktree}');
   await expect(settings.getByRole('combobox', { name: 'Start moment', exact: true })).toContainText('Agent work started');

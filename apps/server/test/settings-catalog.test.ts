@@ -206,6 +206,11 @@ describe('settings catalog classification', () => {
     expect(appApply(['remoteServers', '0', 'name'])).toBe('rac-restart');
     expect(appApply(['remoteServers', '0', 'icon'])).toBe('rac-restart');
     expect(appApply(['integrations', 'enabled'])).toBe('rac-restart');
+    expect(appApply(['fileOpenAction'])).toBe('rac-restart');
+    expect(appApply(['flyoutMarkers'])).toBe('rac-restart');
+    expect(appApply(['dynamicWorktrees'])).toBe('rac-restart');
+    expect(appApply(['usagePace'])).toBe('rac-restart');
+    expect(appApply(['autoDeleteSentNotes'])).toBe('rac-restart');
     expect(appApply(['resourceMonitoring'])).toBe('rac-restart');
     expect(appApply(['listen', 'port'])).toBe('rac-restart');
   });
@@ -293,6 +298,26 @@ describe('settings schema metadata', () => {
     });
   });
 
+  // preserve the former client preferences as restart-applied application settings
+  it('describes shared file, flyout, worktree, and usage preferences', () => {
+    const schema = applicationSettingsSchema().properties!;
+    expect(schema.fileOpenAction).toMatchObject({ type: 'enum', options: ['preview', 'edit'], default: 'edit', label: 'Default file action', apply: 'rac-restart', description: expect.stringMatching(/clicking a file.*Edit.*Preview/u) });
+    expect(schema.flyoutMarkers).toMatchObject({ type: 'boolean', default: false, label: 'Flyout markers', apply: 'rac-restart', description: expect.stringMatching(/carets.*flyouts/u) });
+    expect(schema.dynamicWorktrees).toMatchObject({ type: 'boolean', default: true, label: 'Dynamic worktrees', apply: 'rac-restart', description: expect.stringMatching(/multiple worktrees.*launcher/u) });
+    expect(schema.usagePace).toMatchObject({ type: 'boolean', default: true, label: 'Usage pace', apply: 'rac-restart', description: expect.stringMatching(/account limit.*even pace.*reset/u) });
+  });
+
+  // expose the opt-in default and locked-note exception beside the toggle
+  it('describes automatic sent-note deletion as a restart-applied server setting', () => {
+    expect(applicationSettingsSchema().properties?.autoDeleteSentNotes).toMatchObject({
+      type: 'boolean',
+      default: false,
+      label: 'Auto-delete sent notes',
+      apply: 'rac-restart',
+      description: expect.stringMatching(/Delete unlocked notes.*send them, queue them, or choose Launch and run.*Locked notes and scheduled runs are unaffected.*Undo/u)
+    });
+  });
+
   // expose the server-wide scope and every monitoring cadence
   it('describes resource monitoring as a restart-applied server setting', () => {
     expect(applicationSettingsSchema().properties?.resourceMonitoring).toMatchObject({
@@ -300,7 +325,7 @@ describe('settings schema metadata', () => {
       default: false,
       label: 'Resource monitoring',
       apply: 'rac-restart',
-      description: expect.stringMatching(/every browser.*CPU and memory.*1 second.*flyout.*1 minute.*closed.*Disk usage.*10 minutes/u)
+      description: expect.stringMatching(/CPU and memory.*1 second.*flyout.*1 minute.*closed.*Disk usage.*10 minutes/u)
     });
   });
 

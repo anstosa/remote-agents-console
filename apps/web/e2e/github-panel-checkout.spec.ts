@@ -50,12 +50,12 @@ const details: Record<string, unknown> = {
 
 type Call = { method: string; path: string; body?: unknown };
 // stub the console; every worktree action lands in `calls`, and `refuse` answers one with a 409
-async function mount(page: Page, { dirty = false, withAgent = false, calls = [], refuse, removal = {} }: { dirty?: boolean; withAgent?: boolean; calls?: Call[]; refuse?: string; removal?: Record<string, unknown> } = {}) {
+async function mount(page: Page, { dirty = false, withAgent = false, calls = [], refuse, removal = {}, dynamicWorktrees = true }: { dirty?: boolean; withAgent?: boolean; calls?: Call[]; refuse?: string; removal?: Record<string, unknown>; dynamicWorktrees?: boolean } = {}) {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
     const path = decodeURIComponent(url.pathname);
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', dynamicWorktrees } });
     if (path === '/api/dashboard') return route.fulfill({ json: dashboard(dirty, withAgent) });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     if (path === '/api/github/overview') return route.fulfill({ json: { mine: [...lists.mine, ...lists.done], reviews: lists.reviews, issues: [], totals: { mine: lists.mine.length + lists.done.length, reviews: lists.reviews.length, issues: 0 }, fetchedAt: Date.now() } });
@@ -128,12 +128,12 @@ const forkFeature = { ...matrixWorktree('fork', 'fork:/audiobookshelf/wts/podcas
 const upstreamPull = row(4978, 'Continue serial podcasts upstream', { repository: 'advplyr/audiobookshelf', url: 'https://github.com/advplyr/audiobookshelf/pull/4978' });
 
 // serve a foreign Workspace beside one verified fork of the pull request repository
-async function mountForkMatrix(page: Page, targets: Array<typeof forkMain>, calls: Call[], manageWorktrees = true) {
+async function mountForkMatrix(page: Page, targets: Array<typeof forkMain>, calls: Call[], manageWorktrees = true, dynamicWorktrees = true) {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = decodeURIComponent(new URL(request.url()).pathname);
     // return the authenticated shell
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', dynamicWorktrees } });
     // expose only the server-verified parent hint
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, serverStartedAt: 1001, githubRevision: 1, agents: [], projects: [
       { id: 'a', label: 'Alpha', github: 'acme/a', available: true, manageWorktrees: true, worktrees: [alphaMain] },
@@ -157,14 +157,14 @@ async function mountForkMatrix(page: Page, targets: Array<typeof forkMain>, call
 }
 
 // serve the cross-repository destination matrix
-async function mountMatrix(page: Page, { destination = { kind: 'project' as const, worktreeId: bravoMain.id, label: 'Bravo One' }, targets, availability = {}, calls = [], refuse }: { destination?: { kind: 'worktree' | 'project'; worktreeId: string; label: string }; targets?: Array<typeof bravoMain>; availability?: Record<string, boolean>; calls?: Call[]; refuse?: string } = {}) {
+async function mountMatrix(page: Page, { destination = { kind: 'project' as const, worktreeId: bravoMain.id, label: 'Bravo One' }, targets, availability = {}, calls = [], refuse, dynamicWorktrees = true }: { destination?: { kind: 'worktree' | 'project'; worktreeId: string; label: string }; targets?: Array<typeof bravoMain>; availability?: Record<string, boolean>; calls?: Call[]; refuse?: string; dynamicWorktrees?: boolean } = {}) {
   const item = matrixPull(destination);
   const dashboardValue = matrixDashboard(targets);
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = decodeURIComponent(new URL(request.url()).pathname);
     // return the authenticated browser shell
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', dynamicWorktrees } });
     if (path === '/api/dashboard') return route.fulfill({ json: dashboardValue });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     if (path === '/api/github/overview') return route.fulfill({ json: { mine: [item], reviews: [], issues: [], totals: { mine: 1, reviews: 0, issues: 0 }, fetchedAt: Date.now() } });
@@ -376,9 +376,8 @@ test('lists verified-fork targets from a foreign Workspace and preserves upstrea
 });
 
 test('uses a verified fork as the sole direct target without adding a flyout marker', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('rac.dynamic-worktrees', 'disabled'));
   const calls: Call[] = [];
-  await mountForkMatrix(page, [forkMain], calls);
+  await mountForkMatrix(page, [forkMain], calls, true, false);
   const github = await showMatrix(page);
   const row = github.locator('.overview-row').filter({ hasText: '#4978' });
   const direct = row.getByRole('button', { name: 'Checkout in Fork Main' });
@@ -406,8 +405,7 @@ test('does not broaden new-Worktree setup policy for a verified fork', async ({ 
 
 // suppress only new-worktree choices when dynamic worktrees are off
 test('keeps every existing B target but no New choice when dynamic worktrees are off', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('rac.dynamic-worktrees', 'disabled'));
-  await mountMatrix(page);
+  await mountMatrix(page, { dynamicWorktrees: false });
   const github = await showMatrix(page);
   await github.getByRole('button', { name: 'Checkout and actions for pull request #7' }).click();
   const menu = page.getByRole('group', { name: 'Actions for pull request #7' });
@@ -420,9 +418,8 @@ test('keeps every existing B target but no New choice when dynamic worktrees are
 
 // keep same-repository compact mode direct while retaining full mutation context
 test('directly switches and moves Here with context when dynamic worktrees are off', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('rac.dynamic-worktrees', 'disabled'));
   const calls: Call[] = [];
-  await mount(page, { calls });
+  await mount(page, { calls, dynamicWorktrees: false });
   await page.goto('/');
   await page.getByRole('tab', { name: /^feature/u }).click();
   await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
@@ -457,9 +454,8 @@ test('directly switches and moves Here with context when dynamic worktrees are o
 
 // use one direct foreign target only after its readiness read
 test('uses the sole cross-repository target directly and disables it when readiness refuses', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('rac.dynamic-worktrees', 'disabled'));
   const calls: Call[] = [];
-  await mountMatrix(page, { calls, targets: [bravoMain], availability: { [bravoMain.id]: false } });
+  await mountMatrix(page, { calls, targets: [bravoMain], availability: { [bravoMain.id]: false }, dynamicWorktrees: false });
   const github = await showMatrix(page);
   const direct = github.getByRole('button', { name: 'Checkout in B Main' });
   await expect(direct).toBeDisabled();

@@ -8,7 +8,7 @@ type NoteLockFixture = {
   notes: Note[];
   lockRequests: LockRequest[];
   deletes: string[];
-  prompts: Array<{ prompt: string; attachments: unknown[] }>;
+  prompts: Array<{ prompt: string; attachments: unknown[]; noteId?: string }>;
   notesRevision: number;
   failLock: boolean;
   lockGate?: Promise<void>;
@@ -98,7 +98,7 @@ const mockNoteLocking = async (page: Page, fixture: NoteLockFixture, context: 'w
     }
     // capture locked-note prompt dispatches
     if (url.pathname === `/api/agents/${context === 'worktree' ? 'agent-1' : 'scratch-1'}/prompt` && request.method() === 'POST') {
-      fixture.prompts.push(request.postDataJSON() as { prompt: string; attachments: unknown[] });
+      fixture.prompts.push(request.postDataJSON() as { prompt: string; attachments: unknown[]; noteId?: string });
       return route.fulfill({ status: 202, json: { queued: true } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -184,7 +184,7 @@ test('locks notes without losing drafts, persists the guard, then unlocks before
     await dialog.screenshot({ path: test.info().outputPath(`locked-note-${viewport.label}.png`) });
   }
   await dialog.getByRole('button', { name: 'Send note as prompt' }).click();
-  await expect.poll(() => fixture.prompts).toEqual([{ prompt: 'Newer draft typed while locking.', attachments: [] }]);
+  await expect.poll(() => fixture.prompts).toEqual([{ prompt: 'Newer draft typed while locking.', attachments: [], noteId: 'note-editable-001' }]);
   await expect.poll(() => fixture.notes[0]?.text).toBe('Newer draft typed while locking.');
 
   await page.reload();

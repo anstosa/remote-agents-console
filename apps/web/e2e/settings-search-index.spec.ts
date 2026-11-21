@@ -28,6 +28,8 @@ const pages: SettingsSearchPage[] = [
   { id: 'keyboard', label: 'Keyboard shortcuts', group: 'Console' },
   { id: 'app', label: 'Application', group: 'Application' },
   { id: 'interface', label: 'Interface', group: 'Application' },
+  { id: 'notes', label: 'Notes', group: 'Application' },
+  { id: 'files', label: 'Files', group: 'Application' },
   { id: 'agents', label: 'Agents', group: 'Integrations' },
   { id: 'projects', label: 'Projects', group: 'Application' },
   { id: 'reviews', label: 'Reviews', group: 'Application' },
@@ -125,8 +127,8 @@ test('indexes Review descendants only while the application structured editor is
   expect(raw.filter(result => result.kind === 'field' && result.pageId === 'reviews')).toEqual([]);
 });
 
-// route client preferences and application buttons to their dedicated pages
-test('indexes Interface and Projects controls under their owning pages', () => {
+// route browser and application preferences to their dedicated pages
+test('indexes each preference under its owning page', () => {
   const application = source('app', 'json', applicationSettingsSchema(), {
     buttons: {
       pullRequest: [{
@@ -145,13 +147,28 @@ test('indexes Interface and Projects controls under their owning pages', () => {
   expect(fieldAt(results, 'interface', ['colorTheme'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['reducedMotion'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['flyoutMarkers'])).toBeDefined();
-  expect(fieldAt(results, 'interface', ['usagePace'])).toBeDefined();
-  expect(fieldAt(results, 'interface', ['fileOpenAction'])).toBeDefined();
+  expect(fieldAt(results, 'agents', ['usagePace'])).toBeDefined();
+  expect(fieldAt(results, 'agents', ['replySuggestions'])).toBeDefined();
+  expect(fieldAt(results, 'agents', ['defaultAgent'])).toBeDefined();
+  expect(fieldAt(results, 'files', ['fileOpenAction'])).toBeDefined();
+  expect(fieldAt(results, 'notes', ['autoDeleteSentNotes'])?.label).toBe('Auto-delete sent notes');
+  expect(fieldAt(results, 'interface', ['usagePace'])).toBeUndefined();
+  expect(fieldAt(results, 'interface', ['fileOpenAction'])).toBeUndefined();
+  expect(fieldAt(results, 'interface', ['replySuggestions'])).toBeUndefined();
+  expect(fieldAt(results, 'interface', ['autoDeleteSentNotes'])).toBeUndefined();
+  expect(fieldAt(results, 'app', ['autoDeleteSentNotes'])).toBeUndefined();
   expect(fieldAt(results, 'projects', ['dynamicWorktrees'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['buttons', 'pullRequest', '0', 'text'])).toBeDefined();
   expect(fieldAt(results, 'app', ['buttons', 'pullRequest', '0', 'text'])).toBeUndefined();
   expect(JSON.stringify(results)).not.toContain('PRIVATE_BUTTON_TEXT');
   expect(JSON.stringify(results)).not.toContain('PRIVATE_BUTTON_PROMPT');
+
+  const raw = build([application], { rawSourceIds: new Set(['app']) });
+  expect(fieldAt(raw, 'interface', ['terminalFontSize'])).toBeDefined();
+  expect(fieldAt(raw, 'interface', ['flyoutMarkers'])).toBeUndefined();
+  expect(fieldAt(raw, 'files', ['fileOpenAction'])).toBeUndefined();
+  expect(fieldAt(raw, 'projects', ['dynamicWorktrees'])).toBeUndefined();
+  expect(fieldAt(raw, 'agents', ['usagePace'])).toBeUndefined();
 });
 
 // route calendar configuration and credentials without indexing title values

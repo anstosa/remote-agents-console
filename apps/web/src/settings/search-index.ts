@@ -3,6 +3,7 @@ import { composeOptionSettings } from '../../../server/src/settings/catalog.js';
 import { isProtectedValue, type SettingsSchema, type SettingsSnapshot, type SettingsSource } from './contracts.js';
 import { agentEnvironmentKeys, agentEnvironmentOwnerForKey, googleCalendarEnvironmentKeys, storageEnvironmentKeys, voiceEnvironmentKeys } from './environment-fields.js';
 import { tmuxEnvironmentKeysForInstallation } from './tmux-settings.js';
+import { applicationPreferences } from './application-preferences.js';
 
 export type SettingsSearchPage = {
   id: string;
@@ -55,8 +56,7 @@ const applicationDedicatedPaths = new Set([
   'tmux',
   'projects',
   'buttons',
-  'replySuggestions',
-  'resourceMonitoring',
+  ...applicationPreferences.map(({ key }) => key),
   'review',
   'googleCalendar',
   'proxy',
@@ -218,11 +218,7 @@ function addBrowserFields(index: FieldIndex): void {
     { pageId: 'interface', label: 'WebGL terminals', path: ['webglTerminals'], keywords: 'gpu renderer canvas performance vim redraw' },
     { pageId: 'interface', label: 'Theme', path: ['colorTheme'], keywords: 'appearance dark light mocha latte' },
     { pageId: 'interface', label: 'Reduced motion', path: ['reducedMotion'], keywords: 'animation shimmer pulse accessibility' },
-    { pageId: 'interface', label: 'Notification sounds', path: ['notificationSounds'], keywords: 'alert chime audio mute silent' },
-    { pageId: 'interface', label: 'Flyout markers', path: ['flyoutMarkers'], keywords: 'carets menu buttons' },
-    { pageId: 'interface', label: 'Usage pace', path: ['usagePace'], keywords: 'account limit consumed reset ahead behind' },
-    { pageId: 'interface', label: 'Default file action', path: ['fileOpenAction'], keywords: 'open files preview edit editor' },
-    { pageId: 'projects', label: 'Dynamic worktrees', path: ['dynamicWorktrees'], keywords: 'launcher multiple worktrees' }
+    { pageId: 'interface', label: 'Notification sounds', path: ['notificationSounds'], keywords: 'alert chime audio mute silent' }
   ];
   // add stable browser field identities
   for (const field of fields) index.add(field.pageId, field.label, field.path, [], [field.keywords]);
@@ -323,6 +319,8 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
   if (adapters !== undefined) visitSchema(index, 'agents', adapters, childValue(source.value, 'adapters'), ['adapters'], [], {
     keywordFor: path => applicationEnvironmentAliases[path.join('.')]
   });
+  // target the controls for choosing a default adapter by star
+  if (adapters !== undefined && !options.rawSourceIds.has(source.id)) index.add('agents', 'Default adapter', ['defaultAgent'], [], ['default agent launch automatic star']);
 
   const conductor = baseSchema.properties?.conductor;
   // keep omitted Conductor fields searchable without creating configuration
@@ -346,15 +344,15 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
   // button definitions retain their application paths on Interface
   if (buttons !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'interface', buttons, childValue(source.value, 'buttons'), ['buttons'], []);
 
-  const replySuggestions = baseSchema.properties?.replySuggestions;
-  // keep the console-wide generation setting searchable on Interface
-  if (replySuggestions !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'interface', replySuggestions, childValue(source.value, 'replySuggestions'), ['replySuggestions'], []);
-
-  const resourceMonitoring = baseSchema.properties?.resourceMonitoring;
-  // keep server resource inspection searchable on Interface
-  if (resourceMonitoring !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'interface', resourceMonitoring, childValue(source.value, 'resourceMonitoring'), ['resourceMonitoring'], [], {
-    keywordFor: () => 'server flyout host cpu memory ram disks drives storage usage wsl windows'
-  });
+  // index dedicated preferences only while their structured editors are available
+  if (!options.rawSourceIds.has(source.id)) {
+    // retain each field's owning page and source path
+    for (const { key, page, keywords } of applicationPreferences) {
+      const schema = baseSchema.properties?.[key];
+      // require catalog support for the corresponding control
+      if (schema !== undefined) visitSchema(index, page, schema, childValue(source.value, key), [key], [], { keywordFor: () => keywords });
+    }
+  }
 
   const review = baseSchema.properties?.review;
   // keep permanent Review controls searchable without creating omitted configuration

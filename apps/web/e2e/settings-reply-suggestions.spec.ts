@@ -34,14 +34,15 @@ function applicationSource(state: FixtureState, writable: boolean) {
 }
 
 // mount one stateful application settings fixture
-async function setupReplySuggestionSettings(page: Page, options: { enabled?: boolean; writable?: boolean } = {}) {
+async function setupReplySuggestionSettings(page: Page, options: { enabled?: boolean; autoDeleteSentNotes?: boolean; writable?: boolean } = {}) {
   await mockAccountSocket(page);
   await page.addInitScript(() => localStorage.clear());
   const writable = options.writable !== false;
   const state: FixtureState = {
     value: {
       publicOrigin: 'https://fixture.example.test',
-      ...(options.enabled === undefined ? {} : { replySuggestions: options.enabled })
+      ...(options.enabled === undefined ? {} : { replySuggestions: options.enabled }),
+      ...(options.autoDeleteSentNotes === undefined ? {} : { autoDeleteSentNotes: options.autoDeleteSentNotes })
     },
     revision: 1,
     saves: [],
@@ -120,11 +121,11 @@ async function reloadSettings(page: Page) {
 }
 
 // verify placement default copy and search ownership
-test('places omitted reply suggestions on Interface with an agent-usage warning', async ({ page }) => {
+test('places omitted reply suggestions on Agents with an agent-usage warning', async ({ page }) => {
   const { settings, state } = await setupReplySuggestionSettings(page);
   await openPage(settings, 'Application');
   await expect(settings.locator('[data-settings-path="replySuggestions"]')).toHaveCount(0);
-  await openPage(settings, 'Interface');
+  await openPage(settings, 'Agents');
   const setting = settings.locator('[data-settings-path="replySuggestions"]');
   const toggle = setting.getByRole('switch', { name: 'Reply suggestions', exact: true });
   await expect(toggle).not.toBeChecked();
@@ -136,15 +137,42 @@ test('places omitted reply suggestions on Interface with an agent-usage warning'
   const search = settings.getByRole('searchbox', { name: 'Search settings', exact: true });
   await search.fill('Reply suggestions');
   const result = page.getByRole('listbox', { name: 'Settings search results', exact: true }).getByRole('option').filter({ hasText: 'Reply suggestions' });
-  await expect(result).toContainText('Interface');
+  await expect(result).toContainText('Agents');
   await result.click();
   await expect(setting).toHaveAttribute('data-settings-search-highlight', 'true');
+});
+
+// verify server ownership placement help search and persistence
+test('places and persists automatic sent-note deletion on Notes', async ({ page }) => {
+  const { settings, state } = await setupReplySuggestionSettings(page);
+  await openPage(settings, 'Application');
+  await expect(settings.locator('[data-settings-path="autoDeleteSentNotes"]')).toHaveCount(0);
+  await openPage(settings, 'Notes');
+  const setting = settings.locator('[data-settings-path="autoDeleteSentNotes"]');
+  const toggle = setting.getByRole('switch', { name: 'Auto-delete sent notes', exact: true });
+  await expect(toggle).not.toBeChecked();
+  await expect(setting).toContainText(/send them, queue them, or choose Launch and run.*Locked notes and scheduled runs are unaffected.*Undo/u);
+  expect(state.value).not.toHaveProperty('autoDeleteSentNotes');
+
+  const search = settings.getByRole('searchbox', { name: 'Search settings', exact: true });
+  await search.fill('queued unlocked notes');
+  const result = page.getByRole('listbox', { name: 'Settings search results', exact: true }).getByRole('option').filter({ hasText: 'Auto-delete sent notes' });
+  await expect(result).toContainText('Notes');
+  await result.click();
+  await expect(setting).toHaveAttribute('data-settings-search-highlight', 'true');
+
+  await toggle.check();
+  await settings.getByRole('button', { name: 'Save changes' }).click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  expect(state.validations).toHaveLength(1);
+  expect(state.saves[0]!.changes.flatMap(change => change.patches ?? [])).toContainEqual(expect.objectContaining({ op: 'set', path: ['autoDeleteSentNotes'], value: true }));
+  expect(state.value.autoDeleteSentNotes).toBe(true);
 });
 
 // verify explicit true false and true persistence
 test('persists explicit reply suggestion choices across reloads', async ({ page }) => {
   let { settings, state } = await setupReplySuggestionSettings(page, { enabled: true });
-  await openPage(settings, 'Interface');
+  await openPage(settings, 'Agents');
   let toggle = settings.getByRole('switch', { name: 'Reply suggestions', exact: true });
   await expect(toggle).toBeChecked();
 
@@ -156,7 +184,7 @@ test('persists explicit reply suggestion choices across reloads', async ({ page 
   expect(state.value.replySuggestions).toBe(false);
 
   settings = await reloadSettings(page);
-  await openPage(settings, 'Interface');
+  await openPage(settings, 'Agents');
   toggle = settings.getByRole('switch', { name: 'Reply suggestions', exact: true });
   await expect(toggle).not.toBeChecked();
   await toggle.check();
@@ -166,14 +194,15 @@ test('persists explicit reply suggestion choices across reloads', async ({ page 
   expect(state.value.replySuggestions).toBe(true);
 
   settings = await reloadSettings(page);
-  await openPage(settings, 'Interface');
+  await openPage(settings, 'Agents');
   await expect(settings.getByRole('switch', { name: 'Reply suggestions', exact: true })).toBeChecked();
 });
 
 // verify installation write ownership reaches the dedicated control
 test('disables reply suggestions in read-only catalogs', async ({ page }) => {
   const { settings } = await setupReplySuggestionSettings(page, { enabled: true, writable: false });
-  await openPage(settings, 'Interface');
-  await expect(settings.getByRole('switch', { name: 'Reply suggestions', exact: true })).toBeDisabled();
-  await expect(settings.getByRole('note').filter({ hasText: 'Reply suggestions are read-only' })).toBeVisible();
+  await openPage(settings, 'Agents');
+  const replySuggestions = settings.getByRole('region', { name: 'Reply suggestions', exact: true });
+  await expect(replySuggestions.getByRole('switch', { name: 'Reply suggestions', exact: true })).toBeDisabled();
+  await expect(replySuggestions.getByRole('note')).toHaveText('This setting is read-only in this installation.');
 });

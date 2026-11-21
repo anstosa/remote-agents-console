@@ -16,9 +16,9 @@ const panes = [
 
 const coraAgent = { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', branch: 'feature/phone', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0, changes: [{ code: ' M', path: 'src/app.ts', additions: 1, deletions: 1 }] }, title: 'Ready', projectUrl: 'https://project.example.com', stack: { running: true, tunnel: true }, queuedPromptCount: 0 };
 
-const routeApi = (page: Page, agents = [coraAgent]) => page.route('**/api/**', async route => {
+const routeApi = (page: Page, agents = [coraAgent], flyoutMarkers = false) => page.route('**/api/**', async route => {
   const path = new URL(route.request().url()).pathname;
-  if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+  if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', flyoutMarkers } });
   if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents, projects: [] } });
   if (path === '/api/push/public-key') return route.fulfill({ json: {} });
   if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'pane-ticket' } });
@@ -103,11 +103,9 @@ const switchWorkspace = async (page: Page, name: string) => {
 };
 
 test.beforeEach(async ({ page }) => {
-  // opt in before loading split controls
-  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
   await installPaneMock(page);
   await page.route('https://project.example.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main>Phone preview</main>' }));
-  await routeApi(page);
+  await routeApi(page, [coraAgent], true);
   await page.goto('/');
   await seedPaneSize(page, 'agent-1', 80, 24);
   await pushBytes(page, 'agent-1', 'Ready\r\n');

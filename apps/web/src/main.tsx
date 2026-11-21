@@ -20,7 +20,7 @@ import { ContextMenuHost, contextMenuOwnsFocus, openContextMenu, type ContextMen
 import { SelectionActionsContext, openSelectionContextMenu, preserveContextMenuPress, useSelectionActions, type ClipboardContents, type SelectionActions } from './selection-context-menu.js';
 import { ContextFlyoutEvents } from './context-flyouts.js';
 import { agentSplitHidden, setAgentSplitHidden, workspaceOpenGeneration, workspaceOpenStillCurrent, workspaceIntentionallyEmpty, setWorkspaceIntentionallyEmpty, workspaceAlias, setWorkspaceAlias, settingsSplitOpen, setSettingsSplitOpen, useWorkspaceViewRevision, workspaceViews, pendingWorkspaceJumps, requestWorkspaceJump, type WorkspaceSplit, type WorkspaceView } from './workspace-view.js';
-import { PanelExpandContext, type PanelAction, type PanelExpansion, PanelHeader, PanelIcon, panelIcons, type ProgressColor, useExpansionScope, usePanelExpand, usePanelExpansion, usePhoneLayout } from './panel-header.js';
+import { PanelExpandContext, type PanelAction, type PanelExpansion, PanelHeader, PanelIcon, panelIcons, type ProgressColor, useExpansionScope, usePanelExpand, usePanelExpansion, usePhoneLayout, workspacePanelGlyphs } from './panel-header.js';
 import { ConfiguredButtonList, ConfiguredButtonsProvider, type ButtonActionDraft, type ButtonCatalog, useConfiguredButtons, useConfiguredButtonsBusy } from './configured-buttons.js';
 import { clearTerminalCommand, pruneTerminalCommands, stageTerminalCommand, terminalCommandKey, terminalCommandLimitMessage, TerminalCommandDraft } from './terminal-command-draft.js';
 import { type CarouselPanel, type PanelCarousel, PanelDots, usePanelCarousel, usePanelSwipe } from './panel-carousel.js';
@@ -41,11 +41,9 @@ import { isVimCommand } from './terminal-navigation.js';
 import { confirmKey, KeyboardLayer, KeyPicker, keyTarget, shortcutSettingsNavigationEvent, terminalBindingAction, useKeyAction, useKeyActions, type KeyPickerOption } from './keyboard.js';
 import type { KeysConfig } from '../../server/src/config/keys.js';
 import { applyColorTheme, useColorTheme } from './color-theme.js';
-import { useDynamicWorktrees } from './dynamic-worktrees.js';
-import { useUsagePace } from './usage-pace.js';
+import { serverPreferences, ServerPreferencesProvider, useServerPreferences, type FileOpenAction } from './server-preferences.js';
 import { applyReducedMotion, prefersReducedMotion } from './reduced-motion.js';
 import { useFullscreenAction } from './fullscreen-loader.js';
-import { applyFlyoutMarkers } from './flyout-markers.js';
 import { readNotificationSounds } from './notification-sounds.js';
 import { UpstreamRebaseNotification, type GitUpstreamSummary } from './upstream-rebase.js';
 import { useViewportFlyout } from './viewport-flyout.js';
@@ -63,7 +61,6 @@ import { ScheduleEditor, defaultScheduleCron, lastRunNeedsAttention, scheduleInv
 import { useBrowserPermissionBroker } from './browser-permissions.js';
 import { FilesPanel } from './files-panel/files-panel.js';
 import { useFilePreview, type FilePreviewController } from './file-preview.js';
-import { useFileOpenAction } from './file-open-action.js';
 import { saveFilesOpen, useFilesController, type FilesController } from './files-panel/controller.js';
 import type { FileEntry } from './files-panel/contracts.js';
 import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './settings/settings-center.js';
@@ -368,6 +365,8 @@ const isQueuedPrompt = (value: unknown): value is QueuedPrompt => value !== null
   && ((value as QueuedPrompt).attachments === undefined || Array.isArray((value as QueuedPrompt).attachments) && (value as QueuedPrompt).attachments!.every(attachment => attachment !== null && typeof attachment === 'object' && typeof attachment.name === 'string' && Number.isInteger(attachment.size) && attachment.size >= 0));
 type NoteAttachment = { name: string; size: number };
 type WorktreeNote = { id: string; text: string; title?: string; locked?: boolean; allWorkspaces?: boolean; attachments?: NoteAttachment[]; source?: 'queued-prompt' | 'conductor'; schedule?: Schedule; nextRun?: string };
+type DeletedNoteReceipt = { id: string; undoToken: string };
+type NoteLaunchRunResult = { deletedNote?: DeletedNoteReceipt };
 // keep deletion recovery available after changing workspaces
 const NoteFeedbackContext = createContext<{ deleted: (label: string, undoToken: string) => void; toasts: ReactNode[] } | undefined>(undefined);
 // the Adapter and target a new Schedule pre-fills with, plus the launcher rows the note pane's
@@ -379,7 +378,7 @@ type ServerInfo = { name: string; url: string; icon?: string; remotes: RemoteSer
 type InstanceAttention = 'idle'|'working'|'question'|'completed'|'unavailable';
 type InstanceStatus = RemoteServer & { attention: InstanceAttention };
 type DavoSettings = { enabled: boolean; available: boolean; name: string; context: string };
-type SessionInfo = { csrfToken: string; active: boolean; deviceName?: string; controllingDeviceName?: string; defaultAgent?: AgentKind; resourceMonitoring?: boolean; davo?: DavoSettings; server?: ServerInfo };
+type SessionInfo = { csrfToken: string; active: boolean; deviceName?: string; controllingDeviceName?: string; defaultAgent?: AgentKind; resourceMonitoring?: boolean; fileOpenAction?: FileOpenAction; flyoutMarkers?: boolean; dynamicWorktrees?: boolean; usagePace?: boolean; davo?: DavoSettings; server?: ServerInfo };
 type CodexLimitWindow = { usedPercent: number; windowDurationMins?: number; resetsAt?: number };
 type ApiKeySpend = { status: 'available'; todayUsd: number; weekUsd: number; asOf: number } | { status: 'unconfigured' | 'unavailable' };
 type CodexAccount = { id: string; label: string; active: boolean; authMode?: 'apikey'; spend?: ApiKeySpend; email?: string; planType?: string; primary?: CodexLimitWindow; secondary?: CodexLimitWindow; resetCount?: number; error?: string };
@@ -1543,7 +1542,7 @@ const limitPace = ({ usedPercent, windowDurationMins, resetsAt }: CodexLimitWind
 };
 // render one account limit meter
 function CodexLimitUsage({ window, now }: { window: CodexLimitWindow; now: number }) {
-  const showPace = useUsagePace();
+  const { usagePace: showPace } = useServerPreferences();
   const duration = codexLimitDuration(window.windowDurationMins);
   const countdown = codexResetCountdown(window.resetsAt, now);
   const pace = showPace ? limitPace(window, now) : undefined;
@@ -3626,7 +3625,7 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   // render numbered answers
   if (question && answerMode) return <section ref={composerVisibilityRef} className="prompt question-prompt" aria-label="Agent question" onDragEnter={dragAttachments} onDragOver={dragAttachments} onDragLeave={leaveAttachmentDrag} onDragEnd={clearAttachmentDrag} onDrop={dropAttachments}><div className="question-heading"><div className="question-copy"><strong>{question.permission ? 'Permission request' : 'Agent question'}{question.page !== undefined && <span className="question-page"> · {question.page.index + 1} of {question.page.count} · <button type="button" className="question-page-next" onClick={question.page.next}>next</button></span>}{question.expiresAt !== undefined && <QuestionCountdown key={question.id} expiresAt={question.expiresAt} />}</strong><span>{question.text}</span>{question.detail !== undefined && <pre className="question-detail">{question.detail}</pre>}</div><div className="question-tools">{!choiceOnlyParsedPermission && <button type="button" className="question-notes-toggle" aria-controls={questionNotesId} data-context-flyout aria-expanded={questionNotesOpen} onClick={() => { /* toggle answer notes */ setNotesQuestionId(questionNotesOpen ? undefined : question.id); }}>{questionNotesOpen ? 'Hide reply' : 'Reply in your own words'}</button>}{questionModeToggle}</div></div>{question.textAnswer !== undefined && <QuestionTextAnswer key={question.id} field={question.textAnswer} pending={pending} onAnswer={text => void answer(text)} />}{question.dismissable && <button type="button" className="question-dismiss" disabled={pending} onClick={() => void answer({ dismiss: true })}>Dismiss</button>}<div className="question-choices">{question.choices.map(choice => <button key={`${choice.answerIndex}-${choice.label}`} className="question-choice" disabled={pending} onClick={() => void answer(choice.answerIndex)}><b aria-hidden="true">{choice.number}</b><span>{choice.label}{choice.description && <small>{choice.description}</small>}</span></button>)}</div>{questionNotes}{attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}</section>;
   const queueLabel = pending ? 'Queueing' : 'Queue';
-  const queuePanel = queuedPromptsOpen && <FlyoutPortal onDismiss={() => setQueuedPromptsOpen(false)}><section className="queued-prompts-panel more-menu flyout-menu" ref={queuedPromptFlyoutRef} style={queuedPromptFlyoutStyle} aria-label="Queued prompts"><header><strong>Queued prompts</strong></header>{pendingSteers.length > 0 && <div className="pending-steers" aria-label="Pending steers"><small>Steers pending: held by the agent, not in the queue</small><ul>{pendingSteers.map((steer, index) => <li key={index}>{steer}</li>)}</ul></div>}{queuedPromptError && <p className="queued-prompt-error" role="alert">{queuedPromptError}</p>}<div className="queued-prompts-list">{queuedPrompts.map((queued, index) => { const label = queued.text || queued.attachments?.map(attachment => attachment.name).join(', ') || 'Attachments only'; const editing = queuedPromptEdit?.id === queued.id; const busy = queuedPromptAction !== undefined; return <div className={`queued-prompt-item${editing ? ' editing' : ''}`} key={queued.id}><span className="queued-prompt-order"><strong className="queued-prompt-position" aria-label={`Queue position ${index + 1}`}>{index + 1}</strong><span className="queued-prompt-order-buttons"><button type="button" disabled={busy || index === 0} aria-label={`Move queued prompt earlier: ${label}`} title="Move earlier" onClick={() => void moveQueuedPrompt(queued, 'earlier')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg></button><button type="button" disabled={busy || index === queuedPrompts.length - 1} aria-label={`Move queued prompt later: ${label}`} title="Move later" onClick={() => void moveQueuedPrompt(queued, 'later')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg></button></span></span>{editing ? <textarea aria-label={`Edit queued prompt: ${label}`} value={queuedPromptEdit.text} maxLength={32_000} autoFocus onChange={event => setQueuedPromptEdit({ id: queued.id, text: event.target.value })} /> : <span className="prompt-with-sender"><PromptSenderChips sender={queued} /><button className="queued-prompt-copy" type="button" disabled={busy} title={label} onClick={() => setQueuedPromptEdit({ id: queued.id, text: queued.text })}><span>{queued.text || 'Attachments only'}</span>{queued.attachments?.length ? <small>{queued.attachments.map(attachment => attachment.name).join(', ')}</small> : null}</button></span>}<span className="queued-prompt-actions">{editing ? <><button type="button" disabled={busy || !queuedPromptEdit.text.trim() && queued.attachments === undefined} aria-label={`Save queued prompt changes: ${label}`} title="Save changes" onClick={() => void saveQueuedPromptEdit(queued)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg></button><button type="button" disabled={busy} aria-label={`Stop editing queued prompt: ${label}`} title="Stop editing" onClick={() => setQueuedPromptEdit(undefined)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></> : <button type="button" className={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save' ? 'progress-border progress-blue' : undefined} aria-busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save' || undefined} disabled={busy} aria-label={`Save queued prompt as note: ${label}`} title="Save as note" onClick={() => void saveQueuedPromptAsNote(queued)}><ProgressRing busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save'} /><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="notes-icon-sheet" d="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M15 21v-6h6" /></svg></button>}<button className={`queued-prompt-cancel${progressBorder(queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel', 'red')}`} type="button" aria-busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel' || undefined} disabled={busy} aria-label={`Cancel queued prompt: ${label}`} title="Cancel queued prompt" onClick={() => void cancelQueuedPrompt(queued)}><ProgressRing busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel'} /><svg className="action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg></button></span></div>; })}</div></section></FlyoutPortal>;
+  const queuePanel = queuedPromptsOpen && <FlyoutPortal onDismiss={() => setQueuedPromptsOpen(false)}><section className="queued-prompts-panel more-menu flyout-menu" ref={queuedPromptFlyoutRef} style={queuedPromptFlyoutStyle} aria-label="Queued prompts"><header><strong>Queued prompts</strong></header>{pendingSteers.length > 0 && <div className="pending-steers" aria-label="Pending steers"><small>Steers pending: held by the agent, not in the queue</small><ul>{pendingSteers.map((steer, index) => <li key={index}>{steer}</li>)}</ul></div>}{queuedPromptError && <p className="queued-prompt-error" role="alert">{queuedPromptError}</p>}<div className="queued-prompts-list">{queuedPrompts.map((queued, index) => { const label = queued.text || queued.attachments?.map(attachment => attachment.name).join(', ') || 'Attachments only'; const editing = queuedPromptEdit?.id === queued.id; const busy = queuedPromptAction !== undefined; return <div className={`queued-prompt-item${editing ? ' editing' : ''}`} key={queued.id}><span className="queued-prompt-order"><strong className="queued-prompt-position" aria-label={`Queue position ${index + 1}`}>{index + 1}</strong><span className="queued-prompt-order-buttons"><button type="button" disabled={busy || index === 0} aria-label={`Move queued prompt earlier: ${label}`} title="Move earlier" onClick={() => void moveQueuedPrompt(queued, 'earlier')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg></button><button type="button" disabled={busy || index === queuedPrompts.length - 1} aria-label={`Move queued prompt later: ${label}`} title="Move later" onClick={() => void moveQueuedPrompt(queued, 'later')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg></button></span></span>{editing ? <textarea aria-label={`Edit queued prompt: ${label}`} value={queuedPromptEdit.text} maxLength={32_000} autoFocus onChange={event => setQueuedPromptEdit({ id: queued.id, text: event.target.value })} /> : <span className="prompt-with-sender"><PromptSenderChips sender={queued} /><button className="queued-prompt-copy" type="button" disabled={busy} title={label} onClick={() => setQueuedPromptEdit({ id: queued.id, text: queued.text })}><span>{queued.text || 'Attachments only'}</span>{queued.attachments?.length ? <small>{queued.attachments.map(attachment => attachment.name).join(', ')}</small> : null}</button></span>}<span className="queued-prompt-actions">{editing ? <><button type="button" disabled={busy || !queuedPromptEdit.text.trim() && queued.attachments === undefined} aria-label={`Save queued prompt changes: ${label}`} title="Save changes" onClick={() => void saveQueuedPromptEdit(queued)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg></button><button type="button" disabled={busy} aria-label={`Stop editing queued prompt: ${label}`} title="Stop editing" onClick={() => setQueuedPromptEdit(undefined)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></> : <button type="button" className={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save' ? 'progress-border progress-blue' : undefined} aria-busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save' || undefined} disabled={busy} aria-label={`Save queued prompt as note: ${label}`} title="Save as note" onClick={() => void saveQueuedPromptAsNote(queued)}><ProgressRing busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save'} /><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true">{workspacePanelGlyphs.notes}</svg></button>}<button className={`queued-prompt-cancel${progressBorder(queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel', 'red')}`} type="button" aria-busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel' || undefined} disabled={busy} aria-label={`Cancel queued prompt: ${label}`} title="Cancel queued prompt" onClick={() => void cancelQueuedPrompt(queued)}><ProgressRing busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel'} /><svg className="action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg></button></span></div>; })}</div></section></FlyoutPortal>;
   // the queued prompts stay one tap away: counted, and disabled while the queue is empty
   const queuedToggle = <button className={`queued-prompts-toggle icon-button${queuedPromptsOpen ? ' active' : ''}`} type="button" disabled={pending || queuedPrompts.length === 0 && pendingSteers.length === 0} aria-label={`Queued prompts (${queuedPrompts.length})`} data-context-flyout aria-expanded={queuedPromptsOpen} title={queuedPrompts.length === 0 ? 'No queued prompts' : `${queuedPrompts.length} queued prompt${queuedPrompts.length === 1 ? '' : 's'}`} onClick={() => setQueuedPromptsOpen(open => !open)}><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.queue} /></svg>{queuedPrompts.length > 0 && <span className="saved-prompts-count queued-prompts-count" aria-hidden="true">{queuedPrompts.length}</span>}</button>;
   const sendButton = <button className={`queue icon-button${progressBorder(pending, 'blue')}`} aria-busy={pending || undefined} disabled={!ready || pending || (!value && attachments.length === 0)} aria-label={queueLabel} title={queueLabel} onClick={() => void submit()}><ProgressRing busy={pending} /><svg viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.send} /></svg></button>;
@@ -3680,6 +3679,16 @@ const isWorktreeNote = (value: unknown): value is WorktreeNote => {
       // require valid file metadata before exposing note actions
       attachment => attachment !== null && typeof attachment === 'object' && typeof attachment.name === 'string' && Number.isSafeInteger(attachment.size) && attachment.size > 0
     ));
+};
+// accept only a recoverable deletion for the note that was dispatched
+const deletedNoteReceipt = (value: unknown, noteId: string): DeletedNoteReceipt | undefined => {
+  // reject unrelated or malformed response bodies
+  if (value === null || typeof value !== 'object') return undefined;
+  const receipt = (value as { deletedNote?: unknown }).deletedNote;
+  // require both the expected note identity and its undo snapshot
+  if (receipt === null || typeof receipt !== 'object') return undefined;
+  const { id, undoToken } = receipt as Partial<DeletedNoteReceipt>;
+  return id === noteId && typeof undoToken === 'string' && undoToken.trim() ? { id, undoToken } : undefined;
 };
 // treat attachment-only notes as useful content
 const noteHasContent = (note: Pick<WorktreeNote, 'text'|'attachments'>) => Boolean(note.text.trim() || note.attachments?.length);
@@ -4114,7 +4123,7 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
 // manage persistent worktree notes
 // `expansion` is the Workspace's: the note pane expands through it, and a retained note view
 // restores its expansion into it.
-function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpansion, agentId?: string, agentWorking = false, latestAssistantMessage?: string, latestAssistantMessageOverflows = false, onPromptHistoryChanged?: () => void | Promise<void>, promptHistory: PromptHistoryEntry[] = [], schedulePrefill?: SchedulePrefill, onLaunchAndRun?: (noteId: string) => Promise<boolean>, launchRunLabel?: string, promptNote?: PromptNoteSource, onAttachmentPreview?: (path: string, url: string, restore: () => boolean) => void, onAddToPrompt?: (text: string) => void) {
+function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpansion, agentId?: string, agentWorking = false, latestAssistantMessage?: string, latestAssistantMessageOverflows = false, onPromptHistoryChanged?: () => void | Promise<void>, promptHistory: PromptHistoryEntry[] = [], schedulePrefill?: SchedulePrefill, onLaunchAndRun?: (noteId: string) => Promise<NoteLaunchRunResult | false>, launchRunLabel?: string, promptNote?: PromptNoteSource, onAttachmentPreview?: (path: string, url: string, restore: () => boolean) => void, onAddToPrompt?: (text: string) => void) {
   const noteFeedback = useContext(NoteFeedbackContext);
   // use the shared mobile text-editing breakpoint
   const phone = usePhoneLayout();
@@ -4515,8 +4524,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   };
   // preserve the saved snapshot while visibility may revoke this workspace's access
   const updateDraft = (note: WorktreeNote, text: string) => {
-    // preserve the snapshot during visibility writes and deletion
-    if (noteMetadataMutation.current?.option === 'allWorkspaces' || deleting || menuDeletingId === note.id) return;
+    // preserve the snapshot while a mutation or dispatch owns this note
+    if (noteMetadataMutation.current?.option === 'allWorkspaces' || deleting || menuDeletingId === note.id || sendState === 'sending' || menuRunningId === note.id) return;
     draftRef.current = text;
     activeNoteRef.current = { ...note, text };
     setDraft(text);
@@ -4640,8 +4649,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     if (note === undefined || !text || next.length > 30_000) return;
     updateDraft(note, next);
   };
-  // disallow selection appends while visibility is being saved
-  const canAppendToActive = (text: string) => noteMetadataMutation.current?.option !== 'allWorkspaces' && activeNoteRef.current !== undefined && appendTextBlock(draftRef.current, text).length <= 30_000;
+  // disallow selection appends while metadata or dispatch owns the note snapshot
+  const canAppendToActive = (text: string) => noteMetadataMutation.current?.option !== 'allWorkspaces' && sendState !== 'sending' && menuRunningId === undefined && activeNoteRef.current !== undefined && appendTextBlock(draftRef.current, text).length <= 30_000;
   const copy = async () => {
     try {
       await copyText(draftRef.current);
@@ -4770,17 +4779,21 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     const note = activeNoteRef.current;
     // allow attachment-only notes without racing file writes
     if (resourceBase === undefined || note === undefined || agentId === undefined || !noteHasContent({ ...note, text: prompt }) || deleting || attachmentMutation.current || sendState === 'sending' || !beginPendingOperation(promptPendingKey, agentItemKey({ id: agentId, worktreeId }))) return;
-    flush();
     setSendState('sending');
     setCopyState('idle');
     // a retry must not display an earlier success after it fails
     setQueuedNoteFeedback(current => Object.fromEntries(Object.entries(current).filter(([id]) => id !== note.id)));
     try {
-      const attachments = await fetchNoteAttachments(resourceBase, note);
-      const response = await request(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, attachments }) });
+      const dispatched = await settleNoteForDispatch(note);
+      const attachments = await fetchNoteAttachments(resourceBase, dispatched.note);
+      const response = await request(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: dispatched.note.text, attachments, ...(dispatched.saved ? { noteId: dispatched.note.id } : {}) }) });
       // report dispatch failures without clearing saved note content
       if (!response.ok) throw new Error();
-      markNoteQueued(note.id);
+      const payload: unknown = response.status === 200 ? await response.json().catch(() => undefined) : undefined;
+      const receipt = dispatched.saved ? deletedNoteReceipt(payload, note.id) : undefined;
+      // retain ordinary queue feedback when the server kept the note
+      if (receipt === undefined) markNoteQueued(note.id);
+      else acceptDispatchedNoteDeletion(note, resourceBase, dispatched.note.text, receipt);
       // keep completed sends from changing another note's pending state
       if (noteContext.current === resourceBase && activeNoteRef.current?.id === note.id) setSendState('idle');
       // history refresh failures do not turn accepted prompts into failed sends
@@ -4812,18 +4825,24 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     try {
       // wait for text persistence before launching from the stored note
       if (launchAndRunMode) {
-        // persist the open note and let the queued save land before the server reads it, so the
-        // Run submits the current text; the launch toasts and the tab switch carry the outcome
-        flush();
-        await saveQueue.current;
-        await onLaunchAndRun!(note.id);
+        const dispatched = await settleNoteForDispatch(note);
+        // the launch route reads the saved note instead of receiving the draft
+        if (!dispatched.saved) throw new Error('note save failed');
+        const result = await onLaunchAndRun!(note.id);
+        // consume deletion only after the launch route accepted this saved note
+        if (result !== false && result.deletedNote !== undefined) acceptDispatchedNoteDeletion(note, resourceBase, dispatched.note.text, result.deletedNote);
       // include saved files when sending directly to an existing agent
       } else if (agentId !== undefined && noteHasContent(note)) {
-        const attachments = await fetchNoteAttachments(resourceBase, note);
-        const response = await request(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: note.text, attachments }) });
+        const dispatched = await settleNoteForDispatch(note);
+        const attachments = await fetchNoteAttachments(resourceBase, dispatched.note);
+        const response = await request(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: dispatched.note.text, attachments, ...(dispatched.saved ? { noteId: dispatched.note.id } : {}) }) });
         // preserve the saved note after a failed dispatch
         if (!response.ok) throw new Error();
-        markNoteQueued(note.id);
+        const payload: unknown = response.status === 200 ? await response.json().catch(() => undefined) : undefined;
+        const receipt = dispatched.saved ? deletedNoteReceipt(payload, note.id) : undefined;
+        // retain ordinary queue feedback when the server kept the note
+        if (receipt === undefined) markNoteQueued(note.id);
+        else acceptDispatchedNoteDeletion(note, resourceBase, dispatched.note.text, receipt);
         // refresh history independently from the accepted prompt
         void Promise.resolve().then(onPromptHistoryChanged).catch(() => undefined);
       }
@@ -4977,6 +4996,38 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
       // restore toolbar focus for pane deletes
       if (restoreFocusAfterClose) restoreTriggerFocus();
     }
+  };
+  // persist the exact text snapshot before a note-backed dispatch can delete it
+  const settleNoteForDispatch = async (note: WorktreeNote): Promise<{ note: WorktreeNote; saved: boolean }> => {
+    const current = activeNoteRef.current;
+    const active = current?.id === note.id ? current : undefined;
+    const text = active === undefined ? dirtyTexts.current.get(note.id) ?? queuedTexts.current.get(note.id) ?? note.text : draftRef.current;
+    const pendingText = dirtyTexts.current.get(note.id);
+    // enqueue the latest draft even when this action came from the flyout
+    if (active !== undefined) flush();
+    else if (pendingText !== undefined) persist(note.id, pendingText);
+    await saveQueue.current;
+    const saved = !dirtyTexts.current.has(note.id) && !queuedTexts.current.has(note.id);
+    // live sends can omit note identity and retain their historical best-effort save behavior
+    return { note: { ...note, ...active, text }, saved };
+  };
+  // remove a dispatched note only when no newer local draft raced its deletion
+  const acceptDispatchedNoteDeletion = (note: WorktreeNote, origin: string, sentText: string, receipt: DeletedNoteReceipt) => {
+    noteFeedback?.deleted(noteName(note), receipt.undoToken);
+    // leave a replacement workspace's notes untouched
+    if (noteContext.current !== origin) return;
+    const current = activeNoteRef.current;
+    const newerDraft = dirtyTexts.current.has(note.id) || queuedTexts.current.has(note.id) || current?.id === note.id && draftRef.current !== sentText;
+    // preserve any unexpected newer draft for copying instead of clearing it
+    if (newerDraft) {
+      // surface preservation on the active editor
+      if (current?.id === note.id) setSaveStatus('error');
+      return;
+    }
+    noteLoadSequence.current += 1;
+    setLoading(false);
+    setSendState('idle');
+    forgetNote(note, false);
   };
   // delete one note after pending saves settle
   const deleteNote = async (note: WorktreeNote, restoreFocusAfterClose: boolean) => {
@@ -5152,7 +5203,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   // retain recovered-prompt attention while the notes list acknowledges it
   const control = <div className="notes-control" ref={anchorRef}>
     {/* let primary presses leave the prompt and dismiss the mobile keyboard */}
-    <button ref={triggerRef} className={`log-control page-arrow notes-toggle toolbar-button${unreadQueuedNotes ? ' unread-queued-prompts' : ''}${menuOpen || activeNote !== undefined ? ' active' : ''}${activeNote !== undefined ? ' panel-open' : ''}${dirtyCount > 0 ? ' unsaved' : ''}${highlightLatestResponse ? ' latest-response-available' : ''}${loading && notesProgressKind === 'loading' ? ' notes-read-loading' : ''}${progressBorder(loading && notesProgressKind === 'working', 'blue')}`} aria-busy={loading || undefined} aria-label={notesLabel} aria-description={noteCount > 0 ? noteCountsDescription : undefined} title={`${notesLabel}${noteCount > 0 ? ` — ${noteCountsDescription}` : ''}${unreadQueuedNotes ? ' — unread queued prompts' : ''}`} data-context-flyout aria-expanded={menuOpen} disabled={loading} onClick={() => void toggle()}><ProgressRing busy={loading && notesProgressKind === 'working'} /><span className="flyout-caret" aria-hidden="true" /><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="notes-icon-sheet" d="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M15 21v-6h6" /></svg><span className="toolbar-label">Notes</span>
+    <button ref={triggerRef} className={`log-control page-arrow notes-toggle toolbar-button${unreadQueuedNotes ? ' unread-queued-prompts' : ''}${menuOpen || activeNote !== undefined ? ' active' : ''}${activeNote !== undefined ? ' panel-open' : ''}${dirtyCount > 0 ? ' unsaved' : ''}${highlightLatestResponse ? ' latest-response-available' : ''}${loading && notesProgressKind === 'loading' ? ' notes-read-loading' : ''}${progressBorder(loading && notesProgressKind === 'working', 'blue')}`} aria-busy={loading || undefined} aria-label={notesLabel} aria-description={noteCount > 0 ? noteCountsDescription : undefined} title={`${notesLabel}${noteCount > 0 ? ` — ${noteCountsDescription}` : ''}${unreadQueuedNotes ? ' — unread queued prompts' : ''}`} data-context-flyout aria-expanded={menuOpen} disabled={loading} onClick={() => void toggle()}><ProgressRing busy={loading && notesProgressKind === 'working'} /><span className="flyout-caret" aria-hidden="true" /><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true">{workspacePanelGlyphs.notes}</svg><span className="toolbar-label">Notes</span>
       {/* omit empty categories while preserving shared-first order */}
       {noteCount > 0 && <span className="notes-counts" aria-hidden="true">
         {noteCounts.shared > 0 && <span className="saved-prompts-count notes-count notes-count-shared">{noteCounts.shared}</span>}
@@ -5372,7 +5423,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   // expansion with its view
   const paneExpanded = expanded || expansion.immersive;
   // Esc closes the note, unless it is expanded: then the Workspace restores its siblings first
-  const pane = activeNote === undefined ? null : <><section className={`note-pane${paneExpanded ? ' expanded' : ''}${editing ? ' editing' : ' selecting'}`} role="dialog" aria-label="Note" onAuxClickCapture={event => closeOnMiddleClick(event, () => { /* preserve pending note mutations */ if (!noteFilesDisabled) close(); })} onPointerDownCapture={phone && editing ? undefined : preserveContextMenuPress} onMouseDownCapture={phone && editing ? undefined : preserveContextMenuPress} onContextMenu={openNoteContextMenu} onDragEnter={dragNoteFiles} onDragOver={dragNoteFiles} onDragLeave={leaveNoteFiles} onDrop={dropNoteFiles} onPaste={pasteNoteFiles} onKeyDown={event => { if (event.key === 'Escape' && !paneExpanded && !deleting && sendState !== 'sending') { event.preventDefault(); close(); } }}><PanelHeader panelKey="note" label="note" title={noteTitlePill} actions={noteSendAction} secondary={noteSecondary} menuContent={noteOptionsMenu} expandDisabled={noteFilesDisabled} close={{ key: 'close', label: 'Close note', className: 'note-close', disabled: noteFilesDisabled, icon: <PanelIcon path={panelIcons.close} />, onSelect: close }} /><div className="note-pane-head">{noteMetadataError && <p className="note-lock-error" role="alert">{noteMetadataError}</p>}{scheduleArea}{noteAttachmentPicker}{noteAttachmentControls}</div>{draggingNoteFiles && <div className="prompt-drop-overlay" role="status">Drop files to attach to this note</div>}{editing ? <textarea ref={editorRef} aria-label="Note content" value={draft} maxLength={30_000} disabled={deleting || menuDeletingId === activeNote.id || noteVisibilityPending} onChange={event => changeDraft(event.target.value)} onBlur={event => { flush(); /* native mobile popups must retain the editor */ if (phone && event.relatedTarget === null) return; /* menu focus must not unmount the source editor */ if (!contextMenuOwnsFocus(event.currentTarget)) setEditing(false); }} /> : <div className="note-preview-interaction" onPointerDown={() => { selectionAtPointerDown.current = Boolean(window.getSelection()?.toString()); }} onClick={event => inferEditing(event.target)}><NoteMarkdown text={draft} containerRef={previewRef} /></div>}</section>{selectionActions}{notePicker}</>;
+  const pane = activeNote === undefined ? null : <><section className={`note-pane${paneExpanded ? ' expanded' : ''}${editing ? ' editing' : ' selecting'}`} role="dialog" aria-label="Note" onAuxClickCapture={event => closeOnMiddleClick(event, () => { /* preserve pending note mutations */ if (!noteFilesDisabled) close(); })} onPointerDownCapture={phone && editing ? undefined : preserveContextMenuPress} onMouseDownCapture={phone && editing ? undefined : preserveContextMenuPress} onContextMenu={openNoteContextMenu} onDragEnter={dragNoteFiles} onDragOver={dragNoteFiles} onDragLeave={leaveNoteFiles} onDrop={dropNoteFiles} onPaste={pasteNoteFiles} onKeyDown={event => { if (event.key === 'Escape' && !paneExpanded && !deleting && sendState !== 'sending') { event.preventDefault(); close(); } }}><PanelHeader panelKey="note" label="note" title={noteTitlePill} actions={noteSendAction} secondary={noteSecondary} menuContent={noteOptionsMenu} expandDisabled={noteFilesDisabled} close={{ key: 'close', label: 'Close note', className: 'note-close', disabled: noteFilesDisabled, icon: <PanelIcon path={panelIcons.close} />, onSelect: close }} /><div className="note-pane-head">{noteMetadataError && <p className="note-lock-error" role="alert">{noteMetadataError}</p>}{scheduleArea}{noteAttachmentPicker}{noteAttachmentControls}</div>{draggingNoteFiles && <div className="prompt-drop-overlay" role="status">Drop files to attach to this note</div>}{editing ? <textarea ref={editorRef} aria-label="Note content" value={draft} maxLength={30_000} disabled={deleting || menuDeletingId === activeNote.id || noteVisibilityPending || sendState === 'sending' || menuRunningId === activeNote.id} onChange={event => changeDraft(event.target.value)} onBlur={event => { flush(); /* native mobile popups must retain the editor */ if (phone && event.relatedTarget === null) return; /* menu focus must not unmount the source editor */ if (!contextMenuOwnsFocus(event.currentTarget)) setEditing(false); }} /> : <div className="note-preview-interaction" onPointerDown={() => { selectionAtPointerDown.current = Boolean(window.getSelection()?.toString()); }} onClick={event => inferEditing(event.target)}><NoteMarkdown text={draft} containerRef={previewRef} /></div>}</section>{selectionActions}{notePicker}</>;
   // distinguish successful hydration from failed reads that merely settled
   return { active: activeNote !== undefined, appendToActive, canAppendToActive, canCreate: !loading && !noteMetadataPending, canClose: activeNote !== undefined && !noteFilesDisabled, close, initialNotesLoaded, initialNotesSettled: initialNotesSettled || initialNotesLoaded, control, createWithText: create, pane, toggleMenu: toggle };
 }
@@ -7340,7 +7391,7 @@ function GitStatus({ worktreeId, branch, summary, prSummary, attention, pullRequ
 // toolbar shows for a Place without git, and `stack` the Worktree's stack commands.
 type WorkspacePlace = { id?: string; worktreeId?: string; path?: string; stack?: Stack; projectUrl?: string; projectProxied?: boolean; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; pullRequest?: PullRequestSummary; attention?: string };
 // What the Place's notes need from the Agent there (or, with no Agent, how a note's Run launches one).
-type WorkspaceNotesOptions = { agentWorking?: boolean; latestAssistantMessage?: string; latestAssistantMessageOverflows?: boolean; onPromptHistoryChanged?: () => void | Promise<void>; promptHistory?: PromptHistoryEntry[]; schedulePrefill?: SchedulePrefill; onLaunchAndRun?: (noteId: string) => Promise<boolean>; launchRunLabel?: string };
+type WorkspaceNotesOptions = { agentWorking?: boolean; latestAssistantMessage?: string; latestAssistantMessageOverflows?: boolean; onPromptHistoryChanged?: () => void | Promise<void>; promptHistory?: PromptHistoryEntry[]; schedulePrefill?: SchedulePrefill; onLaunchAndRun?: (noteId: string) => Promise<NoteLaunchRunResult | false>; launchRunLabel?: string };
 
 // share the mounted workspace guard with terminal and portal-owned review controls
 const minimizeWorkspacePanel = (workspaceKey: string, panelKey: string, minimize: () => void) => {
@@ -7604,7 +7655,7 @@ function WorkspaceGitStatus({ workspace, actions, onToggle }: { workspace: Works
 function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, onOpenWorktreeStack, onOpenGithub }: { workspace: WorkspaceState; output?: ReactNode; empty?: ReactNode; git?: WorkspaceGitActions; reviewPanel?: ReactNode; onAddToPrompt?: (text: string) => void; onOpenWorktreeStack?: (worktreeId: string) => void; onOpenGithub?: OpenWorktree }) {
   const { place, browser, files, code, preview, stackPanel, githubPanel, notes, expansion } = workspace;
   const { githubRevision, serverStartedAt } = useContext(DashboardGenerationContext);
-  const fileOpenAction = useFileOpenAction();
+  const { fileOpenAction } = useServerPreferences();
   const projects = useContext(ProjectsContext);
   const githubController = useContext(GithubWorkspaceContext);
   const visibleOutput = workspace.agentHidden ? undefined : output;
@@ -9013,7 +9064,7 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
   if (phone && workspace !== undefined) {
     const { browser, files, code, preview, focusSplit } = workspace;
     if (browser.homeUrl !== undefined) menuPanels.push({ key: 'browser', label: 'Browser', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{browserGlyph}</svg>, title: 'Show the project in the browser panel', onSelect: () => browser.open ? focusSplit('browser') : browser.toggle() });
-    if (place?.id !== undefined) menuPanels.push({ key: 'files', label: 'Files', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{filesGlyph}</svg>, title: 'Show the host Files panel', onSelect: () => files.open ? focusSplit('files') : files.show() });
+    if (place?.id !== undefined) menuPanels.push({ key: 'files', label: 'Files', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{workspacePanelGlyphs.files}</svg>, title: 'Show the host Files panel', onSelect: () => files.open ? focusSplit('files') : files.show() });
     if (onGithub) menuPanels.push({ key: 'github', label: <>GitHub{githubBadge > 0 && <span className="github-badge" aria-label={`${githubBadge} new`}>{githubBadge}</span>}</>, icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{githubGlyph}</svg>, title: 'Show the GitHub panel', onSelect: workspace.openGithubPanel });
     if (worktreeId !== undefined && (place?.stack?.processes?.length ?? 0) > 0) menuPanels.push({ key: 'stack', label: 'Stack', icon: <StackIcon path={stackGlyphs.panel} className="more-menu-icon" />, title: 'Show the Stack panel', onSelect: () => workspace.openStackPanel() });
     if (worktreeId !== undefined) menuPanels.push({ key: 'code', label: 'Code', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>, title: 'Show the working changes in the Code panel', onSelect: () => code.open ? focusSplit('code') : code.openChanges('working') });
@@ -9042,7 +9093,6 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
 
 // panel glyphs shared by toolbar buttons and phone rows
 const browserGlyph = <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></>;
-const filesGlyph = <><path d="M3 7h7l2 2h9v10H3z" /><path d="M3 7V5h7l2 2" /></>;
 const codeGlyph = <path d="m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16" />;
 const githubGlyph = githubIcons.pull;
 
@@ -9055,7 +9105,7 @@ function BrowserToggle({ browser }: { browser: WorkspaceState['browser'] }) {
 
 // open the retained host filesystem panel
 function FilesToggle({ files }: { files: WorkspaceState['files'] }) {
-  return <button type="button" className={`toolbar-button files-toggle${files.open ? ' panel-open' : ''}`} aria-label="Files" aria-pressed={files.open} title={files.open ? 'Close the Files panel' : 'Open the host Files panel'} onClick={files.toggle}><svg viewBox="0 0 24 24" aria-hidden="true">{filesGlyph}</svg><span className="toolbar-label">Files</span></button>;
+  return <button type="button" className={`toolbar-button files-toggle${files.open ? ' panel-open' : ''}`} aria-label="Files" aria-pressed={files.open} title={files.open ? 'Close the Files panel' : 'Open the host Files panel'} onClick={files.toggle}><svg viewBox="0 0 24 24" aria-hidden="true">{workspacePanelGlyphs.files}</svg><span className="toolbar-label">Files</span></button>;
 }
 
 // The toolbar's GitHub button: it opens and closes the GitHub panel, its badge counting the pull
@@ -9192,7 +9242,7 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
   };
   // launch a fresh agent for this idle worktree and run one note on it, then hand the new
   // agent off so the tab switches to it — the frontend half of the Run primitive
-  const launchAndRun = async (noteId: string): Promise<boolean> => {
+  const launchAndRun = async (noteId: string): Promise<NoteLaunchRunResult | false> => {
     const operationKey = launchOperationKey(worktree.id);
     // serialize inactive worktree actions
     if (!worktree.available || processing || !beginPendingOperation(operationKey, placeItemKey(worktree.id))) return false;
@@ -9209,18 +9259,19 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
         onOperationFeedback({ tone: 'error', message: `${worktree.label} could not run the note`, detail: message, worktreeId: worktree.id });
         return false;
       }
-      const payload = await response.json() as { agentId?: unknown };
+      const payload: unknown = await response.json();
       // require the discovered new agent
-      if (typeof payload.agentId !== 'string') {
+      if (payload === null || typeof payload !== 'object' || typeof (payload as { agentId?: unknown }).agentId !== 'string') {
         const message = 'The agent started but could not be opened.';
         setError(message);
         onOperationFeedback({ tone: 'error', message: `${worktree.label} could not be opened`, detail: message, worktreeId: worktree.id });
         return false;
       }
-      onLaunched(payload.agentId, worktree, operationKey);
+      onLaunched((payload as { agentId: string }).agentId, worktree, operationKey);
       handedOff = true;
       onOperationFeedback({ tone: 'success', message: `${worktree.label} is running the note`, detail: 'The new agent session is ready and its output is connecting.', worktreeId: worktree.id });
-      return true;
+      const deletedNote = deletedNoteReceipt(payload, noteId);
+      return deletedNote === undefined ? {} : { deletedNote };
     } catch {
       const message = 'Unable to reach the console while launching the agent.';
       setError(message);
@@ -9279,7 +9330,7 @@ function EmptyWorkspace({ workspace, label, detail, launch, onPin }: { workspace
     <div className="empty-workspace-actions">
       {/* keep agent choices available on the empty card */}{launch !== undefined && <LaunchSplitButton label={launch.label} resolution={launch.resolution} target={launch.target} disabled={launch.disabled} disabledReason={launch.disabledReason} pending={launch.pending} placeActions alwaysShowMenu onLaunch={launch.start} />}
       {workspace.terminals.control}
-      {toggleNotes !== undefined && <button type="button" className="toolbar-button" aria-label="Notes" title="Open the notes here" onClick={() => void toggleNotes()}><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="notes-icon-sheet" d="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M15 21v-6h6" /></svg><span className="toolbar-label">Notes</span></button>}
+      {toggleNotes !== undefined && <button type="button" className="toolbar-button" aria-label="Notes" title="Open the notes here" onClick={() => void toggleNotes()}><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true">{workspacePanelGlyphs.notes}</svg><span className="toolbar-label">Notes</span></button>}
       <BrowserToggle browser={workspace.browser} />
       {workspace.place.worktreeId !== undefined && <CodeToggle code={workspace.code} />}
     </div>
@@ -9307,7 +9358,7 @@ function PlaceCard({ place, tabBar, cleanupControl, transient = false, launchDis
   const [running, setRunning] = useState(false);
   // launch a fresh agent at this Place and run one note on it, then hand the new agent off so
   // the tab switches to it (the Place's notes Run route launches as a Launch here would)
-  const launchAndRun = async (noteId: string): Promise<boolean> => {
+  const launchAndRun = async (noteId: string): Promise<NoteLaunchRunResult | false> => {
     const operationKey = launchOperationKey(place.id);
     // serialize note launches with workspace shutdown
     if (running || !beginPendingOperation(operationKey, placeItemKey(place.id))) return false;
@@ -9321,15 +9372,17 @@ function PlaceCard({ place, tabBar, cleanupControl, transient = false, launchDis
         onOperationFeedback({ tone: 'error', message: `${place.label} could not run the note`, detail: await launchError(response) });
         return false;
       }
-      const payload = await response.json() as { agentId?: unknown };
-      if (typeof payload.agentId !== 'string') {
+      const payload: unknown = await response.json();
+      // require the discovered new agent without coupling it to note deletion
+      if (payload === null || typeof payload !== 'object' || typeof (payload as { agentId?: unknown }).agentId !== 'string') {
         onOperationFeedback({ tone: 'error', message: `${place.label} could not be opened`, detail: 'The agent started but could not be opened.' });
         return false;
       }
-      onLaunched(payload.agentId, place, operationKey);
+      onLaunched((payload as { agentId: string }).agentId, place, operationKey);
       handedOff = true;
       onOperationFeedback({ tone: 'success', message: `${place.label} is running the note`, detail: 'The new agent session is ready and its output is connecting.' });
-      return true;
+      const deletedNote = deletedNoteReceipt(payload, noteId);
+      return deletedNote === undefined ? {} : { deletedNote };
     } catch {
       onOperationFeedback({ tone: 'error', message: `${place.label} could not start`, detail: 'Unable to reach the console while launching the agent.' });
       return false;
@@ -10071,7 +10124,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const serverInfo = useContext(ServerContext) ?? fallbackServerInfo();
   const clientSettings = useContext(ClientSettingsContext);
   const davo = clientSettings?.davo ?? legacyDavoSettings;
-  const dynamicWorktrees = useDynamicWorktrees();
+  const { dynamicWorktrees } = useServerPreferences();
   useWorkspaceViewRevision();
   const [renameWorkspace, setRenameWorkspace] = useState<{ key: string; label: string }>();
   const [data, setData] = useState<Dashboard>();
@@ -11864,7 +11917,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const splitIcons: Record<string, ReactNode> = {
       agent: kind === undefined ? <PanelIcon path="M5 7h14v13H5zM12 3v4M8 12h1m6 0h1M9 16h6M2 11v5m20-5v5" /> : <span>{agentKindGlyph[kind]}</span>,
       terminal: <LauncherRowIcon name="terminal" />,
-      note: <PanelIcon path="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2ZM15 21v-6h6" />,
+      note: <PanelIcon glyph={workspacePanelGlyphs.notes} />,
       browser: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{browserGlyph}</svg>,
       code: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>,
       preview: <PanelIcon path={panelIcons.eye} />,
@@ -12597,10 +12650,12 @@ function App() {
           : <PublicEntry initialError={error} done={applySession} />;
   // expose settings without a manual server update bypass
   const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, resourceMonitoring: sessionInfo.resourceMonitoring === true, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, sessionInfo?.resourceMonitoring, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
+  // resolve server preferences once for every runtime consumer
+  const runtimePreferences = useMemo(() => serverPreferences(sessionInfo), [sessionInfo]);
   // share the current launch settings with every flyout
   // keep retry availability separate from provider and operation failures
   const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, loading: agentVersionsLoading, updating: updatingAgent, errors: Array.from(new Set([versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), retryVersions: versionCheckError ? () => { /* retry through the existing request owner */ refreshAgentVersions.current?.(); } : undefined, updateAgent: dispatchAgentUpdate }), [agentUpdateStatuses, agentVersionsLoading, updatingAgent, versionCheckError, dispatchAgentUpdate]);
-  return <SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents />{piUpdateTarget !== undefined && <PiUpdateDialog target={piUpdateTarget} request={request} onClose={closePiUpdate} onSubmitted={submittedPiUpdate} />}<ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} onUpdateFailed={refreshServerUpdateAfterFailure} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
+  return <ServerPreferencesProvider value={runtimePreferences}><SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents />{piUpdateTarget !== undefined && <PiUpdateDialog target={piUpdateTarget} request={request} onClose={closePiUpdate} onSubmitted={submittedPiUpdate} />}<ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} onUpdateFailed={refreshServerUpdateAfterFailure} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider></ServerPreferencesProvider>;
 }
 // register without surfacing legacy or private-mode failures as unhandled rejections
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => undefined);
@@ -12611,5 +12666,4 @@ applyColorTheme();
 // attach before React mounts any progress surfaces
 installProgressAnimationSync();
 applyReducedMotion();
-applyFlyoutMarkers();
 createRoot(document.getElementById('root')!).render(<ConsoleBoundary><App /></ConsoleBoundary>);

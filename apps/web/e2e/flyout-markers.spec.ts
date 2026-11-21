@@ -2,14 +2,14 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 import { installPaneMock } from './pane-stream-mock.js';
 
 // mount a console with toolbar and panel flyouts
-async function stubConsole(page: Page, withBadges = false) {
+async function stubConsole(page: Page, withBadges = false, flyoutMarkers = false) {
   await installPaneMock(page);
   const cleanupTargets = withBadges ? [{ id: 'worker-1', kind: 'orphan-worker', label: 'Orphan worker', detail: 'Test worker' }] : [];
   // isolate console requests from live services
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     // provide a named active browser
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', flyoutMarkers } });
     // expose one workspace with flyout controls
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, cleanupPending: cleanupTargets.length, cleanupTargets, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', branch: 'feature/markers', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 } }], projects: [] } });
     // connect the agent output
@@ -24,27 +24,8 @@ async function stubConsole(page: Page, withBadges = false) {
   });
 }
 
-// open the interface settings panel
-async function openSettings(page: Page) {
-  const settings = page.getByRole('dialog', { name: 'Settings' });
-  // avoid closing a peer tab that followed the shared open state
-  if (!await settings.isVisible()) await page.getByRole('button', { name: 'Global settings', exact: true }).click();
-  await expect(settings).toBeVisible();
-  const selector = settings.getByRole('combobox', { name: 'Settings section', exact: true });
-  // use the compact section picker on narrow viewports
-  if (await selector.isVisible()) {
-    await selector.click();
-    await page.getByRole('listbox', { name: 'Settings section options', exact: true }).locator('[role="option"][data-value="interface"]').click();
-  } else {
-    await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
-  }
-  return settings.getByRole('switch', { name: 'Flyout markers', exact: true });
-}
-
 // inspect all rendered marker decorations
 const visibleMarkers = (page: Page) => page.locator('button > .flyout-caret:visible');
-// read the persistent browser choice
-const storedMarkers = (page: Page) => page.evaluate(() => localStorage.getItem('rac.flyout-markers'));
 
 // compare actual paint order without relying on a particular toolbar width
 async function expectBadgeAboveMarker(button: Locator, selector: string) {
@@ -72,13 +53,12 @@ async function expectBadgeAboveMarker(button: Locator, selector: string) {
   expect(badgeIndex).toBeLessThan(markerIndex);
 }
 
-// exercise the same preference on desktop and phone
+// exercise the same server preference on desktop and phone
 for (const width of [1400, 390]) {
   // verify a directly attached badge and a wrapped badge group
-  test(`button badges paint above flyout markers at ${width}px`, async ({ page }) => {
+  test(`button badges paint above server-enabled flyout markers at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
-    await stubConsole(page, true);
+    await stubConsole(page, true, true);
     await page.goto('/');
     const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
     await expectBadgeAboveMarker(toolbar.getByRole('button', { name: 'More options' }), '.cleanup-summary-count');
@@ -86,125 +66,35 @@ for (const width of [1400, 390]) {
   });
 
   // keep marker visibility independent of viewport layout
-  test(`markers default off and toggle without changing flyout actions at ${width}px`, async ({ page }) => {
+  test(`server-disabled markers leave flyout actions intact at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await stubConsole(page);
     await page.goto('/');
     const server = page.locator('.tabs .server-selector');
-    const marker = server.locator(':scope > .flyout-caret');
     await expect(server).toBeVisible();
-    await expect(marker).toBeHidden();
-    expect(await storedMarkers(page)).toBeNull();
-    const markers = await openSettings(page);
-    await expect(markers).not.toBeChecked();
-    await markers.check();
-    await expect(marker).toBeHidden();
-    expect(await storedMarkers(page)).toBeNull();
-    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
-    await expect(marker).toBeVisible();
-    expect(await storedMarkers(page)).toBe('enabled');
-    await page.getByRole('button', { name: 'Close settings' }).click();
-    // enabled decorations do not intercept flyout clicks
-    await server.click();
-    await expect(page.getByRole('group', { name: 'Remote Agents servers' })).toBeVisible();
-    await page.keyboard.press('Escape');
-    await page.reload();
-    await expect(marker).toBeVisible();
-    const restored = await openSettings(page);
-    await expect(restored).toBeChecked();
-    await restored.uncheck();
-    await expect(marker).toBeVisible();
-    expect(await storedMarkers(page)).toBe('enabled');
-    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await expect(server.locator(':scope > .flyout-caret')).toBeHidden();
     await expect(visibleMarkers(page)).toHaveCount(0);
-    expect(await storedMarkers(page)).toBeNull();
-    await page.getByRole('button', { name: 'Close settings' }).click();
     // hidden decorations leave context-menu opening intact
     await server.click({ button: 'right' });
     await expect(page.getByRole('group', { name: 'Remote Agents servers' })).toBeVisible();
-    await page.keyboard.press('Escape');
-    await page.reload();
-    await expect(marker).toBeHidden();
-    await expect(await openSettings(page)).not.toBeChecked();
   });
 }
 
-// consume a personal opt-in without changing the global default
-test('the activation link enables this browser once and opens settings', async ({ page }) => {
+// prefer the authenticated server value over retired browser storage and query flags
+test('legacy browser overrides cannot enable flyout markers', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
   await stubConsole(page);
-  await page.goto('/?keep=value&flyout-markers=enabled#settings');
-  const settings = page.getByRole('dialog', { name: 'Settings' });
-  await expect(settings).toBeVisible();
-  await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
-  const markers = settings.getByRole('switch', { name: 'Flyout markers', exact: true });
-  await expect(markers).toBeChecked();
-  await expect(page).toHaveURL('/?keep=value#settings');
-  expect(await storedMarkers(page)).toBe('enabled');
-  await markers.uncheck();
-  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await page.goto('/?keep=value&flyout-markers=enabled');
+  await expect(visibleMarkers(page)).toHaveCount(0);
+  await expect(page).toHaveURL('/?keep=value&flyout-markers=enabled');
+});
+
+// restore markers from every authenticated session read
+test('server-enabled flyout markers survive reload', async ({ page }) => {
+  await stubConsole(page, false, true);
+  await page.goto('/');
+  const marker = page.locator('.tabs .server-selector > .flyout-caret');
+  await expect(marker).toBeVisible();
   await page.reload();
-  const reopened = page.getByRole('dialog', { name: 'Settings' });
-  await reopened.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
-  await expect(reopened.getByRole('switch', { name: 'Flyout markers', exact: true })).not.toBeChecked();
-  await expect(visibleMarkers(page)).toHaveCount(0);
-});
-
-// synchronize real same-origin tabs including cleared storage
-test('open tabs follow enabled, disabled, and cleared preferences', async ({ page, context }) => {
-  const peer = await context.newPage();
-  await stubConsole(page);
-  await stubConsole(peer);
-  await page.goto('/');
-  await peer.goto('/');
-  const markers = await openSettings(page);
-  const peerMarkers = await openSettings(peer);
-  await markers.check();
-  await expect(peerMarkers).not.toBeChecked();
-  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await expect(peerMarkers).toBeChecked();
-  await expect(peer.locator('.tabs .server-selector > .flyout-caret')).toBeVisible();
-  await markers.uncheck();
-  await expect(peerMarkers).toBeChecked();
-  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await expect(peerMarkers).not.toBeChecked();
-  await expect(visibleMarkers(peer)).toHaveCount(0);
-  await markers.check();
-  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await expect(peerMarkers).toBeChecked();
-  // clearing browser preferences restores the hidden default
-  await page.evaluate(() => localStorage.clear());
-  await expect(peerMarkers).not.toBeChecked();
-  await expect(visibleMarkers(peer)).toHaveCount(0);
-});
-
-// reject stale values rather than silently enabling markers
-test('unknown stored values keep markers hidden', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'true'));
-  await stubConsole(page);
-  await page.goto('/');
-  await expect(await openSettings(page)).not.toBeChecked();
-  await expect(visibleMarkers(page)).toHaveCount(0);
-});
-
-// preserve an in-memory toggle when storage is unavailable
-test('blocked storage does not prevent toggling markers', async ({ page }) => {
-  // emulate a browser denying preference storage
-  await page.addInitScript(() => {
-    // deny reads and writes consistently
-    for (const method of ['getItem', 'setItem', 'removeItem']) {
-      Object.defineProperty(Storage.prototype, method, { value: () => { /* report storage denial */ throw new DOMException('Storage blocked', 'SecurityError'); } });
-    }
-  });
-  await stubConsole(page);
-  await page.goto('/');
-  const markers = await openSettings(page);
-  await expect(markers).not.toBeChecked();
-  await markers.check();
-  await expect(page.locator('.tabs .server-selector > .flyout-caret')).toBeHidden();
-  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await expect(page.locator('.tabs .server-selector > .flyout-caret')).toBeVisible();
-  await markers.uncheck();
-  await expect(page.locator('.tabs .server-selector > .flyout-caret')).toBeVisible();
-  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await expect(visibleMarkers(page)).toHaveCount(0);
+  await expect(marker).toBeVisible();
 });

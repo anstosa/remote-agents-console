@@ -179,7 +179,7 @@ describe('server administration API', () => {
       updatePreview: async () => preview,
       revision: revisionStatus
     };
-    const adminApp = await buildApp({ ...config, resourceMonitoring: true, adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true } } }, { auth: new AuthService(hash, Buffer.alloc(32, 19).toString('base64url')), serverAdmin: serverAdmin as never, resourceMonitor: { disks: sampleDisks, metrics: sampleMetrics, stream: streamResources } });
+    const adminApp = await buildApp({ ...config, fileOpenAction: 'preview', flyoutMarkers: true, dynamicWorktrees: false, usagePace: false, resourceMonitoring: true, adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true } } }, { auth: new AuthService(hash, Buffer.alloc(32, 19).toString('base64url')), serverAdmin: serverAdmin as never, resourceMonitor: { disks: sampleDisks, metrics: sampleMetrics, stream: streamResources } });
     try {
       const boot = await adminApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const anonymousDisks = await adminApp.inject({ method: 'GET', url: '/api/server/resources/disks', headers: { host: 'agents.example.com' } });
@@ -213,6 +213,10 @@ describe('server administration API', () => {
 
       expect(rename.json()).toMatchObject({ name: 'Garage Server', server: { name: 'Garage Server' } });
       expect(boot.json()).not.toHaveProperty('resourceMonitoring');
+      expect(boot.json()).not.toHaveProperty('fileOpenAction');
+      expect(login.json()).toMatchObject({ fileOpenAction: 'preview', flyoutMarkers: true, dynamicWorktrees: false, usagePace: false });
+      expect(authenticatedSession.json()).toMatchObject({ fileOpenAction: 'preview', flyoutMarkers: true, dynamicWorktrees: false, usagePace: false });
+      expect(renamedDeviceSession.json()).toMatchObject({ fileOpenAction: 'preview', flyoutMarkers: true, dynamicWorktrees: false, usagePace: false });
       expect(login.json().resourceMonitoring).toBe(true);
       expect(authenticatedSession.json().resourceMonitoring).toBe(true);
       expect(renamedDeviceSession.json().resourceMonitoring).toBe(true);

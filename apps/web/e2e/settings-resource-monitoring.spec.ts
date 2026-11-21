@@ -149,6 +149,40 @@ async function openPage(settings: Locator, label: string) {
   await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: label, exact: true }).click();
 }
 
+// compare only the visible label typography
+const labelStyle = (label: Locator) => label.evaluate(element => {
+  const { color, fontFamily, fontSize, fontWeight, letterSpacing, textTransform } = getComputedStyle(element);
+  return { color, fontFamily, fontSize, fontWeight, letterSpacing, textTransform };
+});
+
+// cover both interface navigation layouts
+for (const width of [1440, 390]) {
+  // match browser labels without changing the shared controls or the next section divider
+  test(`matches interface labels and removes the resource divider at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { settings } = await setupResourceMonitoringSettings(page);
+    // open interface through the compact picker on phones
+    if (width < 600) {
+      await settings.getByRole('combobox', { name: 'Settings section', exact: true }).click();
+      await page.getByRole('listbox', { name: 'Settings section options', exact: true }).locator('[data-value="interface"]').click();
+    } else await openPage(settings, 'Interface');
+
+    const baseline = settings.locator('[data-settings-path="notificationSounds"] header > small');
+    await expect(baseline).toBeVisible();
+    const expected = await labelStyle(baseline);
+    // check both shared labels against the same browser label
+    for (const path of ['flyoutMarkers', 'resourceMonitoring']) {
+      const label = settings.locator(`[data-settings-path="${path}"] .settings-field-copy label > strong`);
+      await expect(label).toBeVisible();
+      expect(await labelStyle(label)).toEqual(expected);
+    }
+    const resource = settings.getByRole('region', { name: 'Resource monitoring', exact: true });
+    await expect(resource).toHaveCSS('border-top-width', '0px');
+    await expect(resource).toHaveCSS('padding-top', '0px');
+    await expect(settings.getByRole('region', { name: 'Custom buttons', exact: true })).toHaveCSS('border-top-width', '1px');
+  });
+}
+
 // verify dedicated placement default scope and search ownership
 test('places resource monitoring on Interface as a server-wide setting', async ({ page }) => {
   const { settings, state } = await setupResourceMonitoringSettings(page);
@@ -157,7 +191,9 @@ test('places resource monitoring on Interface as a server-wide setting', async (
   await openPage(settings, 'Interface');
   const setting = settings.locator('[data-settings-path="resourceMonitoring"]');
   await expect(setting.getByRole('switch', { name: 'Resource monitoring', exact: true })).not.toBeChecked();
-  await expect(settings.getByRole('region', { name: 'Resource monitoring', exact: true })).toContainText('every browser connected to this server');
+  const resource = settings.getByRole('region', { name: 'Resource monitoring', exact: true });
+  await expect(resource).toContainText('CPU and memory update');
+  await expect(resource).not.toContainText('This browser');
   expect(state.value).not.toHaveProperty('resourceMonitoring');
 
   const search = settings.getByRole('searchbox', { name: 'Search settings', exact: true });
@@ -205,5 +241,5 @@ test('disables resource monitoring in read-only catalogs', async ({ page }) => {
   const { settings } = await setupResourceMonitoringSettings(page, { enabled: true, writable: false });
   await openPage(settings, 'Interface');
   await expect(settings.getByRole('switch', { name: 'Resource monitoring', exact: true })).toBeDisabled();
-  await expect(settings.getByRole('note').filter({ hasText: 'Resource monitoring is read-only' })).toBeVisible();
+  await expect(settings.getByRole('region', { name: 'Resource monitoring', exact: true }).getByRole('note')).toContainText('This setting is read-only');
 });

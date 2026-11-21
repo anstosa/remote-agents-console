@@ -118,9 +118,7 @@ type SettingsPageHeaderExpectation = {
   id: string;
   title: string;
   eyebrow:
-    | "Application settings"
-    | "Browser settings"
-    | "Server settings"
+    | "Settings"
     | "Deployment settings";
   description?: string;
   sourcePath?: string;
@@ -130,40 +128,41 @@ const settingsPageHeaderExpectations: SettingsPageHeaderExpectation[] = [
   {
     id: "browser",
     title: "This browser",
-    eyebrow: "Browser settings",
+    eyebrow: "Settings",
     description: "Manage this browser’s name and identity.",
   },
-  { id: "voice", title: "Voice", eyebrow: "Server settings", description: "Configure the voice assistant and reduce its access below the MCP capability ceiling." },
+  { id: "voice", title: "Voice", eyebrow: "Settings", description: "Configure the voice assistant and reduce its access below the MCP capability ceiling." },
   {
     id: "keyboard",
     title: "Keyboard shortcuts",
-    eyebrow: "Server settings",
+    eyebrow: "Settings",
+    description: "Configure keyboard shortcuts.",
   },
   {
     id: "app",
     title: "Application",
-    eyebrow: "Server settings",
+    eyebrow: "Settings",
     sourcePath: "/checkout/config/config.json",
   },
   {
     id: "interface",
     title: "Interface",
-    eyebrow: "Application settings",
-    description:
-      "Customize this browser’s appearance and configure application-wide buttons.",
+    eyebrow: "Settings",
+    description: "Customize appearance, flyout markers, and buttons.",
   },
-  { id: "agents", title: "Agents", eyebrow: "Server settings" },
+  { id: "agents", title: "Agents", eyebrow: "Settings", description: "Choose the default adapter and configure programs, credentials, and agent behavior." },
+  { id: "notes", title: "Notes", eyebrow: "Settings", description: "Configure what happens to notes after sending or queuing." },
+  { id: "files", title: "Files", eyebrow: "Settings", description: "Choose what happens when you click a file." },
   {
     id: "projects",
     title: "Projects",
-    eyebrow: "Server settings",
-    description:
-      "Configure repositories, worktrees, project-specific commands, and this browser’s launcher behavior.",
+    eyebrow: "Settings",
+    description: "Configure repositories, worktrees, and project-specific commands.",
   },
-  { id: "reviews", title: "Reviews", eyebrow: "Server settings" },
-  { id: "mcp", title: "MCP", eyebrow: "Server settings", description: "Set the maximum capabilities available to MCP, Conductor, and Voice." },
-  { id: "tmux", title: "TMUX", eyebrow: "Server settings" },
-  { id: "storage", title: "Storage", eyebrow: "Server settings" },
+  { id: "reviews", title: "Reviews", eyebrow: "Settings" },
+  { id: "mcp", title: "MCP", eyebrow: "Settings", description: "Set the maximum capabilities available to MCP, Conductor, and Voice." },
+  { id: "tmux", title: "TMUX", eyebrow: "Settings" },
+  { id: "storage", title: "Storage", eyebrow: "Settings" },
   {
     id: "env",
     title: "Environment & keys",
@@ -356,6 +355,9 @@ type SettingsReadPlan = {
 const settingsUnavailableSections = [
   { id: "app", label: "Application" },
   { id: "agents", label: "Agents" },
+  { id: "notes", label: "Notes" },
+  { id: "files", label: "Files" },
+  { id: "projects", label: "Projects" },
   { id: "reviews", label: "Reviews" },
   { id: "tmux", label: "TMUX" },
   { id: "storage", label: "Storage" },
@@ -602,6 +604,10 @@ async function setupSettings(
         },
         name: "Framework",
         defaultAgent: "codex",
+        fileOpenAction: "edit",
+        flyoutMarkers: false,
+        dynamicWorktrees: true,
+        usagePace: true,
         tmux: { pollIntervalMs: 500 },
         ...(includeIcons ? { icon: "heart" } : {}),
         integrations: {
@@ -683,6 +689,31 @@ async function setupSettings(
           },
           name: { type: "string", label: "Configuration server name" },
           defaultAgent: { type: "string", label: "Default agent" },
+          fileOpenAction: {
+            type: "enum",
+            label: "Default file action",
+            options: ["preview", "edit"],
+            default: "edit",
+            apply: "rac-restart",
+          },
+          flyoutMarkers: {
+            type: "boolean",
+            label: "Flyout markers",
+            default: false,
+            apply: "rac-restart",
+          },
+          dynamicWorktrees: {
+            type: "boolean",
+            label: "Dynamic worktrees",
+            default: true,
+            apply: "rac-restart",
+          },
+          usagePace: {
+            type: "boolean",
+            label: "Usage pace",
+            default: true,
+            apply: "rac-restart",
+          },
           tmux: {
             type: "object",
             label: "TMUX",
@@ -3336,11 +3367,14 @@ test("moves structured TMUX settings into one Application tab and saves original
     "missing",
   );
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
-  const labels = await nav.getByRole("button").allTextContents();
+  // read only visible labels and ignore metadata inside decorative icons
+  const labels = await nav.locator(".settings-source-nav-label").allTextContents();
   expect(labels.indexOf("Interface")).toBe(
     labels.indexOf("Application") + 1,
   );
-  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
+  expect(labels.indexOf("Notes")).toBe(labels.indexOf("Interface") + 1);
+  expect(labels.indexOf("Files")).toBe(labels.indexOf("Notes") + 1);
+  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Files") + 1);
   expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
   expect(labels.indexOf("MCP")).toBe(labels.indexOf("Reviews") + 1);
   expect(labels.indexOf("Conductor")).toBe(labels.indexOf("MCP") + 1);
@@ -4090,12 +4124,6 @@ test("moves adapter settings into Agents and saves both backing sources together
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
-  const labels = await nav.getByRole("button").allTextContents();
-  expect(labels.indexOf("Interface")).toBe(
-    labels.indexOf("Application") + 1,
-  );
-  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
-  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Storage") + 1);
 
   await selectSettingsSection(settings, "app", "Application config");
   await expect(settings.locator('[data-settings-path="adapters"]')).toHaveCount(
@@ -4883,17 +4911,6 @@ test("moves Projects into its own Application section on desktop and mobile", as
   await page.setViewportSize({ width: 1440, height: 900 });
   const { settings, state } = await setupSettings(page);
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
-  const labels = await nav.getByRole("button").allTextContents();
-  expect(labels.indexOf("Interface")).toBe(
-    labels.indexOf("Application") + 1,
-  );
-  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
-  expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
-  expect(labels.indexOf("MCP")).toBe(labels.indexOf("Reviews") + 1);
-  expect(labels.indexOf("Conductor")).toBe(labels.indexOf("MCP") + 1);
-  expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Conductor") + 1);
-  expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
-  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Storage") + 1);
 
   await selectSettingsSection(settings, "app", "Application config");
   await expect(settings.locator('[data-settings-path="projects"]')).toHaveCount(
@@ -8164,7 +8181,7 @@ for (const width of [390, 1440]) {
       }),
     ).toBeVisible();
 
-    // preserve browser-only fallback navigation after the failed request
+    // preserve catalog-independent navigation after the failed request
     if (width === 390) {
       const selector = settings.getByRole("combobox", {
         name: "Settings section",
@@ -8187,20 +8204,19 @@ for (const width of [390, 1440]) {
         "voice",
         "keyboard",
         "interface",
-        "projects",
       ]) {
         await expect(
           listbox.locator(`[role="option"][data-value=${JSON.stringify(id)}]`),
         ).not.toHaveAttribute("aria-disabled", "true");
       }
-      // expose exactly the browser-only fallback pages after failure
+      // expose exactly the catalog-independent pages after failure
       expect(
         await listbox.getByRole("option").evaluateAll((options) =>
           options
             .filter((option) => option.getAttribute("aria-disabled") !== "true")
             .map((option) => option.getAttribute("data-value")),
         ),
-      ).toEqual(["browser", "voice", "keyboard", "interface", "projects"]);
+      ).toEqual(["browser", "voice", "keyboard", "interface"]);
       // retain unavailable file destinations without busy artwork
       for (const source of settingsUnavailableSections) {
         const option = listbox.locator(
@@ -8222,13 +8238,12 @@ for (const width of [390, 1440]) {
         "Voice",
         "Keyboard shortcuts",
         "Interface",
-        "Projects",
       ]) {
         await expect(
           nav.getByRole("button", { name: label, exact: true }),
         ).toBeEnabled();
       }
-      // expose exactly the browser-only fallback pages after failure
+      // expose exactly the catalog-independent pages after failure
       expect(
         await nav.getByRole("button").evaluateAll((buttons) =>
           buttons
@@ -8240,7 +8255,6 @@ for (const width of [390, 1440]) {
         "Voice",
         "Keyboard shortcuts",
         "Interface",
-        "Projects",
       ]);
       // retain unavailable file destinations without busy artwork
       for (const source of settingsUnavailableSections) {
@@ -8255,7 +8269,7 @@ for (const width of [390, 1440]) {
     }
 
     // catalog-independent pages retain complete headers after failure
-    for (const id of ["voice", "keyboard", "interface", "projects"] as const) {
+    for (const id of ["voice", "keyboard", "interface"] as const) {
       const expected = settingsPageHeaderExpectations.find(
         (candidate) => candidate.id === id,
       )!;
@@ -8454,6 +8468,8 @@ test("matches desktop settings icons to mobile navigation without changing names
     { id: "keyboard", label: "Keyboard shortcuts" },
     { id: "app", label: "Application" },
     { id: "interface", label: "Interface" },
+    { id: "notes", label: "Notes" },
+    { id: "files", label: "Files" },
     { id: "agents", label: "Agents" },
     { id: "projects", label: "Projects" },
     { id: "tmux", label: "TMUX" },
@@ -8463,7 +8479,10 @@ test("matches desktop settings icons to mobile navigation without changing names
     { id: "compose-override", label: "Docker" },
   ] as const;
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
-  const desktopPaths = new Map<string, string>();
+  const desktopPaths = new Map<string, Array<string | null>>();
+  // retain the complete geometry for multi-part glyphs
+  const iconPaths = (icon: Locator) =>
+    icon.locator("svg path").evaluateAll((paths) => paths.map((path) => path.getAttribute("d")));
 
   // desktop glyphs remain decorative beside their existing labels
   for (const section of sections) {
@@ -8477,11 +8496,8 @@ test("matches desktop settings icons to mobile navigation without changing names
     );
     const icon = button.locator(".settings-source-nav-icon");
     await expect(icon).toHaveAttribute("aria-hidden", "true");
-    await expect(icon.locator("svg path")).toHaveCount(1);
-    desktopPaths.set(
-      section.id,
-      (await icon.locator("svg path").getAttribute("d"))!,
-    );
+    await expect(icon.locator("svg path")).toHaveCount(["notes", "files", "projects"].includes(section.id) ? 2 : 1);
+    desktopPaths.set(section.id, await iconPaths(icon));
   }
   // keep the environment glyph as a readable outlined key instead of a crowded silhouette
   const environmentKeyPath =
@@ -8493,8 +8509,18 @@ test("matches desktop settings icons to mobile navigation without changing names
       exact: true,
     })
     .screenshot({ path: "/tmp/remoteagents-environment-key-desktop.png" });
-  expect(desktopPaths.get("env")).toBe(environmentKeyPath);
-  expect(desktopPaths.get("tmux")).toBe(tmuxPath);
+  expect(desktopPaths.get("env")).toEqual([environmentKeyPath]);
+  expect(desktopPaths.get("tmux")).toEqual([tmuxPath]);
+  expect(desktopPaths.get("notes")).toEqual(["M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z", "M15 21v-6h6"]);
+  expect(desktopPaths.get("files")).toEqual(["M3 7h7l2 2h9v10H3z", "M3 7V5h7l2 2"]);
+  expect(desktopPaths.get("installation")).toEqual(["M12 3v10m-4-4 4 4 4-4M4 14v6h16v-6"]);
+  // preserve the branch nodes and rule out fill on both icons
+  const notesIcon = nav.getByRole("button", { name: "Notes", exact: true }).locator(".settings-source-nav-icon svg");
+  await expect(notesIcon.locator("path").first()).toHaveCSS("fill", "none");
+  const projectsIcon = nav.getByRole("button", { name: "Projects", exact: true }).locator(".settings-source-nav-icon svg");
+  await expect(projectsIcon.locator("circle")).toHaveCount(3);
+  await expect(projectsIcon.locator("path").first()).toHaveCSS("fill", "none");
+  await expect(projectsIcon.locator("path").first()).not.toHaveCSS("stroke", "none");
   await expect(
     nav.getByRole("button", { name: "Application", exact: true }),
   ).toHaveAttribute("aria-current", "page");
@@ -8510,10 +8536,15 @@ test("matches desktop settings icons to mobile navigation without changing names
     name: "Settings section options",
   });
   for (const section of sections) {
-    const path = listbox
+    const icon = listbox
       .locator(`[role="option"][data-value=${JSON.stringify(section.id)}]`)
-      .locator(".settings-select-option-icon svg path");
-    await expect(path).toHaveAttribute("d", desktopPaths.get(section.id)!);
+      .locator(".settings-select-option-icon");
+    await expect.poll(() => iconPaths(icon)).toEqual(desktopPaths.get(section.id));
+  }
+  // keep both outlines unfilled in the mobile options
+  for (const id of ["notes", "projects"]) {
+    const icon = listbox.locator(`[role="option"][data-value=${JSON.stringify(id)}] .settings-select-option-icon svg`);
+    await expect(icon.locator("path").first()).toHaveCSS("fill", "none");
   }
   await expect(
     listbox
@@ -8707,7 +8738,7 @@ for (const width of [320, 390, 1440, 2560]) {
     });
     await expect(name).toBeVisible({ timeout: 3_000 });
     await expect(name.getByText("This browser", { exact: true })).toHaveCount(
-      0,
+      1,
     );
     await expect(
       name.getByRole("button", { name: "Rename browser name", exact: true }),
@@ -8747,8 +8778,8 @@ for (const width of [320, 390, 1440, 2560]) {
       });
       return { grid, width: bounds.width, terminalWidth: terminal.width, rows };
     });
-    // include the renderer, notification and usage controls alongside the appearance controls
-    expect(metrics.rows).toHaveLength(8);
+    // keep all five browser preferences on the interface page
+    expect(metrics.rows).toHaveLength(5);
     // prove right alignment and centering for every interface preference
     for (const row of metrics.rows) {
       expect(row.separation).toBeGreaterThanOrEqual(0);
@@ -10787,7 +10818,17 @@ for (const width of [390, 780]) {
         exact: true,
       })
       .getByRole("group", { name: "Application", exact: true });
-    await expect(application.getByRole("option")).toHaveCount(8);
+    // verify application order independently of decorative icon text
+    expect(
+      await application.getByRole("option").evaluateAll((options) =>
+        options.map((option) => option.getAttribute("data-value")),
+      ),
+    ).toEqual([
+      "app", "interface", "notes", "files", "projects", "reviews", "mcp",
+      "conductor", "tmux", "storage",
+    ]);
+    await expect(application.getByRole("option", { name: "Notes", exact: true })).toBeVisible();
+    await expect(application.getByRole("option", { name: "Files", exact: true })).toBeVisible();
     await expect(application.getByRole("option", { name: "MCP", exact: true })).toBeVisible();
     await expect(
       application.getByRole("option", {
@@ -11055,11 +11096,7 @@ test("merges browser controls and saves voice with file edits through one transa
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem("rac.color-theme")))
     .toBe("latte");
-  await expect
-    .poll(() =>
-      page.evaluate(() => localStorage.getItem("rac.dynamic-worktrees")),
-    )
-    .toBe("disabled");
+
   expect(state.voiceSaves).toHaveLength(0);
   const transaction = state.saves[0] as {
     body: { changes: Array<{ sourceId: string; patches: unknown[] }> };
@@ -11073,6 +11110,7 @@ test("merges browser controls and saves voice with file edits through one transa
         value: "Framework Draft",
         revisionId: "identity-name-r1",
       },
+      { op: "set", path: ["dynamicWorktrees"], value: false },
       { op: "set", path: ["integrations", "realtime", "enabled"], value: true },
       { op: "set", path: ["integrations", "realtime", "name"], value: "Riley" },
       {
@@ -11134,7 +11172,7 @@ test("keeps browser preferences and voice settings available when the file catal
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   await expect(
     settings.getByText(
-      "Installation files are unavailable. Browser preferences remain available in This browser, Interface, and Projects; file settings are unavailable.",
+      "Installation files are unavailable. Browser preferences remain available in This browser and Interface; file settings are unavailable.",
     ),
   ).toBeVisible();
   await nav.getByRole("button", { name: "Interface", exact: true }).click();
@@ -11199,15 +11237,6 @@ test("keeps browser preferences and voice settings available when the file catal
   await expect(
     settings.getByRole("note").filter({
       hasText: "Load Application configuration before editing custom buttons.",
-    }),
-  ).toBeVisible();
-  await chooseSettingsOption(selector, "projects");
-  await expect(
-    settings.getByRole("switch", { name: "Dynamic worktrees" }),
-  ).toBeVisible();
-  await expect(
-    settings.getByRole("note").filter({
-      hasText: "Load Application configuration before editing projects.",
     }),
   ).toBeVisible();
 });

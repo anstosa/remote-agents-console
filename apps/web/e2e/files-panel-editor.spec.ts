@@ -32,9 +32,9 @@ const outsideEntry = {
 };
 
 // install editor-aware routes over the otherwise unchanged Files fixture
-async function installEditorFixture(page: Page, options: { editor?: boolean; failure?: ShellFailure; outside?: boolean; paneVisibility?: 'missing' | 'stale-once' } = {}): Promise<EditorFixture> {
+async function installEditorFixture(page: Page, options: { editor?: boolean; failure?: ShellFailure; outside?: boolean; paneVisibility?: 'missing' | 'stale-once'; fileOpenAction?: 'preview' | 'edit' } = {}): Promise<EditorFixture> {
   await installPaneMock(page);
-  const fixture = await installFilesFixture(page);
+  const fixture = await installFilesFixture(page, { fileOpenAction: options.fileOpenAction });
   const shellBodies: unknown[] = [];
   const pageErrors: string[] = [];
   let paneReadsAfterShell = 0;
@@ -158,9 +158,8 @@ test('configured editor keeps Preview as an explicit file-viewing action', async
 });
 
 test('saved Preview default leaves explicit Edit available with a configured editor', async ({ page }) => {
-  // persist the browser preference before the application loads
-  await page.addInitScript(() => localStorage.setItem('rac.file-open-action', 'preview'));
-  const { fixture, panel, shellBodies, pageErrors } = await openFiles(page);
+  // return the server preference before the application loads
+  const { fixture, panel, shellBodies, pageErrors } = await openFiles(page, { fileOpenAction: 'preview' });
   const alpha = fileRow(panel, 'alpha.txt');
 
   await alpha.getByRole('button', { name: 'alpha.txt', exact: true }).click();

@@ -866,11 +866,11 @@ const newWorktreeProject = { id: 'repo', label: 'Repo', available: true, manageW
 ] };
 
 // stub one worktree's flyout list and the New worktree dialog's Project lists
-async function stubNewWorktreeFromFlyout(page: Page, { agents, worktreeId, list, onCreate }: { agents: unknown[]; worktreeId: string; list: unknown; onCreate: (body: unknown) => void }) {
+async function stubNewWorktreeFromFlyout(page: Page, { agents, worktreeId, list, onCreate, dynamicWorktrees = true }: { agents: unknown[]; worktreeId: string; list: unknown; onCreate: (body: unknown) => void; dynamicWorktrees?: boolean }) {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', dynamicWorktrees } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents, projects: [newWorktreeProject] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
@@ -921,12 +921,12 @@ test('opens New worktree on a branch from its flyout row in a worktree with no a
 });
 
 test('offers no New worktree action on flyout rows when the launcher offers none', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('rac.dynamic-worktrees', 'disabled'));
   await stubNewWorktreeFromFlyout(page, {
     agents: [],
     worktreeId: 'idle',
     list: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [{ branch: 'feature/solo', checkedOut: false }] },
-    onCreate: () => {}
+    onCreate: () => {},
+    dynamicWorktrees: false
   });
   await page.goto('/');
   await page.getByRole('tab', { name: /^Idle/u }).click();

@@ -28,14 +28,14 @@ const dashboard = {
 };
 
 // mount the toolbar with optional editor configuration
-async function mount(page: Page, editor = false) {
+async function mount(page: Page, editor = false, flyoutMarkers = false) {
   const launches: string[] = [];
   const pins: unknown[] = [];
   const shells: string[] = [];
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = decodeURIComponent(new URL(request.url()).pathname);
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', flyoutMarkers } });
     // keep existing fixtures editor-free unless explicitly enabled
     if (path === '/api/dashboard') return route.fulfill({ json: editor ? { ...dashboard, editor: true } : dashboard });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
@@ -203,8 +203,7 @@ test('Terminal opens a new shell at once when there is nothing to pick', async (
 for (const width of [1440, 390]) {
   // follow empty, open-only and minimized shell states
   test(`Terminal marker follows picker availability at ${width}px`, async ({ page }) => {
-    await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
-    const harness = await mount(page);
+    const harness = await mount(page, false, true);
     await page.getByRole('tab', { name: /^Idle/u }).click();
     await page.setViewportSize({ width, height: 900 });
     const terminal = toolbar(page).getByRole('button', { name: 'Open a terminal' });
@@ -240,8 +239,7 @@ for (const width of [1440, 390]) {
 
 // stale picker availability must not turn a right-click into shell creation
 test('Terminal keeps its advertised picker when panes disappear', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
-  await mount(page);
+  await mount(page, false, true);
   await page.setViewportSize({ width: 1440, height: 900 });
   const terminal = toolbar(page).getByRole('button', { name: 'Open a terminal' });
   await expect(terminal.locator('.flyout-caret')).toBeVisible();
@@ -267,8 +265,7 @@ test('Terminal keeps its advertised picker when panes disappear', async ({ page 
 
 // a new external pane must not replace the advertised direct action
 test('Terminal keeps direct shell creation when panes appear', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('rac.flyout-markers', 'enabled'));
-  const harness = await mount(page);
+  const harness = await mount(page, false, true);
   // settle the empty listing before changing the network snapshot
   const listed = page.waitForResponse(response => decodeURIComponent(new URL(response.url()).pathname) === `/api/worktrees/${idle}/panes`);
   await page.getByRole('tab', { name: /^Idle/u }).click();
