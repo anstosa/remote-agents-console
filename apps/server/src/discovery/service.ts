@@ -372,6 +372,11 @@ export class DiscoveryService {
     this.refreshInFlight = this.discover(force).finally(() => { this.refreshInFlight = undefined; });
     return this.refreshInFlight;
   }
+
+  // only a complete discovery of the exact socket can prove a pane is absent from RAC
+  get tmuxDiscoverySockets(): ReadonlySet<string> | undefined {
+    return this.tmuxOutageSince === undefined ? new Set(this.socketSnapshot.map(socket => socket.fingerprint)) : undefined;
+  }
   // share root resolution across panes without retaining stale checkout identities
   private cachedWorkspaceRoot(path: string): Promise<string> {
     const now = Date.now();

@@ -1134,6 +1134,14 @@ discard closed, unmerged work. GitHub authentication uses the same token as PR
 discovery. Closed PR evidence alone never counts as merged in the manual
 branch-deletion dialog.
 
+The hourly watcher adds hidden live agent panes, including orphaned OMX workers,
+to **More → Cleanup** after more than 24 hours of observed inactivity. It does
+not close them automatically. Select a task and click **Cleanup** to close it;
+RAC rechecks visibility, activity, process identity, and pending input before
+closing the pane. The observation clock restarts when RAC restarts. Older tmux
+versions use window-wide activity, so output from another pane in the window
+also postpones the suggestion.
+
 ### Pruning stale Worktrees
 
 A checkout whose directory is gone (git calls it *prunable*) is hidden rather

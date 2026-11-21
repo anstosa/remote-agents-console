@@ -26,7 +26,7 @@ export class CleanupMonitor {
     this.timer = undefined;
   }
 
-  // scan once and publish cached results
+  // scan and publish suggestions without executing any cleanup
   private run(): Promise<void> {
     if (this.running !== undefined) return this.running;
     const running = this.cleanup.scan().then(async () => {

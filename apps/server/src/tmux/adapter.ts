@@ -7,6 +7,9 @@ import { capturePaneArgs, paneIdPattern as paneId, run, sessionIdPattern as sess
 
 const attentionStates: ReadonlySet<string> = new Set(['working', 'finished', 'question']);
 const inputBlockingPaneModes: ReadonlySet<string> = new Set(['copy-mode', 'view-mode']);
+// use the per-pane counter when supported and otherwise require a quiet window
+const cleanupActivityFormat = '#{?pane_output_generation,p#{pane_output_generation},w#{window_activity}}';
+const cleanupActivityPattern = /^[pw][1-9]\d*$/u;
 const paneModeFormat = '#{pane_in_mode}\t#{pane_mode}';
 
 // a chord written in one send-keys is read as Meta; wait this long after Escape
@@ -291,7 +294,7 @@ export class TmuxAdapter {
 
   // publish an observation only while its exact socket read is still current
   private async readPaneInventory(socket: SocketRef): Promise<PaneListingSnapshot> {
-    const format = `#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{${processNameOption}}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_spawned_by}\t#{${processWorktreeOption}}`;
+    const format = `#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{${processNameOption}}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_spawned_by}\t${cleanupActivityFormat}\t#{${processWorktreeOption}}`;
     const entry: { fingerprint: string; at: number; status: 'pending'|'available'|'unavailable'; panes?: Pane[]; retryAt?: number } = { fingerprint: socket.fingerprint, at: Date.now(), status: 'pending' };
     this.paneSnapshots.set(socket.path, entry);
     const persistent = await this.commands?.listPanes(socket, format).catch(() => undefined);
@@ -305,11 +308,13 @@ export class TmuxAdapter {
     }
     const lines = out.stdout.split('\n').filter(Boolean);
     const panes: Pane[] = lines.flatMap((line) => {
-      const [id, session, name, pid, path, command, title, displayLabel, startCommand, attention, sessionRef, sandboxed, question, consoleManaged, role, paneName, windowId, mode, placeMark, processName, reviewRun, dead, status, keyBinding, spawnedBy, ...worktree] = line.split('\t');
+      const [id, session, name, pid, path, command, title, displayLabel, startCommand, attention, sessionRef, sandboxed, question, consoleManaged, role, paneName, windowId, mode, placeMark, processName, reviewRun, dead, status, keyBinding, spawnedBy, activity, ...worktree] = line.split('\t');
       const exitCode = status && /^\d+$/u.test(status) ? Number(status) : undefined;
+      // unsupported or malformed activity fields are never cleanup evidence
+      const cleanupActivity = cleanupActivityPattern.test(activity ?? '') ? activity : undefined;
       // dead remain-on-exit panes may have neither cwd nor a live pid
       if (!paneId.test(id) || !sessionId.test(session) || !name || (dead !== '1' && (!/^\d+$/.test(pid) || !path))) return [];
-      return [{ paneId: id, sessionId: session, sessionName: name, pid: Number(pid) || 0, path: path ?? '', command: command ?? '', title: title ?? '', ...(displayLabel ? { displayLabel } : {}), ...(startCommand ? { startCommand } : {}), ...(attention ? { reportedAttention: attention } : {}), ...(sessionRef ? { reportedSession: sessionRef } : {}), ...(sandboxed ? { reportedSandboxed: sandboxed } : {}), ...(question ? { reportedQuestion: question } : {}), ...(consoleManaged === '1' ? { consoleManaged: true } : {}), ...(role ? { role } : {}), ...(role === processPaneRole && processName ? { processName } : {}), ...(paneName ? { paneName } : {}), ...(windowId ? { windowId } : {}), ...(mode && !inputBlockingPaneModes.has(mode) ? { paneMode: mode } : {}), ...(placeMark ? { placeMark } : {}), ...(reviewRun ? { reviewRun } : {}), ...(dead === '0' || dead === '1' ? { dead: dead === '1' } : {}), ...(exitCode === undefined ? {} : { exitCode }), ...(keyBinding ? { keyBinding } : {}), ...(spawnedBy ? { spawnedBy } : {}), ...(worktree.length === 0 ? {} : { processWorktree: worktree.join('\t') }), socket }];
+      return [{ paneId: id, sessionId: session, sessionName: name, pid: Number(pid) || 0, path: path ?? '', command: command ?? '', title: title ?? '', ...(displayLabel ? { displayLabel } : {}), ...(startCommand ? { startCommand } : {}), ...(attention ? { reportedAttention: attention } : {}), ...(sessionRef ? { reportedSession: sessionRef } : {}), ...(sandboxed ? { reportedSandboxed: sandboxed } : {}), ...(question ? { reportedQuestion: question } : {}), ...(consoleManaged === '1' ? { consoleManaged: true } : {}), ...(role ? { role } : {}), ...(role === processPaneRole && processName ? { processName } : {}), ...(paneName ? { paneName } : {}), ...(windowId ? { windowId } : {}), ...(mode && !inputBlockingPaneModes.has(mode) ? { paneMode: mode } : {}), ...(placeMark ? { placeMark } : {}), ...(reviewRun ? { reviewRun } : {}), ...(dead === '0' || dead === '1' ? { dead: dead === '1' } : {}), ...(exitCode === undefined ? {} : { exitCode }), ...(keyBinding ? { keyBinding } : {}), ...(spawnedBy ? { spawnedBy } : {}), ...(cleanupActivity === undefined ? {} : { cleanupActivity }), ...(worktree.length === 0 ? {} : { processWorktree: worktree.join('\t') }), socket }];
     });
     // retain only a complete reply; a malformed row must not hide a running process
     entry.status = panes.length === lines.length ? 'available' : 'unavailable';
@@ -604,6 +609,29 @@ export class TmuxAdapter {
 
   async close(socket: SocketRef, pane: string): Promise<boolean> {
     return paneId.test(pane) && (await run(this.binary, ['-S', socket.path, 'kill-pane', '-t', pane])).code === 0;
+  }
+
+  // let tmux recheck identity and activity in the same command queue as the close
+  async closeIdlePane(pane: Pane & { cleanupActivity: string }): Promise<boolean> {
+    const { socket, paneId: id, pid, sessionId: session, windowId: window, cleanupActivity } = pane;
+    // only built-in format names and validated identifiers reach the command
+    if (this.commandsClosed || !paneId.test(id) || !/^\$\d+$/u.test(session) || !/^@\d+$/u.test(window ?? '') || !Number.isSafeInteger(pid) || pid <= 1
+      || !cleanupActivityPattern.test(cleanupActivity) || !await socketIsCurrent(socket) || this.commandsClosed) return false;
+    // match attached viewers by session but ignore rac's no-output inventory client
+    const inSession = `#{S:#{?#{&&:#{==:#{session_id},${session}},#{==:#{session_name},#{client_session}}},1,}}`;
+    const isViewer = '#{!:#{&&:#{client_control_mode},#{m:*no-output*,#{client_flags}}}}';
+    const unattended = `#{==:#{L:#{?#{&&:${inSession},${isViewer}},1,}},}`;
+    const checks = [
+      `#{==:#{pane_id},${id}}`, `#{==:#{session_id},${session}}`, `#{==:#{window_id},${window}}`, `#{==:#{pane_pid},${pid}}`,
+      `#{==:${cleanupActivityFormat},${cleanupActivity}}`,
+      unattended, '#{==:#{window_linked},0}', '#{==:#{pane_dead},0}', '#{==:#{pane_in_mode},0}',
+      '#{==:#{@rac_role},}', '#{==:#{@rac_review_run},}', '#{==:#{@rac_spawned_by},}', '#{==:#{@rac_question},}',
+      '#{||:#{==:#{@rac_attention},},#{==:#{@rac_attention},finished}}'
+    ];
+    // every condition must still hold; the else branch reports a no-op
+    const guard = checks.reduce((condition, check) => `#{&&:${condition},${check}}`);
+    const result = await run(this.binary, ['-S', socket.path, 'if-shell', '-F', '-t', id, guard, `kill-pane -t ${id}`, 'display-message -p skipped']);
+    return result.code === 0 && !result.timedOut && result.stdout === '';
   }
 
   // run one shell command through the agent's tmux server, so under the host

@@ -16,6 +16,8 @@ const omxWorkerWorktree = /(?:^|\/)\.omx\/team\/[^/]+\/worktrees\/worker-\d+(?:\
 const omxWorkerStartup = /(?:^|\/)\.omx\/state\/team\/[^/]+\/runtime\/worker-\d+-startup\.sh(?:['"\s]|$)/u;
 // A pane whose recorded start command launched the OMX HUD watcher.
 const omxHudStartCommand = /(?:^|[/\s])omx\s+hud(?:\s+[^\s]+)*\s+--watch(?:\s|$)/u;
+// distinguish an explicitly launched watcher from a leader's helper
+const startedAsHud = (pane: Pane): boolean => omxHudStartCommand.test(pane.startCommand ?? '');
 
 export function isOmxWorkerPane(pane: Pick<Pane, 'path' | 'startCommand' | 'consoleManaged'>): boolean {
   // an explicit console launch owns the pane even inside a retained team checkout
@@ -28,10 +30,8 @@ export function isOmxWorkerPane(pane: Pick<Pane, 'path' | 'startCommand' | 'cons
 const hudCache = new WeakMap<PaneScan, Set<string>>();
 const leaderCache = new WeakMap<PaneScan, Set<string>>();
 
-// The panes running an OMX HUD watcher — either a watcher process lives in the
-// pane's tree, or the pane's own start command is one. A HUD is a monitor, not
-// an agent, so it is always a cleanup target.
-function hudPaneIds(scan: PaneScan): Set<string> {
+// find the panes with watcher processes below them without inferring the pane's role
+function hudDescendantPaneIds(scan: PaneScan): Set<string> {
   const cached = hudCache.get(scan);
   if (cached !== undefined) return cached;
   const ids = new Set<string>();
@@ -40,30 +40,32 @@ function hudPaneIds(scan: PaneScan): Set<string> {
     const pane = scan.paneAncestor(process.pid);
     if (pane !== undefined) ids.add(scan.identity(pane));
   }
-  for (const pane of scan.panes) if (omxHudStartCommand.test(pane.startCommand ?? '')) ids.add(scan.identity(pane));
   hudCache.set(scan, ids);
   return ids;
 }
 
 // A session has a leader when it still holds a live agent pane — OMX, or plain
-// Codex, since a hand-started leader may be either — that no Adapter excludes and
-// that is not the HUD watcher: the session a human is actually driving.
+// Codex — that no Adapter excludes and that was not started as a HUD watcher.
+// a HUD helper under a recognized leader does not stop it from owning the team
 function sessionsWithLeader(scan: PaneScan): Set<string> {
   const cached = leaderCache.get(scan);
   if (cached !== undefined) return cached;
-  const huds = hudPaneIds(scan);
   const leaders = new Set<string>();
+  // only recognized agents can own a team
   for (const pane of scan.panes) {
     const kind = scan.recognizedKind(pane);
-    if ((kind === 'omx' || kind === 'codex') && !scan.excluded(pane) && !huds.has(scan.identity(pane))) leaders.add(scan.sessionIdentity(pane));
+    // leave excluded workers and panes started as watchers out of the leader set
+    if ((kind === 'omx' || kind === 'codex') && !scan.excluded(pane) && !startedAsHud(pane)) leaders.add(scan.sessionIdentity(pane));
   }
   leaderCache.set(scan, leaders);
   return leaders;
 }
 
+// keep standalone watchers separate from panes that contain agents
 export function classifyOmxPane(pane: Pane, scan: PaneScan): CleanupClassification | undefined {
   const session = pane.sessionName ?? pane.sessionId;
-  if (hudPaneIds(scan).has(scan.identity(pane))) return { kind: 'hud-pane', label: 'HUD watcher', detail: `${paneLabel(pane)} in tmux session ${session}` };
+  // a descendant-only watcher never changes a recognized agent's classification
+  if (startedAsHud(pane) || (scan.recognizedKind(pane) === undefined && hudDescendantPaneIds(scan).has(scan.identity(pane)))) return { kind: 'hud-pane', label: 'HUD watcher', detail: `${paneLabel(pane)} in tmux session ${session}` };
   if (isOmxWorkerPane(pane) && !sessionsWithLeader(scan).has(scan.sessionIdentity(pane))) return { kind: 'orphan-worker', label: 'Orphan OMX worker', detail: `${paneLabel(pane)} in tmux session ${session}` };
   if (scan.recognizedKind(pane) === 'omx' && !scan.excluded(pane) && !scan.active(pane)) return { kind: 'stale-agent', label: 'Stale OMX agent', detail: `${paneLabel(pane)} at ${pane.path}` };
   return undefined;

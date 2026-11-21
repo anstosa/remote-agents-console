@@ -10,7 +10,7 @@ import { processInspector, socketFinder } from './helpers/discovery-stubs.js';
 
 const socket = { path: '/tmp/tmux-test', fingerprint: 'one', device: 1, inode: 2 };
 // include stack metadata in the shared dashboard row
-const row = (dead = '0', status = '', cwd = '/worktree', keyBinding = '') => ['%1', '$1', 'main', '123', cwd, 'node', 'café ☕', '', '', '', '', '', '', '', 'process', '', '@1', '', 'project:/worktree', 'dev', '', dead, status, keyBinding, '', '/worktree'].join('\t') + '\n';
+const row = (dead = '0', status = '', cwd = '/worktree', keyBinding = '') => ['%1', '$1', 'main', '123', cwd, 'node', 'café ☕', '', '', '', '', '', '', '', 'process', '', '@1', '', 'project:/worktree', 'dev', '', dead, status, keyBinding, '', 'p42', '/worktree'].join('\t') + '\n';
 // isolate clock and command mocks
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); vi.unstubAllEnvs(); run.mockReset(); });
 
@@ -20,7 +20,7 @@ describe('shared pane snapshots', () => {
     const commands = { listPanes: vi.fn().mockResolvedValue(row()), retainSockets: vi.fn(), closeAll: vi.fn() };
     const adapter = new TmuxAdapter(commands);
     const panes = await adapter.listPanes(socket);
-    expect(panes).toMatchObject([{ title: 'café ☕', dead: false, processWorktree: '/worktree' }]);
+    expect(panes).toMatchObject([{ title: 'café ☕', dead: false, cleanupActivity: 'p42', processWorktree: '/worktree' }]);
     expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'available', panes });
     await adapter.listPanes(socket);
     expect(commands.listPanes).toHaveBeenCalledTimes(2);
