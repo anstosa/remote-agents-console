@@ -11703,9 +11703,9 @@ test("edits every source class without leaking masked values and keeps restart p
     .getByRole("button", { name: "Restart", exact: true })
     .click();
   await expect(page.locator(".fullscreen-loader")).toContainText(
-    "Waiting for the host applier",
+    "RAC will check your saved settings before restarting.",
   );
-  expect(state.restarts).toBe(1);
+  await expect.poll(() => state.restarts).toBe(1);
 
   // protected plaintext never enters browser persistence or navigation state
   expect(

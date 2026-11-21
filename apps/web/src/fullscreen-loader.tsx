@@ -91,11 +91,10 @@ export function FullscreenLoader({ label, children, onEntered, focusReturnKey, p
     if (focusReturnKey !== undefined) focusReturnRef.current = focusReturnKey;
   }, [focusReturnKey]);
 
-  // let a later action reuse an already-painted passive overlay
+  // let a new action reuse an already-painted restart or passive overlay
   useEffect(() => {
-    // clear only when no action owns the painted handoff
-    if (onEntered === undefined) reportedRef.current = false;
-  }, [onEntered]);
+    reportedRef.current = false;
+  }, [focusReturnKey, onEntered]);
 
   // retain an initial transparent paint before beginning the fade
   useEffect(() => {
@@ -209,7 +208,7 @@ export function FullscreenLoader({ label, children, onEntered, focusReturnKey, p
       if (firstPaintFrame !== undefined) window.cancelAnimationFrame(firstPaintFrame);
       if (secondPaintFrame !== undefined) window.cancelAnimationFrame(secondPaintFrame);
     };
-  }, [onEntered, visible]);
+  }, [focusReturnKey, onEntered, visible]);
 
   return createPortal(<div ref={overlayRef} className={`reconnecting-overlay fullscreen-loader${visible ? ' fullscreen-loader-entered' : ''}`} role="alert" aria-label={label} aria-busy="true" tabIndex={-1}>
     <div className="auth-glow" aria-hidden="true" />

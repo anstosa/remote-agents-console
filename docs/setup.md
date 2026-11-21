@@ -99,11 +99,14 @@ other items. Boolean switches sit to the right of their label and description.
 Restart guidance appears in the non-dismissable **Restart pending** toast after
 saving, rather than on individual settings or pages. Successful saves show a
 temporary **Saved** toast that dismisses after five seconds.
-Recovery details appear only after the host begins restarting RAC. The live
-countdown uses the host watchdog deadline and continues while RAC is offline.
-Completion shows a dismissible **Server restarted successfully** toast, or a
-warning when RAC had to recover after a failed restart. Dismissing that outcome
-does not dismiss any saved changes that still require a restart.
+The restart screen shows whether RAC is preparing, checking settings,
+restarting, reconnecting, or restoring its last working configuration. Once the
+server starts restarting, the recovery countdown continues even while RAC is
+offline. If the countdown runs out or automatic recovery fails, open **Manual
+recovery** for instructions. A successful restart shows a dismissible notice
+and checks for a newer UI in the browser that started it. The page reloads only
+if the UI changed; if you have unsaved work, finish it and choose **Reload UI**.
+After automatic recovery, saved settings stay pending so you can review them.
 
 For Compose installations, the host first builds the RAC image while the current
 service remains available, with a separate ten-minute build timeout. A failed

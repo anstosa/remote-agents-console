@@ -1,5 +1,6 @@
 import { type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useUiReloadBlocker } from '../ui-reload-guard.js';
 import { type ColorTheme, setColorTheme, useColorTheme } from '../color-theme.js';
 import { setNotificationSounds, useNotificationSounds } from '../notification-sounds.js';
 import { PanelIcon, panelIcons } from '../panel-header.js';
@@ -52,6 +53,8 @@ export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locke
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState(identity.deviceName);
   const [renameTouched, setRenameTouched] = useState(false);
+  // keep the browser name before it reaches the shared Settings draft
+  useUiReloadBlocker(renameOpen && renameTouched);
   const [renameError, setRenameError] = useState('');
   const renameBaseline = useRef(identity.deviceName);
   const renameButton = useRef<HTMLButtonElement>(null);

@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { SplitConfirmation } from '../split-confirmation.js';
+import { useUiReloadBlocker } from '../ui-reload-guard.js';
 import { isGoogleCalendarSummary, type GoogleCalendarSummary } from './contracts.js';
 import { useSettingsRuntime } from './runtime.js';
 import { SettingsSelect } from './select.js';
@@ -167,16 +168,24 @@ export function GoogleCalendarSettings({ setup, configuration, environment, titl
   const { status, setStatus, loading, error, setError, refresh } = setup;
   const [busyAction, setBusyAction] = useState<'connect' | 'create' | 'select' | 'disconnect' | 'retry'>();
   const [calendarName, setCalendarName] = useState(defaultCalendarName);
+  const [calendarNameEdited, setCalendarNameEdited] = useState(false);
   const [selectedCalendarId, setSelectedCalendarId] = useState('');
+  const [calendarSelectionEdited, setCalendarSelectionEdited] = useState(false);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   const [preview, setPreview] = useState('');
   const [previewError, setPreviewError] = useState('');
   const [copied, setCopied] = useState(false);
   const operationPending = useRef(false);
   const previewSequence = useRef(0);
+  // protect drafts and live actions that the shared settings transaction does not own
+  useUiReloadBlocker(calendarNameEdited || calendarSelectionEdited || busyAction !== undefined || confirmingDisconnect);
 
   // follow the server-selected calendar until the operator chooses another option
-  useEffect(() => { setSelectedCalendarId(status?.selectedCalendarId ?? status?.calendars[0]?.id ?? ''); }, [status?.selectedCalendarId, status?.calendars]);
+  useEffect(() => {
+    // preserve an uncommitted choice across status refreshes
+    if (calendarSelectionEdited) return;
+    setSelectedCalendarId(status?.selectedCalendarId ?? status?.calendars[0]?.id ?? '');
+  }, [calendarSelectionEdited, status?.selectedCalendarId, status?.calendars]);
   // revoke modal intent when authority changes
   useEffect(() => { setConfirmingDisconnect(false); }, [runtime.canMutate, runtime.securityEpoch]);
   // refresh when this dedicated page mounts
@@ -235,6 +244,13 @@ export function GoogleCalendarSettings({ setup, configuration, environment, titl
         return;
       }
       setStatus(payload);
+      // return completed live-action inputs to their clean server-backed defaults
+      if (action === 'create') {
+        setCalendarName(defaultCalendarName);
+        setCalendarNameEdited(false);
+      }
+      // a committed selection or disconnect no longer owns an unsaved destination
+      if (action === 'select' || action === 'disconnect') setCalendarSelectionEdited(false);
       // do not describe a safely reported degraded outcome as success
       if (payload.status === 'degraded') onNotice('error', calendarFailure(payload.lastError));
       else onNotice('success', success);
@@ -345,12 +361,12 @@ export function GoogleCalendarSettings({ setup, configuration, environment, titl
 
     <section className="settings-schema-section settings-google-calendar-target" aria-label="Google Calendar destination">
       <header><div><h3>Calendar</h3><p>Create a dedicated calendar or select one previously created by RAC. RAC never lists or writes unrelated calendars here.</p></div></header>
-      <label className="settings-google-calendar-name">New calendar name<input aria-label="New calendar name" type="text" value={calendarName} disabled={liveBlocked || providerUnavailable || !status?.connected} onChange={event => { /* retain an unsaved live-action label only in memory */ setCalendarName(event.target.value); }} /></label>
+      <label className="settings-google-calendar-name">New calendar name<input aria-label="New calendar name" type="text" value={calendarName} disabled={liveBlocked || providerUnavailable || !status?.connected} onChange={event => { /* retain an unsaved live-action label only in memory */ setCalendarName(event.target.value); setCalendarNameEdited(event.target.value !== defaultCalendarName); }} /></label>
       {calendarNameError && <span className="settings-field-error" role="alert">{calendarNameError}</span>}
       <button type="button" disabled={liveBlocked || providerUnavailable || !status?.connected || calendarNameError !== undefined} onClick={() => { /* create exactly one explicitly named calendar */ void mutate('create', '/api/settings/google-calendar/calendars', { name: calendarName.trim() }, 'Google Calendar created.'); }}>{busyAction === 'create' ? 'Creating…' : 'Create calendar'}</button>
       <div className="settings-google-calendar-select">
         <span>RAC-created calendar</span>
-        <SettingsSelect label="RAC-created calendar" value={selectedCalendarId} disabled={liveBlocked || providerUnavailable || !status?.connected || status.calendars.length === 0} options={(status?.calendars ?? []).map(calendar => ({ /* expose only server-returned RAC calendars */ value: calendar.id, label: calendar.name }))} onChange={value => { /* stage only the live target choice */ setSelectedCalendarId(value); }} />
+        <SettingsSelect label="RAC-created calendar" value={selectedCalendarId} disabled={liveBlocked || providerUnavailable || !status?.connected || status.calendars.length === 0} options={(status?.calendars ?? []).map(calendar => ({ /* expose only server-returned RAC calendars */ value: calendar.id, label: calendar.name }))} onChange={value => { /* stage only a choice that differs from the server */ setSelectedCalendarId(value); setCalendarSelectionEdited(value !== (status?.selectedCalendarId ?? status?.calendars[0]?.id ?? '')); }} />
         <button type="button" className="settings-primary-button" disabled={liveBlocked || providerUnavailable || !status?.connected || selectedCalendar === undefined || selectedCalendarId === status.selectedCalendarId} onClick={() => { /* select only an identifier returned by the safe status route */ void mutate('select', '/api/settings/google-calendar/select', { calendarId: selectedCalendarId }, 'Google Calendar destination updated.'); }}>{busyAction === 'select' ? 'Selecting…' : 'Use selected calendar'}</button>
       </div>
     </section>

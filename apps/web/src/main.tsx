@@ -44,6 +44,7 @@ import { applyColorTheme, useColorTheme } from './color-theme.js';
 import { serverPreferences, ServerPreferencesProvider, useServerPreferences, type FileOpenAction } from './server-preferences.js';
 import { applyReducedMotion, prefersReducedMotion } from './reduced-motion.js';
 import { useFullscreenAction } from './fullscreen-loader.js';
+import { hasUiReloadBlockers, setUiReloadBlocker, useUiReloadBlocked, useUiReloadBlocker } from './ui-reload-guard.js';
 import { readNotificationSounds } from './notification-sounds.js';
 import { UpstreamRebaseNotification, type GitUpstreamSummary } from './upstream-rebase.js';
 import { useViewportFlyout } from './viewport-flyout.js';
@@ -65,7 +66,7 @@ import { saveFilesOpen, useFilesController, type FilesController } from './files
 import type { FileEntry } from './files-panel/contracts.js';
 import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './settings/settings-center.js';
 import { SettingsHeaderActionsContext, SettingsHeaderSearchContext } from './settings/header-actions.js';
-import { isSettingsSnapshot, settingsResponseError } from './settings/contracts.js';
+import { isSettingsSnapshot, settingsResponseError, type SettingsStatus } from './settings/contracts.js';
 import { instanceIconHashPattern, isInstanceIconName } from '../../server/src/instance-icon-name.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
 import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
@@ -427,18 +428,30 @@ type SpeechRecognitionInstance = { continuous: boolean; interimResults: boolean;
 type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
 
 const promptDrafts = new Map<string, string>();
+const unsavedPromptDrafts = new Set<string>();
+const promptReloadOwner = Symbol();
 const promptDraftListeners = new Map<string, Set<() => void>>();
 type PromptNoteSource = Pick<Agent, 'id' | 'placeId' | 'worktreeId'> & { onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void };
-const promptDraftKey = (id: string) => `remote-agent-console:prompt-draft:${id}`;
+const promptDraftPrefix = 'remote-agent-console:prompt-draft:';
+// keep prompt storage scoped to the exact composer
+const promptDraftKey = (id: string) => `${promptDraftPrefix}${id}`;
 const readPromptDraft = (id: string) => {
   try { return localStorage.getItem(promptDraftKey(id)) ?? ''; }
   catch { return ''; }
 };
+// record drafts that still depend on this document because storage rejected the text
 const savePromptDraft = (id: string, value: string) => {
   try {
+    // store only nonempty prompt drafts
     if (value) localStorage.setItem(promptDraftKey(id), value);
     else localStorage.removeItem(promptDraftKey(id));
-  } catch { /* Private browsing or storage quota must not block prompting. */ }
+    unsavedPromptDrafts.delete(id);
+  } catch {
+    // do not protect an empty draft when storage is unavailable
+    if (value) unsavedPromptDrafts.add(id);
+    else unsavedPromptDrafts.delete(id);
+  }
+  syncPromptReloadBlocker();
 };
 const getPromptDraft = (id: string) => {
   if (!promptDrafts.has(id)) promptDrafts.set(id, readPromptDraft(id));
@@ -470,6 +483,17 @@ const appliedDraftOffers = new Map<string, number>();
 // retain selected files across composer remounts without persisting file contents
 const promptAttachments = new Map<string, File[]>();
 const emptyPromptAttachments: File[] = [];
+// include drafts retained for minimized or inactive workspaces
+const syncPromptReloadBlocker = () => setUiReloadBlocker(promptReloadOwner, unsavedPromptDrafts.size > 0 || promptAttachments.size > 0);
+// recheck storage before navigation in case another tab changed a retained draft
+const reconcilePromptReloadBlocker = () => {
+  for (const [id, value] of promptDrafts) {
+    // keep the current document when its draft no longer matches the stored copy
+    if (value !== readPromptDraft(id)) unsavedPromptDrafts.add(id);
+    else unsavedPromptDrafts.delete(id);
+  }
+  syncPromptReloadBlocker();
+};
 // identify drafts prepared before a worktree has an agent
 const worktreePromptId = (worktreeId: string) => `worktree-prompt:${worktreeId}`;
 const promptHandoffFocus = new Map<string, { start: number; end: number }>();
@@ -480,6 +504,7 @@ const setPromptAttachments = (id: string, next: SetStateAction<File[]>) => {
   // release file buffers when the draft is cleared
   if (files.length === 0) promptAttachments.delete(id);
   else promptAttachments.set(id, files);
+  syncPromptReloadBlocker();
   // notify every mounted draft consumer
   promptDraftListeners.get(id)?.forEach(listener => listener());
 };
@@ -749,6 +774,20 @@ const currentUiVersion = (() => {
   const script = document.querySelector<HTMLScriptElement>('script[type="module"][src]');
   return script === null ? undefined : new URL(script.src).pathname;
 })();
+// compare the deployed entry with this document without treating a failed check as an update
+async function hasDeployedUiUpdate(timeoutMs: number): Promise<boolean | undefined> {
+  // development or a missing entry cannot reliably identify a newer bundle
+  if (currentUiVersion === undefined) return undefined;
+  try {
+    const response = await fetch('/api/ui-version', { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
+    // only a valid same-origin module pathname can trigger a reload
+    if (!response.ok) return undefined;
+    const payload = await response.json() as { version?: unknown } | null;
+    const version = payload?.version;
+    return typeof version === 'string' && /^\/(?!\/)[^?#\\]*\.(?:[cm]?js|tsx)$/u.test(version) ? version !== currentUiVersion : undefined;
+  } catch { return undefined; }
+}
+
 type ConsoleConnectionListener = (reachable: boolean) => void;
 const consoleConnectionListeners = new Set<ConsoleConnectionListener>();
 const unavailableStatuses = new Set([502, 503, 520, 521, 522, 523, 524, 525, 526, 527, 530]);
@@ -1252,7 +1291,7 @@ type ClientSettings = {
   renameClient: (name: string) => Promise<string | undefined>;
   renameServer: (name: string) => Promise<string | undefined>;
   loadServerRevision: () => Promise<ServerRevision | undefined>;
-  reloadClient: () => void;
+  reloadClient: () => Promise<boolean>;
   openServerUpdate: () => void;
   refreshDavo: () => Promise<void>;
   disableDavo: () => Promise<string | undefined>;
@@ -1970,6 +2009,8 @@ function ClientSettingsLayout({ settings, workspaceKey, children, onOperationFee
   const [name, setName] = useState(settings.serverName);
   const [renamingAccount, setRenamingAccount] = useState<CodexAccount>();
   const [pending, setPending] = useState(false);
+  // leave live rename dialogs open until their owner saves or dismisses them
+  useUiReloadBlocker(dialog === 'server' || dialog === 'account-rename');
   const [error, setError] = useState('');
   const [accounts, setAccounts] = useState<CodexAccount[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
@@ -2910,6 +2951,8 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const [queuedPromptsOpen, setQueuedPromptsOpen] = useState(false);
   const [queuedPromptAction, setQueuedPromptAction] = useState<{ id: string; kind: 'cancel' | 'edit' | 'move' | 'save' }>();
   const [queuedPromptEdit, setQueuedPromptEdit] = useState<{ id: string; text: string }>();
+  // preserve an inline queued prompt edit and any submit in flight
+  useUiReloadBlocker(queuedPromptEdit !== undefined || pending);
   const [queuedPromptError, setQueuedPromptError] = useState<string>();
   const [normalPromptQuestionId, setNormalPromptQuestionId] = useState<string>();
   const [notesQuestionId, setNotesQuestionId] = useState<string>();
@@ -4172,6 +4215,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const [scheduleBusy, setScheduleBusy] = useState(false);
   const [scheduleRunning, setScheduleRunning] = useState(false);
   const [attachmentPending, setAttachmentPending] = useState(false);
+  // protect note text and title drafts while their saves are pending
+  useUiReloadBlocker(dirtyCount > 0 || renaming || menuRenameDraft !== undefined || renameBusy || attachmentPending || sendState === 'sending');
   const [noteAttachmentError, setNoteAttachmentError] = useState('');
   const [draggingNoteFiles, setDraggingNoteFiles] = useState(false);
   const noteAttachmentInput = useRef<HTMLInputElement | null>(null);
@@ -6717,6 +6762,8 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState(name);
   const [renamePending, setRenamePending] = useState(false);
+  // preserve an in-place terminal label draft or rename in flight
+  useUiReloadBlocker(renamePending || renaming && renameDraft !== name);
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState(false);
   // the stream's status until its seed lands (Connecting, Reconnecting…); undefined while live
@@ -9290,7 +9337,7 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
   const discardDraft: PanelAction = { key: 'discard', label: 'Discard draft', title: 'Discard this draft and its attachments', className: 'agent-discard', icon: <PanelIcon path={actionIconPaths.trash} />, onSelect: () => {
     // confirm before losing prepared text or files, as a failed launch's discard does
     if ((getPromptDraft(draftId) || promptAttachments.has(draftId)) && !window.confirm('Discard this draft and its attachments?')) return;
-    promptAttachments.delete(draftId);
+    setPromptAttachments(draftId, []);
     setPromptDraft(draftId, '');
     setPromptOpened(false);
   } };
@@ -9616,13 +9663,17 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
   const noteFeedback = useContext(NoteFeedbackContext);
   const [reloadingClient, setReloadingClient] = useState(false);
   const reloadClient = clientSettings?.reloadClient;
+  const uiReloadBlocked = useUiReloadBlocked();
   // paint the committed progress border before replacing the document
   useEffect(() => {
     // schedule navigation only after the reload button is clicked
     if (!reloadingClient || reloadClient === undefined) return;
     let frame = window.requestAnimationFrame(() => {
       // leave one rendered frame before navigation can suspend painting
-      frame = window.requestAnimationFrame(reloadClient);
+      frame = window.requestAnimationFrame(() => {
+        // keep the manual action available after a draft blocks navigation
+        void reloadClient().then(reloaded => { if (!reloaded) setReloadingClient(false); });
+      });
     });
     // cancel navigation if this toast host unmounts before the next frame
     return () => window.cancelAnimationFrame(frame);
@@ -9637,7 +9688,7 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
   if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate && !showSettingsRestart && !showTunnelHealth && !noteFeedback?.toasts.length) return null;
   return createPortal(<div className="toast-region">
     {noteFeedback?.toasts}
-    {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>Reload to use the latest version.</span></div><button type="button" className="progress-border progress-loading progress-blue" data-fullscreen-focus-return="reload" disabled={reloadingClient} aria-busy={reloadingClient} onClick={() => {
+    {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>{uiReloadBlocked ? 'Save or discard your unsaved work, then reload to update.' : 'Reload to use the latest version.'}</span></div><button type="button" className="progress-border progress-loading progress-blue" data-fullscreen-focus-return="reload" disabled={reloadingClient} aria-busy={reloadingClient} onClick={() => {
       // keep reload feedback visible while the replacement document is loading
       if (reloadingClient) return;
       setReloadingClient(true);
@@ -9703,6 +9754,8 @@ const noAutofill = { autoComplete: 'off', autoCorrect: 'off', autoCapitalize: 'o
 // rename a non-git workspace on this browser without renaming its folder
 function RenameWorkspaceDialog({ workspace, onClose }: { workspace: { key: string; label: string }; onClose: () => void }) {
   const [name, setName] = useState(workspace.label);
+  // preserve the alias until it is saved or dismissed
+  useUiReloadBlocker(name !== workspace.label);
   // save the client-local alias without changing server identity
   const save = (event: React.FormEvent) => { event.preventDefault(); setWorkspaceAlias(workspace.key, name); onClose(); };
   return createPortal(<div className="dialog client-rename-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-rename-title" onKeyDown={event => { /* dismiss without saving */ if (event.key === 'Escape') onClose(); }}><div><header><h2 id="workspace-rename-title">Rename workspace</h2><button type="button" aria-label="Close rename workspace" onClick={onClose}><PanelIcon path={panelIcons.close} /></button></header><form onSubmit={save}><p>This name applies to this browser only.</p><label>Workspace name<input autoFocus value={name} maxLength={120} {...noAutofill} onChange={event => setName(event.target.value)} /></label><footer><button type="button" onClick={() => { /* restore the discovered name */ setWorkspaceAlias(workspace.key, ''); onClose(); }}>Use default name</button><button type="button" onClick={onClose}>Cancel</button><button type="submit" disabled={!name.trim()}>Save</button></footer></form></div></div>, document.body);
@@ -9712,6 +9765,8 @@ function RenameWorkspaceDialog({ workspace, onClose }: { workspace: { key: strin
 function RenameWorktreeDialog({ worktree, request, onClose, onRenamed }: { worktree: Worktree; request: (url: string, init?: RequestInit) => Promise<Response>; onClose: () => void; onRenamed: (label: string | undefined) => void }) {
   const [name, setName] = useState(worktree.label);
   const [pending, setPending] = useState(false);
+  // keep a pending rename or an unsaved label in this document
+  useUiReloadBlocker(pending || name !== worktree.label);
   const [error, setError] = useState<string>();
   // write one normalized custom label
   const rename = async (event: React.FormEvent) => {
@@ -9805,6 +9860,8 @@ const readHeldMoveInspection = (value: unknown, operationId: string, sourceWorkt
 };
 // retain ordinary creation choices while keeping held moves a distinct operation
 function NewWorktreeDialog({ project, request, initial, initialRecovery, onRecoveryChange, serverStartedAt, reviewUnavailable, onClose, onCreated, onSelectTarget, onRefresh }: { project: Project; request: (url: string, init?: RequestInit) => Promise<Response>; initial?: NewWorktreeSelection; initialRecovery?: InterruptedHeldMove; onRecoveryChange?: (recovery: InterruptedHeldMove | undefined) => void; serverStartedAt?: number; reviewUnavailable?: string; onClose: () => void; onCreated: (result: WorktreeCreated, opened: WorktreeOpenChoice, follow: WorktreeFollowUp) => void; onSelectTarget: (target: DashboardTarget) => void; onRefresh?: () => void | Promise<void> }) {
+  // keep the open worktree plan including branch and launch choices until it closes
+  useUiReloadBlocker(true);
   const pullInitial = initial?.mode === 'pull-request' || initial?.mode === 'move-pull-request' ? initial : undefined;
   const heldInitial = initial?.mode === 'move-pull-request' ? initial : undefined;
   const issue = initial?.mode === 'issue' ? initial : undefined;
@@ -10483,13 +10540,14 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     // retain drafts while their agent or inactive worktree still exists
     for (const id of promptDrafts.keys()) {
       // retire removed draft caches
-      if (!retainedPromptIds.has(id)) promptDrafts.delete(id);
+      if (!retainedPromptIds.has(id)) { promptDrafts.delete(id); unsavedPromptDrafts.delete(id); }
     }
     // release attachment buffers belonging to removed workspaces
     for (const id of promptAttachments.keys()) {
       // keep pending launch files through dashboard updates
       if (!retainedPromptIds.has(id)) promptAttachments.delete(id);
     }
+    syncPromptReloadBlocker();
     for (const [worktreeId, sourceAgentId] of pendingNewTaskSources) {
       const replacement = nextPayload.agents.find(agent => agent.worktreeId === worktreeId && agent.id !== sourceAgentId && agent.reviewRun === undefined);
       const sourceStillActive = nextPayload.agents.some(agent => agent.id === sourceAgentId);
@@ -11996,6 +12054,7 @@ function App() {
   const [serverStatuses, setServerStatuses] = useState<Record<string, InstanceAttention>>({});
   const [error, setError] = useState('');
   const [clientUpdateAvailable, setClientUpdateAvailable] = useState(false);
+  const [checkingRestartUi, setCheckingRestartUi] = useState(false);
   const [serverUpdateAvailable, setServerUpdateAvailable] = useState(false);
   // order overlapping availability reads and terminal retry refreshes
   const serverUpdateAvailabilityRequest = useRef(0);
@@ -12016,6 +12075,15 @@ function App() {
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const colorTheme = useColorTheme();
   const notificationFingerprintScope = `${location.origin}|${serverInfo.url}`;
+  // keep the reload guidance current when another tab changes a saved prompt
+  useEffect(() => {
+    const changed = (event: StorageEvent) => {
+      // ignore other browser preferences unless storage was cleared
+      if (event.key === null || event.key.startsWith(promptDraftPrefix)) reconcilePromptReloadBlocker();
+    };
+    window.addEventListener('storage', changed);
+    return () => window.removeEventListener('storage', changed);
+  }, []);
   // the controlling browser's theme colours the console's tmux panes; post it on gaining control,
   // on every toggle, and on each session refresh, so a restarted server (back on Mocha) relearns it
   useEffect(() => {
@@ -12065,16 +12133,27 @@ function App() {
     }
   }, []);
   // reload one stale browser bundle only behind the painted cover
-  const reloadClient = useCallback(async () => {
+  const reloadClient = useCallback(async (): Promise<boolean> => {
+    // manual and automatic updates both protect work that only lives here
+    reconcilePromptReloadBlocker();
+    if (hasUiReloadBlockers()) return false;
     // ignore repeated reload clicks while one transition owns the screen
-    if (!await beginFullscreenAction('reload')) return;
+    if (!await beginFullscreenAction('reload')) return false;
+    // a pending draft may have appeared before the cover painted
+    reconcilePromptReloadBlocker();
+    if (hasUiReloadBlockers()) {
+      finishFullscreenAction('reload');
+      return false;
+    }
     location.reload();
-  }, [beginFullscreenAction]);
+    return true;
+  }, [beginFullscreenAction, finishFullscreenAction]);
   // reload stale clients after control succeeds without opening the old console
   const claimSession = useCallback((current: SessionInfo) => {
     // keep ready-only work paused until the fresh document restores ownership
     if (current.active && clientUpdateAvailable) {
-      void reloadClient();
+      // continue with control when local work needs the current document
+      void reloadClient().then(reloaded => { if (!reloaded) applySession(current); });
       return;
     }
     applySession(current);
@@ -12435,11 +12514,26 @@ function App() {
       if (response.ok) applySession(await response.json() as SessionInfo);
     } catch { /* keep the current screen while the reconnect overlay handles availability */ }
   }, [applySession]);
-  // refresh effective server settings after the restart settles
-  const onRestartSettled = useCallback(() => {
-    finishFullscreenAction('restart');
-    void refreshSession();
-  }, [finishFullscreenAction, refreshSession]);
+  // refresh effective settings or replace this document after a proved local restart
+  const onRestartSettled = useCallback((restarted?: SettingsStatus) => {
+    // a failed or cancelled restart and a move to a new address never reload this page
+    if (restarted === undefined || restarted.reconnectOrigin !== undefined || currentUiVersion === undefined) {
+      finishFullscreenAction('restart');
+      void refreshSession();
+      return;
+    }
+    setCheckingRestartUi(true);
+    // keep the same fullscreen cover until the bundle check returns
+    void hasDeployedUiUpdate(4_000).then(update => {
+      setCheckingRestartUi(false);
+      finishFullscreenAction('restart');
+      // continue in place when nothing changed or the version could not be confirmed
+      if (update !== true) { void refreshSession(); return; }
+      setClientUpdateAvailable(true);
+      // continue in this document when the reload guard preserves local edits
+      void reloadClient().then(reloaded => { if (!reloaded) void refreshSession(); });
+    });
+  }, [finishFullscreenAction, refreshSession, reloadClient]);
   // return an expired session to login
   const handleUnauthorized = useCallback(() => {
     setSessionInfo(undefined);
@@ -12574,16 +12668,16 @@ function App() {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [reconnecting]);
+  // keep ordinary background update discovery independent from the restart handoff
   useEffect(() => {
+    // skip documents whose loaded bundle could not be identified
     if (currentUiVersion === undefined) return;
     let closed = false;
+    // advertise updates outside a restart without automatically navigating
     const checkForUpdate = async () => {
-      try {
-        const response = await consoleFetch('/api/ui-version', { cache: 'no-store', signal: AbortSignal.timeout(8_000) });
-        if (!response.ok || closed) return;
-        const payload = await response.json() as { version?: unknown };
-        if (typeof payload.version === 'string' && payload.version !== currentUiVersion) setClientUpdateAvailable(true);
-      } catch { /* Retry at the next interval. */ }
+      const update = await hasDeployedUiUpdate(8_000);
+      // do not repaint a retired browser or clear an existing notice on a failed check
+      if (update === true && !closed) setClientUpdateAvailable(true);
     };
     const stopPolling = pollWhileVisible(checkForUpdate, 30_000, false);
     return () => { closed = true; stopPolling(); };
@@ -12655,7 +12749,7 @@ function App() {
   // share the current launch settings with every flyout
   // keep retry availability separate from provider and operation failures
   const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, loading: agentVersionsLoading, updating: updatingAgent, errors: Array.from(new Set([versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), retryVersions: versionCheckError ? () => { /* retry through the existing request owner */ refreshAgentVersions.current?.(); } : undefined, updateAgent: dispatchAgentUpdate }), [agentUpdateStatuses, agentVersionsLoading, updatingAgent, versionCheckError, dispatchAgentUpdate]);
-  return <ServerPreferencesProvider value={runtimePreferences}><SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents />{piUpdateTarget !== undefined && <PiUpdateDialog target={piUpdateTarget} request={request} onClose={closePiUpdate} onSubmitted={submittedPiUpdate} />}<ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} onUpdateFailed={refreshServerUpdateAfterFailure} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider></ServerPreferencesProvider>;
+  return <ServerPreferencesProvider value={runtimePreferences}><SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents />{piUpdateTarget !== undefined && <PiUpdateDialog target={piUpdateTarget} request={request} onClose={closePiUpdate} onSubmitted={submittedPiUpdate} />}<ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} onUpdateFailed={refreshServerUpdateAfterFailure} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} checkingRestartUi={checkingRestartUi} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider></ServerPreferencesProvider>;
 }
 // register without surfacing legacy or private-mode failures as unhandled rejections
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => undefined);

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import type { SettingsStatus } from '../src/settings/contracts.js';
 import { installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock';
 import { codeViewOption, openCodeViewMenu } from './panel-header';
 import type { ComparisonFile, ComparisonFileContents, ComparisonPatch, FilePreviewView, RevisionFile } from '../src/code-panel/comparison';
@@ -1492,6 +1493,7 @@ test('asks about lines of a Code panel diff from the gutter, with follow-ups, an
   const asked: Array<{ query: string; body: unknown }> = [];
   let turns: Array<{ id: string; question: string; askedAt: string; answer: string }> = [];
   let polls = 0;
+  let restartStatus: SettingsStatus = { pending: false, targets: [], effective: 'known', restartAvailable: true };
   const anchor = { changeId: 'src/app.ts', file: 'src/app.ts', side: 'additions', startLine: 2, endLine: 2, excerpt: ' const a = 1;\n-const b = 2;\n+const b = 3;\n const c = 4;' };
   const comparison = patchOf([trackedFile('src/app.ts')]);
   await page.route('**/api/**', async route => {
@@ -1501,6 +1503,14 @@ test('asks about lines of a Code panel diff from the gutter, with follow-ups, an
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', worktreeId: 'cora', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/code-panel', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0, changes: [{ code: ' M', path: 'src/app.ts', additions: 1, deletions: 1 }] }, title: 'Ready' }], projects: [] } });
     if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    // introduce the ui build only after the fixture confirms this restart
+    if (url.pathname === '/api/ui-version') return route.fulfill({ json: { ...(restartStatus.operation === undefined ? {} : { version: '/assets/index-new-ask.js' }) } });
+    if (url.pathname === '/api/settings/status') return route.fulfill({ json: restartStatus });
+    if (url.pathname === '/api/settings/restart') {
+      const operation = { id: 'ask-fixture-restart', state: 'complete', restart: { state: 'restarted', recoveryDeadline: Date.now() } } as const;
+      restartStatus = { ...restartStatus, pending: false, targets: [], operation };
+      return route.fulfill({ json: operation });
+    }
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/message-files') return route.fulfill({ json: { files: [] } });
@@ -1563,6 +1573,24 @@ test('asks about lines of a Code panel diff from the gutter, with follow-ups, an
   await panel(page).locator('[data-utility-button]').click();
   const draft = panel(page).getByPlaceholder('Ask about these lines');
   await draft.fill('Why drop 2?');
+  // protect owner-local compose text even when there are no shared settings drafts
+  restartStatus = { ...restartStatus, pending: true, targets: ['rac'] };
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  let navigations = 0;
+  // a background refresh cannot navigate away from the open question
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations += 1; });
+  await page.getByRole('status', { name: 'Restart pending', exact: true }).getByRole('button', { name: 'Restart', exact: true }).click();
+  const update = page.getByRole('status', { name: 'UI update available', exact: true });
+  await expect(update).toContainText('Save or discard your unsaved work, then reload to update.');
+  await expect(draft).toHaveValue('Why drop 2?');
+  expect(navigations).toBe(0);
+  await panel(page).getByRole('region', { name: 'Questions for the agent' }).getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(update).toContainText('Reload to use the latest version.');
+  await panel(page).getByText('const b = 2;').hover();
+  await panel(page).locator('[data-utility-button]').click();
+  await draft.fill('Why drop 2?');
+  await expect(update).toContainText('Save or discard your unsaved work, then reload to update.');
   await draft.press('Control+Enter');
+  await expect(update).toContainText('Reload to use the latest version.');
   await expect.poll(() => asked.at(-1)?.body).toEqual({ lines: { changeId: 'src/app.ts', side: 'deletions', startLine: 2, endLine: 2 }, question: 'Why drop 2?', fingerprint: comparison.fingerprint });
 });

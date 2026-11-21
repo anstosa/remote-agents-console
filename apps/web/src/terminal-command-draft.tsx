@@ -1,8 +1,11 @@
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { setUiReloadBlocker } from './ui-reload-guard.js';
 
 type CommandDraft = { text: string; focus: number };
 const drafts = new Map<string, CommandDraft>();
 const listeners = new Map<string, Set<() => void>>();
+
+const terminalReloadOwner = Symbol();
 // bound the entire editable command rather than only each transport frame
 const terminalCommandByteLimit = 256 * 1024;
 export const terminalCommandLimitMessage = `Commands are limited to ${terminalCommandByteLimit / 1024} KiB. Your existing draft has been kept.`;
@@ -13,8 +16,11 @@ export const terminalCommandFits = (text: string): boolean => text.length <= ter
 // scope staged commands to the exact place and terminal pane
 export const terminalCommandKey = (placeId: string, paneId: string): string => JSON.stringify([placeId, paneId]);
 
-// notify only the terminal whose editable draft changed
-const publish = (key: string) => listeners.get(key)?.forEach(listener => listener());
+// notify the changed terminal and protect drafts even when minimized
+const publish = (key: string) => {
+  setUiReloadBlocker(terminalReloadOwner, drafts.size > 0);
+  listeners.get(key)?.forEach(listener => listener());
+};
 
 // retain existing edits when another custom action is staged
 export function stageTerminalCommand(key: string, text: string): boolean {

@@ -536,6 +536,7 @@ test('keeps restart progress fullscreen until the operation settles', async ({ p
 
   const loader = page.getByRole('alert', { name: 'Preparing restart', exact: true });
   const card = loader.locator(':scope > .fullscreen-card');
+  let queuedStatusRead: Promise<unknown> | undefined;
   try {
     await restart.click();
     await expect.poll(() => fixture.restartRequests).toBe(1);
@@ -543,15 +544,17 @@ test('keeps restart progress fullscreen until the operation settles', async ({ p
     await expect(notice).toHaveCount(0);
     await expectProgressBorder(card, 'mauve');
     await expectClockwiseProgressBorder(card);
+    queuedStatusRead = page.waitForResponse(async response => new URL(response.url()).pathname === '/api/settings/status' && response.request().method() === 'GET' && (await response.json() as RestartStatus).operation?.state === 'queued');
   } finally {
     // release the mocked restart during failed assertions too
     restartGate.release();
   }
-  await expect(loader).toContainText('Waiting for the host applier');
-  fixture.status = { pending: true, targets: ['rac'], effective: 'known', restartAvailable: true, operation: { id: 'restart-1', state: 'running', phase: 'Restarting RAC' } };
+  await queuedStatusRead;
+  // keep the same painted progress card through the next user-facing step
+  fixture.status = { pending: true, targets: ['rac'], effective: 'known', restartAvailable: true, operation: { id: 'restart-1', state: 'running', phase: 'claimed' } };
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-  await expect(loader).toContainText('Restarting RAC');
-  await expectProgressBorder(card, 'mauve');
+  const checking = page.getByRole('alert', { name: 'Checking saved settings', exact: true });
+  await expectProgressBorder(checking.locator(':scope > .fullscreen-card'), 'mauve');
 
   fixture.status = { pending: false, targets: [], effective: 'known', restartAvailable: true, operation: { id: 'restart-1', state: 'complete' } };
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
@@ -570,10 +573,10 @@ test('shows a reduced-motion fullscreen retry spinner and stops it after failure
   // hold the retry before returning its second failure
   await mountRestartFixture(page, fixture, async route => {
     await restartGate.promise;
-    await route.fulfill({ status: 503, json: { error: 'Retry rejected by fixture.' } });
+    await route.fulfill({ status: 409, json: { error: 'Retry rejected by fixture.' } });
   });
 
-  const notice = page.getByRole('alert', { name: 'Restart pending' });
+  const notice = page.getByRole('alert', { name: 'Restart failed', exact: true });
   const retry = notice.getByRole('button', { name: 'Retry restart', exact: true });
   await expect(retry).toBeEnabled();
   await expect(retry.locator('.update-progress-ring')).toHaveCount(0);
@@ -601,5 +604,5 @@ test('shows a reduced-motion fullscreen retry spinner and stops it after failure
   await expect(retry).toBeEnabled();
   await expect(retry).not.toHaveAttribute('aria-busy');
   await expect(retry.locator('.update-progress-ring')).toHaveCount(0);
-  await expect(notice).toContainText('First restart failed.');
+  await expect(notice).toContainText('Review them before retrying.');
 });

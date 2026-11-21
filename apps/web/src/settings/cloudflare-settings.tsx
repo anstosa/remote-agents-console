@@ -59,8 +59,8 @@ const hostnameValue = (value: string): string | undefined => {
   return hostname.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(hostname) ? hostname : undefined;
 };
 
-// translate bounded host diagnostics into actionable setup guidance
-const cloudflareFailure = (code: string): string => ({
+// translate only known host diagnostics into actionable setup guidance
+const cloudflareFailures: Record<string, string> = {
   invalid_cloudflare_token: 'Paste only the tunnel token, not the installation command.',
   cloudflare_dns_unavailable: 'The hostname does not resolve yet. Save the Cloudflare route and try again.',
   cloudflare_health_proof_failed: 'The hostname did not reach this RAC. Check the route service URL and Cloudflare Access, then retry. The previous RAC address was kept.',
@@ -69,8 +69,28 @@ const cloudflareFailure = (code: string): string => ({
   cloudflare_connector_start_failed: 'Docker could not start the connector. Check the tunnel token and host Docker status, then retry.',
   cloudflare_service_unsupported: 'The installed Docker files do not define the managed token connector. Update the stack files before setup.',
   settings_restart_required: 'Apply the saved Settings changes before starting Cloudflare setup.',
-  settings_operation_in_progress: 'Another Settings operation is still running. Wait for it to finish before retrying.'
-} as Record<string, string>)[code.replaceAll('-', '_')] ?? code;
+  settings_operation_in_progress: 'Another Settings operation is still running. Wait for it to finish before retrying.',
+  cloudflare_connector_not_ready: 'Start the Cloudflare connector and wait until it connects before verifying the hostname.',
+  settings_changes_pending: 'Restart RAC to apply the saved settings before changing the Cloudflare address.',
+  cloudflare_status_pending: 'Cloudflare status is still loading. Wait a moment, then refresh status.',
+  settings_unavailable: 'RAC could not check Cloudflare setup. Refresh status before trying again.',
+  settings_applier_unavailable: 'Ask the server administrator to enable Cloudflare setup for this installation.',
+  cloudflare_setup_unsupported: 'This RAC installation does not support automated Cloudflare setup.'
+};
+
+// keep unknown diagnostics out of user-facing copy
+function cloudflareFailure(code: string, fallback: string): string {
+  const key = code.replaceAll('-', '_');
+  return Object.hasOwn(cloudflareFailures, key) ? cloudflareFailures[key]! : fallback;
+}
+
+// explain request rejections without exposing response text
+async function cloudflareRequestFailure(response: Response, fallback: string): Promise<string> {
+  // authentication and control can change while a request is in flight
+  if (response.status === 401) return 'Sign in again before continuing Cloudflare setup.';
+  if (response.status === 403 || response.status === 423) return 'Take control from this browser before changing Cloudflare setup.';
+  return cloudflareFailure(await settingsResponseError(response, ''), fallback);
+}
 
 // explain the connector-first dashboard workflow without copying any credentials
 export const cloudflareSetupInstructions = (serviceUrl: string, hostname: string): string => [
@@ -104,7 +124,12 @@ export function CloudflareSettings({ setup, disabled, blockedByDrafts, confirmat
     try {
       const response = await runtime.request('/api/settings/cloudflare', { cache: 'no-store' });
       // retain prior progress across helper or connection failures
-      if (!response.ok) { if (mounted.current) setError(await settingsResponseError(response, 'Cloudflare status is unavailable.')); return; }
+      if (!response.ok) {
+        const message = await cloudflareRequestFailure(response, 'Cloudflare status is unavailable. Refresh status to try again.');
+        // parsing the response may outlive this page
+        if (mounted.current) setError(message);
+        return;
+      }
       const payload: unknown = await response.json();
       // never render an unvalidated helper response
       if (!isCloudflareStatus(payload)) { if (mounted.current) setError('Cloudflare returned an unsupported status.'); return; }
@@ -162,7 +187,12 @@ export function CloudflareSettings({ setup, disabled, blockedByDrafts, confirmat
       const body = action === 'connect' ? { action, ...(draft.token.trim() === '' ? {} : { token: draft.token.trim() }) } : { action, hostname: capturedHostname };
       const response = await runtime.request('/api/settings/cloudflare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       // report only bounded API diagnostics and keep unrelated drafts intact
-      if (!response.ok) { if (mounted.current) setError(await settingsResponseError(response, 'Cloudflare setup could not be started.')); return; }
+      if (!response.ok) {
+        const message = await cloudflareRequestFailure(response, 'Cloudflare setup could not be started. Refresh status before trying again.');
+        // do not display stale request errors after leaving the page
+        if (mounted.current) setError(message);
+        return;
+      }
       const payload: unknown = await response.json();
       // require a durable accepted operation before discarding entered plaintext
       if (payload === null || typeof payload !== 'object' || !('operation' in payload) || !isSettingsOperation(payload.operation) || !['queued', 'running', 'complete'].includes(payload.operation.state)) { if (mounted.current) setError('Cloudflare setup could not be confirmed. Refresh status before retrying.'); return; }
@@ -186,8 +216,8 @@ export function CloudflareSettings({ setup, disabled, blockedByDrafts, confirmat
         <button type="button" disabled={disabled || running || blockedByDrafts} onClick={() => { /* reopen instructions without changing the existing tunnel */ setReplacement({ open: true }); }}>Replace tunnel</button>
       </> : <>
       <strong>{loading ? 'Loading Cloudflare…' : running ? 'Applying Cloudflare setup…' : status?.mode === 'local' ? 'Existing file-managed tunnel' : status?.mode === 'token' && !connectorRunning ? 'Connector stopped' : connectorRunning && status?.verifiedAt ? 'Public hostname verified' : connectorRunning ? 'Connector started · hostname not verified' : 'Not connected'}</strong>
-      {operation?.state === 'running' && <span>{operation.phase ?? 'The host is applying this step…'}</span>}
-      {operation?.state === 'failed' && <span role="alert">{operation.error === undefined ? 'The setup step failed. Your previous public address is retained or recovered.' : cloudflareFailure(operation.error)}</span>}
+      {operation?.state === 'running' && <span>{operation.phase === 'verifying-hostname' ? 'Checking whether the public address reaches RAC.' : operation.phase === 'restarting-rac' ? 'Restarting RAC to use the new address.' : operation.phase === 'connector-starting' || operation.phase === 'connector-restarting' ? 'Starting the connection to Cloudflare.' : 'Preparing to apply your settings.'}</span>}
+      {operation?.state === 'failed' && <span role="alert">{cloudflareFailure(operation.error ?? '', 'Cloudflare setup did not finish. Review the connection settings and try again.')}</span>}
       {activeOrigin && <a href={activeOrigin}>Open {activeOrigin}</a>}
       {status?.verifiedAt && <small>Last verified: {status.hostname} · {status.verifiedAt}</small>}
       {running && status?.reconnectOrigin && operation?.phase === 'restarting-rac' && <a href={status.reconnectOrigin}>Open the new RAC address after verification</a>}
@@ -195,9 +225,9 @@ export function CloudflareSettings({ setup, disabled, blockedByDrafts, confirmat
       {existing && <button type="button" disabled={setup.dirty || running} title={setup.dirty ? 'Discard setup changes before returning to the tunnel summary' : undefined} onClick={() => { /* leave the guide without discarding any authored draft */ setReplacement({ open: false }); }}>Back to tunnel</button>}
       </>}
     </section>
-    {error && <p className="error" role="alert">{cloudflareFailure(error)}</p>}
+    {error && <p className="error" role="alert">{error}</p>}
     {showGuide && <>
-    {status?.supported === false && <p role="note">{status.reason === 'settings_applier_unavailable' ? 'Install the Settings host applier before setting up a tunnel.' : status.reason === 'cloudflare-token-compose-only' || status.reason === undefined ? 'New tunnel setup is available for Docker installations only. Native installations can manage an already installed cloudflared service below.' : status.reason}</p>}
+    {status?.supported === false && <p role="note">{status.reason === 'settings_applier_unavailable' ? 'Install the Settings host applier before setting up a tunnel.' : status.reason === 'cloudflare-token-compose-only' || status.reason === undefined ? 'New tunnel setup is available for Docker installations only. Native installations can manage an already installed cloudflared service below.' : 'Cloudflare setup is not available for this installation.'}</p>}
     {blockedByDrafts && <p role="note">Save or discard other Settings changes before starting Cloudflare setup. Saved changes awaiting a restart must also be applied first.</p>}
     <section className="settings-schema-section">
       <header><h3>1. Create a tunnel in Cloudflare</h3></header>

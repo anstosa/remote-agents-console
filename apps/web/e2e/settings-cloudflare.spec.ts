@@ -11,6 +11,8 @@ async function setup(page: Page, overrides: Partial<CloudflareStatus> = {}, obse
     active: !observer,
     posts: [] as Record<string, unknown>[],
     failActivation: false,
+    rejectSetup: undefined as { status: number; error: string } | undefined,
+    rejectStatus: undefined as { status: number; error: string } | undefined,
     holdOperation: false,
     status,
     cloudflare: { supported: true, mode: 'unconfigured', enabled: false, connected: false, tokenPresent: false, serviceUrl: 'http://127.0.0.1:9876', ...overrides } as CloudflareStatus
@@ -37,6 +39,8 @@ async function setup(page: Page, overrides: Partial<CloudflareStatus> = {}, obse
     if (path === '/api/settings/cloudflare' && request.method() === 'POST') {
       const body = request.postDataJSON() as Record<string, unknown>;
       state.posts.push(body);
+      // report host rejections without changing the connector or stored token
+      if (state.rejectSetup) return route.fulfill({ status: state.rejectSetup.status, json: { error: state.rejectSetup.error } });
       const operation = { id: `cloudflare-${state.posts.length}`, kind: 'cloudflare' as const, state: state.holdOperation ? 'running' as const : 'complete' as const, phase: 'Starting connector' };
       state.status.operation = operation;
       // connector startup cannot change the public hostname
@@ -46,7 +50,8 @@ async function setup(page: Page, overrides: Partial<CloudflareStatus> = {}, obse
       else Object.assign(state.cloudflare, { hostname: body.hostname, connected: true, verifiedAt: '2026-10-18T00:00:00Z', operation });
       return route.fulfill({ status: 202, json: { operation, ...(body.action === 'activate' ? { reconnectOrigin: `https://${body.hostname}` } : {}) } });
     }
-    if (path === '/api/settings/cloudflare') return route.fulfill({ json: state.cloudflare });
+    // support a transient status rejection without destroying the last snapshot
+    if (path === '/api/settings/cloudflare') return state.rejectStatus ? route.fulfill({ status: state.rejectStatus.status, json: { error: state.rejectStatus.error } }) : route.fulfill({ json: state.cloudflare });
     if (path === '/api/settings') return route.fulfill({ json: { version: 1, installationKind: state.cloudflare.supported ? 'compose' : 'systemd', revisionId: 'snapshot-1', sources: [appSource, ...legacySources], status } });
     if (path === '/api/settings/remask') return route.fulfill({ status: 204, body: '' });
     return route.fulfill({ status: 404, json: { error: 'unmocked_fixture_request' } });
@@ -146,6 +151,32 @@ test('keeps a failed hostname draft and current origin for retry', async ({ page
   await expect(settings.getByRole('button', { name: 'Discard changes', exact: true })).toBeVisible();
 });
 
+// translate known failures and hide unknown server diagnostics
+test('explains rejected Cloudflare requests without exposing raw codes', async ({ page }) => {
+  const { settings, state } = await setup(page);
+  const token = settings.getByLabel('Tunnel token', { exact: true });
+  await token.fill('synthetic-setup-token');
+  const start = settings.getByRole('button', { name: 'Start connector', exact: true });
+  // a rejected action must preserve the entered values and offer a next step
+  for (const failure of [
+    { status: 409, error: 'cloudflare_connector_not_ready', copy: 'Start the Cloudflare connector and wait until it connects before verifying the hostname.' },
+    { status: 409, error: 'settings_changes_pending', copy: 'Restart RAC to apply the saved settings before changing the Cloudflare address.' },
+    { status: 423, error: 'another client is active', copy: 'Take control from this browser before changing Cloudflare setup.' },
+    { status: 503, error: 'unrecognized_host_detail', copy: 'Cloudflare setup could not be started. Refresh status before trying again.' }
+  ]) {
+    state.rejectSetup = failure;
+    await start.click();
+    await expect(settings.getByRole('alert')).toContainText(failure.copy);
+    await expect(settings.getByRole('alert')).not.toContainText(failure.error);
+    await expect(token).toHaveValue('synthetic-setup-token');
+    await expect(start).toBeEnabled();
+  }
+  state.rejectStatus = { status: 503, error: 'cloudflare_status_pending' };
+  await settings.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await expect(settings.getByRole('alert')).toContainText('Cloudflare status is still loading. Wait a moment, then refresh status.');
+  await expect(settings.getByRole('alert')).not.toContainText('cloudflare_status_pending');
+});
+
 test('protects entered tokens with the shared discard guard', async ({ page }) => {
   const { settings } = await setup(page);
   await settings.getByLabel('Tunnel token', { exact: true }).fill('synthetic-private-entry');
@@ -219,10 +250,11 @@ test('blocks setup while unrelated drafts exist and on native installations', as
   expect(state.posts).toHaveLength(0);
   await page.reload();
   state.cloudflare.supported = false;
-  state.cloudflare.reason = 'New tunnel setup is available for Docker installations only.';
+  state.cloudflare.reason = 'cloudflare-token-compose-only';
   await page.getByRole('button', { name: 'Global settings' }).first().click();
   await selectSection(settings, 'Cloudflare');
-  await expect(settings.getByText(state.cloudflare.reason, { exact: true })).toBeVisible();
+  await expect(settings.getByText('New tunnel setup is available for Docker installations only. Native installations can manage an already installed cloudflared service below.', { exact: true })).toBeVisible();
+  await expect(settings.getByText(state.cloudflare.reason, { exact: true })).toHaveCount(0);
   await expect(settings.getByRole('button', { name: 'Start connector', exact: true })).toBeDisabled();
 });
 

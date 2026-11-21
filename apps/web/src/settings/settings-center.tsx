@@ -11,6 +11,7 @@ import { useBrowserSettingsDraft, useSettingsBrowserDraftState, type BrowserSett
 import type { SettingsChange, SettingsEnvironmentFallback, SettingsEnvField, SettingsIssue, SettingsPatch, SettingsSchema, SettingsSnapshot, SettingsSource, SettingsValidation } from './contracts.js';
 import { isProtectedValue, isSettingsSnapshot, settingsResponseError } from './contracts.js';
 import { useSettingsRuntime } from './runtime.js';
+import { useUiReloadBlocker } from '../ui-reload-guard.js';
 import { SettingsCodeEditor } from './code-editor.js';
 import { SettingsPageHeader } from './page-header.js';
 import { SettingsRevealButton } from './reveal-button.js';
@@ -62,6 +63,8 @@ export function useSettingsSession() {
   useEffect(() => () => { saveCancelled.current = true; }, []);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // the shared session can hold edits even when its settings split is closed
+  useUiReloadBlocker(saving || Object.keys(browserDraft[0]).length > 0 || cloudflare.dirty || Object.values(drafts).some(hasDraftMutation));
   // distinguish saving from other blocking file operations
   const [savePending, setSavePending] = useState(false);
   const loadGeneration = useRef(0);

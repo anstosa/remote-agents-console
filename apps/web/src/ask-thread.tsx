@@ -3,6 +3,7 @@ import { askErrorMessage, askRoleCopy, maxAskQuestion, type AskFailure, type Ask
 import type { ReviewDiffAsk } from './code-panel/review-diffs.js';
 import { useJobElapsed, type ReviewRunLink } from './review-jobs.js';
 import { MarkdownBlocks } from './note-markdown.js';
+import { useUiReloadBlocker } from './ui-reload-guard.js';
 
 // One Ask thread in a tour diff: the questions asked and the Markdown answers of `role` (the reviewer
 // under its Finding, the guide under the asked-about lines), the question still being answered (with
@@ -19,15 +20,22 @@ export function AskThreadView({ role, thread, pending, failed, placeholder, onAs
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState('');
   const elapsed = useJobElapsed(pending?.job, pending?.startedAt);
+  // keep owner-local compose work through background ui updates
+  useUiReloadBlocker(question !== '' || sending);
   // a failure the thread holds no turn for
   const lost = failed !== undefined && !turns.some(turn => turn.id === failed.turnId) ? failed.message : undefined;
   if (!open && turns.length === 0 && pending === undefined && lost === undefined) return <div className="review-ask-open"><button type="button" onClick={() => setOpen(true)}>Ask {copy.who}</button></div>;
+  // retain refused questions while releasing completed requests
   const send = async (text: string) => {
     setSending(true);
     setFailure('');
-    const refused = await onAsk(text);
-    setSending(false);
-    if (refused === undefined) setQuestion(''); else setFailure(refused);
+    try {
+      const refused = await onAsk(text);
+      // clear only a question accepted by its owning endpoint
+      if (refused === undefined) setQuestion(''); else setFailure(refused);
+    } finally {
+      setSending(false);
+    }
   };
   const busy = pending !== undefined || sending;
   return (
@@ -55,7 +63,7 @@ export function AskThreadView({ role, thread, pending, failed, placeholder, onAs
         <textarea aria-label={`Question for the ${copy.who}`} placeholder={turns.length === 0 && pending === undefined ? placeholder ?? copy.placeholder : 'Ask a follow-up'} value={question} maxLength={maxAskQuestion} autoFocus={turns.length === 0 && pending === undefined} onChange={event => setQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) event.currentTarget.form?.requestSubmit(); }} />
         {failure !== '' && <p className="review-ask-error" role="alert">{failure}</p>}
         <div className="review-ask-actions">
-          {turns.length === 0 && pending === undefined && <button type="button" onClick={() => { if (onCancel !== undefined) { onCancel(); return; } setOpen(false); setFailure(''); }}>Cancel</button>}
+          {turns.length === 0 && pending === undefined && <button type="button" onClick={() => { setQuestion(''); setFailure(''); /* release a cancelled local compose before closing it */ if (onCancel !== undefined) { onCancel(); return; } setOpen(false); }}>Cancel</button>}
           <button type="submit" disabled={busy || question.trim() === ''}>{sending ? 'Asking…' : 'Ask'}</button>
         </div>
       </form>

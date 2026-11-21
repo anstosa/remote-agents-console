@@ -6,6 +6,7 @@ type CalendarFixtureState = {
   connectUrl: string;
   summary: GoogleCalendarSummary;
   settingsStatus: SettingsStatus;
+  restartVersion?: string;
   mutations: Array<{ path: string; body: Record<string, unknown> }>;
   previews: string[];
   saves: Array<{ changes: Array<{ sourceId: string; patches?: SettingsPatch[] }> }>;
@@ -134,6 +135,13 @@ async function setup(page: Page, width = 1440) {
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     if (path === '/api/server/update-available') return route.fulfill({ json: { available: false } });
     if (path === '/api/settings/status') return route.fulfill({ json: state.settingsStatus });
+    // publish a synthetic verified restart without touching a live server
+    if (path === '/api/settings/restart') {
+      const operation = { id: 'calendar-fixture-restart', state: 'complete', restart: { state: 'restarted', recoveryDeadline: Date.now() } } as const;
+      state.settingsStatus = { ...state.settingsStatus, pending: false, targets: [], operation };
+      return route.fulfill({ json: operation });
+    }
+    if (path === '/api/ui-version') return route.fulfill({ json: { version: state.restartVersion } });
     if (path === '/api/settings/cloudflare') return route.fulfill({ json: { supported: false, reason: 'fixture', mode: 'unconfigured', enabled: false, tokenPresent: false, serviceUrl: 'http://127.0.0.1:8787' } });
     if (path === '/api/settings/google-calendar/title-preview') {
       const body = request.postDataJSON() as { template: string };
@@ -190,6 +198,47 @@ async function setup(page: Page, width = 1440) {
   await expect(settings.getByText('Loading Google Calendar…', { exact: true })).toHaveCount(0);
   return { settings, state };
 }
+
+// preserve a calendar draft that is not part of the shared settings save transaction
+test('defers a new UI after restart until a calendar name is created', async ({ page }) => {
+  const { settings, state } = await setup(page);
+  const input = settings.getByRole('textbox', { name: 'New calendar name', exact: true });
+  await input.fill('Unsaved calendar name');
+  state.settingsStatus = { ...state.settingsStatus, pending: true, targets: ['rac'] };
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true }).getByRole('button', { name: 'Restart', exact: true });
+  await expect(restart).toBeEnabled();
+  let navigations = 0;
+  // only a navigation of the main document can erase the editor
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations += 1; });
+  state.restartVersion = '/assets/index-calendar-restart.js';
+  await restart.click();
+  const update = page.getByRole('status', { name: 'UI update available', exact: true });
+  await expect(update).toContainText('Save or discard your unsaved work, then reload to update.');
+  await expect(input).toHaveValue('Unsaved calendar name');
+  expect(navigations).toBe(0);
+  await settings.getByRole('button', { name: 'Create calendar', exact: true }).click();
+  await expect(input).toHaveValue('RAC Agent Work');
+  await expect(update).toContainText('Reload to use the latest version.');
+});
+
+// preserve an uncommitted destination without treating the server selection as a draft
+test('defers a new UI after restart until a calendar selection is applied', async ({ page }) => {
+  const { settings, state } = await setup(page);
+  const selector = settings.getByRole('switch', { name: 'RAC-created calendar', exact: true });
+  await selector.click();
+  await expect(selector).toBeChecked();
+  state.settingsStatus = { ...state.settingsStatus, pending: true, targets: ['rac'] };
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true }).getByRole('button', { name: 'Restart', exact: true });
+  state.restartVersion = '/assets/index-calendar-selection.js';
+  await restart.click();
+  const update = page.getByRole('status', { name: 'UI update available', exact: true });
+  await expect(update).toContainText('Save or discard your unsaved work, then reload to update.');
+  await expect(selector).toBeChecked();
+  await settings.getByRole('button', { name: 'Use selected calendar', exact: true }).click();
+  await expect(update).toContainText('Reload to use the latest version.');
+});
 
 // verify responsive integration grouping, content and defaults
 for (const width of [1440, 390]) test(`renders Google Calendar settings safely at ${width}px`, async ({ page }) => {
@@ -255,7 +304,7 @@ test('uses shared save validation and blocks live actions while any draft is dir
     expect.objectContaining({ path: ['googleCalendar', 'titleTemplate'], value: '{project} · {agent}' }),
     expect.objectContaining({ path: ['googleCalendar', 'startMoment'], value: 'prompt_submitted' })
   ]));
-  await expect(page.getByText('Restart pending', { exact: true })).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Restart pending', exact: true })).toBeVisible();
   await expect(settings.getByRole('button', { name: 'Reconnect Google account', exact: true })).toBeEnabled();
 });
 

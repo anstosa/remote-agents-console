@@ -112,6 +112,35 @@ test('bases a new branch on a chosen branch, sending the ref that resolves it', 
   await expect.poll(() => created).toEqual({ mode: 'new', branch: 'feature/login', base: 'origin/hotfix', open: 'agent' });
 });
 
+// protect an open worktree form if a restart is started from the same page
+test('keeps an uncreated worktree draft through a newer UI restart', async ({ page }) => {
+  await stub(page, () => { throw new Error('The draft must not create a worktree.'); });
+  const pending = { pending: true, targets: ['rac'], effective: 'known', restartAvailable: true };
+  const operation = { id: 'worktree-ui-restart', state: 'complete', restart: { state: 'restarted', recoveryDeadline: Date.now() } };
+  let complete = false;
+  await page.route('**/api/settings/status', route => route.fulfill({ json: complete ? { ...pending, pending: false, targets: [], operation } : pending }));
+  await page.route('**/api/settings/restart', route => { complete = true; return route.fulfill({ json: operation }); });
+  await page.route('**/api/ui-version', route => route.fulfill({ json: complete ? { version: '/assets/index-after-worktree-restart.js' } : {} }));
+  await page.goto('/');
+  const dialog = await openNewWorktree(page);
+  const branch = dialog.getByLabel('Branch name');
+  await branch.fill('feature/unfinished');
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true }).getByRole('button', { name: 'Restart', exact: true });
+  // dispatch an already queued restart click without dismissing the overlapping modal
+  await restart.evaluate(button => (button as HTMLButtonElement).click());
+  const notice = page.getByRole('status', { name: 'UI update available', exact: true });
+  await expect(notice).toContainText('Save or discard your unsaved work, then reload to update.');
+  await expect(branch).toHaveValue('feature/unfinished');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(notice).toContainText('Reload to use the latest version.');
+  // dismiss the launcher restored under the closed dialog before using its backdrop
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('group', { name: 'Agent launcher' })).toHaveCount(0);
+  const reload = page.waitForEvent('framenavigated', { predicate: frame => frame === page.mainFrame() });
+  await notice.getByRole('button', { name: 'Reload UI', exact: true }).click();
+  await reload;
+});
+
 test('agent chooser click-away consumes the background Create action', async ({ page }) => {
   let created: unknown;
   await stub(page, body => { created = body; });

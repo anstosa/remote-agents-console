@@ -446,6 +446,11 @@ button.settings-installation-file-link:disabled { background: transparent; color
 .fullscreen-restart-details a { color: var(--blue); }
 .fullscreen-restart-details code { color: var(--text); white-space: normal; }
 .fullscreen-restart-details .settings-recovery-countdown { color: var(--yellow); font-weight: 800; font-variant-numeric: tabular-nums; }
+/* keep manual recovery available without leading with a shell command */
+.settings-manual-recovery { color: var(--subtext-0); font: 500 .73rem/1.45 var(--font-mono); overflow-wrap: anywhere; }
+.settings-manual-recovery summary { color: var(--blue); cursor: pointer; }
+.settings-manual-recovery p { margin: .35rem 0; }
+.settings-manual-recovery code { color: var(--text); }
 @media (max-width: 780px) {
   .settings-center-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   /* show one accessible custom dropdown instead of the horizontal tab strip */

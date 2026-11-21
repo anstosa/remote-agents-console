@@ -320,14 +320,17 @@ fallback pages after a catalog failure.
 Show loading/retry, unsupported native setup, legacy configuration, connector
 started but unverified, active verified hostname, in-flight operation, and safe
 failure. Distinguish connector startup from end-to-end route health.
-Pending restart notices omit recovery details until RAC actually starts restarting.
-Reload UI and Restart fade fully into one fullscreen loader before navigation or
-the restart request begins. Block background interaction during the transition.
-During restart, count down against the host watchdog's fixed recovery deadline,
-including while disconnected. Keep countdown and manual recovery guidance inside
-the centered loader, not a competing toast. Respect reduced-motion preferences.
-Show dismissible proved success or recovery-warning
-toasts after completion; recovery does not silently discard pending saved edits.
+The pending restart notice says what saved changes need and who can restart.
+Reload UI and Restart use one fullscreen loader that fully paints before the
+request or navigation and blocks background interaction. Show plain-language
+steps for preparing, checking settings, restarting, reconnecting, and restoring
+the previous configuration. Never show raw host phases or error codes. Keep
+the fixed recovery countdown visible when offline; offer the host command only
+under Manual recovery after the deadline or a failed recovery. Respect reduced
+motion. Report verified success or recovery with dismissible toasts; recovery
+does not discard saved edits. In the initiating browser, check the deployed UI
+build once after a verified restart, then reload only when it has changed.
+Keep unsaved work and show the manual reload notice if reloading would lose it.
 Settings saves use the shared toast stack: success expires after five seconds;
 errors have no expiry and can be dismissed. Keep field-level validation inline.
 Layer toasts below all flyouts, including Settings search results, and their

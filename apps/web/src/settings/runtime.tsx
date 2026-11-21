@@ -1,7 +1,7 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SettingsOperation, SettingsRequest, SettingsStatus, TunnelHealth } from './contracts.js';
-import { isSettingsOperation, isSettingsStatus, isTunnelHealth, settingsResponseError } from './contracts.js';
+import { isSettingsOperation, isSettingsStatus, isTunnelHealth } from './contracts.js';
 import { FullscreenLoader, type FullscreenAction } from '../fullscreen-loader.js';
 
 type SettingsRuntime = {
@@ -9,6 +9,7 @@ type SettingsRuntime = {
   status?: SettingsStatus;
   statusError?: string;
   restartPending: boolean;
+  restartError?: string;
   restart: () => Promise<void>;
   refreshStatus: () => Promise<void>;
   securityEpoch: number;
@@ -26,6 +27,7 @@ type SettingsRuntime = {
 const SettingsRuntimeContext = createContext<SettingsRuntime | undefined>(undefined);
 
 const dismissedRestartKey = 'rac.settings.dismissed-restart-result';
+const restartConfirmationMs = 15_000;
 
 // retain dismissal across reloads without persisting credentials or source content
 const readDismissedRestart = (): string | undefined => {
@@ -44,10 +46,11 @@ const tunnelHealthCheckIdentity = (health: TunnelHealth | undefined): string | u
 };
 
 // keep restart state alive outside the settings panel
-export function SettingsRuntimeProvider({ request, monitorRequest = request, children, enabled = true, canMutate = true, beforeRestart, onRestartSettled, beforeTunnelReconnect, onTunnelReconnectSettled }: { request: SettingsRequest; monitorRequest?: SettingsRequest; children: ReactNode; enabled?: boolean; canMutate?: boolean; beforeRestart?: () => Promise<boolean>; onRestartSettled?: () => void; beforeTunnelReconnect?: () => Promise<boolean>; onTunnelReconnectSettled?: () => void }) {
+export function SettingsRuntimeProvider({ request, monitorRequest = request, children, enabled = true, canMutate = true, beforeRestart, onRestartSettled, beforeTunnelReconnect, onTunnelReconnectSettled }: { request: SettingsRequest; monitorRequest?: SettingsRequest; children: ReactNode; enabled?: boolean; canMutate?: boolean; beforeRestart?: () => Promise<boolean>; onRestartSettled?: (restarted?: SettingsStatus) => void; beforeTunnelReconnect?: () => Promise<boolean>; onTunnelReconnectSettled?: () => void }) {
   const [status, setStatus] = useState<SettingsStatus>();
   const [statusError, setStatusError] = useState<string>();
   const [restartPending, setRestartPending] = useState(false);
+  const [restartError, setRestartError] = useState<string>();
   const [securityEpoch, setSecurityEpoch] = useState(0);
   const [dismissedRestart, setDismissedRestart] = useState(readDismissedRestart);
   const [tunnelHealth, setTunnelHealth] = useState<TunnelHealth>();
@@ -67,6 +70,8 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
   const tunnelHealthSnapshot = useRef<TunnelHealth | undefined>(undefined);
   const readingTunnelHealth = useRef(false);
   const awaitingRestartStatus = useRef(false);
+  const lastOperationId = useRef<string | undefined>(undefined);
+  const restartIdentity = useRef<{ previous?: string; tracked?: string; confirmBy?: number } | undefined>(undefined);
   const mounted = useRef(true);
   const authenticationEnabled = useRef(enabled);
   const authenticationEpoch = useRef(0);
@@ -296,18 +301,29 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
       if (!currentRead()) return;
       // retain the prior deadline and operation across transient status failures
       if (!response.ok || !isSettingsStatus(payload)) {
-        const message = response.ok ? 'Settings status is unavailable.' : await settingsResponseError(response, 'Settings status is unavailable.');
-        // a delayed error body must not overwrite a newer successful poll
-        if (currentRead()) setStatusError(message);
+        setStatusError('Settings status is unavailable.');
         return;
       }
+      const operation = payload.operation;
+      lastOperationId.current = operation?.id;
       setStatus(payload);
       setStatusError(undefined);
-      // retain the fullscreen handoff until a fresh status proves the host has settled
-      if (awaitingRestartStatus.current && !submittingRestart.current && !activeServerRestart(payload.operation)) {
-        awaitingRestartStatus.current = false;
-        onRestartSettled?.();
-      }
+      const identity = restartIdentity.current;
+      // wait for the submission boundary before interpreting durable observations
+      if (!awaitingRestartStatus.current || submittingRestart.current || identity === undefined) return;
+      // recover an interrupted acknowledgement from new work in flight, not terminal history
+      if (identity.tracked === undefined && operation !== undefined && operation.id !== identity.previous && operation.kind !== 'cloudflare' && activeServerRestart(operation)) identity.tracked = operation.id;
+      const matches = operation !== undefined && operation.id === identity.tracked;
+      // a tracked restart may settle only on its own terminal result
+      if (identity.tracked !== undefined && (!matches || activeServerRestart(operation))) return;
+      // only an unidentified submission can run out of time to confirm
+      if (identity.tracked === undefined && (identity.confirmBy === undefined || Date.now() < identity.confirmBy)) return;
+      awaitingRestartStatus.current = false;
+      restartIdentity.current = undefined;
+      // an unconfirmed operation is not a failed restart and must not trigger a reload
+      if (!matches) setRestartError("Couldn't confirm the restart. Check the saved settings before retrying.");
+      const restarted = matches && operation.kind !== 'cloudflare' && operation.id !== identity.previous && operation.state === 'complete' && operation.restart?.state === 'restarted';
+      onRestartSettled?.(restarted ? payload : undefined);
     } catch {
       // keep the countdown alive while the server is temporarily unreachable
       if (currentRead()) setStatusError('Reconnecting to the server…');
@@ -319,7 +335,9 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
   useEffect(() => {
     // wait for an authenticated session
     if (!enabled) {
-      setStatus(undefined); setStatusError(undefined);
+      setStatus(undefined); setStatusError(undefined); setRestartError(undefined);
+      lastOperationId.current = undefined;
+      restartIdentity.current = undefined;
       restartAttempt.current += 1;
       submittingRestart.current = false;
       setRestartPending(false);
@@ -357,8 +375,10 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
     if (submittingRestart.current || awaitingRestartStatus.current || !mutationAllowed.current) return;
     submittingRestart.current = true;
     awaitingRestartStatus.current = true;
+    restartIdentity.current = { previous: lastOperationId.current };
     setRestartPending(true);
     setStatusError(undefined);
+    setRestartError(undefined);
     let submitted = false;
     const epoch = authenticationEpoch.current;
     const attempt = ++restartAttempt.current;
@@ -371,32 +391,34 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
         // an old attempt must not release a newer session's cover
         if (attempt === restartAttempt.current) {
           awaitingRestartStatus.current = false;
+          restartIdentity.current = undefined;
           if (mounted.current) onRestartSettled?.();
         }
         return;
       }
       submitted = true;
-      const response = await request('/api/settings/restart', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      const response = await request('/api/settings/restart', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(10_000) });
       // ignore acknowledgements after the authenticated provider has detached
       if (!currentSession()) return;
       // distinguish explicit rejection from an unavailable acknowledgement
       if (!response.ok) {
-        const message = await settingsResponseError(response, 'Restart could not be started.');
-        // an error body may finish after provider teardown
-        if (!currentSession()) return;
         const rejected = response.status >= 400 && response.status < 500;
-        setStatusError(rejected ? message : `${message} Checking restart progress…`);
         // transport failures become synthetic 503 responses in the shared request helper
         if (rejected) {
           awaitingRestartStatus.current = false;
+          restartIdentity.current = undefined;
+          setRestartError('The restart did not start. Your saved settings are still pending.');
           onRestartSettled?.();
-        }
+        } else setStatusError('Checking whether the restart started…');
         return;
       }
       const payload: unknown = await response.json().catch(() => undefined);
       // parsing may outlive the application that requested the restart
       if (!currentSession()) return;
       statusRequest.current += 1;
+      const operation = isSettingsStatus(payload) ? payload.operation : isSettingsOperation(payload) ? payload : undefined;
+      // capture the acknowledged identity separately from durable history
+      if (operation !== undefined && restartIdentity.current !== undefined) restartIdentity.current.tracked = operation.id;
       // accept either the status envelope or one operation response
       if (isSettingsStatus(payload)) { setStatus(payload); setStatusError(undefined); }
       else if (isSettingsOperation(payload)) { setStatus(current => current === undefined ? current : { ...current, operation: payload }); setStatusError(undefined); }
@@ -409,7 +431,8 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
       if (submitted) setStatusError('Reconnecting to check restart progress…');
       else {
         awaitingRestartStatus.current = false;
-        setStatusError('Restart could not be started.');
+        restartIdentity.current = undefined;
+        setRestartError('The restart did not start. Your saved settings are still pending.');
         onRestartSettled?.();
       }
     } finally {
@@ -417,6 +440,9 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
       if (attempt === restartAttempt.current) {
         submittingRestart.current = false;
         statusRequest.current += 1;
+        const identity = restartIdentity.current;
+        // bound uncertainty only while a submitted operation has no known identity
+        if (identity !== undefined && identity.tracked === undefined) identity.confirmBy = Date.now() + restartConfirmationMs;
         // only post-submission status reads may release an ambiguous handoff
         if (mounted.current) {
           setRestartPending(false);
@@ -446,7 +472,8 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
     const timer = window.setTimeout(dismissRestartResult, 5_000);
     return () => window.clearTimeout(timer);
   }, [dismissRestartResult, successfulRestartId]);
-  const value = useMemo<SettingsRuntime>(() => ({ request, status, statusError, restartPending, restart, refreshStatus, securityEpoch, canMutate, restartResult, dismissRestartResult, tunnelHealth, tunnelReconnectPending, tunnelReconnectError, tunnelReconnectCoverActive, reconnectTunnel, refreshTunnelHealth }), [canMutate, dismissRestartResult, request, restart, restartPending, refreshStatus, securityEpoch, status, statusError, restartResult, tunnelHealth, tunnelReconnectPending, tunnelReconnectError, tunnelReconnectCoverActive, reconnectTunnel, refreshTunnelHealth]);
+  // share only the current restart notice and actions with the toast and cover
+  const value = useMemo<SettingsRuntime>(() => ({ request, status, statusError, restartPending, restartError, restart, refreshStatus, securityEpoch, canMutate, restartResult, dismissRestartResult, tunnelHealth, tunnelReconnectPending, tunnelReconnectError, tunnelReconnectCoverActive, reconnectTunnel, refreshTunnelHealth }), [canMutate, dismissRestartResult, request, restart, restartError, restartPending, refreshStatus, securityEpoch, status, statusError, restartResult, tunnelHealth, tunnelReconnectPending, tunnelReconnectError, tunnelReconnectCoverActive, reconnectTunnel, refreshTunnelHealth]);
   return <SettingsRuntimeContext.Provider value={value}>{children}</SettingsRuntimeContext.Provider>;
 }
 
@@ -469,7 +496,7 @@ const hasPendingRestartNotice = (status: SettingsStatus | undefined): boolean =>
 // report whether the toast host must stay mounted
 export const useSettingsRestartNoticeVisible = (): boolean => {
   const runtime = useOptionalSettingsRuntime();
-  return runtime?.restartResult !== undefined || runtime?.restartPending === true || hasPendingRestartNotice(runtime?.status);
+  return runtime?.restartError !== undefined || runtime?.restartResult !== undefined || runtime?.restartPending === true || hasPendingRestartNotice(runtime?.status);
 };
 
 // report whether continuous checks require a global tunnel notice
@@ -521,8 +548,13 @@ function TunnelOutageRecoveryControl() {
   </div>;
 }
 
+// keep the host command behind an explicit recovery disclosure
+function ManualRestartRecovery({ command }: { command: string }) {
+  return <details className="settings-manual-recovery"><summary>Manual recovery</summary><p>If RAC still does not return, run this on the server. It keeps your saved settings.</p><code>{command}</code></details>;
+}
+
 // derive remaining time from the actual host deadline even after sleep or disconnection
-function RestartRecoveryCountdown({ deadline }: { deadline: number }) {
+function RestartRecoveryCountdown({ deadline, command }: { deadline: number; command?: string }) {
   const [now, setNow] = useState(Date.now);
   // repaint each second without restarting or extending the host timer
   useEffect(() => {
@@ -530,11 +562,24 @@ function RestartRecoveryCountdown({ deadline }: { deadline: number }) {
     return () => window.clearInterval(timer);
   }, []);
   const seconds = Math.max(0, Math.ceil((deadline - now) / 1_000));
-  return <span className="settings-recovery-countdown" role="timer" aria-label="Automatic recovery countdown" aria-live="off">Automatic recovery in {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, '0')}{seconds === 0 && ' · waiting for host recovery…'}</span>;
+  return <><span className="settings-recovery-countdown" role="timer" aria-label="Automatic recovery countdown" aria-live="off">{seconds === 0 ? 'Waiting for automatic recovery…' : `Automatic recovery in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`}</span>{seconds === 0 && command && <ManualRestartRecovery command={command} />}</>;
+}
+
+// translate durable restart states into one step and one expectation
+function restartPresentation(operation: SettingsOperation | undefined, reconnecting: boolean): { label: string; detail: string } {
+  // automatic recovery supersedes the forward restart
+  if (operation?.restart?.state === 'recovering') return { label: 'Restoring the last working settings', detail: 'The restart did not finish. RAC is recovering automatically and will keep your saved changes.' };
+  // distinguish an expected interruption from work still running on the server
+  if (reconnecting) return { label: 'Reconnecting after restart', detail: 'The connection can drop during a restart. RAC will reconnect automatically.' };
+  // an armed recovery deadline means RAC has begun replacing the running server
+  if (operation?.restart?.state === 'restarting') return { label: 'Restarting server', detail: 'RAC is starting with your saved settings. You can leave this page open.' };
+  // the host may be validating settings or building while the old server is still up
+  if (operation?.state === 'running') return { label: 'Checking saved settings', detail: 'RAC is preparing the server for restart. This can take a few minutes.' };
+  return { label: 'Preparing restart', detail: 'RAC will check your saved settings before restarting. No action needed.' };
 }
 
 // keep one fullscreen cover for explicit actions and durable restart progress
-export function ConsoleFullscreenLoader({ action, reconnecting, onEntered }: { action?: FullscreenAction; reconnecting: boolean; onEntered: () => void }) {
+export function ConsoleFullscreenLoader({ action, reconnecting, checkingRestartUi = false, onEntered }: { action?: FullscreenAction; reconnecting: boolean; checkingRestartUi?: boolean; onEntered: () => void }) {
   const runtime = useOptionalSettingsRuntime();
   const status = runtime?.status;
   const operation = status?.operation;
@@ -543,20 +588,17 @@ export function ConsoleFullscreenLoader({ action, reconnecting, onEntered }: { a
   const reconnectingTunnel = action === 'tunnel-reconnect';
   // leave normal console content mounted and uncovered when no action is active
   if (action === undefined && !serverRestart && !reconnecting) return null;
-  const progress = serverRestart ? operation?.restart : undefined;
-  const label = action === 'reload' ? 'Reloading UI' : reconnectingTunnel ? 'Reconnecting tunnel' : restarting ? progress?.state === 'recovering' ? 'Recovering server' : progress?.state === 'restarting' ? 'Restarting server' : 'Preparing restart' : 'Reconnecting to console';
-  const detail = serverRestart ? operation?.phase ?? 'Applying saved settings and checking health…' : 'Preparing to apply saved settings…';
+  const activeOperation = serverRestart ? operation : undefined;
+  const progress = activeOperation?.restart;
+  const restartStep = checkingRestartUi ? { label: 'Checking for a UI update', detail: 'RAC is back online. This page will reload only if a newer version is available.' } : restartPresentation(activeOperation, reconnecting);
+  const label = action === 'reload' ? 'Reloading UI' : reconnectingTunnel ? 'Reconnecting tunnel' : restarting ? restartStep.label : 'Reconnecting to console';
   return <FullscreenLoader label={label} onEntered={action === undefined ? undefined : onEntered} focusReturnKey={action} progressKind={restarting || reconnectingTunnel ? 'working' : 'loading'}>
     {restarting && <div className="fullscreen-restart-details">
-      {/* omit the redundant host restart phase */}
-      {detail !== 'restarting' && <p>{detail}</p>}
-      {progress?.state === 'restarting' && <RestartRecoveryCountdown deadline={progress.recoveryDeadline} />}
-      {progress?.state === 'recovering' && <p>Automatic host recovery is in progress…</p>}
-      {progress !== undefined && status?.recoveryCommand && <small>Manual recovery: <code>{status.recoveryCommand}</code>. Recovery keeps saved settings.</small>}
-      {status?.reconnectOrigin && <a href={status.reconnectOrigin}>Open {status.reconnectOrigin}</a>}
-      {status?.reloginRequired && <small>You may need to sign in again after the restart.</small>}
-      {runtime?.statusError && !reconnecting && <small>{runtime.statusError}</small>}
-      {reconnecting && <small>Console unavailable. Reconnecting…</small>}
+      <p>{restartStep.detail}</p>
+      {progress?.state === 'restarting' && <RestartRecoveryCountdown deadline={progress.recoveryDeadline} command={status?.recoveryCommand} />}
+      {status?.reconnectOrigin && <a href={status.reconnectOrigin}>Open the new RAC address</a>}
+      {!checkingRestartUi && status?.reloginRequired && <small>You may need to sign in again.</small>}
+      {!reconnecting && runtime?.statusError && <small>{runtime.statusError}</small>}
     </div>}
     {reconnectingTunnel && <small>Restarting only the Cloudflare connector and checking the public route…</small>}
     {!restarting && !reconnectingTunnel && reconnecting && <TunnelOutageRecoveryControl />}
@@ -586,21 +628,22 @@ export function SettingsRestartNotice() {
   if (!visible || runtime === undefined || status === undefined) return null;
   const running = runtime.restartPending || operation?.state === 'queued' || operation?.state === 'running';
   const failed = operation?.state === 'failed' && operation.restart?.state !== 'recovered';
-  const progress = operation?.restart;
+  const recoveryFailed = failed && operation.restart?.state === 'recovery-failed';
   const cloudflareSetup = operation?.kind === 'cloudflare';
-  const targets = status.targets.map(target => target === 'rac' ? 'RAC' : 'Cloudflare').join(' and ');
-  let detail = failed ? operation?.error ?? status.reason ?? 'The last restart failed. Saved settings are still pending.' : running ? operation?.phase ?? 'Applying saved settings and checking health…' : status.effective === 'unknown' ? 'Saved settings are not proven effective yet.' : `${targets || 'RAC'} must be restarted before saved settings take effect.`;
-  // add post-restart authentication guidance without hiding failures
-  if (status.reloginRequired) detail = `${detail} You may need to sign in again.`;
-  const recoveryActive = progress !== undefined && !['restarted', 'recovered'].includes(progress.state);
+  const showUnconfirmed = !hasPendingRestartNotice(status) && runtime.restartError !== undefined;
+  const targets = status.targets.map(target => target === 'rac' ? 'RAC' : 'the Cloudflare connector').join(' and ');
+  const heading = showUnconfirmed ? 'Restart not confirmed' : cloudflareSetup ? 'Cloudflare setup' : recoveryFailed ? 'Automatic recovery failed' : failed ? 'Restart failed' : 'Restart to apply settings';
+  const detail = cloudflareSetup ? failed ? 'Cloudflare setup did not finish. Review your setup before trying again.' : 'RAC is setting up your public connection.'
+    : recoveryFailed ? 'RAC could not restore the last working configuration. Use manual recovery before trying another restart.'
+    : failed ? 'Your saved settings are still pending. Review them before retrying.'
+    : `Restart ${targets || 'RAC'} to put your saved settings into effect.`;
   // active server progress belongs inside the single fullscreen loader
-  const pendingVisible = !runtime.restartPending && !activeServerRestart(operation) && hasPendingRestartNotice(status);
-  const heading = cloudflareSetup ? 'Cloudflare setup' : !running ? 'Restart pending' : progress?.state === 'recovering' ? 'Recovering server' : progress?.state === 'restarting' ? 'Restarting server' : 'Preparing restart';
-  return <>{pendingVisible && <section className={`toast settings-restart-notice${failed ? ' failed' : ''}${running ? ' progress-border progress-yellow' : ''}`} data-restart-active={recoveryActive || undefined} role={failed ? 'alert' : 'status'} aria-label={cloudflareSetup ? 'Cloudflare setup' : 'Restart pending'} aria-live={failed ? 'assertive' : 'polite'} aria-busy={running || undefined}>
+  const pendingVisible = !runtime.restartPending && !activeServerRestart(operation) && (showUnconfirmed || hasPendingRestartNotice(status));
+  return <>{pendingVisible && <section className={`toast settings-restart-notice${failed ? ' failed' : ''}${running ? ' progress-border progress-yellow' : ''}`} role={failed || showUnconfirmed ? 'alert' : 'status'} aria-label={cloudflareSetup || failed || showUnconfirmed ? heading : 'Restart pending'} aria-live={failed ? 'assertive' : 'polite'} aria-busy={running || undefined}>
     {running && <span className="update-progress-ring" aria-hidden="true" />}
     <span className="settings-restart-icon" aria-hidden="true">{failed ? '!' : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8M20 4v4h-4" /></svg>}</span>
-    <span className="settings-restart-copy"><strong>{heading}</strong><span>{detail}</span>{status.reconnectOrigin && <a href={status.reconnectOrigin}>Open {status.reconnectOrigin}</a>}{recoveryActive && status.recoveryCommand && <small>Manual recovery: <code>{status.recoveryCommand}</code>. Recovery keeps saved settings.</small>}{runtime.statusError && <small>{runtime.statusError}</small>}</span>
-    {cloudflareSetup ? <a href="#settings">Review setup</a> : <button type="button" className={running ? `progress-border ${failed ? 'progress-red' : 'progress-yellow'}` : undefined} aria-busy={running || undefined} data-fullscreen-focus-return="restart" disabled={running || !status.restartAvailable || !runtime.canMutate} title={!runtime.canMutate ? 'Take control to restart' : undefined} onClick={() => { /* start only the fixed restart */ void runtime.restart(); }}>{running && <span className="update-progress-ring" aria-hidden="true" />}{running ? 'Restarting…' : failed ? 'Retry restart' : 'Restart'}</button>}
+    <div className="settings-restart-copy"><strong>{heading}</strong>{!showUnconfirmed && <span>{detail}</span>}{status.reconnectOrigin && <a href={status.reconnectOrigin}>Open the new RAC address</a>}{status.reloginRequired && <span>You may need to sign in again.</span>}{recoveryFailed && status.recoveryCommand && <ManualRestartRecovery command={status.recoveryCommand} />}{!showUnconfirmed && !runtime.canMutate && !cloudflareSetup && !recoveryFailed && <span>Take control from this browser to restart.</span>}{!showUnconfirmed && !status.restartAvailable && !cloudflareSetup && <span>Ask the server administrator to restart RAC.</span>}{(runtime.restartError ?? runtime.statusError) && <small>{runtime.restartError ?? runtime.statusError}</small>}</div>
+    {showUnconfirmed ? <a href="#settings">Review settings</a> : cloudflareSetup ? <a href="#settings">Review setup</a> : !recoveryFailed && <button type="button" data-fullscreen-focus-return="restart" disabled={running || !status.restartAvailable || !runtime.canMutate} title={!runtime.canMutate ? 'Take control to restart' : undefined} onClick={() => { /* start only the fixed restart */ void runtime.restart(); }}>{failed ? 'Retry restart' : 'Restart'}</button>}
   </section>}{runtime.restartResult !== undefined && <RestartResultToast operation={runtime.restartResult} onDismiss={runtime.dismissRestartResult} />}</>;
 }
 
