@@ -91,8 +91,10 @@ async function selectSection(settings: Locator, label: string) {
   }
 }
 
-// mount Settings with isolated fake Google and source-backed API responses
-async function setup(page: Page, width = 1440) {
+const emptyCaptureFailures = { total: 0, unsupported_lifecycle_contract: 0, missing_lifecycle_evidence: 0, capture_capacity_exceeded: 0, capture_store_unavailable: 0 };
+
+// mount settings with isolated fake google and source-backed api responses
+async function setup(page: Page, width = 1440, counts: GoogleCalendarSummary['counts'] = { pending: 2, delivered: 7, failed: 4, retryable: 3, suppressed: 3, captureFailures: emptyCaptureFailures }) {
   await mockAccountSocket(page);
   await page.setViewportSize({ width, height: width < 600 ? 844 : 1000 });
   await page.addInitScript(() => localStorage.clear());
@@ -113,7 +115,7 @@ async function setup(page: Page, width = 1440) {
         tokenKey: true,
         redirectUri: 'http://127.0.0.1:4173/api/settings/google-calendar/callback'
       },
-      counts: { pending: 2, delivered: 7, failed: 1, suppressed: 3 },
+      counts,
       lastSuccessAt: '2026-10-23T17:00:00.000Z'
     },
     settingsStatus: { pending: false, targets: [], effective: 'known', restartAvailable: true },
@@ -126,6 +128,10 @@ async function setup(page: Page, width = 1440) {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    // require explicit negotiation for every route that returns a calendar summary
+    if (['', '/calendars', '/select', '/retry', '/disconnect'].some(suffix => path === `/api/settings/google-calendar${suffix}`)) {
+      expect(request.headers()['accept']).toBe('application/vnd.rac.google-calendar-summary.v2+json');
+    }
     // expose one authenticated controlling browser
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'calendar-csrf', active: true, deviceName: 'Calendar fixture', server: { name: 'Fixture', url: 'https://fixture.example.test', remotes: [] }, davo: { enabled: false, available: true, name: 'Davo', context: '' } } });
     // keep unrelated dashboard data empty
@@ -166,7 +172,10 @@ async function setup(page: Page, width = 1440) {
     }
     if (path === '/api/settings/google-calendar/retry' && request.method() === 'POST') {
       state.mutations.push({ path, body: request.postDataJSON() as Record<string, unknown> });
-      state.summary.counts = { ...state.summary.counts, failed: 0, pending: state.summary.counts.pending + 1 };
+      const counts = state.summary.counts;
+      // fail the fixture if a browser tries to retry against the legacy shape
+      if (counts.retryable === undefined) return route.fulfill({ status: 500 });
+      state.summary.counts = { ...counts, failed: counts.failed - counts.retryable, retryable: 0, pending: counts.pending + counts.retryable };
       return route.fulfill({ json: state.summary });
     }
     if (path === '/api/settings/google-calendar/disconnect' && request.method() === 'POST') {
@@ -321,9 +330,14 @@ test('creates, selects, retries, and disconnects through explicit live actions',
   await settings.getByRole('button', { name: 'Use selected calendar', exact: true }).click();
   await expect.poll(() => state.mutations.at(-1)).toEqual({ path: '/api/settings/google-calendar/select', body: { calendarId: 'calendar-secondary' } });
 
-  await settings.getByRole('button', { name: 'Retry failed deliveries', exact: true }).click();
-  await expect.poll(() => state.mutations.at(-1)?.path).toBe('/api/settings/google-calendar/retry');
-  await expect(settings.getByText('Failed', { exact: true }).locator('..').getByRole('definition')).toHaveText('0');
+  const retry = settings.getByRole('button', { name: 'Retry failed deliveries', exact: true });
+  await retry.click();
+  await expect.poll(() => state.mutations.filter(mutation => mutation.path === '/api/settings/google-calendar/retry')).toEqual([{ path: '/api/settings/google-calendar/retry', body: {} }]);
+  await expect(settings.getByText('Pending', { exact: true }).locator('..').getByRole('definition')).toHaveText('5');
+  await expect(settings.getByText('Delivery failures', { exact: true }).locator('..').getByRole('definition')).toHaveText('1');
+  await expect(settings.getByText('Delivered', { exact: true }).locator('..').getByRole('definition')).toHaveText('7');
+  await expect(settings.getByText('1 cannot be retried.', { exact: false })).toBeVisible();
+  await expect(retry).toBeDisabled();
 
   await settings.getByRole('button', { name: 'Disconnect', exact: true }).click();
   const confirmation = settings.getByRole('alertdialog', { name: 'Disconnect Google Calendar?', exact: true });
@@ -331,6 +345,39 @@ test('creates, selects, retries, and disconnects through explicit live actions',
   await confirmation.getByRole('button', { name: 'Disconnect', exact: true }).click();
   await expect.poll(() => state.mutations.at(-1)?.path).toBe('/api/settings/google-calendar/disconnect');
   await expect(settings.getByRole('button', { name: 'Connect Google account', exact: true })).toBeVisible();
+});
+
+// explain missing work separately rather than suggesting there is an event to resend
+test('reports uncaptured activity separately with its reasons', async ({ page }) => {
+  const captureFailures = { ...emptyCaptureFailures, total: 376, unsupported_lifecycle_contract: 149, missing_lifecycle_evidence: 227 };
+  const { settings, state } = await setup(page, 390, { pending: 0, delivered: 7, failed: 0, retryable: 0, suppressed: 3, captureFailures });
+  await expect(settings.getByText('Not captured: 376', { exact: true })).toBeVisible();
+  await expect(settings.getByText('Unsupported agent lifecycle: 149', { exact: true })).toBeVisible();
+  await expect(settings.getByText('Missing verified activity timing: 227', { exact: true })).toBeVisible();
+  await expect(settings.getByText('Delivery failures', { exact: true }).locator('..').getByRole('definition')).toHaveText('0');
+  await expect(settings.getByText('RAC won’t recreate deleted events', { exact: false })).toHaveCount(0);
+  await expect(settings.getByRole('button', { name: 'Retry failed deliveries', exact: true })).toBeDisabled();
+  expect(state.mutations).toEqual([]);
+});
+
+// show capacity instead of a delivery error when no event could be admitted
+test('reports the capture limit without offering a delivery retry', async ({ page }) => {
+  const captureFailures = { ...emptyCaptureFailures, total: 2, capture_capacity_exceeded: 2 };
+  const { settings, state } = await setup(page, 390, { pending: 0, delivered: 0, failed: 0, retryable: 0, suppressed: 0, captureFailures });
+  await expect(settings.getByText('Not captured: 2', { exact: true })).toBeVisible();
+  await expect(settings.getByText('Capture limit reached: 2', { exact: true })).toBeVisible();
+  await expect(settings.getByText('Delivery failures', { exact: true }).locator('..').getByRole('definition')).toHaveText('0');
+  await expect(settings.getByRole('button', { name: 'Retry failed deliveries', exact: true })).toBeDisabled();
+  expect(state.mutations).toEqual([]);
+});
+
+// keep old status readable without inferring retryability from its combined count
+test('does not retry a legacy aggregate returned by an older server', async ({ page }) => {
+  const { settings, state } = await setup(page, 1440, { pending: 0, delivered: 7, failed: 376, suppressed: 3 });
+  await expect(settings.getByText('Reported failures', { exact: true }).locator('..').getByRole('definition')).toHaveText('376');
+  await expect(settings.getByText('This RAC server did not report which deliveries can be retried.', { exact: false })).toBeVisible();
+  await expect(settings.getByRole('button', { name: 'Retry failed deliveries', exact: true })).toBeDisabled();
+  expect(state.mutations).toEqual([]);
 });
 
 test('explains degraded lifecycle, unknown-create, and revoked-auth states without color alone', async ({ page }) => {
@@ -348,7 +395,7 @@ test('explains degraded lifecycle, unknown-create, and revoked-auth states witho
   state.summary.lastError = 'authorization_required';
   await settings.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await expect(settings.getByRole('alert')).toContainText('Reconnect the Google account');
-  await expect(settings.getByText('Failed', { exact: true }).locator('..').getByRole('definition')).toHaveText('1');
+  await expect(settings.getByText('Delivery failures', { exact: true }).locator('..').getByRole('definition')).toHaveText('4');
 });
 
 // prove OAuth replaces this tab without relying on a popup or an unobserved mutation

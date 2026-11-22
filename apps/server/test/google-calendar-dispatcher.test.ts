@@ -482,4 +482,101 @@ describe('Google Calendar dispatcher', () => {
       expect(reloaded.get(id)?.lastError).toBeUndefined();
     }
   });
+
+  // retry the entire eligible batch without another click or a provider burst
+  it('queues all same-calendar failures at once and delivers them on paced passes', async () => {
+    const directory = await tempDir('rac-google-calendar-bulk-retry-');
+    const key = `active:${randomBytes(32).toString('base64url')}`;
+    const authPath = join(directory, 'auth.json');
+    const activitiesPath = join(directory, 'activities.json');
+    const now = 100_000;
+    await new AuthStore(authPath, parseTokenKey(key)).save({ version: 1, clientId: 'client', principal: { sub: 'subject' }, tokens: { accessToken: 'access', expiresAt: now + 3_600_000 }, calendars: [{ id: 'one', name: 'one' }, { id: 'two', name: 'two' }], selectedCalendarId: 'two' });
+    const attempted = { attempts: 1, firstAttemptAt: now - 1_000 };
+    const terminal = { ...attempted, completedAt: now - 500 };
+    const retryable: CalendarActivity[] = [
+      { ...readyActivity('scheduled', 'one', now + 60_000), ...attempted, status: 'retry_scheduled', lastError: 'retry_scheduled' },
+      { ...readyActivity('auth', 'one', 0), ...terminal, status: 'authorization_required' },
+      { ...readyActivity('exhausted', 'one', 0), ...terminal, status: 'dead_letter', attempts: 8, lastError: 'retry_scheduled' },
+      { ...readyActivity('rejected', 'one', 0), ...terminal, status: 'dead_letter', lastError: 'google_request_rejected' }
+    ];
+    const untouched: CalendarActivity[] = [
+      { ...readyActivity('conflict', 'one', 0), ...terminal, status: 'ownership_conflict' },
+      { ...readyActivity('deleted', 'one', 0), ...terminal, status: 'deleted_by_user' },
+      { ...readyActivity('missing', 'one', 0), ...terminal, status: 'target_missing' },
+      { ...readyActivity('different-account', 'one', 0), ...terminal, status: 'authorization_required', principalSub: 'other' },
+      { ...readyActivity('unregistered', 'other', 0), ...terminal, status: 'dead_letter', lastError: 'retry_scheduled' },
+      { ...readyActivity('already-delivered', 'one', 0), ...terminal, status: 'delivered' },
+      readyActivity('pending', 'one', now + 60_000)
+    ];
+    // represent activities with no event payload to resend
+    const uncaptured = ([
+      ['awaiting_evidence', 'unsupported_lifecycle_contract'],
+      ['awaiting_evidence', 'missing_lifecycle_evidence'],
+      ['suppressed', 'capture_capacity_exceeded'],
+      ['suppressed', 'not_connected']
+    ] as const).map(([status, reason]): CalendarActivity => {
+      const { id, agentId, kind, submittedAt, labels, policy, target, principalSub, version } = readyActivity(reason, 'one', 0);
+      // omit the binding only for work admitted while disconnected
+      return { id, agentId, kind, submittedAt, labels, policy, ...(reason === 'not_connected' ? {} : { target, principalSub }), version, status, attempts: 0, completedAt: now - 500, reason };
+    });
+    const records = new ActivityStore(activitiesPath, () => now);
+    // seed both the failed batch and rows the retry action must ignore
+    for (const record of [...retryable, ...untouched, ...uncaptured]) await records.add(record);
+    const sent: string[] = [];
+    // simulate a recovered provider while recording the exact immutable IDs
+    const fetcher = vi.fn(async (target: string, init?: RequestInit) => {
+      expect(target).toMatch(/\/calendars\/one\/events$/u);
+      const { id } = JSON.parse(String(init?.body)) as { id: string };
+      sent.push(id);
+      return new Response(JSON.stringify({ id }));
+    });
+    const service = await createGoogleCalendarService({ config: retryable[0]!.policy, publicOrigin: 'https://agents.example.com', env: { RAC_GOOGLE_CALENDAR_CLIENT_ID: 'client', RAC_GOOGLE_CALENDAR_CLIENT_SECRET: 'secret', RAC_GOOGLE_CALENDAR_TOKEN_KEY: key }, authPath, activitiesPath, fetch: fetcher as typeof fetch, now: () => now });
+    const captureFailures = { total: 3, unsupported_lifecycle_contract: 1, missing_lifecycle_evidence: 1, capture_capacity_exceeded: 1, capture_store_unavailable: 0 };
+    expect(service.summary().counts).toMatchObject({ failed: 9, retryable: 4, suppressed: 1, captureFailures });
+    const released = await service.retry(authority());
+    expect(released.counts).toMatchObject({ pending: 5, failed: 5, retryable: 0, captureFailures });
+    await vi.waitFor(() => expect(service.summary().counts.delivered).toBe(2));
+    expect(sent).toEqual([retryable[0]!.eventId]);
+    service.start();
+    try {
+      await vi.waitFor(() => expect(service.summary().counts.delivered).toBe(5), { timeout: 5_000 });
+    } finally {
+      await service.stop();
+    }
+    expect(sent).toEqual(retryable.map(record => record.eventId));
+    const reloaded = new ActivityStore(activitiesPath, () => now);
+    await reloaded.load();
+    // ensure the batch never modifies another account, protected event, or pending row
+    for (const record of [...untouched, ...uncaptured]) expect(reloaded.get(record.id)).toEqual(record);
+  });
+
+  // keep a retry reset even when a running pass has already listed the old attempt budget
+  it('uses the reset budget when a retry overlaps a dispatch', async () => {
+    const directory = await tempDir('rac-google-calendar-overlap-retry-');
+    const key = `active:${randomBytes(32).toString('base64url')}`;
+    const authPath = join(directory, 'auth.json');
+    const activitiesPath = join(directory, 'activities.json');
+    const now = 100_000;
+    await new AuthStore(authPath, parseTokenKey(key)).save({ version: 1, clientId: 'client', principal: { sub: 'subject' }, tokens: { accessToken: 'access', expiresAt: now + 3_600_000 }, calendars: [{ id: 'one', name: 'one' }, { id: 'two', name: 'two' }], selectedCalendarId: 'one' });
+    const first = readyActivity('in-flight', 'one', now);
+    const second: CalendarActivity = { ...readyActivity('stale-budget', 'two', now), status: 'retry_scheduled', firstAttemptAt: now - 1_000, attempts: 8, lastError: 'retry_scheduled' };
+    const records = new ActivityStore(activitiesPath, () => now);
+    await records.add(first);
+    await records.add(second);
+    const held = Promise.withResolvers<Response>();
+    // leave the first attempt in flight until the user requeues the second
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ id: second.eventId }))).mockImplementationOnce(() => held.promise);
+    const service = await createGoogleCalendarService({ config: first.policy, publicOrigin: 'https://agents.example.com', env: { RAC_GOOGLE_CALENDAR_CLIENT_ID: 'client', RAC_GOOGLE_CALENDAR_CLIENT_SECRET: 'secret', RAC_GOOGLE_CALENDAR_TOKEN_KEY: key }, authPath, activitiesPath, fetch: fetcher as typeof fetch, now: () => now });
+    const dispatch = service.dispatch();
+    try {
+      await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+      await service.retry(authority());
+    } finally {
+      held.resolve(new Response(JSON.stringify({ id: first.eventId })));
+      await dispatch;
+    }
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await records.load();
+    expect(records.get(second.id)).toMatchObject({ status: 'delivered', attempts: 1, firstAttemptAt: now });
+  });
 });

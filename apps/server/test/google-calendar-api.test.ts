@@ -14,7 +14,9 @@ import { AuthStore } from '../src/google-calendar/store.js';
 import { tempDir } from './helpers/codex-fixtures.js';
 
 const apps: ReturnType<typeof Fastify>[] = [];
-const summary = { enabled: true, available: true, connected: false, status: 'setup_required' as const, calendars: [], setup: { clientId: true, clientSecret: true, tokenKey: true, redirectUri: 'https://agents.example.com/api/settings/google-calendar/oauth/callback' }, counts: { pending: 0, delivered: 0, failed: 0, suppressed: 0 } };
+const captureFailures = { total: 5, unsupported_lifecycle_contract: 1, missing_lifecycle_evidence: 2, capture_capacity_exceeded: 2, capture_store_unavailable: 0 };
+const summary = { enabled: true, available: true, connected: false, status: 'setup_required' as const, calendars: [], setup: { clientId: true, clientSecret: true, tokenKey: true, redirectUri: 'https://agents.example.com/api/settings/google-calendar/oauth/callback' }, counts: { pending: 1, delivered: 2, failed: 2, retryable: 0, suppressed: 4, captureFailures } };
+const snapshot = { ...summary, capacitySuppressed: 1 };
 
 afterEach(async () => {
   // close each isolated route fixture
@@ -24,17 +26,17 @@ afterEach(async () => {
 // build one secret-free service fixture
 function fixture(): GoogleCalendarService {
   return {
-    summary: () => summary,
+    summary: () => snapshot,
     admit: async () => false,
     signal: async () => undefined,
     start: () => undefined,
     stop: async () => undefined,
     beginConnect: vi.fn(() => 'https://accounts.google.com/o/oauth2/v2/auth?state=secret-state'),
     completeConnect: vi.fn(async () => undefined),
-    createCalendar: vi.fn(async () => summary),
-    selectCalendar: vi.fn(async () => summary),
-    disconnect: vi.fn(async () => summary),
-    retry: vi.fn(async () => summary),
+    createCalendar: vi.fn(async () => snapshot),
+    selectCalendar: vi.fn(async () => snapshot),
+    disconnect: vi.fn(async () => snapshot),
+    retry: vi.fn(async () => snapshot),
     preview: vi.fn(() => 'Cora'),
     dispatch: async () => undefined
   };
@@ -83,6 +85,35 @@ describe('Google Calendar settings API', () => {
     expect(connected.json()).toEqual({ url: 'https://accounts.google.com/o/oauth2/v2/auth?state=secret-state' });
     const unknown = await app.inject({ method: 'POST', url: '/api/settings/google-calendar/select', headers: { cookie: 'session=yes', 'x-csrf-token': 'csrf' }, payload: { calendarId: 'one', extra: true } });
     expect(unknown).toMatchObject({ statusCode: 400 });
+  });
+
+  // preserve closed delivery count responses across browser and server upgrades
+  it('negotiates the legacy and expanded counts for every summary endpoint', async () => {
+    const app = Fastify();
+    apps.push(app);
+    // reuse one signed controller fixture for all summary routes
+    const authenticated = (): Session => ({ id: 'session', csrf: 'csrf' });
+    await registerGoogleCalendarRoutes(app, { service: fixture(), session: authenticated, controlled: authenticated, reservationGeneration: () => 'generation', renewReservation: () => true, isSessionValid: () => true });
+    const path = '/api/settings/google-calendar';
+    const mediaType = 'application/vnd.rac.google-calendar-summary.v2+json';
+    const legacy = { ...summary, counts: { pending: 1, delivered: 2, failed: 6, suppressed: 5 } };
+    // verify both response shapes on reads and authenticated actions
+    for (const request of [
+      { method: 'GET', url: path },
+      { method: 'POST', url: `${path}/calendars`, payload: { name: 'Work' } },
+      { method: 'POST', url: `${path}/select`, payload: { calendarId: 'owned' } },
+      { method: 'POST', url: `${path}/disconnect`, payload: {} },
+      { method: 'POST', url: `${path}/retry`, payload: {} }
+    ] as const) {
+      const oldTab = await app.inject(request);
+      expect(oldTab.statusCode).toBe(200);
+      expect(oldTab.json()).toEqual(legacy);
+      const newTab = await app.inject({ ...request, headers: { accept: mediaType } });
+      expect(newTab.statusCode).toBe(200);
+      expect(newTab.headers['content-type']).toContain(mediaType);
+      expect(newTab.headers['cache-control']).toBe('no-store');
+      expect(newTab.json()).toEqual(summary);
+    }
   });
 
   // redirect every callback without reflecting code, state, or provider failure

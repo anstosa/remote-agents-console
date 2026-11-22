@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import type { CalendarAdmission, CalendarSignal, CalendarSummary, GoogleCalendarConfig } from './contracts.js';
+import { emptyCalendarCaptureFailures, type CalendarAdmission, type CalendarSignal, type CalendarSummary, type GoogleCalendarConfig } from './contracts.js';
 import { ActiveGoogleCalendarService, type GoogleCalendarService } from './service.js';
 import { GoogleCalendarError } from './provider-types.js';
 import { parseTokenKey } from './crypto.js';
@@ -93,7 +93,8 @@ class InertGoogleCalendarService implements GoogleCalendarService {
       status: this.reason === 'disabled' ? 'disabled' : 'degraded',
       calendars: [],
       setup: { ...this.setupState, redirectUri: this.redirectUri },
-      counts: { pending: 0, delivered: 0, failed: 0, suppressed: 0 },
+      counts: { pending: 0, delivered: 0, failed: 0, retryable: 0, suppressed: 0, captureFailures: { ...emptyCalendarCaptureFailures } },
+      capacitySuppressed: 0,
       ...(this.reason === 'disabled' ? {} : { lastError: this.reason })
     };
   }

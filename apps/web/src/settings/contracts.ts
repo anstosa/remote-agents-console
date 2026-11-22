@@ -138,6 +138,16 @@ export type TunnelHealth = {
   error?: 'origin_unavailable' | 'tunnel_unreachable' | 'tunnel_identity_mismatch' | 'reconnect_failed';
 };
 
+export const googleCalendarSummaryMediaType = 'application/vnd.rac.google-calendar-summary.v2+json';
+
+type GoogleCalendarCaptureFailures = {
+  total: number;
+  unsupported_lifecycle_contract: number;
+  missing_lifecycle_evidence: number;
+  capture_capacity_exceeded: number;
+  capture_store_unavailable: number;
+};
+
 export type GoogleCalendarSummary = {
   enabled: boolean;
   available: boolean;
@@ -157,7 +167,7 @@ export type GoogleCalendarSummary = {
     delivered: number;
     failed: number;
     suppressed: number;
-  };
+  } & ({ retryable: number; captureFailures: GoogleCalendarCaptureFailures } | { retryable?: never; captureFailures?: never });
   lastError?: string;
   lastSuccessAt?: string;
 };
@@ -167,6 +177,18 @@ const hasOnlyKeys = (value: object, allowed: ReadonlySet<string>): boolean => Ob
 
 // accept bounded display text without control bytes
 const isSafeCalendarText = (value: unknown, maximum: number): value is string => typeof value === 'string' && Array.from(value).length <= maximum && !/[\p{Cc}\p{Cs}]/u.test(value);
+
+// accept only nonnegative integral delivery counts
+const isCalendarCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+// require a bounded aggregate and never accept arbitrary capture diagnostics
+const isCalendarCaptureFailures = (value: unknown): value is GoogleCalendarCaptureFailures => {
+  // reject unversioned keys before checking required counts
+  if (value === null || typeof value !== 'object' || !hasOnlyKeys(value, new Set(['total', 'unsupported_lifecycle_contract', 'missing_lifecycle_evidence', 'capture_capacity_exceeded', 'capture_store_unavailable']))) return false;
+  const { total, unsupported_lifecycle_contract, missing_lifecycle_evidence, capture_capacity_exceeded, capture_store_unavailable } = value as GoogleCalendarCaptureFailures;
+  return [total, unsupported_lifecycle_contract, missing_lifecycle_evidence, capture_capacity_exceeded, capture_store_unavailable].every(isCalendarCount)
+    && unsupported_lifecycle_contract + missing_lifecycle_evidence + capture_capacity_exceeded + capture_store_unavailable <= total;
+};
 
 // validate a public callback URI without admitting query credentials
 const isSafeRedirectUri = (value: unknown): value is string => {
@@ -191,7 +213,9 @@ export const isGoogleCalendarSummary = (value: unknown): value is GoogleCalendar
   if (setup === null || typeof setup !== 'object' || counts === null || typeof counts !== 'object') return false;
   // reject unversioned response expansion that could include provider secrets
   if (!hasOnlyKeys(value, new Set(['enabled', 'available', 'connected', 'status', 'accountEmail', 'calendars', 'selectedCalendarId', 'setup', 'counts', 'lastError', 'lastSuccessAt']))) return false;
-  if (!hasOnlyKeys(setup, new Set(['clientId', 'clientSecret', 'tokenKey', 'redirectUri'])) || !hasOnlyKeys(counts, new Set(['pending', 'delivered', 'failed', 'suppressed']))) return false;
+  if (!hasOnlyKeys(setup, new Set(['clientId', 'clientSecret', 'tokenKey', 'redirectUri'])) || !hasOnlyKeys(counts, new Set(['pending', 'delivered', 'failed', 'retryable', 'suppressed', 'captureFailures']))) return false;
+  // accept a closed legacy response or both expanded fields together
+  if ((counts.retryable !== undefined || counts.captureFailures !== undefined) && (!isCalendarCount(counts.retryable) || counts.retryable > counts.failed || !isCalendarCaptureFailures(counts.captureFailures))) return false;
   // validate every RAC-created calendar label and opaque identifier
   if (!Array.isArray(summary.calendars) || !summary.calendars.every(calendar => calendar !== null && typeof calendar === 'object' && hasOnlyKeys(calendar, new Set(['id', 'name'])) && isSafeCalendarText(calendar.id, 1_024) && calendar.id !== '' && isSafeCalendarText(calendar.name, 120) && calendar.name.trim() !== '')) return false;
   // require the selected target to come from the returned RAC-owned registry
@@ -206,10 +230,7 @@ export const isGoogleCalendarSummary = (value: unknown): value is GoogleCalendar
     && typeof setup.clientSecret === 'boolean'
     && typeof setup.tokenKey === 'boolean'
     && isSafeRedirectUri(setup.redirectUri)
-    && Number.isSafeInteger(counts.pending) && counts.pending >= 0
-    && Number.isSafeInteger(counts.delivered) && counts.delivered >= 0
-    && Number.isSafeInteger(counts.failed) && counts.failed >= 0
-    && Number.isSafeInteger(counts.suppressed) && counts.suppressed >= 0
+    && isCalendarCount(counts.pending) && isCalendarCount(counts.delivered) && isCalendarCount(counts.failed) && isCalendarCount(counts.suppressed)
     && (summary.lastError === undefined || isSafeCalendarText(summary.lastError, 320))
     && (summary.lastSuccessAt === undefined || isSafeCalendarText(summary.lastSuccessAt, 80));
 };

@@ -192,7 +192,10 @@ describe('Google Calendar stores', () => {
     const row = activity('next');
     const input = { id: row.id, agentId: row.agentId, kind: row.kind, submittedAt: row.submittedAt, labels: row.labels };
     expect(await Promise.all([service.admit(input), service.admit({ ...input, id: 'last' })])).toEqual([true, false]);
-    expect(service.summary().counts).toMatchObject({ pending: 10_000, suppressed: 1 });
+    expect(service.summary()).toMatchObject({
+      capacitySuppressed: 1,
+      counts: { pending: 10_000, failed: 0, retryable: 0, suppressed: 0, captureFailures: { total: 1, capture_capacity_exceeded: 1 } }
+    });
   });
 
   // keep the final authority fence immediately ahead of durable directory publication

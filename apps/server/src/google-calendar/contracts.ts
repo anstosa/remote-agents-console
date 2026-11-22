@@ -17,6 +17,8 @@ export type CalendarLabels = { worktree: string; project?: string; agent: string
 export type CalendarAdmission = { id: string; agentId: string; kind: string; submittedAt: string; labels: CalendarLabels };
 export type CalendarSignal = { id: string; type: 'sent' | 'started' | 'question' | 'finished' | 'invalid'; at?: string; labels?: CalendarLabels; reason?: string };
 export type CalendarCaptureSink = { admit: (input: CalendarAdmission) => Promise<boolean>; signal: (input: CalendarSignal) => Promise<void> };
+export const emptyCalendarCaptureFailures = { total: 0, unsupported_lifecycle_contract: 0, missing_lifecycle_evidence: 0, capture_capacity_exceeded: 0, capture_store_unavailable: 0 };
+export type CalendarCaptureFailures = typeof emptyCalendarCaptureFailures;
 export type CalendarSummary = {
   enabled: boolean;
   available: boolean;
@@ -26,7 +28,9 @@ export type CalendarSummary = {
   calendars: { id: string; name: string }[];
   selectedCalendarId?: string;
   setup: { clientId: boolean; clientSecret: boolean; tokenKey: boolean; redirectUri: string };
-  counts: { pending: number; delivered: number; failed: number; suppressed: number };
+  counts: { pending: number; delivered: number; failed: number; retryable: number; suppressed: number; captureFailures: CalendarCaptureFailures };
+  /** internal-only count used to reconstruct the legacy response */
+  capacitySuppressed: number;
   lastError?: string;
   lastSuccessAt?: string;
 };

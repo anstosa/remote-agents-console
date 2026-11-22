@@ -1,7 +1,7 @@
 import { cancelGoogleResponse } from './bounded-response.js';
 import { createHash } from 'node:crypto';
 import { rm } from 'node:fs/promises';
-import type { CalendarAdmission, CalendarCaptureSink, CalendarSignal, CalendarSummary, GoogleCalendarConfig } from './contracts.js';
+import { emptyCalendarCaptureFailures, type CalendarAdmission, type CalendarCaptureFailures, type CalendarCaptureSink, type CalendarSignal, type CalendarSummary, type GoogleCalendarConfig } from './contracts.js';
 import { createGoogleCalendar, deliverGoogleEvent } from './google-api.js';
 import { exchangeAuthorizationCode, OAuthTransactions, refreshAuthorization, validateIdToken, type OAuthConfiguration } from './oauth.js';
 import type { CalendarActivity, GoogleAuthState, TokenKey } from './provider-types.js';
@@ -15,7 +15,7 @@ import { calendarInterval } from './interval.js';
 const dispatchIntervalMs = 1_000;
 const maximumAttempts = 8;
 const maximumAttemptAgeMs = 24 * 60 * 60 * 1_000;
-const evidenceFailureReasons: ReadonlySet<string> = new Set(['unsupported_lifecycle_contract', 'missing_lifecycle_evidence', 'capture_capacity_exceeded', 'capture_store_unavailable']);
+const evidenceFailureReasons: ReadonlySet<string> = new Set(Object.keys(emptyCalendarCaptureFailures).filter(reason => reason !== 'total'));
 
 export type CallbackAuthority = {
   sessionId: string;
@@ -104,13 +104,18 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
   // expose a bounded secret-free provider snapshot
   summary(): CalendarSummary {
     const records = this.activities.list();
-    const recordError = latestEvidenceFailure(records);
-    const visibleError = this.lastError ?? recordError;
+    const capture = summarizeCaptureFailures(records);
+    const visibleError = this.lastError ?? capture.latestReason;
+    const auth = this.auth;
     const counts = {
       pending: records.filter(record => ['admitted', 'ready', 'delivering'].includes(record.status)).length,
       delivered: records.filter(record => record.status === 'delivered').length,
-      failed: records.filter(record => ['retry_scheduled', 'authorization_required', 'dead_letter', 'ownership_conflict', 'deleted_by_user', 'target_missing', 'awaiting_evidence'].includes(record.status)).length,
-      suppressed: records.filter(record => record.status === 'suppressed').length
+      // count only events that reached delivery here
+      failed: records.filter(record => ['retry_scheduled', 'authorization_required', 'dead_letter', 'ownership_conflict', 'deleted_by_user', 'target_missing'].includes(record.status)).length,
+      // expose which failures can actually be released for this connection
+      retryable: auth === undefined ? 0 : records.filter(record => canRetryDelivery(record, auth)).length,
+      suppressed: records.filter(record => record.status === 'suppressed').length - capture.capacitySuppressed,
+      captureFailures: capture.counts
     };
     const connected = this.auth !== undefined;
     const lineage = this.auth ?? this.tombstone;
@@ -125,6 +130,7 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
       ...(selectedCalendarId === undefined ? {} : { selectedCalendarId }),
       setup: { clientId: true, clientSecret: true, tokenKey: true, redirectUri: this.oauth.redirectUri },
       counts,
+      capacitySuppressed: capture.capacitySuppressed,
       ...(visibleError === undefined ? {} : { lastError: visibleError }),
       ...(this.lastSuccessAt === undefined ? {} : { lastSuccessAt: this.lastSuccessAt })
     };
@@ -307,13 +313,14 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
     const auth = connection.auth;
     // keep retry inert until one connection is restored
     if (auth === undefined) return this.summary();
-    const selectedIds = new Set(auth.calendars.map(calendar => calendar.id));
     await this.activities.updateAllFenced(records => {
+      const retryAt = this.options.now();
+      // release the whole batch in one durable write
       for (const record of records) {
-        // release retryable or same-principal authorization rows only
-        if ((record.status === 'retry_scheduled' || record.status === 'authorization_required' || record.status === 'dead_letter' && record.lastError === 'retry_scheduled') && record.target !== undefined && selectedIds.has(record.target.id) && record.principalSub === auth.principal.sub) {
+        // reset failed exact-target deliveries including dead letters
+        if (canRetryDelivery(record, auth)) {
           record.status = 'ready';
-          record.nextAttemptAt = this.options.now();
+          record.nextAttemptAt = retryAt;
           record.lastError = undefined;
           record.attempts = 0;
           record.firstAttemptAt = undefined;
@@ -344,15 +351,16 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
     const fetcher = abortableFetch(this.options.fetcher, controller.signal);
     try {
       const now = this.options.now();
-      const due = this.activities.list().filter(activity => (activity.status === 'ready' || activity.status === 'retry_scheduled' || activity.status === 'delivering') && (activity.nextAttemptAt ?? 0) <= now).sort((left, right) => (left.firstAttemptAt ?? 0) - (right.firstAttemptAt ?? 0));
+      const due = this.activities.list().filter(activity => isDueForDelivery(activity, now)).sort((left, right) => (left.firstAttemptAt ?? 0) - (right.firstAttemptAt ?? 0));
       const targets = new Set<string>();
+      // leave the remaining ready jobs for the next background pass
       for (const activity of due) {
         // exit between jobs once shutdown begins
         if (this.stopping) break;
-        // permit only one request for each immutable target per pass
+        // pace provider calls per original calendar
         if (activity.target === undefined || targets.has(activity.target.id)) continue;
         targets.add(activity.target.id);
-        await this.deliver(activity, fetcher);
+        await this.deliver(activity.id, fetcher);
       }
     } catch {
       this.lastError = 'capture_store_unavailable';
@@ -505,16 +513,30 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
   }
 
   // deliver one persisted record with bounded retries
-  private async deliver(snapshot: CalendarActivity, fetcher: typeof fetch): Promise<void> {
-    const firstAttemptAt = snapshot.firstAttemptAt ?? this.options.now();
-    const attempts = snapshot.attempts + 1;
-    // dead-letter exhausted retry budgets before any provider request
-    if (snapshot.attempts >= maximumAttempts || snapshot.firstAttemptAt !== undefined && this.options.now() - snapshot.firstAttemptAt >= maximumAttemptAgeMs) {
-      await this.activities.update(snapshot.id, activity => { activity.status = 'dead_letter'; activity.lastError = 'retry_scheduled'; activity.completedAt = this.options.now(); });
-      this.lastError = 'retry_scheduled';
-      return;
-    }
-    await this.activities.update(snapshot.id, activity => { activity.status = 'delivering'; activity.firstAttemptAt = firstAttemptAt; activity.attempts = attempts; });
+  private async deliver(id: string, fetcher: typeof fetch): Promise<void> {
+    let claimed = false;
+    // claim current state so the batch cannot overwrite a concurrent retry reset
+    const snapshot = await this.activities.update(id, activity => {
+      const now = this.options.now();
+      // skip stale work or shutdown before marking an attempt
+      if (this.stopping || !isDueForDelivery(activity, now)) return;
+      // dead-letter exhausted retry budgets before any provider request
+      if (activity.attempts >= maximumAttempts || activity.firstAttemptAt !== undefined && now - activity.firstAttemptAt >= maximumAttemptAgeMs) {
+        activity.status = 'dead_letter';
+        activity.lastError = 'retry_scheduled';
+        activity.completedAt = now;
+        return;
+      }
+      activity.status = 'delivering';
+      activity.firstAttemptAt ??= now;
+      activity.attempts += 1;
+      claimed = true;
+    });
+    // expose an exhausted budget only after its state is durable
+    if (snapshot?.status === 'dead_letter') this.lastError = snapshot.lastError;
+    // never send without a durably claimed attempt
+    if (!claimed || snapshot === undefined) return;
+    const { attempts, firstAttemptAt = this.options.now() } = snapshot;
     let result;
     try {
       const connection = await this.authorized(undefined, fetcher);
@@ -523,7 +545,7 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
       if (snapshot.principalSub !== auth.principal.sub || snapshot.target === undefined || !auth.calendars.some(calendar => calendar.id === snapshot.target!.id)) result = { kind: 'authorization_required' } as const;
       else {
         this.assertAuthorized(connection);
-        result = await deliverGoogleEvent(fetcher, auth.tokens.accessToken, { ...snapshot, attempts });
+        result = await deliverGoogleEvent(fetcher, auth.tokens.accessToken, snapshot);
       }
     } catch (error) {
       result = { kind: error instanceof GoogleCalendarError && error.code === 'authorization_required' ? 'authorization_required' : 'retry', delayMs: 1_000, reason: 'retry_scheduled' } as const;
@@ -555,6 +577,18 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
   }
 }
 
+// retry failed requests without reviving deleted events or moving destinations
+function canRetryDelivery(activity: CalendarActivity, auth: GoogleAuthState): boolean {
+  return (activity.status === 'retry_scheduled' || activity.status === 'authorization_required' || activity.status === 'dead_letter')
+    && activity.principalSub === auth.principal.sub
+    && auth.calendars.some(calendar => calendar.id === activity.target?.id);
+}
+
+// select due work including interrupted deliveries recovered after restart
+function isDueForDelivery(activity: CalendarActivity, now: number): boolean {
+  return (activity.status === 'ready' || activity.status === 'retry_scheduled' || activity.status === 'delivering') && (activity.nextAttemptAt ?? 0) <= now;
+}
+
 // normalize only parseable positive instants
 function validInstant(value: string | undefined): string | undefined {
   // reject absent and nonpositive instants
@@ -568,14 +602,30 @@ function safeReason(value: string | undefined, fallback: string): string {
   return value !== undefined && evidenceFailureReasons.has(value) ? value : fallback;
 }
 
-// select the newest durable bounded evidence failure for restart-safe status
-function latestEvidenceFailure(records: CalendarActivity[]): string | undefined {
+// summarize uncaptured work and preserve its newest bounded diagnostic
+function summarizeCaptureFailures(records: CalendarActivity[]): { counts: CalendarCaptureFailures; capacitySuppressed: number; latestReason?: string } {
+  const counts = { ...emptyCalendarCaptureFailures };
+  let capacitySuppressed = 0;
   let latest: CalendarActivity | undefined;
+  // include all uncaptured rows even without a recognized reason
   for (const record of records) {
-    // retain the newest valid reason and prefer later rows on timestamp ties
-    if (record.status === 'awaiting_evidence' && record.reason !== undefined && evidenceFailureReasons.has(record.reason) && (record.completedAt ?? 0) >= (latest?.completedAt ?? 0)) latest = record;
+    // admission can persist a capture limit failure as suppressed
+    if (record.status === 'suppressed' && record.reason === 'capture_capacity_exceeded') {
+      counts.total += 1;
+      counts.capture_capacity_exceeded += 1;
+      capacitySuppressed += 1;
+      continue;
+    }
+    // leave delivery and ordinary suppression out of the capture totals
+    if (record.status !== 'awaiting_evidence') continue;
+    counts.total += 1;
+    // never project arbitrary stored reason text
+    if (record.reason === undefined || !evidenceFailureReasons.has(record.reason)) continue;
+    counts[record.reason as Exclude<keyof CalendarCaptureFailures, 'total'>] += 1;
+    // prefer the later record on timestamp ties
+    if ((record.completedAt ?? 0) >= (latest?.completedAt ?? 0)) latest = record;
   }
-  return latest?.reason;
+  return { counts, capacitySuppressed, latestReason: latest?.reason };
 }
 
 // reject an in-flight background fetch immediately when shutdown aborts

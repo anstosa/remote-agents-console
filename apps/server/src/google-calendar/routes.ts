@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Session } from '../auth/service.js';
+import type { CalendarSummary } from './contracts.js';
 import type { CallbackAuthority, GoogleCalendarService, OperationAuthority } from './service.js';
 import { GoogleCalendarError } from './provider-types.js';
 
@@ -11,6 +12,8 @@ type GoogleCalendarRoutes = {
   renewReservation: (sessionId: string, generation: string) => boolean;
   isSessionValid: (sessionId: string) => boolean;
 };
+
+const calendarSummaryV2 = 'application/vnd.rac.google-calendar-summary.v2+json';
 
 // require one exact shallow json object
 function body(request: FastifyRequest, allowed: string[]): Record<string, unknown> {
@@ -36,6 +39,21 @@ function endpoint(handler: (request: FastifyRequest, reply: FastifyReply) => Pro
   };
 }
 
+// negotiate the expanded counts without breaking tabs running the old ui
+function summaryEndpoint(handler: (request: FastifyRequest) => Promise<CalendarSummary>) {
+  return endpoint(async (request, reply) => {
+    const { capacitySuppressed, ...summary } = await handler(request);
+    // expand counts only when the browser requests this exact representation
+    if (request.headers.accept === calendarSummaryV2) {
+      reply.type(calendarSummaryV2);
+      return summary;
+    }
+    const { pending, delivered, failed, suppressed, captureFailures } = summary.counts;
+    // put capacity rejections back where old clients counted them
+    return { ...summary, counts: { pending, delivered, failed: failed + captureFailures.total - capacitySuppressed, suppressed: suppressed + capacitySuppressed } };
+  });
+}
+
 // bind one mutation to its signed request session and controller generation
 function operationAuthority(request: FastifyRequest, deps: GoogleCalendarRoutes): OperationAuthority {
   const session = deps.controlled(request, true);
@@ -58,26 +76,26 @@ function operationAuthority(request: FastifyRequest, deps: GoogleCalendarRoutes)
 // register the authenticated google calendar settings surface
 export async function registerGoogleCalendarRoutes(app: FastifyInstance, deps: GoogleCalendarRoutes): Promise<void> {
   const mutation = { bodyLimit: 16_384, config: { rateLimit: { max: 30, timeWindow: '1 minute' } } };
-  app.get('/api/settings/google-calendar', endpoint(async request => { deps.session(request); return deps.service.summary(); }));
+  app.get('/api/settings/google-calendar', summaryEndpoint(async request => { /* require an authenticated reader */ deps.session(request); return deps.service.summary(); }));
   app.post('/api/settings/google-calendar/connect', mutation, endpoint(async request => {
     const authority = operationAuthority(request, deps);
     body(request, []);
     return { url: deps.service.beginConnect(authority.sessionId, authority.reservationGeneration) };
   }));
-  app.post('/api/settings/google-calendar/calendars', mutation, endpoint(async request => {
+  app.post('/api/settings/google-calendar/calendars', mutation, summaryEndpoint(async request => {
     const authority = operationAuthority(request, deps);
     const input = body(request, ['name']);
     return await deps.service.createCalendar(input.name, authority);
   }));
-  app.post('/api/settings/google-calendar/select', mutation, endpoint(async request => {
+  app.post('/api/settings/google-calendar/select', mutation, summaryEndpoint(async request => {
     const authority = operationAuthority(request, deps);
     const input = body(request, ['calendarId']);
     // require one bounded registry id
     if (typeof input.calendarId !== 'string' || input.calendarId.length < 1 || input.calendarId.length > 1024) throw new GoogleCalendarError('invalid_request', 400);
     return await deps.service.selectCalendar(input.calendarId, authority);
   }));
-  app.post('/api/settings/google-calendar/disconnect', mutation, endpoint(async request => { const authority = operationAuthority(request, deps); body(request, []); return await deps.service.disconnect(authority); }));
-  app.post('/api/settings/google-calendar/retry', mutation, endpoint(async request => { const authority = operationAuthority(request, deps); body(request, []); return await deps.service.retry(authority); }));
+  app.post('/api/settings/google-calendar/disconnect', mutation, summaryEndpoint(async request => { /* retain the controller fence */ const authority = operationAuthority(request, deps); body(request, []); return await deps.service.disconnect(authority); }));
+  app.post('/api/settings/google-calendar/retry', mutation, summaryEndpoint(async request => { /* retain the controller fence */ const authority = operationAuthority(request, deps); body(request, []); return await deps.service.retry(authority); }));
   app.post('/api/settings/google-calendar/title-preview', mutation, endpoint(async request => {
     deps.controlled(request, true);
     const input = body(request, ['template']);

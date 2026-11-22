@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { SplitConfirmation } from '../split-confirmation.js';
 import { useUiReloadBlocker } from '../ui-reload-guard.js';
-import { isGoogleCalendarSummary, type GoogleCalendarSummary } from './contracts.js';
+import { googleCalendarSummaryMediaType, isGoogleCalendarSummary, type GoogleCalendarSummary } from './contracts.js';
 import { useSettingsRuntime } from './runtime.js';
 import { SettingsSelect } from './select.js';
 import './google-calendar-settings.css';
@@ -21,6 +21,12 @@ type GoogleCalendarSettingsProps = {
 
 const defaultCalendarName = 'RAC Agent Work';
 const placeholders = ['{worktree}', '{project}', '{agent}'] as const;
+const captureFailureLabels = [
+  ['unsupported_lifecycle_contract', 'Unsupported agent lifecycle'],
+  ['missing_lifecycle_evidence', 'Missing verified activity timing'],
+  ['capture_capacity_exceeded', 'Capture limit reached'],
+  ['capture_store_unavailable', 'Capture storage unavailable']
+] as const;
 
 // retain safe provider status across page navigation without retaining credentials
 export function useGoogleCalendarSetup(enabled: boolean) {
@@ -37,7 +43,7 @@ export function useGoogleCalendarSetup(enabled: boolean) {
     const sequence = ++requestSequence.current;
     setLoading(true);
     try {
-      const response = await runtime.request('/api/settings/google-calendar', { cache: 'no-store' });
+      const response = await runtime.request('/api/settings/google-calendar', { cache: 'no-store', headers: { accept: googleCalendarSummaryMediaType } });
       const payload: unknown = response.ok ? await response.json().catch(() => undefined) : undefined;
       // ignore stale reads and reject unsupported response shapes
       if (sequence !== requestSequence.current) return;
@@ -235,7 +241,7 @@ export function GoogleCalendarSettings({ setup, configuration, environment, titl
     setBusyAction(action);
     setError('');
     try {
-      const response = await runtime.request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const response = await runtime.request(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: googleCalendarSummaryMediaType }, body: JSON.stringify(body) });
       const payload: unknown = await response.json().catch(() => undefined);
       // retain current status when mutation acknowledgement is missing or unsafe
       if (!response.ok || !isGoogleCalendarSummary(payload)) {
@@ -302,6 +308,9 @@ export function GoogleCalendarSettings({ setup, configuration, environment, titl
   };
 
   const selectedCalendar = status?.calendars.find(calendar => calendar.id === selectedCalendarId);
+  const captureFailures = status?.counts.captureFailures;
+  const failedDeliveries = status?.counts.failed ?? 0;
+  const retryableDeliveries = status?.counts.retryable ?? 0;
   const statusCopy = statusLabel(status, loading);
   let previewContent: ReactNode = <small>Previewing…</small>;
   // prioritize validation errors over previously rendered preview content
@@ -376,11 +385,18 @@ export function GoogleCalendarSettings({ setup, configuration, environment, titl
       <dl className="settings-google-calendar-counts">
         <div><dt>Pending</dt><dd>{status?.counts.pending ?? 0}</dd></div>
         <div><dt>Delivered</dt><dd>{status?.counts.delivered ?? 0}</dd></div>
-        <div><dt>Failed</dt><dd>{status?.counts.failed ?? 0}</dd></div>
+        <div><dt>{captureFailures === undefined && status !== undefined ? 'Reported failures' : 'Delivery failures'}</dt><dd>{failedDeliveries}</dd></div>
         <div><dt>Suppressed</dt><dd>{status?.counts.suppressed ?? 0}</dd></div>
       </dl>
       {status?.lastSuccessAt && <small>Last successful delivery: {status.lastSuccessAt}</small>}
-      <button type="button" disabled={liveBlocked || providerUnavailable || (status?.counts.failed ?? 0) === 0} onClick={() => { /* retry only server-classified failed deliveries */ void mutate('retry', '/api/settings/google-calendar/retry', {}, 'Failed Google Calendar deliveries released for retry.'); }}>{busyAction === 'retry' ? 'Retrying…' : 'Retry failed deliveries'}</button>
+      {/* distinguish missing work data from deliveries that reached the outbox */}
+      {captureFailures !== undefined && captureFailures.total > 0 && <div>
+        <p><strong>Not captured: {captureFailures.total}</strong>. RAC did not create or send calendar events for this work.</p>
+        <ul>{captureFailureLabels.map(([reason, label]) => (/* show only capture reasons present in this queue */ captureFailures[reason] > 0 && <li key={reason}>{label}: {captureFailures[reason]}</li>))}</ul>
+      </div>}
+      {status?.connected && captureFailures === undefined && <p>This RAC server did not report which deliveries can be retried. Retry is unavailable.</p>}
+      {status?.connected && captureFailures !== undefined && failedDeliveries > retryableDeliveries && <p>{failedDeliveries - retryableDeliveries} cannot be retried. RAC won’t recreate deleted events, overwrite other events, or switch accounts or calendars.</p>}
+      <button type="button" disabled={liveBlocked || providerUnavailable || !status?.connected || retryableDeliveries === 0} onClick={() => { /* queue all failed deliveries the server can safely retry */ void mutate('retry', '/api/settings/google-calendar/retry', {}, 'All retryable Google Calendar deliveries queued.'); }}>{busyAction === 'retry' ? 'Retrying…' : 'Retry failed deliveries'}</button>
     </section>
 
     {confirmingDisconnect && confirmationTarget != null && <SplitConfirmation target={confirmationTarget} title="Disconnect Google Calendar?" description="RAC will remove its saved Google authorization and stop delivery. Existing Google calendars and events are not deleted." confirmLabel="Disconnect" pending={busyAction === 'disconnect'} onCancel={() => { /* preserve the current connection */ setConfirmingDisconnect(false); }} onConfirm={async () => { /* remove only RAC authorization */ await mutate('disconnect', '/api/settings/google-calendar/disconnect', {}, 'Google Calendar disconnected.'); setConfirmingDisconnect(false); }} />}
