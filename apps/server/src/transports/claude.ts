@@ -24,8 +24,10 @@ export const claudeMcpServer = 'rac';
 /** `ask_user` as the model calls it. */
 export const claudeAskUserTool = `mcp__${claudeMcpServer}__${askUser.name}`;
 /** The Conductor's SDK MCP server, since `rac` names the console's own MCP server there (ADR 0022). */
-export const claudeConductorMcpServer = 'operator';
+const claudeConductorMcpServer = 'operator';
 export const claudeConductorAskUserTool = `mcp__${claudeConductorMcpServer}__${askUser.name}`;
+/** The SDK MCP server serving `ask_user` to an Agent in `role`, as its launch declares it and its client serves it. */
+export const claudeAskUserServer = (role?: 'conductor'): string => role === 'conductor' ? claudeConductorMcpServer : claudeMcpServer;
 const askUserTools = new Set([claudeAskUserTool, claudeConductorAskUserTool]);
 // the Conductor's SessionStart (`compact`) hook callback; fixed, so a reattached client answers the
 // one an earlier client registered
@@ -319,8 +321,7 @@ type Operation = { kind: 'rename' | 'compact' | 'clear' | 'model'; id?: string; 
 // bind protocol history reads to the current profile
 export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: launched, role, attached }) => {
   const conductor = role === 'conductor';
-  // the SDK MCP server serving `ask_user`
-  const server = conductor ? claudeConductorMcpServer : claudeMcpServer;
+  const server = claudeAskUserServer(role);
   // the console's state for the compaction under way, given once to its SessionStart callback
   let handoff: string | undefined;
   // request ids no earlier client used, so a response replayed from before a reattach answers nothing
@@ -480,6 +481,8 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
   };
   const turnStarted = () => {
     working = true;
+    // a compaction within a Turn is Claude's own, never the console's
+    handoff = undefined;
     toolCalls = 0;
     answer = '';
     turnPrompt = undefined;

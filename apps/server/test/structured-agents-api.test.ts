@@ -2493,7 +2493,8 @@ describe('the Conductor\'s dispatches', () => {
     await deployed.reattached;
     await deployed.app.conductor.start();
     // the Conductor's client is told its role again, and its worker's is told none
-    expect(next.attachedAt.map(at => at.role)).toEqual(expect.arrayContaining(['conductor', undefined]));
+    const roles = Object.fromEntries(next.attaches.map((holder, index) => [holder.agentId, next.attachedAt[index]!.role]));
+    expect(roles).toEqual({ [conductor]: 'conductor', [target]: undefined });
     // the Conductor, reattached too, is idle once it reports its Conversation
     next.emitTo(conductor, { type: 'conversation', id: 'conducting' });
     next.emitTo(target, { type: 'turn', turn: { type: 'started' } });

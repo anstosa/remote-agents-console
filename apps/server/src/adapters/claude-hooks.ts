@@ -1,5 +1,6 @@
 import { claudeAskUserTool, claudeConductorAskUserTool } from '../transports/claude.js';
-import { homeSecrets } from './pi-sandbox.js';
+import { join } from 'node:path';
+import { folderWritable, homeSecrets, piSecrets, piStateDir, staticPolicy } from './pi-sandbox.js';
 import { claudeReplyObserverConfiguration } from '../reply-suggestions/claude-observer.js';
 import { responseUrlSessionHookCommand } from './response-urls.js';
 import type { AdapterFileContext, AttentionState, SandboxSettings } from './types.js';
@@ -118,18 +119,42 @@ export const claudeStructuredSettings = JSON.stringify({
   permissions: { allow: [claudeAskUserTool], deny: ['AskUserQuestion'] }
 });
 
+// what in a Claude account's config directory holds credentials, MCP server headers, or other
+// Conversations' prompts and transcripts
+const claudeSecrets = ['.credentials.json', '.claude.json', 'history.jsonl'];
+const claudeTranscripts = 'projects';
+// a path as a permission rule takes it: `//` starts an absolute path, `~/` the home directory
+const rulePath = (path: string): string => path === '~' || path.startsWith('~/') ? path : `/${path}`;
+const rules = (tool: string, paths: readonly string[]): string[] => paths.flatMap(path => [`${tool}(${rulePath(path)})`, `${tool}(${rulePath(path)}/**)`]);
+const noSandbox: SandboxSettings = { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
+
 /**
  * A Claude Conductor's settings (ADR 0022), the only ones it loads: the launch's hooks; a sandbox
- * that fails closed and lets no command out, on the kind's lists (the console's own hosts and
- * paths denied) and the operator's credentials unreadable; and, asking no one, the console's MCP
- * tools, `ask_user` and edits allowed, with the file tools kept to its working folder.
+ * that fails closed and lets no command out, on the kind's lists (the console's own hosts and paths
+ * denied), with the operator's credentials, the account's Claude state and Pi's unreadable and, as
+ * for a Sandboxed Pi, its folder unwritable where it holds the home directory or a console
+ * repository; and, asking no one, the console's MCP tools, `ask_user` and edits allowed, the file
+ * tools kept to its folder and, since they follow permission rules rather than the sandbox's lists,
+ * denied the same paths. `stateDirectory` is the launch account's Claude config directory.
  */
-export const claudeConductorSettings = (sandbox?: SandboxSettings): string => JSON.stringify({
-  hooks: structuredHooks,
-  sandbox: {
-    enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true,
-    network: { allowedDomains: sandbox?.allowedDomains ?? [], deniedDomains: sandbox?.deniedDomains ?? [] },
-    filesystem: { allowWrite: sandbox?.allowWrite ?? [], denyWrite: sandbox?.denyWrite ?? [], denyRead: [...sandbox?.denyRead ?? [], ...homeSecrets.map(name => `~/${name}`)] }
-  },
-  permissions: { defaultMode: 'dontAsk', allow: ['mcp__rac', claudeConductorAskUserTool, 'Edit', 'Write'], deny: ['AskUserQuestion'], blockFileToolReadsOutsideWorkingDirectories: true, blockWritesOutsideWorkingDirectories: true }
-});
+export function claudeConductorSettings({ cwd, stateDirectory, sandbox = noSandbox }: { cwd: string; stateDirectory: string; sandbox?: SandboxSettings }): string {
+  const { network, filesystem } = staticPolicy(sandbox);
+  const writable = folderWritable(cwd, sandbox.repositories ?? []);
+  const secrets = [...filesystem.denyRead, ...homeSecrets.map(name => `~/${name}`), ...claudeSecrets.map(name => join(stateDirectory, name)), '~/.claude.json', ...piSecrets.map(name => join(piStateDir(process.env), name))];
+  const denyWrite = [...filesystem.denyWrite, ...(writable ? [] : [cwd])];
+  return JSON.stringify({
+    hooks: structuredHooks,
+    sandbox: {
+      enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true,
+      network,
+      // other Conversations' transcripts are kept from commands only: the file tools read the large
+      // results Claude saves beside its own
+      filesystem: { allowWrite: filesystem.allowWrite, denyWrite, denyRead: [...secrets, join(stateDirectory, claudeTranscripts)] }
+    },
+    permissions: {
+      defaultMode: 'dontAsk', allow: ['mcp__rac', claudeConductorAskUserTool, ...(writable ? ['Edit', 'Write'] : [])],
+      deny: ['AskUserQuestion', ...rules('Read', secrets), ...rules('Edit', denyWrite)],
+      blockFileToolReadsOutsideWorkingDirectories: true, blockWritesOutsideWorkingDirectories: true
+    }
+  });
+}

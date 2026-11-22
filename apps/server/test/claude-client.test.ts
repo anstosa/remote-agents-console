@@ -428,6 +428,14 @@ describe('the Claude client', () => {
     expect(await refused).toBe('Not enough messages to compact.');
     callback('h4', compactHook!);
     expect(replies().at(-1)).toEqual({ subtype: 'success', request_id: 'h4', response: {} });
+
+    // nor does one that compacted without calling back: a Turn's own compaction gets nothing stale
+    const silent = connection.compact({ state: 'STATE: unclaimed' });
+    play(fixture('compact.jsonl'));
+    expect(await silent).toBeUndefined();
+    await connection.deliver('Go on');
+    callback('h5', compactHook!);
+    expect(replies().at(-1)).toEqual({ subtype: 'success', request_id: 'h5', response: {} });
   });
 
   it('lists the models initialize gave with their Efforts, and switches with set_model, but not the Effort, which stays the launch\'s', async () => {

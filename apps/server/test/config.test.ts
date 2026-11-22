@@ -663,8 +663,9 @@ describe('claude adapter configuration', () => {
       adapters: { claude: { program: process.execPath, sandbox: { allowedDomains: ['registry.npmjs.org', 'pypi.org'], allowWrite: ['~/.cache/pnpm'] } } } });
     expect(config.adapters?.claude?.sandbox).toEqual({ allowedDomains: ['registry.npmjs.org', 'pypi.org'], deniedDomains: [], allowWrite: ['~/.cache/pnpm'], denyWrite: [], denyRead: ['~/.ssh'], env: [] });
     await expect(validateConfig({ ...scratch, adapters: { claude: { program: process.execPath, sandbox: { allowedDomains: ['https://pypi.org'] } } } })).rejects.toThrow(/not a URL/u);
-    // a kind with no sandbox of its own takes none
-    await expect(validateConfig({ ...scratch, adapters: { codex: { program: process.execPath, sandbox: {} } } })).rejects.toThrow();
+    // Claude's sandbox passes its commands the CLI's environment, so it takes no names; a kind with no sandbox of its own takes none
+    await expect(validateConfig({ ...scratch, adapters: { claude: { program: process.execPath, sandbox: { env: ['NPM_TOKEN'] } } } })).rejects.toThrow(/env/u);
+    await expect(validateConfig({ ...scratch, adapters: { codex: { program: process.execPath, sandbox: {} } } })).rejects.toThrow(/sandbox/u);
   });
 
   it('refuses sandbox paths that are not absolute or home-relative, URLs as domains, and bad variable names', async () => {

@@ -7,7 +7,7 @@ import { claudeReviewRuns } from './claude-review-runs.js';
 import { claudeQuestionTextAnswer, claudeQuestionTextEntry, reportedClaudeQuestion } from './claude-questions.js';
 import { claudeFolderTrustQuestion } from './claude-folder-trust.js';
 import { responseUrlEnvironment } from './response-urls.js';
-import { claudeClient, claudeConductorMcpServer, claudeEfforts, claudeMcpServer } from '../transports/claude.js';
+import { claudeAskUserServer, claudeClient, claudeEfforts } from '../transports/claude.js';
 import type { Adapter, ReplacedFlagValue, StructuredAdapter, TmuxKey } from './types.js';
 
 // The packaged CLI entry a `node …` invocation of Claude Code runs.
@@ -149,15 +149,15 @@ export const claudeStructuredAdapter = {
   kind: 'claude',
   // A Conductor's launch is sealed (ADR 0022): it loads no setting sources and no MCP server but its
   // own, has only the tools it needs, and runs on settings the console writes whole
-  launch: ({ nonce = '', responseOrigin, resume, role, sandbox }) => {
+  launch: ({ cwd, nonce = '', responseOrigin, resume, role, sandbox, stateDirectory = claudeConfigDir() }) => {
     const conductor = role === 'conductor';
-    const server = conductor ? claudeConductorMcpServer : claudeMcpServer;
+    const server = claudeAskUserServer(role);
     return {
       args: [
         '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages', '--permission-prompts', 'host', '--permission-prompt-tool', 'stdio',
         ...(conductor ? ['--setting-sources', '', '--strict-mcp-config', '--tools', conductorTools] : []),
         '--mcp-config', JSON.stringify({ mcpServers: { [server]: { type: 'sdk', name: server } } }),
-        '--settings', conductor ? claudeConductorSettings(sandbox) : claudeStructuredSettings,
+        '--settings', conductor ? claudeConductorSettings({ cwd, stateDirectory, ...(sandbox === undefined ? {} : { sandbox }) }) : claudeStructuredSettings,
         ...(resume === undefined ? [] : ['--resume', resume])
       ],
       env: { RAC_LAUNCH_NONCE: nonce, ...responseUrlEnvironment(responseOrigin) },

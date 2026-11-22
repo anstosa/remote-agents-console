@@ -540,9 +540,10 @@ export interface StructuredAdapter {
  * the kind's console-rendered files, and `nonce` is what its launch report must echo. `role` launches
  * the Conductor: its client then takes the console's MCP access, and it gets the console's role prompt.
  * `sandbox` is the kind's sandbox settings, the console's own paths and hosts included, for a kind
- * that writes them into its launch rather than a rendered file.
+ * that writes them into its launch rather than a rendered file; `stateDirectory` is the launch
+ * account's store root (`conversations.stateDirectory`).
  */
-export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; responseOrigin?: string; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string; role?: 'conductor'; sandbox?: SandboxSettings };
+export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; responseOrigin?: string; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string; role?: 'conductor'; sandbox?: SandboxSettings; stateDirectory?: string };
 /**
  * A structured launch's arguments. A `sealed` launch is the whole of what the process loads: the
  * console composes only its model and Effort onto it, and none of the operator's arguments, the

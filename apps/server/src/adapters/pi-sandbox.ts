@@ -38,9 +38,8 @@ export const staticPolicy = (settings: SandboxSettings): SandboxPolicy => ({
  */
 export type SessionPaths = { cwd: string; stateDir: string; git?: { dir: string; commonDir: string }; tempDir: string; tmuxSocket?: string };
 
-// what in Pi's state directory holds credentials, may hold literal keys, or holds other
-// Conversations
-const piSecrets = ['auth.json', 'oauth.json', 'mcp-auth.json', 'models.json', 'mcp.json', 'sessions'];
+/** What in Pi's state directory holds credentials, may hold literal keys, or holds other Conversations. */
+export const piSecrets = ['auth.json', 'oauth.json', 'mcp-auth.json', 'models.json', 'mcp.json', 'sessions'];
 /** The operator's other credentials, under the home directory, that a command never needs. */
 export const homeSecrets = ['.ssh', '.gnupg', '.aws', '.config/gh', '.config/gcloud', '.docker/config.json', '.git-credentials', '.netrc', '.npmrc', '.claude/.credentials.json', '.codex/auth.json'];
 /** What in a repository's git directory configures git, runs code, or points git elsewhere. */
@@ -70,9 +69,7 @@ export function sessionPolicy(policy: SandboxPolicy, session: SessionPaths): San
   const { git } = session;
   const linked = git !== undefined && git.dir !== git.commonDir;
   const socket = session.tmuxSocket === undefined ? [] : [session.tmuxSocket];
-  const cwd = canonical(session.cwd);
-  const holds = (path: string) => isUnder(canonical(path), cwd);
-  const writable = holds(homedir()) || policy.repositories.some(repository => canonical(repository) !== cwd && holds(repository)) ? [] : [session.cwd];
+  const writable = folderWritable(session.cwd, policy.repositories) ? [session.cwd] : [];
   // a linked Worktree's `.git` file, or the `.git` a command would make outside any repository; a
   // deny on a missing path leaves a placeholder in its place, which no git outside a repository reads
   const gitFile = linked && existsSync(join(session.cwd, '.git')) || git === undefined ? [join(session.cwd, '.git')] : [];
@@ -88,6 +85,17 @@ export function sessionPolicy(policy: SandboxPolicy, session: SessionPaths): San
     env: policy.env,
     repositories: policy.repositories
   };
+}
+
+/**
+ * Whether a session may write its own folder: not when the folder holds the home directory, whose
+ * dotfiles configure the operator's own shells and git, or one of the console's other repositories,
+ * whose git the console runs.
+ */
+export function folderWritable(folder: string, repositories: readonly string[]): boolean {
+  const cwd = canonical(folder);
+  const holds = (path: string) => isUnder(canonical(path), cwd);
+  return !holds(homedir()) && !repositories.some(repository => canonical(repository) !== cwd && holds(repository));
 }
 
 /**

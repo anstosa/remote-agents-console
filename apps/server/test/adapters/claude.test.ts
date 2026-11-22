@@ -167,6 +167,7 @@ describe('structured claude launch', () => {
     await trusting('/elsewhere');
     const args = ['--permission-mode', 'bypassPermissions', '--add-dir', '/', '--setting-sources', 'user', '--mcp-config', './servers.json', '--settings', '/home/me/wide.json'];
     const sandbox: SandboxSettings = { allowedDomains: ['registry.npmjs.org'], deniedDomains: ['console.example.com', '172.19.0.1'], allowWrite: ['~/.cache/pnpm'], denyWrite: ['/srv/rac/.data'], denyRead: ['/srv/rac/.data'], env: ['NPM_TOKEN'], repositories: ['/srv/rac'] };
+    vi.stubEnv('PI_CODING_AGENT_DIR', '/pi/agent');
     const opened = await launched({ role: 'conductor', model: { model: 'opus', effort: 'high' }, security: { permissions: 'bypassPermissions' } }, { args }, place, sandbox);
     const settings = opened.args[opened.args.indexOf('--settings') + 1]!;
     expect(opened.args).toEqual([
@@ -175,21 +176,39 @@ describe('structured claude launch', () => {
       '--mcp-config', '{"mcpServers":{"operator":{"type":"sdk","name":"operator"}}}', '--settings', settings,
       '--model', 'opus', '--effort', 'high'
     ]);
+    const home = ['~/.ssh', '~/.gnupg', '~/.aws', '~/.config/gh', '~/.config/gcloud', '~/.docker/config.json', '~/.git-credentials', '~/.netrc', '~/.npmrc', '~/.claude/.credentials.json', '~/.codex/auth.json'];
+    // the launch account's Claude secrets and Pi's, which no command of the Conductor's needs
+    const secrets = [...home, `${config}/.credentials.json`, `${config}/.claude.json`, `${config}/history.jsonl`, '~/.claude.json', ...['auth.json', 'oauth.json', 'mcp-auth.json', 'models.json', 'mcp.json', 'sessions'].map(name => `/pi/agent/${name}`)];
+    // Claude's file tools follow permission rules, not the sandbox's lists
+    const rules = (tool: string, paths: string[]) => paths.flatMap(path => [`${tool}(${path.startsWith('~') ? path : `/${path}`})`, `${tool}(${path.startsWith('~') ? path : `/${path}`}/**)`]);
     expect(JSON.parse(settings)).toEqual({
       hooks: JSON.parse(claudeStructuredSettings).hooks,
       sandbox: {
         enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true,
         network: { allowedDomains: ['registry.npmjs.org'], deniedDomains: ['console.example.com', '172.19.0.1'] },
-        filesystem: { allowWrite: ['~/.cache/pnpm'], denyWrite: ['/srv/rac/.data'], denyRead: ['/srv/rac/.data', '~/.ssh', '~/.gnupg', '~/.aws', '~/.config/gh', '~/.config/gcloud', '~/.docker/config.json', '~/.git-credentials', '~/.netrc', '~/.npmrc', '~/.claude/.credentials.json', '~/.codex/auth.json'] }
+        // other Conversations' transcripts are kept from commands only: the file tools read results Claude saved there
+        filesystem: { allowWrite: ['~/.cache/pnpm'], denyWrite: ['/srv/rac/.data'], denyRead: ['/srv/rac/.data', ...secrets, `${config}/projects`] }
       },
-      permissions: { defaultMode: 'dontAsk', allow: ['mcp__rac', 'mcp__operator__ask_user', 'Edit', 'Write'], deny: ['AskUserQuestion'], blockFileToolReadsOutsideWorkingDirectories: true, blockWritesOutsideWorkingDirectories: true }
+      permissions: {
+        defaultMode: 'dontAsk', allow: ['mcp__rac', 'mcp__operator__ask_user', 'Edit', 'Write'],
+        deny: ['AskUserQuestion', ...rules('Read', ['/srv/rac/.data', ...secrets]), ...rules('Edit', ['/srv/rac/.data'])],
+        blockFileToolReadsOutsideWorkingDirectories: true, blockWritesOutsideWorkingDirectories: true
+      }
     });
+    expect(JSON.parse(settings).permissions.deny).toContain('Read(//srv/rac/.data/**)');
     // the operator's environment still names the account
     expect(opened.env).toEqual({ SOME: '1', CLAUDE_CONFIG_DIR: config, RAC_LAUNCH_NONCE: 'n0nce', ...responseUrlEnvironment() });
     // with no sandbox settings given, it has no network and writes nowhere beyond its folder
     const bare = await launched({ role: 'conductor' }, { args });
     expect(JSON.parse(bare.args[bare.args.indexOf('--settings') + 1]!).sandbox).toMatchObject({ network: { allowedDomains: [], deniedDomains: [] }, filesystem: { allowWrite: [], denyWrite: [] } });
     expect(bare.args).not.toContain('bypassPermissions');
+
+    // a folder holding one of the console's repositories is not the Conductor's to write, as for a Sandboxed Pi
+    const above = await launched({ role: 'conductor' }, {}, place, { ...sandbox, repositories: [join(work, 'remoteagents')] });
+    const confined = JSON.parse(above.args[above.args.indexOf('--settings') + 1]!);
+    expect(confined.sandbox.filesystem.denyWrite).toEqual(['/srv/rac/.data', work]);
+    expect(confined.permissions.allow).toEqual(['mcp__rac', 'mcp__operator__ask_user']);
+    expect(confined.permissions.deny).toContain(`Edit(/${work}/**)`);
   });
 
   it('routes structured Claude to a kind-specific generic holder under the host bridge', async () => {

@@ -142,12 +142,13 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       const allowed = configured.allowedModels ?? (model === undefined ? [] : [{ model: model.model }]);
       const rendered = await files(kind);
       const settings = sandbox(kind);
-      const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(place.responseOrigin === undefined ? {} : { responseOrigin: place.responseOrigin }), ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(settings === undefined ? {} : { sandbox: settings }), ...(resumed === undefined ? {} : { resume: resumed }), ...(continues ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
+      const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(place.responseOrigin === undefined ? {} : { responseOrigin: place.responseOrigin }), ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(settings === undefined ? {} : { sandbox: settings }), stateDirectory: adapter.conversations.stateDirectory(env), ...(resumed === undefined ? {} : { resume: resumed }), ...(continues ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
       // the operator's arguments, less what the launch composes itself (whatever the boot dropped,
       // for the Transport configured then), and the model and Launch menu choices, composed as for a
       // pane; a sealed launch takes only its model
       const sealed = spec.sealed === true;
-      const choice = model === undefined && (security === undefined || sealed) ? undefined : { ...(model === undefined ? {} : { model }), ...(security === undefined || sealed ? {} : { security }) };
+      const chosen = sealed ? undefined : security;
+      const choice = model === undefined && chosen === undefined ? undefined : { ...(model === undefined ? {} : { model }), ...(chosen === undefined ? {} : { security: chosen }) };
       // in a folder the CLI does not trust yet, its restrictions replace the operator's and come last
       const untrusted = sealed ? undefined : await adapter.untrusted?.(place.home, inheritedHomeEnvironment(configured.env, home));
       const operatorArgs = sealed ? [] : [adapter.conflictingArgs, untrusted?.reserved].reduce((args, reserved) => reserved === undefined ? args : withoutFlags(args, reserved), configured.args);
