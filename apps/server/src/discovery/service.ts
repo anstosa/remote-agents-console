@@ -7,6 +7,7 @@ import { TmuxAdapter } from '../tmux/adapter.js';
 import { ProcInspector, type ProcessInspector } from './processes.js';
 import { GithubService } from '../github/service.js';
 import { messageAsksQuestion, parseReportedAttention, resolveAttention } from '../adapters/attention.js';
+import { codexProcessOwnsConversation } from '../adapters/codex-conversations.js';
 import type { ReplySuggestionService } from '../reply-suggestions/service.js';
 import { adapterCapabilities, adapterFor, adapters, paneExcluded, structuredAdapters } from '../adapters/registry.js';
 import { projectIdOf, worktreeMatchesWorkspace, worktreePathOf, worktreeWireId } from '../workspaces/resolver.js';
@@ -38,6 +39,7 @@ export type TmuxReplySuggestionTarget = {
   panePid: number;
   cwd: string;
   conversationId?: string;
+  conversationProof?: string;
   process: { pid: number; startTime: string };
   generation: number;
 };
@@ -153,6 +155,8 @@ export class DiscoveryService {
   private panePids = new Map<string, number>();
   // distinguish native agent replacement beneath an unchanged tmux shell
   private agentPids = new Map<string, number>();
+  // bind Claude's reported session to the exact agent ancestry that emitted its hook
+  private paneConversationProcessProofs = new Map<string, string>();
   // atomically published native reply targets never trigger dashboard refreshes
   private replyTargets = new Map<string, TmuxReplySuggestionTarget>();
   private replyTargetCounter = 0;
@@ -432,6 +436,7 @@ export class DiscoveryService {
     const paneCwds = new Map<string, string>();
     const paneReported = new Map<string, AttentionState>();
     const paneQuestionPayloads = new Map<string, string>();
+    const paneConversationProcessProofs = new Map<string, string>();
     const replyCandidates = new Map<string, Omit<TmuxReplySuggestionTarget, 'generation'>>();
     const places = await this.places(this.worktreeSnapshot);
     // a holder's pane runs a structured Agent's process, never a recognised Agent's
@@ -442,7 +447,8 @@ export class DiscoveryService {
         // a pane whose agent is gone must not keep a stale report; nothing else clears it. A
         // worker's `@rac_spawned_by` goes with it, but never starts the clearing: it is set before
         // the agent's process is recognised
-        if (pane.reportedAttention !== undefined || pane.reportedSession !== undefined || pane.reportedSandboxed !== undefined || pane.reportedQuestion !== undefined) void this.tmux.unsetReportedState(pane.socket, pane.paneId).catch(() => {});
+        if (pane.reportedAttention !== undefined || pane.reportedSession !== undefined || pane.reportedSessionProcesses !== undefined
+          || pane.reportedSandboxed !== undefined || pane.reportedQuestion !== undefined) void this.tmux.unsetReportedState(pane.socket, pane.paneId).catch(() => {});
         return undefined;
       }
       const home = await this.cachedWorkspaceRoot(pane.path);
@@ -455,6 +461,16 @@ export class DiscoveryService {
       if (pane.reportedQuestion !== undefined && pane.reportedQuestion.length > 0) paneQuestionPayloads.set(id, pane.reportedQuestion);
       const attention = resolveAttention({ kind: recognized.kind, title: pane.title, reported, hasQuestion: false });
       const conversationId = pane.reportedSession !== undefined && pane.reportedSession.length > 0 ? pane.reportedSession : undefined;
+      const proofSeparator = pane.reportedSessionProcesses?.indexOf('|') ?? -1;
+      const proofSession = proofSeparator < 0 ? undefined : pane.reportedSessionProcesses?.slice(0, proofSeparator);
+      const proofProcesses = proofSeparator < 0 ? undefined : pane.reportedSessionProcesses?.slice(proofSeparator + 1);
+      const reporterProcesses = proofProcesses !== undefined && /^\d+:\d+(?:,\d+:\d+){0,11}$/u.test(proofProcesses) ? proofProcesses.split(',') : [];
+      const conversationProof = proofSession === conversationId && recognized.startTime !== undefined
+        && reporterProcesses.includes(`${recognized.pid}:${recognized.startTime}`) ? pane.reportedSessionProcesses : undefined;
+      // accept only a hook report bound to this session and exact native lifetime
+      if (conversationProof !== undefined) {
+        paneConversationProcessProofs.set(id, conversationProof);
+      }
       const agentPane: AgentPane = { paneId: pane.paneId, sessionId: `${pane.socket.fingerprint}:${pane.sessionId}`, socketFingerprint: pane.socket.fingerprint, ...(pane.paneMode === undefined ? {} : { paneMode: pane.paneMode }) };
       // expose only an opaque match hint when discovery proved one exact process lifetime
       const processKey = recognized.startTime === undefined ? {} : { recoveryProcessKey: recoveryProcessKey(recognized.kind, recognized.pid, recognized.startTime) };
@@ -468,6 +484,7 @@ export class DiscoveryService {
           panePid: pane.pid,
           cwd: pane.path,
           ...(conversationId === undefined ? {} : { conversationId }),
+          ...(conversationProof === undefined ? {} : { conversationProof }),
           process: { pid: recognized.pid, startTime: recognized.startTime }
         });
       }
@@ -492,6 +509,7 @@ export class DiscoveryService {
     this.paneCwds = paneCwds;
     this.paneReported = paneReported;
     this.paneQuestionPayloads = paneQuestionPayloads;
+    this.paneConversationProcessProofs = paneConversationProcessProofs;
     this.publishReplyTargets(replyCandidates);
     // discard removed panes so late transcript reads cannot restore their state
     for (const id of this.messageQuestions.keys()) {
@@ -566,13 +584,30 @@ export class DiscoveryService {
 
   // identify one target without object-identity or ordinary-scan churn
   private replyTargetKey(target: Omit<TmuxReplySuggestionTarget, 'generation'> | TmuxReplySuggestionTarget): string {
-    return JSON.stringify([target.id, target.kind, target.attention, target.panePid, target.cwd, target.conversationId, target.process.pid, target.process.startTime]);
+    return JSON.stringify([target.id, target.kind, target.attention, target.panePid, target.cwd, target.conversationId, target.conversationProof, target.process.pid, target.process.startTime]);
   }
 
   // return a defensive copy from the last atomic pane scan
   replySuggestionTarget(id: string): TmuxReplySuggestionTarget | undefined {
     const target = this.replyTargets.get(id);
     return target === undefined ? undefined : { ...target, process: { ...target.process } };
+  }
+
+  // require one conversation source owned by the exact native process generation
+  async previewConversationOwned(expected: TmuxReplySuggestionTarget): Promise<boolean> {
+    const before = this.replyTargets.get(expected.id);
+    // reject retired or mixed atomic targets before native source discovery
+    if (before === undefined || expected.conversationId === undefined || before.generation !== expected.generation
+      || this.replyTargetKey(before) !== this.replyTargetKey(expected)) return false;
+    if (expected.kind === 'claude') {
+      return expected.conversationProof !== undefined && this.paneConversationProcessProofs.get(expected.id) === expected.conversationProof;
+    }
+    // Codex/OMX ownership requires the exact process's open writer, never cwd fallback
+    const owned = await codexProcessOwnsConversation(expected.process.pid, expected.conversationId).catch(() => false);
+    const after = this.replyTargets.get(expected.id);
+    // a concurrent replacement invalidates even a matching writer result
+    return owned && after !== undefined && after.generation === expected.generation
+      && this.replyTargetKey(after) === this.replyTargetKey(expected);
   }
 
   // freshly validate the recognized lifetime without dashboard, target or refresh recursion

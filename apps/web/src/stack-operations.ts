@@ -19,6 +19,7 @@ export type StackProcessState = { name: string; state: 'running'|'exited'|'stopp
 // what "Show <name> output" reads: the process's state and its pane's recent output, and while
 // it runs the pane's id, which "Open as Terminal" opens
 export type StackProcessOutput = StackProcessState & { paneId?: string; output: string };
+export type ProjectStackStatus = 'working'|'exited'|'partial'|'healthy'|'down'|'running'|'stopped'|'unknown';
 // the actions a Stack process derives; any other action is a one-shot command (mirrors the
 // server's list in worktree-commands/service.ts)
 export const processActions = ['start', 'stop', 'restart'] as const satisfies readonly StackAction[];
@@ -113,6 +114,25 @@ export const processesSummary = (processes: readonly StackProcessState[]) => {
   const live = processes.filter(process => process.state === 'running').length;
   return live === 0 ? 'stopped' : live === processes.length ? 'running' : `${live} of ${processes.length} running`;
 };
+
+// share stack badge precedence between the toolbar and passive workspace cards
+export function resolveStackStatus(stack: { processes?: readonly StackProcessState[]; tunnel?: boolean; running?: boolean } | undefined, inProgress: boolean): ProjectStackStatus {
+  // prioritize active operations
+  if (inProgress) return 'working';
+  // prefer observed process health to a potentially stale tunnel check
+  if (stack?.processes !== undefined) {
+    // unexpected exits outrank a partial stack
+    if (stack.processes.some(process => process.state === 'exited')) return 'exited';
+    const live = stack.processes.filter(process => process.state === 'running').length;
+    // separate stopped stacks from stacks with at least one running process
+    if (live === 0) return 'stopped';
+    // report mixed process health before consulting the tunnel
+    if (live < stack.processes.length) return 'partial';
+  }
+  // use known tunnel health before the generic running flag
+  if (stack?.tunnel !== undefined) return stack.tunnel ? 'healthy' : 'down';
+  return stack?.running === undefined ? 'unknown' : stack.running ? 'running' : 'stopped';
+}
 
 // What the Stack panel shows on its right: one of this Worktree's processes, or a process used in
 // another Worktree, by its `usedKey`

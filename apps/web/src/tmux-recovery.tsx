@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { isResourceSnapshot, type ResourceSnapshot } from '../../server/src/server-admin/resource-contracts.js';
+import { restoreCoverFocus } from './fullscreen-loader.js';
 import { agentKindLabel, agentKinds, LaunchTabBadge, type AgentKind } from './launch-profile.js';
 import { ServerResources } from './server-resources.js';
 import { SplitConfirmation } from './split-confirmation.js';
@@ -109,7 +110,7 @@ export function TmuxRecovery({ preview, request, retry, lastKnown, serverControl
     dialog.showModal();
     card.current?.focus({ preventScroll: true });
     // release the top layer and restore prior focus on exit
-    return () => { dialog.close(); };
+    return () => restoreCoverFocus(() => { /* keep native focus restoration passive */ dialog.close(); });
   }, []);
 
   // poll only while this view is open, without piling up requests during an outage

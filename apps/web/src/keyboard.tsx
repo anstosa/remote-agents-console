@@ -221,9 +221,22 @@ export const typingOutsideTerminal = (event: KeyboardEvent | undefined): boolean
   return editable && target.closest('.xterm') === null;
 };
 
+const keyInterceptors = new Set<(event: KeyboardEvent) => boolean>();
+// let temporary input owners run before the shared shortcut dispatcher
+export const interceptShortcutKeys = (intercept: (event: KeyboardEvent) => boolean) => {
+  keyInterceptors.add(intercept);
+  // release only the observer installed by this surface
+  return () => { keyInterceptors.delete(intercept); };
+};
+
 // The one keydown listener for app shortcuts. It runs first (window, capture phase) and swallows
 // only the keys the dispatcher handles; every other key reaches xterm, the composer or the control.
 const onKeyDown = (event: KeyboardEvent) => {
+  // passive dismissal owns the complete key gesture before any workspace shortcut
+  for (const intercept of keyInterceptors) {
+    // a claimed event must never reach another handler or native terminal input
+    if (intercept(event)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+  }
   const chord = eventChord(event);
   // let the recorder hear shortcuts without executing or illustrating them
   if (keyTarget(event)?.closest('[data-shortcut-recorder]') != null) { dispatcher.reset(); clearKeyPress(); return; }

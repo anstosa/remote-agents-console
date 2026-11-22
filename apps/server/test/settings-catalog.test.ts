@@ -329,6 +329,32 @@ describe('settings schema metadata', () => {
     });
   });
 
+  // expose one persisted object for the composite Interface controls
+  it('describes screensaver enablement and zero-disabled idle minutes', () => {
+    expect(applicationSettingsSchema().properties?.screensaver).toMatchObject({
+      type: 'object',
+      label: 'Screensaver',
+      description: expect.stringMatching(/passive overview.*open Workspace.*Agents/u),
+      apply: 'rac-restart',
+      properties: {
+        enabled: {
+          type: 'boolean',
+          default: false,
+          label: 'Enable screensaver',
+          apply: 'rac-restart',
+          description: expect.stringMatching(/shortcut.*automatic start.*saving and restarting RAC/u)
+        },
+        idleMinutes: {
+          type: 'number',
+          default: 0,
+          label: 'Idle minutes',
+          apply: 'rac-restart',
+          description: expect.stringMatching(/without browser input.*Zero disables automatic start/u)
+        }
+      }
+    });
+  });
+
   // present omission behavior on the field rather than inside explanatory copy
   it('publishes grounded application and review placeholders', () => {
     const schema = applicationSettingsSchema({ scratchDirectory: '/home/operator' });

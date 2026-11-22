@@ -183,7 +183,9 @@ describe('OMX launch catalog projection', () => {
     expect(manifest.modelPolicy.catalogStatus).toBe('ready');
     expect(prepared.model).toEqual({ model: 'openai/default', effort: 'xhigh' });
     expect(prepared.security).toEqual({});
+    const repeatedPreparation = vi.spyOn(service, 'prepare');
     await expect(service.revalidate(prepared, context)).resolves.toBeUndefined();
+    expect(repeatedPreparation).not.toHaveBeenCalled();
     expect(probe).toHaveBeenCalledOnce();
   });
 
@@ -472,6 +474,8 @@ else {
     const pidFile = join(checkout, 'slow.pid');
     await mkdir(scripts, { recursive: true });
     await mkdir(socketDirectory, { recursive: true, mode: 0o700 });
+    // silence the system bash login hint in the isolated fixture home
+    await writeFile(join(checkout, '.hushlogin'), '');
     await writeFile(slow, 'slow once\n');
     await writeFile(fakeBash, [
       '#!/bin/sh',

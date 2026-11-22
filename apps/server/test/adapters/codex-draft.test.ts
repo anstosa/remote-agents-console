@@ -192,9 +192,21 @@ describe('Codex draft observation', () => {
 
   // a native selector takes priority over its background composer
   it('keeps background drafts unknown while a native choice dialog owns input', () => {
-    const pane = ['Choose an action', '❯ 1. Approve', '  2. Reject', capture('› owned draft')].join('\n');
+    const pane = ['Choose an action', '\x1b[1;7m❯ 1. Approve\x1b[0m', '  2. Reject', capture('› owned draft')].join('\n');
     expect(codexDraftState(pane, 'owned draft ')).toBe('unknown');
     expect(codexOwnsDraft(pane, 'owned draft ')).toBe(false);
+  });
+
+  it('does not treat imitateable plain numbered text as a native selector', () => {
+    const pane = ['Authored example', '❯ 1. not native chrome', '  2. still authored', capture('› owned draft')].join('\n');
+    expect(codexDraftState(pane, 'owned draft ')).toBe('visible');
+    expect(codexOwnsDraft(pane, 'owned draft ')).toBe(true);
+  });
+
+  it('does not let one inverse-styled authored row imitate a native selector', () => {
+    const pane = ['\x1b[1;7m❯ 1. styled prose\x1b[0m', capture('› owned draft')].join('\n');
+    expect(codexDraftState(pane, 'owned draft ')).toBe('visible');
+    expect(codexOwnsDraft(pane, 'owned draft ')).toBe(true);
   });
 
   // accept every animation frame without changing the expected prompt

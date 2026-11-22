@@ -8,6 +8,7 @@ import type { StackState } from '../worktree-commands/service.js';
 import type { ReviewTourCapability, StoredReviewTourSummary } from '../review-tour/contracts.js';
 import type { CodeReviewCapability } from '../code-review/contracts.js';
 import type { KeysConfig } from '../config/keys.js';
+import type { ScreensaverConfig } from '../config/schema.js';
 import type { ButtonCatalog } from '../button-actions/catalog.js';
 import type { WatchSummary } from '../watches/service.js';
 import type { NotificationEvent, NotificationState } from '../notification-events.js';
@@ -45,11 +46,12 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
   editor?: true;
   // the operator's key tables, each terminal command reduced to its program name
   keys?: KeysConfig;
+  screensaver: ScreensaverConfig;
   buttons?: ButtonCatalog;
 };
 
 // fingerprint every dashboard field that drives browser refreshes
-export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.tmuxOutage, dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.cleanupTargets, dashboard.cleanupVersion, dashboard.notesRevision, dashboard.githubRevision, dashboard.githubBadge, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.buttons]);
+export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.tmuxOutage, dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.cleanupTargets, dashboard.cleanupVersion, dashboard.notesRevision, dashboard.githubRevision, dashboard.githubBadge, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.screensaver, dashboard.buttons]);
 
 // who asked for a dashboard: GET /api/dashboard, a /ws/dashboard connect, the server's poll,
 // its first build at boot, the cleanup scan, or anything else (mutation routes, job and

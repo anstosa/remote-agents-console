@@ -43,6 +43,9 @@ const clients: ContractClient[] = [{
   }
 }];
 
+// assert the proven preview answer alongside the existing transport completion
+const settledAnswer = (message: string) => ({ type: 'turn', previewAnswer: message, turn: { type: 'settled', message } });
+
 const tmux = execFileSync('/bin/sh', ['-c', 'command -v tmux || true'], { encoding: 'utf8' }).trim();
 // the sandbox runtime's tools, without which a Sandboxed launch cannot engage its sandbox
 const sandboxRuns = ['bwrap', 'socat', 'rg'].every(tool => execFileSync('/bin/sh', ['-c', `command -v ${tool} || true`], { encoding: 'utf8' }).trim() !== '');
@@ -165,7 +168,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
       { type: 'transcript', item: { id: expect.any(String), kind: 'message', role: 'user', text: 'Say hello' } },
       { type: 'transcript', item: { id: expect.any(String), kind: 'message', role: 'assistant', text: 'Hello from the stub provider' } },
       { type: 'transcript', item: { id: expect.any(String), kind: 'settled', outcome: 'done', cost: expect.any(Number), toolCalls: 0 } },
-      { type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } }
+      settledAnswer('Hello from the stub provider')
     ]);
     // the Turn's cost, from the stub model's price, is the Conversation's so far
     const ended = turn.find(event => event.type === 'transcript' && event.item.kind === 'settled') as Extract<StructuredEvent, { type: 'transcript' }>;
@@ -371,7 +374,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     const asked = await next('question') as Extract<StructuredEvent, { type: 'question' }>;
     expect(asked.question).toMatchObject({ text: 'Which colour?', field: { kind: 'choice', choices: ['red', 'blue'] } });
     expect(await connection.answer(asked.question.id, 1)).toBe(true);
-    expect(await next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'You answered: blue' } });
+    expect(await next('turn')).toEqual(settledAnswer('You answered: blue'));
   }, 60_000);
 
   it('switches model and Effort between Turns, among the models it can reach', async () => {
@@ -467,7 +470,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(await connection.deliver('Reply slowly')).toBe('started');
     await next('turn', event => event.type === 'turn' && event.turn.type === 'started');
     expect(await connection.deliver('Second')).toBe('busy');
-    expect(await next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } });
+    expect(await next('turn')).toEqual(settledAnswer('Hello from the stub provider'));
   }, 60_000);
 
   it('steers a working Agent: the steer is pending, then taken within the same Turn', async () => {
@@ -480,7 +483,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(await next('steers')).toEqual({ type: 'steers', pending: [] });
     await next('turn');
 
-    expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }, { type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } }]);
+    expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }, settledAnswer('Hello from the stub provider')]);
     expect(events.filter(event => event.type === 'transcript' && event.item.kind === 'message' && event.item.role === 'user').map(event => (event as { item: { text: string } }).item.text)).toEqual(['Reply slowly', 'Also say goodbye']);
   }, 60_000);
 
@@ -511,7 +514,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
 
     expect(await connection.answer(asked.question.id, 1)).toBe(true);
     expect(await next('question-closed')).toEqual({ type: 'question-closed', id: asked.question.id });
-    expect(await next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'You answered: blue' } });
+    expect(await next('turn')).toEqual(settledAnswer('You answered: blue'));
     expect(events).toContainEqual({ type: 'transcript', item: expect.objectContaining({ id: toolCallId, kind: 'tool', name: 'Ask', summary: '', state: 'done', result: 'blue' }) });
     expect(await connection.answer(asked.question.id, 0)).toBe(false);
   }, 60_000);
@@ -529,7 +532,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
 
     const again = await reattached(launch, client, idle);
     expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'started' } });
-    expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } });
+    expect(await again.next('turn')).toEqual(settledAnswer('Hello from the stub provider'));
     // it read the Conversation afresh, as it never heard the launch, and replayed only the Turn in flight
     expect(again.events).toContainEqual({ type: 'conversation', id: expect.any(String) });
     expect(again.events.flatMap(event => event.type === 'transcript' && event.item.kind === 'message' && event.item.role === 'user' ? [event.item.text] : [])).toEqual(['Reply slowly']);
@@ -549,7 +552,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     const again = await reattached(launch, client, 0);
     expect(again.dropped).toBeGreaterThan(0);
     expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'started' } });
-    expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } });
+    expect(await again.next('turn')).toEqual(settledAnswer('Hello from the stub provider'));
   }, 60_000);
 
   it('reports its process exiting, killed or its window closed by hand, and Close stops the process and removes the window', async () => {

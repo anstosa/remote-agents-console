@@ -136,7 +136,7 @@ describe('the Claude client', () => {
     play(records.slice(10, 11));
     expect(of('steers').at(-1)).toEqual({ type: 'steers', pending: [] });
     play(records.slice(11));
-    expect(of('turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }, { type: 'turn', turn: { type: 'settled', message: 'The command printed:\n\n```\ndone\n```\n\nPEAR' } }]);
+    expect(of('turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }, { type: 'turn', turn: { type: 'settled', message: 'The command printed:\n\n```\ndone\n```\n\nPEAR' }, previewAnswer: 'The command printed:\n\n```\ndone\n```\n\nPEAR' }]);
     // the echoes of the prompt and the steer show nothing twice
     expect(items()).toEqual([
       { id: prompt.uuid, kind: 'message', role: 'user', text: prompt.message.content },
@@ -268,7 +268,7 @@ describe('the Claude client', () => {
     expect(of('steers').at(-1)).toEqual({ type: 'steers', pending: [] });
     play(records.slice(6));
     expect(of('turn').filter(event => event.turn.type === 'started')).toHaveLength(2);
-    expect(of('turn').at(-1)).toEqual({ type: 'turn', turn: { type: 'settled', message: expect.stringMatching(/^PEAR/u) } });
+    expect(of('turn').at(-1)).toEqual({ type: 'turn', turn: { type: 'settled', message: expect.stringMatching(/^PEAR/u) }, previewAnswer: expect.stringMatching(/^PEAR/u) });
     expect(items().at(-1)).toMatchObject({ id: `${steer.uuid}:end`, kind: 'settled', outcome: 'done' });
   });
 

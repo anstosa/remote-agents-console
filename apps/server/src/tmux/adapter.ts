@@ -19,6 +19,7 @@ const paneSnapshotTtlMs = 2_000;
 const paneReadTimeoutMs = 2_000;
 const paneRetryBaseMs = 5_000;
 const paneRetryMaxMs = 30_000;
+const previewRetryMs = 1_000;
 
 type PaneHealthEntry = { fingerprint: string; status: 'healthy'|'unavailable'; failures: number; retryAt: number; since?: number; lastHealthyAt?: number; retry?: Promise<PaneListingSnapshot> };
 
@@ -136,6 +137,8 @@ export class TmuxAdapter {
   private readonly paneSnapshots = new Map<string, { fingerprint: string; at: number; status: 'pending'|'available'|'unavailable'; panes?: Pane[]; retryAt?: number }>();
   private readonly paneHealth = new Map<string, PaneHealthEntry>();
   private readonly fallbackReads = new Map<string, { fingerprint: string; value: Promise<RunResult | undefined> }>();
+  private readonly previewReads = new Map<string, { fingerprint: string; value: Promise<string | undefined> }>();
+  private readonly previewFailures = new Map<string, { fingerprint: string; retryAt: number }>();
 
   // production supplies server-owned reads; standalone adapters retain spawned commands
   constructor(private readonly commands?: Pick<TmuxCommandRegistry, 'listPanes' | 'retainSockets' | 'closeAll'>) {}
@@ -189,10 +192,20 @@ export class TmuxAdapter {
       // discard only reads outside the retained lifetime
       if (live.get(path) !== entry.fingerprint) this.fallbackReads.delete(path);
     }
+    // preview subprocesses may finish but replacements cannot share their bytes
+    for (const [key, entry] of this.previewReads) {
+      const path = key.slice(0, key.indexOf('\u0000'));
+      if (live.get(path) !== entry.fingerprint) this.previewReads.delete(key);
+    }
+    // pane-local capture cooldowns retire with their exact socket lifetime
+    for (const [key, entry] of this.previewFailures) {
+      const path = key.slice(0, key.indexOf('\u0000'));
+      if (live.get(path) !== entry.fingerprint) this.previewFailures.delete(key);
+    }
   }
 
   // app shutdown owns the persistent dashboard transport
-  closeCommands(): void { this.commandsClosed = true; this.commands?.closeAll(); this.paneSnapshots.clear(); this.paneHealth.clear(); this.fallbackReads.clear(); }
+  closeCommands(): void { this.commandsClosed = true; this.commands?.closeAll(); this.paneSnapshots.clear(); this.paneHealth.clear(); this.fallbackReads.clear(); this.previewReads.clear(); this.previewFailures.clear(); }
 
   // advance one socket's bounded retry window after an incomplete observation
   private markPaneReadUnavailable(socket: SocketRef, entry: { retryAt?: number }): void {
@@ -294,7 +307,7 @@ export class TmuxAdapter {
 
   // publish an observation only while its exact socket read is still current
   private async readPaneInventory(socket: SocketRef): Promise<PaneListingSnapshot> {
-    const format = `#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{${processNameOption}}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_spawned_by}\t${cleanupActivityFormat}\t#{${processWorktreeOption}}`;
+    const format = `#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_session_processes}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{${processNameOption}}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_spawned_by}\t${cleanupActivityFormat}\t#{${processWorktreeOption}}`;
     const entry: { fingerprint: string; at: number; status: 'pending'|'available'|'unavailable'; panes?: Pane[]; retryAt?: number } = { fingerprint: socket.fingerprint, at: Date.now(), status: 'pending' };
     this.paneSnapshots.set(socket.path, entry);
     const persistent = await this.commands?.listPanes(socket, format).catch(() => undefined);
@@ -308,13 +321,13 @@ export class TmuxAdapter {
     }
     const lines = out.stdout.split('\n').filter(Boolean);
     const panes: Pane[] = lines.flatMap((line) => {
-      const [id, session, name, pid, path, command, title, displayLabel, startCommand, attention, sessionRef, sandboxed, question, consoleManaged, role, paneName, windowId, mode, placeMark, processName, reviewRun, dead, status, keyBinding, spawnedBy, activity, ...worktree] = line.split('\t');
+      const [id, session, name, pid, path, command, title, displayLabel, startCommand, attention, sessionRef, sessionProcesses, sandboxed, question, consoleManaged, role, paneName, windowId, mode, placeMark, processName, reviewRun, dead, status, keyBinding, spawnedBy, activity, ...worktree] = line.split('\t');
       const exitCode = status && /^\d+$/u.test(status) ? Number(status) : undefined;
       // unsupported or malformed activity fields are never cleanup evidence
       const cleanupActivity = cleanupActivityPattern.test(activity ?? '') ? activity : undefined;
       // dead remain-on-exit panes may have neither cwd nor a live pid
       if (!paneId.test(id) || !sessionId.test(session) || !name || (dead !== '1' && (!/^\d+$/.test(pid) || !path))) return [];
-      return [{ paneId: id, sessionId: session, sessionName: name, pid: Number(pid) || 0, path: path ?? '', command: command ?? '', title: title ?? '', ...(displayLabel ? { displayLabel } : {}), ...(startCommand ? { startCommand } : {}), ...(attention ? { reportedAttention: attention } : {}), ...(sessionRef ? { reportedSession: sessionRef } : {}), ...(sandboxed ? { reportedSandboxed: sandboxed } : {}), ...(question ? { reportedQuestion: question } : {}), ...(consoleManaged === '1' ? { consoleManaged: true } : {}), ...(role ? { role } : {}), ...(role === processPaneRole && processName ? { processName } : {}), ...(paneName ? { paneName } : {}), ...(windowId ? { windowId } : {}), ...(mode && !inputBlockingPaneModes.has(mode) ? { paneMode: mode } : {}), ...(placeMark ? { placeMark } : {}), ...(reviewRun ? { reviewRun } : {}), ...(dead === '0' || dead === '1' ? { dead: dead === '1' } : {}), ...(exitCode === undefined ? {} : { exitCode }), ...(keyBinding ? { keyBinding } : {}), ...(spawnedBy ? { spawnedBy } : {}), ...(cleanupActivity === undefined ? {} : { cleanupActivity }), ...(worktree.length === 0 ? {} : { processWorktree: worktree.join('\t') }), socket }];
+      return [{ paneId: id, sessionId: session, sessionName: name, pid: Number(pid) || 0, path: path ?? '', command: command ?? '', title: title ?? '', ...(displayLabel ? { displayLabel } : {}), ...(startCommand ? { startCommand } : {}), ...(attention ? { reportedAttention: attention } : {}), ...(sessionRef ? { reportedSession: sessionRef } : {}), ...(sessionProcesses ? { reportedSessionProcesses: sessionProcesses } : {}), ...(sandboxed ? { reportedSandboxed: sandboxed } : {}), ...(question ? { reportedQuestion: question } : {}), ...(consoleManaged === '1' ? { consoleManaged: true } : {}), ...(role ? { role } : {}), ...(role === processPaneRole && processName ? { processName } : {}), ...(paneName ? { paneName } : {}), ...(windowId ? { windowId } : {}), ...(mode && !inputBlockingPaneModes.has(mode) ? { paneMode: mode } : {}), ...(placeMark ? { placeMark } : {}), ...(reviewRun ? { reviewRun } : {}), ...(dead === '0' || dead === '1' ? { dead: dead === '1' } : {}), ...(exitCode === undefined ? {} : { exitCode }), ...(keyBinding ? { keyBinding } : {}), ...(spawnedBy ? { spawnedBy } : {}), ...(cleanupActivity === undefined ? {} : { cleanupActivity }), ...(worktree.length === 0 ? {} : { processWorktree: worktree.join('\t') }), socket }];
     });
     // retain only a complete reply; a malformed row must not hide a running process
     entry.status = panes.length === lines.length ? 'available' : 'unavailable';
@@ -346,7 +359,7 @@ export class TmuxAdapter {
   // Conductor's mark on a worker's pane, so an Agent started there later is not its worker
   async unsetReportedState(socket: SocketRef, pane: string): Promise<boolean> {
     if (!paneId.test(pane)) return false;
-    const results = await Promise.all(['@rac_attention', '@rac_session', '@rac_sandboxed', '@rac_question', '@rac_spawned_by'].map(
+    const results = await Promise.all(['@rac_attention', '@rac_session', '@rac_session_processes', '@rac_sandboxed', '@rac_question', '@rac_spawned_by'].map(
       option => run(this.binary, ['-S', socket.path, 'set-option', '-p', '-t', pane, '-u', option])
     ));
     return results.every(result => result.code === 0);
@@ -423,6 +436,59 @@ export class TmuxAdapter {
     if (captureVia !== undefined) return await captureVia(depth);
     const out = await run(this.binary, ['-S', socket.path, ...capturePaneArgs(pane, depth)]);
     return out.code === 0 ? out.stdout : undefined;
+  }
+
+  // retain a bounded lookbehind so text previews can skip composer rows before taking the tail
+  async capturePreview(socket: SocketRef, pane: string, previewIdentity: string): Promise<string | undefined> {
+    // reject unsafe pane coordinates and unbounded coalescing keys
+    if (!paneId.test(pane) || previewIdentity === '' || previewIdentity.length > 128) return undefined;
+    const health = this.paneHealth.get(socket.path);
+    // do not multiply capture processes while this exact socket is cooling down
+    if (health?.fingerprint === socket.fingerprint && health.status === 'unavailable' && health.retryAt > Date.now()) return undefined;
+    const key = `${socket.path}\u0000${pane}\u0000${previewIdentity}`;
+    const failure = this.previewFailures.get(key);
+    // a vanished pane cools down without suppressing its healthy siblings
+    if (failure?.fingerprint === socket.fingerprint && failure.retryAt > Date.now()) return undefined;
+    // release this expired generation before starting its retry
+    if (failure !== undefined) this.previewFailures.delete(key);
+    const existing = this.previewReads.get(key);
+    // coalesce passive reads only within this socket lifetime
+    if (existing?.fingerprint === socket.fingerprint) return await existing.value;
+    const entry = {
+      fingerprint: socket.fingerprint,
+      value: Promise.resolve(undefined) as Promise<string | undefined>
+    };
+    entry.value = this.captureText(socket, pane, 64).then(stdout => {
+      // a retired socket read must not publish into its replacement
+      if (this.previewReads.get(key) !== entry || this.commandsClosed) return undefined;
+      // pane-local disappearance cannot establish a socket outage
+      if (stdout === undefined) {
+        this.previewFailures.set(key, { fingerprint: socket.fingerprint, retryAt: Date.now() + previewRetryMs });
+        // bound retired conversation identities on long-lived sockets
+        while (this.previewFailures.size > 1_024) this.previewFailures.delete(this.previewFailures.keys().next().value!);
+        return undefined;
+      }
+      this.previewFailures.delete(key);
+      return safeTerminalText(stdout);
+    }).finally(() => {
+      // release only the matching in-flight capture
+      if (this.previewReads.get(key) === entry) this.previewReads.delete(key);
+    });
+    this.previewReads.set(key, entry);
+    return await entry.value;
+  }
+
+  // freshly verify the pane and reported conversation that own passive preview bytes
+  async previewTargetMatches(socket: SocketRef, pane: string, expectedPid: number, expectedConversationId: string, expectedConversationProof?: string): Promise<boolean> {
+    // reject unsafe coordinates and option values before invoking tmux
+    if (!paneId.test(pane) || !Number.isSafeInteger(expectedPid) || expectedPid <= 0 || expectedConversationId === ''
+      || expectedConversationId.length > 256 || /[\0\r\n\t]/u.test(expectedConversationId)
+      || expectedConversationProof !== undefined && (expectedConversationProof.length > 4_096 || /[\0\r\n\t]/u.test(expectedConversationProof))) return false;
+    const out = await run(this.binary, ['-S', socket.path, 'display-message', '-p', '-t', pane, '#{pane_id}\t#{pane_pid}\t#{@rac_session}\t#{@rac_session_processes}']);
+    // require one complete current-pane identity record
+    const match = out.code === 0 ? /^(%\d+)\t([1-9]\d*)\t([^\r\n\t]+)\t([^\r\n\t]*)\r?\n?$/u.exec(out.stdout) : null;
+    return match !== null && match[1] === pane && Number(match[2]) === expectedPid && match[3] === expectedConversationId
+      && (expectedConversationProof === undefined || match[4] === expectedConversationProof);
   }
 
   // capture only the current browser window

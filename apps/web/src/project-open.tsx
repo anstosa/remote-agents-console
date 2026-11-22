@@ -3,10 +3,8 @@ import { createPortal } from 'react-dom';
 import { FlyoutPortal } from './flyout-portal.js';
 import { PanelIcon, panelIcons } from './panel-header.js';
 import { actionGlyphs, ProcessNotices, RelationChips, StackIcon, stackGlyphs, stackProgressColor, StateDot, StateText, UsedFailure, useStackControls, WarningIcon, withMinimumProgress, type ProcessAction, type ProjectStack, type StackControls } from './stack-controls.js';
-import { dependantsOf, processActionLabel, processActions, processesSummary, processWarns, stackActionLabel, stackOperationLabel, usedProcessDown, usedProcesses, type ProcessNotice, type ProcessNoticeTarget, type StackAction, type StackProcessState, type StackSelection, type StartableNoticeTarget, type StackOperationLog, type UsedProcess } from './stack-operations.js';
+import { dependantsOf, processActionLabel, processActions, processesSummary, processWarns, resolveStackStatus, stackActionLabel, stackOperationLabel, usedProcessDown, usedProcesses, type ProcessNotice, type ProcessNoticeTarget, type StackAction, type StackProcessState, type StackSelection, type StartableNoticeTarget, type StackOperationLog, type UsedProcess } from './stack-operations.js';
 import { useViewportFlyout } from './viewport-flyout.js';
-
-type ProjectStackStatus = 'working'|'exited'|'partial'|'healthy'|'down'|'running'|'stopped'|'unknown';
 
 // A notice's Start of the process it names in another Worktree, by `noticeStartKey`: `pending`
 // while its request is out, then sent and waiting for the next state to hide the notice, or failed
@@ -15,33 +13,6 @@ type NoticeStart = { id: number; pending: boolean; error?: string };
 const noticeStartKey = (target: ProcessNoticeTarget) => `${target.worktreeId}\u0000${target.process ?? ''}`;
 // how long a sent Start shows "Starting…" when no state hides its notice, before offering Start again
 const noticeStartSettleMs = 15_000;
-
-// how many of a stack's Stack processes are running
-const runningCount = (processes: StackProcessState[]) => processes.filter(process => process.state === 'running').length;
-
-// derive the stack status badge
-function resolveStackStatus(stack: ProjectStack | undefined, inProgress: boolean): ProjectStackStatus {
-  // prioritize active operations
-  if (inProgress) return 'working';
-  // a Stack process that died on its own, a stack only partly running, or one stopped outranks
-  // whatever its tunnel says: a check from before a Stop can still read healthy, and a failing
-  // one would read as broken
-  if (stack?.processes !== undefined) {
-    if (stack.processes.some(process => process.state === 'exited')) return 'exited';
-    const live = runningCount(stack.processes);
-    if (live === 0) return 'stopped';
-    if (live < stack.processes.length) return 'partial';
-  }
-  // reflect a healthy tunnel
-  if (stack?.tunnel === true) return 'healthy';
-  // reflect a failed tunnel
-  if (stack?.tunnel === false) return 'down';
-  // reflect a running stack
-  if (stack?.running === true) return 'running';
-  // reflect a stopped stack
-  if (stack?.running === false) return 'stopped';
-  return 'unknown';
-}
 
 // A process's Start, Stop and Restart as icon buttons, each disabled while it would do nothing or
 // another action runs
@@ -234,7 +205,7 @@ export function ProjectOpen({ url, title, stack, worktreeId, browserOpen = false
   // describe the server badge state
   const stackStatus = resolveStackStatus(stack, inProgress);
   // a partial stack counts its running processes on the badge
-  const stackStatusText = stackStatus === 'partial' ? `${runningCount(processes)} of ${processes.length} running` : stackStatus;
+  const stackStatusText = stackStatus === 'partial' ? processesSummary(processes) : stackStatus;
   // name each exited process and its code for the tooltip and screen readers
   const exited = processes.filter(process => process.state === 'exited');
   const stackDescription = stackStatus === 'exited' && exited.length > 0 ? exited.map(process => `${process.name} exited${process.exitCode === undefined ? '' : ` (${process.exitCode})`}`).join(', ') : stackStatusText;

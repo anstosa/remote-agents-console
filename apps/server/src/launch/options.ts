@@ -10,7 +10,7 @@ import { ConductorModelCatalog, type PiModelSource } from '../settings/conductor
 import type { ModelSetting } from '../transports/structured.js';
 import { nativeSecurityManifest, nativeSecurityProblem, type NativeLaunchCapabilities } from './native-options.js';
 import type { LaunchCatalogModel, LaunchKindManifest, LaunchModelPolicy, LaunchOptionsResponse, LaunchSecurityManifest, ManualLaunchChoice, ModelSelection, NativeLaunchSecurity, PreparedLaunchChoice } from './options-types.js';
-import { probeClaudeCatalog, probeCodexCatalog, probeOmxCatalog, type ClaudeCatalogProbe, type OmxCatalogProbe } from './omx-catalog.js';
+import { hostCodexCatalogDeadlineMs, probeClaudeCatalog, probeCodexCatalog, probeOmxCatalog, type ClaudeCatalogProbe, type OmxCatalogProbe } from './omx-catalog.js';
 import { inheritedHomeEnvironment } from '../places/launch-home.js';
 
 /** the server-resolved launch context used for catalog and restart defaults. */
@@ -31,6 +31,8 @@ type LaunchOptionsDependencies = {
 };
 
 type HostSnapshot = { catalog: LaunchCatalogSnapshot; capabilities: NativeLaunchCapabilities };
+type ManifestEvidence = { manifest: LaunchKindManifest; catalog: LaunchCatalogSnapshot; capabilities: NativeLaunchCapabilities; invalidation: number; revisionKey: string; fingerprint: string };
+type PreparedEvidence = ManifestEvidence & { discover: boolean };
 
 type RevisionState = { id: number; version: number; fingerprint: string };
 type Cached<T> = { at: number; value: T };
@@ -248,9 +250,10 @@ function resolvedCodexDefault(args: readonly string[], nativeConfig: Json, catal
   const configured = configuredCodexModel(args);
   const configModel = typeof nativeConfig.model === 'string' && agentModel.safeParse(nativeConfig.model).success ? nativeConfig.model : undefined;
   const configEffort = typeof nativeConfig.model_reasoning_effort === 'string' && effortToken.test(nativeConfig.model_reasoning_effort) ? nativeConfig.model_reasoning_effort : undefined;
-  return configured === undefined
-    ? (configModel === undefined ? catalogDefault : { model: configModel, ...(configEffort === undefined ? {} : { effort: configEffort }) })
-    : { model: configured.model, ...((configured.effort ?? configEffort) === undefined ? {} : { effort: configured.effort ?? configEffort }) };
+  // only use the recommendation's effort when it supplies the selected model
+  const model = configured?.model ?? configModel ?? catalogDefault?.model;
+  const effort = configured?.effort ?? configEffort ?? (configured === undefined && configModel === undefined ? catalogDefault?.effort : undefined);
+  return model === undefined ? undefined : { model, ...(effort === undefined ? {} : { effort }) };
 }
 
 // discard raw host configuration after projecting validated model metadata
@@ -477,6 +480,7 @@ export class LaunchOptionsService {
   private readonly now: () => number;
   private readonly ttlMs: number;
   private readonly deadlineMs: number;
+  private readonly hostCodexDeadlineMs: number;
   private readonly capabilitiesLoader: NonNullable<LaunchOptionsDependencies['capabilities']>;
   private readonly capabilitiesInjected: boolean;
   private readonly omxProbe: typeof probeOmxCatalog;
@@ -490,6 +494,7 @@ export class LaunchOptionsService {
   private readonly capabilityFlights = new Map<string, Promise<NativeLaunchCapabilities>>();
   private readonly revisions = new Map<string, RevisionState>();
   private readonly revisionDiscovery = new Map<string, boolean>();
+  private readonly preparedEvidence = new WeakMap<PreparedLaunchChoice, PreparedEvidence>();
   private readonly invalidations = new Map<AgentKind, number>();
   private nextRevisionId = 1;
 
@@ -500,6 +505,7 @@ export class LaunchOptionsService {
     this.now = dependencies.now ?? Date.now;
     this.ttlMs = dependencies.ttlMs ?? DEFAULT_TTL_MS;
     this.deadlineMs = dependencies.deadlineMs ?? DEFAULT_DEADLINE_MS;
+    this.hostCodexDeadlineMs = dependencies.deadlineMs ?? hostCodexCatalogDeadlineMs;
     this.capabilitiesInjected = dependencies.capabilities !== undefined;
     this.capabilitiesLoader = dependencies.capabilities ?? (async (kind, config, cwd, home) => await probeNativeCapabilities(kind, config, cwd, this.deadlineMs, home));
     this.omxProbe = dependencies.omxProbe ?? probeOmxCatalog;
@@ -524,9 +530,11 @@ export class LaunchOptionsService {
     // deduplicate the catalog and capability consumers
     if (active !== undefined) return await active;
     const generation = this.invalidations.get(kind) ?? 0;
+    // bridged Codex and OMX both enter the host shell before native discovery
+    const deadline = kind !== 'claude' && process.env.RAC_HOST_TMUX_DIR !== undefined ? this.hostCodexDeadlineMs : this.deadlineMs;
     const pending = (kind === 'claude'
-      ? this.claudeProbe(config, context, this.deadlineMs).then(value => ({ catalog: projectClaudeCatalog(value), capabilities: value.capabilities }))
-      : (kind === 'codex' ? this.codexHostProbe : this.omxProbe)(config, context, this.deadlineMs).then(value => ({ catalog: projectHostCatalog(value), capabilities: value.capabilities })))
+      ? this.claudeProbe(config, context, deadline).then(value => ({ catalog: projectClaudeCatalog(value), capabilities: value.capabilities }))
+      : (kind === 'codex' ? this.codexHostProbe : this.omxProbe)(config, context, deadline).then(value => ({ catalog: projectHostCatalog(value), capabilities: value.capabilities })))
       .catch(() => ({ catalog: unavailable(`Live model discovery could not be read from the configured ${kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : 'OMX'} context. Retry discovery.`), capabilities: {} }));
     this.hostFlights.set(key, pending);
     try {
@@ -654,8 +662,24 @@ export class LaunchOptionsService {
     if (this.revisionDiscovery.size > 512) this.revisionDiscovery.delete(this.revisionDiscovery.keys().next().value!);
   }
 
-  // construct one current manifest
-  private async manifest(kind: AgentKind, context: LaunchOptionsContext, discover = true): Promise<LaunchKindManifest> {
+  // derive current local state without mutating an existing revision
+  private manifestState(kind: AgentKind, config: AdapterLaunchConfig, context: LaunchOptionsContext, catalog: LaunchCatalogSnapshot, capabilities: NativeLaunchCapabilities, invalidation: number): { revisionKey: string; fingerprint: string; modelPolicy: LaunchModelPolicy; security: LaunchSecurityManifest } {
+    const modelPolicy = resolveLaunchModelPolicy(config.allowedModels, catalog, context, kind);
+    const security = nativeSecurityManifest(kind, capabilities);
+    // opaque coupled presets require deliberate replacement of inherited axes
+    if ((kind === 'codex' || kind === 'omx') && config.args.some(argument => ['--approve-for-me', '--full-auto', '--yolo'].includes(argument))) security.message = [security.message, 'Some partial overrides are unavailable for coupled native presets. Choose both filesystem and approval settings to replace them.'].filter(Boolean).join(' ');
+    const fingerprint = JSON.stringify({ invalidation, program: config.program, args: config.args, allowedModels: config.allowedModels, catalog, capabilities, currentKind: context.currentKind, currentModel: context.currentModel, restart: context.restart, modelPolicy, security });
+    return { revisionKey: `${this.key(kind, context)}\u0000${context.targetId ?? ''}`, fingerprint, modelPolicy, security };
+  }
+
+  // project one manifest from exact native evidence without reacquiring it
+  private manifestFromEvidence(kind: AgentKind, config: AdapterLaunchConfig, context: LaunchOptionsContext, catalog: LaunchCatalogSnapshot, capabilities: NativeLaunchCapabilities, invalidation: number): { manifest: LaunchKindManifest; revisionKey: string; fingerprint: string } {
+    const state = this.manifestState(kind, config, context, catalog, capabilities, invalidation);
+    return { manifest: { kind, optionsRevision: this.revision(state.revisionKey, state.fingerprint), modelPolicy: state.modelPolicy, security: state.security }, revisionKey: state.revisionKey, fingerprint: state.fingerprint };
+  }
+
+  // keep native evidence with its manifest so validation doesn't retry failed discovery
+  private async manifest(kind: AgentKind, context: LaunchOptionsContext, discover = true): Promise<ManifestEvidence> {
     const config = this.configs[kind];
     // reject unconfigured kinds before native work
     if (config === undefined) throw new LaunchOptionsError(409, 'launch_option_unsupported');
@@ -664,18 +688,14 @@ export class LaunchOptionsService {
       discover ? this.catalog(kind, config, context) : Promise.resolve(this.cachedCatalog(kind, context) ?? this.fallbackCatalog(kind)),
       this.nativeCapabilities(kind, config, context)
     ]);
-    const modelPolicy = resolveLaunchModelPolicy(config.allowedModels, catalog, context, kind);
-    const security = nativeSecurityManifest(kind, capabilities);
-    // opaque coupled presets require deliberate replacement of inherited axes
-    if ((kind === 'codex' || kind === 'omx') && config.args.some(argument => ['--approve-for-me', '--full-auto', '--yolo'].includes(argument))) security.message = [security.message, 'Some partial overrides are unavailable for coupled native presets. Choose both filesystem and approval settings to replace them.'].filter(Boolean).join(' ');
-    const fingerprint = JSON.stringify({ invalidation, program: config.program, args: config.args, allowedModels: config.allowedModels, catalog, capabilities, currentKind: context.currentKind, currentModel: context.currentModel, restart: context.restart, modelPolicy, security });
-    return { kind, optionsRevision: this.revision(`${this.key(kind, context)}\u0000${context.targetId ?? ''}`, fingerprint), modelPolicy, security };
+    return { ...this.manifestFromEvidence(kind, config, context, catalog, capabilities, invalidation), catalog, capabilities, invalidation };
   }
 
   /** list current launch options for every configured Agent kind. */
   async list(context: LaunchOptionsContext): Promise<LaunchOptionsResponse> {
     const configured = agentKinds.filter(kind => this.configs[kind] !== undefined);
-    const kinds = await Promise.all(configured.map(async kind => await this.manifest(kind, context)));
+    // expose only the public manifest, not the internal evidence
+    const kinds = await Promise.all(configured.map(async kind => (await this.manifest(kind, context)).manifest));
     // remember menu-backed revisions for immediate preparation
     for (const manifest of kinds) this.rememberRevision(manifest.optionsRevision, true);
     return { kinds };
@@ -719,7 +739,8 @@ export class LaunchOptionsService {
     // claude saved efforts require native proof even for untouched fresh launches
     const needsClaudeDefaultEffortMetadata = kind === 'claude' && configuredSelection?.effort !== undefined;
     const discover = rememberedDiscovery ?? (needsExplicitIdentity || needsEffortMetadata || needsClaudeDefaultEffortMetadata);
-    const manifest = await this.manifest(kind, context, discover);
+    const evidence = await this.manifest(kind, context, discover);
+    const { manifest, capabilities } = evidence;
     this.rememberRevision(manifest.optionsRevision, discover);
     // detect stale browser state without trusting a matching revision
     if (choice.optionsRevision !== undefined && choice.optionsRevision !== manifest.optionsRevision) throw new LaunchOptionsError(409, 'launch_options_stale');
@@ -743,7 +764,6 @@ export class LaunchOptionsService {
       if (policy.state !== 'native-default' || policy.allowed.length !== 0 || choice.effort?.mode === 'effort') throw new LaunchOptionsError(409, 'launch_option_unsupported');
       nativeDefault = true;
     }
-    const capabilities = await this.nativeCapabilities(kind, config, context);
     const catalogModel = resolvedModel === undefined ? undefined : policy.catalog.find(model => model.id === resolvedModel);
     let effort: string | undefined;
     // validate one explicit Effort against current model metadata
@@ -779,30 +799,31 @@ export class LaunchOptionsService {
     // preserve the exact validated choice across lifecycle handoffs
     Object.freeze(prepared.security);
     if (prepared.model !== undefined) Object.freeze(prepared.model);
-    return Object.freeze(prepared);
+    const frozen = Object.freeze(prepared);
+    this.preparedEvidence.set(frozen, { ...evidence, discover });
+    return frozen;
   }
 
   /** revalidate immutable prepared semantics immediately before a side effect. */
   async revalidate(prepared: PreparedLaunchChoice, context: LaunchOptionsContext): Promise<void> {
-    const discover = this.revisionDiscovery.get(prepared.optionsRevision) ?? true;
-    const manifest = await this.manifest(prepared.kind, context, discover);
-    // compare target-bound current state before semantic reconstruction
-    if (manifest.optionsRevision !== prepared.optionsRevision) throw new LaunchOptionsError(409, 'launch_options_stale');
-    // an opaque or nominal Pi default carries no explicit identity to reconstruct
-    if (prepared.nativeDefault && prepared.model === undefined) {
-      const security = prepareSecurity(prepared.kind, { kind: prepared.kind, security: prepared.security }, manifest.security);
-      if (JSON.stringify(security) !== JSON.stringify(prepared.security)) throw new LaunchOptionsError(409, 'launch_options_stale');
+    const evidence = this.preparedEvidence.get(prepared);
+    // accept only choices issued by this exact service instance
+    if (evidence === undefined) throw new LaunchOptionsError(409, 'launch_options_stale');
+    const generation = this.invalidations.get(prepared.kind) ?? 0;
+    // do not spend a native probe on an already retired choice
+    if (generation !== evidence.invalidation) throw new LaunchOptionsError(409, 'launch_options_stale');
+    // native security flags need fresh grammar evidence even without a model override
+    const nativeSecurityOverride = prepared.kind !== 'pi' && Object.values(prepared.security).some(value => value !== 'inherit');
+    // true no-override launches only need to confirm their local context
+    if (prepared.model === undefined && !nativeSecurityOverride) {
+      const config = this.configs[prepared.kind];
+      if (config === undefined) throw new LaunchOptionsError(409, 'launch_options_stale');
+      const state = this.manifestState(prepared.kind, config, context, evidence.catalog, evidence.capabilities, evidence.invalidation);
+      if ((this.invalidations.get(prepared.kind) ?? 0) !== generation || state.revisionKey !== evidence.revisionKey || state.fingerprint !== evidence.fingerprint) throw new LaunchOptionsError(409, 'launch_options_stale');
       return;
     }
-    const raw: ManualLaunchChoice = {
-      kind: prepared.kind,
-      ...(prepared.keepCurrent ? { model: { mode: 'keep-current' as const } } : prepared.model === undefined ? { model: { mode: 'native-default' as const } } : { model: { mode: 'model' as const, id: prepared.model.model } }),
-      ...(prepared.model?.effort === undefined ? {} : { effort: { mode: 'effort' as const, id: prepared.model.effort } }),
-      security: prepared.security,
-      optionsRevision: prepared.optionsRevision
-    };
-    const current = await this.prepare(prepared.kind, raw, context);
-    // require the exact prepared semantic result
-    if (JSON.stringify(current) !== JSON.stringify(prepared)) throw new LaunchOptionsError(409, 'launch_options_stale');
+    const { manifest } = await this.manifest(prepared.kind, context, evidence.discover);
+    // reject evidence retired during the confirmation request
+    if ((this.invalidations.get(prepared.kind) ?? 0) !== generation || manifest.optionsRevision !== prepared.optionsRevision) throw new LaunchOptionsError(409, 'launch_options_stale');
   }
 }

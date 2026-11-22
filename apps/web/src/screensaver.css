@@ -1,0 +1,35 @@
+/* soften the console without obscuring it or blurring the cards */
+.screensaver { position: fixed; inset: 0; z-index: 100000; box-sizing: border-box; display: flex; flex-direction: column; padding: clamp(1rem, 2.5vw, 2.5rem); overflow: hidden; background: rgb(0 0 0 / 24%); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); color: var(--text); outline: none; cursor: default; }
+/* keep one wide column until two roomy cards fit; never fit more than two */
+.screensaver-grid { --card-gap: 1.25rem; display: grid; flex: 1 1 auto; grid-auto-rows: max-content; min-height: 0; overflow: auto; scrollbar-width: thin; grid-template-columns: repeat(auto-fit, minmax(min(100%, max(43rem, calc((100% - var(--card-gap)) / 2))), 1fr)); align-content: start; gap: var(--card-gap); }
+.screensaver-workspace { min-width: 0; align-self: start; overflow: hidden; border: 1px solid var(--surface-1); border-radius: .6rem; background: var(--base); }
+.screensaver-workspace > header { display: flex; justify-content: space-between; align-items: start; gap: .75rem; padding: 1rem; background: color-mix(in srgb, var(--surface-0) 40%, transparent); }
+.screensaver-workspace > header > div { min-width: 0; }
+.screensaver-workspace h2 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
+.screensaver-workspace > header p { margin: .35rem 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtext-0); font-size: .72rem; }
+/* align both summaries at the right and let long labels wrap on narrow cards */
+.screensaver-workspace-statuses { display: grid; justify-items: end; gap: .3rem; max-width: 58%; text-align: right; font-size: .7rem; overflow-wrap: anywhere; }
+.screensaver-workspace-state { color: var(--progress-ring-color, var(--subtext-1)); }
+.screensaver-stack-status { color: var(--progress-ring-color, var(--stack-status-color, var(--subtext-0))); }
+.screensaver-stack-status > span { color: var(--subtext-0); }
+.screensaver-processes { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .7rem; padding: .7rem 1rem; font-size: .7rem; border-bottom: 1px solid var(--surface-0); }
+.screensaver-process { padding: .15rem .4rem; border: 1px solid var(--surface-1); border-radius: .2rem; color: var(--progress-ring-color, var(--process-state-color, var(--subtext-0))); overflow-wrap: anywhere; }
+.screensaver-process.running { --process-state-color: var(--green); }
+.screensaver-process.exited { --process-state-color: var(--red); }
+.screensaver-agent { min-width: 0; padding: 1rem; border-bottom: 1px solid var(--surface-0); }
+.screensaver-agent:last-child { border-bottom: 0; }
+.screensaver-agent > header { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-bottom: .65rem; }
+/* separate conversation headings from the compact monospace transcript */
+.screensaver-agent h3 { margin: 0; font: 650 .8rem/1.3 system-ui, sans-serif; color: var(--lavender); overflow-wrap: anywhere; }
+.screensaver-state { border: 1px solid currentColor; border-radius: 1rem; padding: .1rem .5rem; font-size: .65rem; white-space: nowrap; color: var(--agent-state-color, var(--overlay-2)); }
+.screensaver-agent pre { margin: 0; font: .6rem/1.4 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
+.screensaver-agent .screensaver-output { font-size: .55rem; }
+/* clip from the beginning so the newest rows remain inside the card */
+.screensaver-response-window, .screensaver-output-window { display: flex; flex-direction: column-reverse; overflow: hidden; }
+.screensaver-response-window { max-block-size: 10.08rem; }
+.screensaver-output-window { max-block-size: calc(7 * .55rem * 1.4); }
+.screensaver-response-window > pre, .screensaver-output-window > pre { flex: none; }
+.screensaver-empty, .screensaver-truncated { margin: .5rem 1rem; font-size: .75rem; color: var(--subtext-0); }
+.screensaver-agent .screensaver-empty, .screensaver-agent .screensaver-truncated { margin: .5rem 0 0; }
+/* preserve readable cards on narrow phones without horizontal scrolling */
+@media (max-width: 600px) { .screensaver-grid { --card-gap: 1rem; } }

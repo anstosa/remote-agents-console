@@ -2,7 +2,10 @@ import { randomBytes } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { TmuxAdapter } from '../tmux/adapter.js';
-import { codexCollapsedPasteLabel, failedTurnFromCapture, lastPromptFromHistory, latestCompletedAssistantTurn, queueReadyPrompt } from '../adapters/codex-turns.js';
+import { codexLatestWriterResponse } from '../adapters/codex-conversations.js';
+import { claudeLatestResponse } from '../adapters/claude-conversations.js';
+import { codexCollapsedPasteLabel, codexOutputFromCapture, codexOutputStartRow, failedTurnFromCapture, lastPromptFromHistory, latestCompletedAssistantTurn, queueReadyPrompt } from '../adapters/codex-turns.js';
+import { claudeTerminalTail, styledTerminalTail, type TerminalPreview } from '../adapters/terminal-preview.js';
 import { adapterFor } from '../adapters/registry.js';
 import { codexFamily, type Adapter, type AgentKind, type CompletionBaseline, type CompletionEvent, type PaneSnapshot, type Submission, type SubmissionDraftState, type SubmissionMode, type TmuxKey } from '../adapters/types.js';
 import type { Agent } from '../domain/models.js';
@@ -17,6 +20,7 @@ import type { AgentWaiter } from '../launch/wait.js';
 import { configuredWorktreeForWorkspace } from '../workspaces/resolver.js';
 import { updateAdvisorLabel, updateAdvisorPendingLabel } from '../update-advisor.js';
 import { isFullGitSha } from '../git/revision.js';
+import { screensaverPreviewMode, type ScreensaverPreviewMode } from '../screensaver/identity.js';
 import type { AgentTransport, ConversationTarget, Gate, InterruptOutcome, LaunchOutcome, QuestionAnswer, RenameOutcome, SwitchOutcome, TurnEvent } from './transport.js';
 
 export const answerCaptureGraceMs = 10_000;
@@ -39,6 +43,14 @@ const updateAdvisorPollMs = 100;
 const normalizedPrompt = (value: string) => value.replace(/\s+/gu, ' ').trim();
 // normalize one styled terminal snapshot
 const normalizedTerminalText = (value: string) => normalizedPrompt(value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, ''));
+// show the newest pane rows from the current interaction without drafts or footer chrome
+export function codexPaneOutputPreview(capture: string, rows: number): TerminalPreview | undefined {
+  const output = codexOutputFromCapture(capture);
+  // ambiguous scrollback must not become another turn's preview
+  if (output === undefined) return undefined;
+  return styledTerminalTail(output, rows, true, codexOutputStartRow(output));
+}
+
 // the console never composes submission through an unknown kind
 export type AdapterView = Pick<Adapter, 'stateSource' | 'submission' | 'turns' | 'questions' | 'completion' | 'managedPromptLifecycleV1' | 'newConversation' | 'conversations'>;
 // an Adapter that announces its own Attention state (rather than the console
@@ -774,6 +786,34 @@ export class TmuxTransport implements AgentTransport {
     return typeof this.discovery.paneProcessId === 'function' ? this.discovery.paneProcessId(agentId) : undefined;
   }
 
+  // bind screensaver bytes to one reported conversation and freshly verified process generation
+  private async nativePreviewProof(agentId: string, target: TmuxTarget, mode: ScreensaverPreviewMode, expectedIdentity: string | undefined) {
+    const { conversationId, recoveryProcessKey } = target.agent;
+    // native history and pane bytes require the server-issued conversation/process token
+    if (expectedIdentity === undefined || conversationId === undefined || recoveryProcessKey === undefined
+      || screensaverPreviewMode(target.agent, expectedIdentity) !== mode) return undefined;
+    const proof = this.discovery.replySuggestionTarget(agentId);
+    // require one atomic discovery projection for the same pane-native generation
+    if (proof === undefined || proof.id !== agentId || proof.kind !== target.agent.kind || proof.conversationId !== conversationId
+      || proof.panePid !== this.paneProcessId(agentId) || proof.process.pid !== this.discovery.agentProcessId?.(agentId)) return undefined;
+    // pane reports alone can survive replacement, so require native process ownership
+    return await this.discovery.previewConversationOwned(proof).catch(() => false) ? proof : undefined;
+  }
+
+  // bind a passive read to the exact native process and pane lifetime it started on
+  private async previewTargetCurrent(agentId: string, expected: TmuxTarget, conversationId: string | undefined, recoveryProcessKey: string | undefined, panePid: number | undefined, agentPid: number | undefined): Promise<boolean> {
+    const current = await this.discovery.target(agentId).catch(() => undefined);
+    // reject a replacement socket, pane, kind or conversation
+    if (current === undefined || current.socket.fingerprint !== expected.socket.fingerprint
+      || current.agent.pane.paneId !== expected.agent.pane.paneId || current.agent.kind !== expected.agent.kind
+      || current.agent.conversationId !== conversationId
+      || current.agent.recoveryProcessKey !== recoveryProcessKey) return false;
+    // reject process replacements whenever discovery can prove either generation
+    if (panePid !== undefined && this.paneProcessId(agentId) !== panePid) return false;
+    if (agentPid !== undefined && this.discovery.agentProcessId?.(agentId) !== agentPid) return false;
+    return true;
+  }
+
   // the raw reported Inline question payload one pane carries, when discovery exposes it
   private reportedQuestionPayload(agentId: string): string | undefined {
     return typeof this.discovery.reportedQuestionPayload === 'function' ? this.discovery.reportedQuestionPayload(agentId) : undefined;
@@ -986,6 +1026,60 @@ export class TmuxTransport implements AgentTransport {
   async latestAnswer(agentId: string): Promise<string | undefined> {
     const target = await this.discovery.target(agentId);
     return target === undefined ? undefined : (await this.tmux.captureWindow(target.socket, target.agent.pane.paneId, 120).catch(() => undefined))?.latestAssistantMessage;
+  }
+
+  // resolve the current conversation before selecting its latest response
+  async previewAnswer(agentId: string, expectedIdentity?: string): Promise<string | undefined> {
+    const target = await this.discovery.target(agentId);
+    // never read a transcript for a departed pane
+    if (target === undefined) return undefined;
+    const { kind, conversationId, recoveryProcessKey } = target.agent;
+    const proof = await this.nativePreviewProof(agentId, target, 'response', expectedIdentity);
+    // unknown conversations and unverified native generations have no safe response source
+    if (proof === undefined) return undefined;
+    // Claude reports an exact native session, and its transcript is filed by cwd
+    const pid = this.paneProcessId(agentId);
+    const agentPid = this.discovery.agentProcessId?.(agentId);
+    let response: string | undefined;
+    // Claude requires its exact reported native session and worktree transcript
+    if (kind === 'claude') response = conversationId === undefined ? undefined : await claudeLatestResponse(conversationId, this.discovery.paneDirectory(agentId));
+    // Codex requires the known pane process before resolving its writer-owned rollout
+    else if (pid !== undefined && codexFamily(kind)) {
+      response = conversationId === undefined || agentPid === undefined ? undefined : await codexLatestWriterResponse(agentPid, conversationId);
+    }
+    // unknown terminal formats cannot safely provide a response preview
+    else return undefined;
+    const current = await this.previewTargetCurrent(agentId, target, conversationId, recoveryProcessKey, pid, agentPid);
+    const paneCurrent = pid !== undefined && conversationId !== undefined
+      && await this.tmux.previewTargetMatches(target.socket, target.agent.pane.paneId, pid, conversationId, proof.conversationProof).catch(() => false);
+    // fresh conversation and process reads close replacement races hidden by stale inventory
+    return current && paneCurrent && await this.discovery.previewConversationOwned(proof).catch(() => false)
+      && await this.discovery.validateReplySuggestionTarget(proof) ? response : undefined;
+  }
+
+  // take a live window from the displayed pane, not a guessed native tool-result block
+  async previewOutput(agentId: string, rows: number, expectedIdentity?: string): Promise<TerminalPreview | undefined> {
+    const target = await this.discovery.target(agentId);
+    const panePid = this.paneProcessId(agentId);
+    const agentPid = this.discovery.agentProcessId?.(agentId);
+    const conversationId = target?.agent.conversationId;
+    const recoveryProcessKey = target?.agent.recoveryProcessKey;
+    const proof = target === undefined ? undefined : await this.nativePreviewProof(agentId, target, 'output', expectedIdentity);
+    // do not capture a pane without exact conversation and process evidence
+    if (target === undefined || proof === undefined || expectedIdentity === undefined) return undefined;
+    const output = await this.tmux.capturePreview(target.socket, target.agent.pane.paneId, expectedIdentity);
+    // a failed pane-local capture needs no separate identity subprocess
+    if (output === undefined) return undefined;
+    const paneCurrent = panePid !== undefined && conversationId !== undefined
+      && await this.tmux.previewTargetMatches(target.socket, target.agent.pane.paneId, panePid, conversationId, proof.conversationProof).catch(() => false);
+    // report an unreadable pane rather than reviving an older response
+    if (!paneCurrent || !await this.previewTargetCurrent(agentId, target, conversationId, recoveryProcessKey, panePid, agentPid)
+      || !await this.discovery.previewConversationOwned(proof).catch(() => false)
+      || !await this.discovery.validateReplySuggestionTarget(proof)) return undefined;
+    if (codexFamily(target.agent.kind)) return codexPaneOutputPreview(output, rows);
+    if (target.agent.kind === 'claude') return claudeTerminalTail(output, rows);
+    // adapters without a verified terminal boundary must not expose drafts or chrome
+    return undefined;
   }
 
   async recentLines(agentId: string, rows: number): Promise<{ text: string; older: boolean } | undefined> {

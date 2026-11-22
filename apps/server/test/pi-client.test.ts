@@ -182,7 +182,7 @@ describe('the Pi client', () => {
     pi({ type: 'agent_start' });
     pi({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' } });
     pi({ type: 'agent_settled', aborted: false });
-    expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }, { type: 'turn', turn: { type: 'settled', message: 'Done' } }]);
+    expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }, { type: 'turn', turn: { type: 'settled', message: 'Done' }, previewAnswer: 'Done' }]);
     expect(events.some(event => event.type === 'report')).toBe(false);
   });
 
@@ -212,14 +212,14 @@ describe('the Pi client', () => {
     const refreshed = sent.filter(record => record.type === 'get_messages').at(-1)!;
     expect(refreshed.id).not.toBe(stale.id);
     pi({ type: 'response', id: refreshed.id, command: 'get_messages', success: true, data: { messages: [{ role: 'user', content: 'New prompt' }, { role: 'assistant', content: [{ type: 'text', text: 'New question?' }], stopReason: 'stop' }] } });
-    await vi.waitFor(() => expect(events.filter(event => event.type === 'history')).toEqual([{ type: 'history', conversationId: 'same', items: [{ id: 'h0', kind: 'message', role: 'user', text: 'New prompt' }, { id: 'h1', kind: 'message', role: 'assistant', text: 'New question?' }, { id: 'h2', kind: 'settled', outcome: 'done', cost: 0, toolCalls: 0 }] }]));
+    await vi.waitFor(() => expect(events.filter(event => event.type === 'history')).toEqual([{ type: 'history', conversationId: 'same', previewAnswer: 'New question?', items: [{ id: 'h0', kind: 'message', role: 'user', text: 'New prompt' }, { id: 'h1', kind: 'message', role: 'assistant', text: 'New question?' }, { id: 'h2', kind: 'settled', outcome: 'done', cost: 0, toolCalls: 0 }] }]));
   });
 
   it('after an overflowed replay, settles a Turn whose start it missed', async () => {
     const { sent, events, pi } = piOverChannel({ dropped: 40 });
     pi({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' } });
     pi({ type: 'agent_settled', aborted: false });
-    expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'settled', message: 'Done' } }]);
+    expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'settled', message: 'Done' }, previewAnswer: 'Done' }]);
     // Pi works on: the state it reports decides that the Agent is working, and a dialog it opened in the lines missed is unknown
     pi({ type: 'agent_start' });
     const { id } = sent.find(record => record.type === 'get_state')!;
@@ -229,10 +229,43 @@ describe('the Pi client', () => {
 
   it('after an overflowed replay in the middle of a Turn, takes the Agent to be working when Pi says it is', async () => {
     const { sent, events, pi } = piOverChannel({ dropped: 40 });
+    const stale = sent.find(record => record.type === 'get_messages')!;
     const { id } = sent.find(record => record.type === 'get_state')!;
     pi({ type: 'response', id, command: 'get_state', success: true, data: { sessionId: 's1', isStreaming: true } });
     await vi.waitFor(() => expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }]));
+    const fresh = sent.filter(record => record.type === 'get_messages').at(-1)!;
+    expect(fresh.id).not.toBe(stale.id);
+    pi({ type: 'response', id: fresh.id, command: 'get_messages', success: true, data: { messages: [
+      { role: 'user', content: 'Earlier prompt' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Earlier answer' }], stopReason: 'stop' },
+      { role: 'user', content: 'Active prompt' }
+    ] } });
+    await vi.waitFor(() => expect(events.filter(event => event.type === 'history')).toEqual([{ type: 'history', conversationId: 's1', previewAnswer: 'Earlier answer', activePrompt: true, items: [
+      { id: 'h0', kind: 'message', role: 'user', text: 'Earlier prompt' },
+      { id: 'h1', kind: 'message', role: 'assistant', text: 'Earlier answer' },
+      { id: 'h2', kind: 'settled', outcome: 'done', cost: 0, toolCalls: 0 },
+      { id: 'h3', kind: 'message', role: 'user', text: 'Active prompt' }
+    ] }]));
     pi({ type: 'agent_settled', aborted: false });
     expect(events.filter(event => event.type === 'turn').at(-1)).toEqual({ type: 'turn', turn: { type: 'settled', message: '' } });
+  });
+
+  // standalone compaction has no active prompt whose prior answer is live output
+  it('restores completed history behind a compaction-only reattach frontier', async () => {
+    const { sent, events, pi } = piOverChannel({ dropped: 40 });
+    const state = sent.find(record => record.type === 'get_state')!;
+    const history = sent.find(record => record.type === 'get_messages')!;
+    pi({ type: 'response', id: state.id, command: 'get_state', success: true, data: { sessionId: 's1', isStreaming: false, isCompacting: true } });
+    await vi.waitFor(() => expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }]));
+    expect(sent.filter(record => record.type === 'get_messages')).toHaveLength(1);
+    pi({ type: 'response', id: history.id, command: 'get_messages', success: true, data: { messages: [
+      { role: 'user', content: 'Earlier prompt' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Earlier answer' }], stopReason: 'stop' }
+    ] } });
+    await vi.waitFor(() => expect(events.filter(event => event.type === 'history')).toEqual([{ type: 'history', conversationId: 's1', previewAnswer: 'Earlier answer', activePrompt: false, items: [
+      { id: 'h0', kind: 'message', role: 'user', text: 'Earlier prompt' },
+      { id: 'h1', kind: 'message', role: 'assistant', text: 'Earlier answer' },
+      { id: 'h2', kind: 'settled', outcome: 'done', cost: 0, toolCalls: 0 }
+    ] }]));
   });
 });

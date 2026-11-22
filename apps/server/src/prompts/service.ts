@@ -46,7 +46,7 @@ type StoredPromptRequest = PromptRequestStatus & { terminalAt?: number; promptFi
  * failed draft to clear), which a structured Transport answers trivially. A delivery is `busy`
  * when the Agent was already working: the prompt stays queued for the next settle.
  */
-export interface TurnTransport extends Pick<AgentTransport, 'answer' | 'interrupt' | 'close' | 'latestAnswer' | 'recentLines'> {
+export interface TurnTransport extends Pick<AgentTransport, 'answer' | 'interrupt' | 'close' | 'latestAnswer' | 'recentLines' | 'previewOutput' | 'previewAnswer'> {
   target(agentId: string): Promise<{ agent: Agent } | undefined>;
   gate(agentId: string, step?: 'retry' | 'settle'): Promise<Gate>;
   held(agentId: string): boolean;

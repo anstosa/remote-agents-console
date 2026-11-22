@@ -271,6 +271,27 @@ export function claudeHistory(lines: Iterable<string>, { running = false } = {})
   return items;
 }
 
+// accept only a non-error result that Claude durably marked completed
+const claudeCompletedPreviewAnswer = (record: unknown): string | undefined => {
+  if (!isObject(record) || record.type !== 'result' || record.subtype !== 'success' || record.is_error === true || record.terminal_reason !== 'completed' || typeof record.result !== 'string' || record.result.trim() === '') return undefined;
+  return record.result;
+};
+
+// recover one answer durably completed in Claude's persisted session history
+export function claudeHistoryPreviewAnswer(lines: Iterable<string>): string | undefined {
+  let proven: string | undefined;
+  for (const line of lines) {
+    let record: unknown;
+    try { record = JSON.parse(line); } catch { continue; }
+    if (!isObject(record) || record.type !== 'assistant' || record.synthetic === true || record.isMeta === true || record.isSidechain === true || record.parent_tool_use_id !== undefined && record.parent_tool_use_id !== null || record.isApiErrorMessage === true) continue;
+    const message = isObject(record.message) ? record.message : undefined;
+    if (message === undefined || synthetic(message) || message.stop_reason !== 'end_turn' || !Array.isArray(message.content)) continue;
+    const completed = message.content.flatMap(block => isObject(block) && block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('');
+    if (completed.trim() !== '') proven = completed;
+  }
+  return proven;
+}
+
 
 // a model as `initialize` lists it, with the Efforts it supports; an Effort is a launch argument
 // (`--effort`) this client cannot change live (unverified: whether `/effort` works between Turns
@@ -366,7 +387,8 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
     conversationName = name;
     emit({ type: 'conversation', id, ...(name === undefined ? {} : { name }) });
     const items = lines === undefined ? [] : claudeHistory(lines, { running: working === true });
-    emit({ type: 'history', conversationId: id, items });
+    const previewAnswer = lines === undefined ? undefined : claudeHistoryPreviewAnswer(lines);
+    emit({ type: 'history', conversationId: id, items, ...(previewAnswer === undefined ? {} : { previewAnswer }) });
   };
   // print mode writes no `ai-title` of its own: once the session JSONL holds a Conversation's first
   // prompt, the CLI titles it as interactive Claude does (persisted as its `ai-title`, a title it
@@ -547,7 +569,8 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
     // under the id its history gives it, when the Turn's prompt is known
     transcript({ id: turnPrompt !== undefined ? `${turnPrompt}:end` : typeof record.uuid === 'string' ? record.uuid : randomUUID(), kind: 'settled', outcome: outcome(aborted, failed), ...(cost === undefined ? {} : { cost }), toolCalls });
     usage();
-    emit({ type: 'turn', turn: aborted ? { type: 'aborted' } : failed ? { type: 'failed' } : { type: 'settled', message: typeof record.result === 'string' ? record.result : answer } });
+    const previewAnswer = claudeCompletedPreviewAnswer(record);
+    emit({ type: 'turn', turn: aborted ? { type: 'aborted' } : failed ? { type: 'failed' } : { type: 'settled', message: typeof record.result === 'string' ? record.result : answer }, ...(aborted || failed || previewAnswer === undefined ? {} : { previewAnswer }) });
     void observeName();
     wake();
   };

@@ -1,11 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { piHistory } from '../src/transports/pi.js';
+import { piHistory, piHistoryPreviewAnswer } from '../src/transports/pi.js';
 
 // Pi's messages (`get_messages`) in the shapes the pinned Pi writes them, trimmed to the fields read
 const usage = (total: number) => ({ input: 1000, output: 50, totalTokens: 1050, cost: { total } });
 const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] });
 
 describe('a Pi Conversation reloaded from its messages', () => {
+  // only Pi's terminal stop reason may publish a completed screensaver response
+  it('proves preview answers from native completion rather than partial or failed prose', () => {
+    const messages = [
+      user('First'),
+      { role: 'assistant', content: [{ type: 'text', text: 'partial tool prose' }], stopReason: 'toolUse' },
+      { role: 'assistant', content: [{ type: 'text', text: 'completed answer' }], stopReason: 'stop' },
+      user('Second'),
+      { role: 'assistant', content: [{ type: 'text', text: 'failed draft' }], stopReason: 'error' }
+    ];
+
+    expect(piHistoryPreviewAnswer(messages)).toBe('completed answer');
+    expect(piHistoryPreviewAnswer([{ role: 'assistant', content: [{ type: 'text', text: 'not done' }], stopReason: 'toolUse' }])).toBeUndefined();
+  });
+
   it('leaves the last prompt\'s group open while its Turn still runs, as after a reattach mid-Turn', () => {
     const messages = [user('Tidy the notes'), { role: 'assistant', content: [{ type: 'text', text: 'Done.' }], usage: usage(0.001), stopReason: 'stop' }, user('Reply slowly')];
     expect(piHistory(messages, { running: true })).toEqual([

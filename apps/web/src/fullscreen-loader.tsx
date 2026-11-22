@@ -9,6 +9,18 @@ type PendingAction = {
   resolve: (entered: boolean) => void;
 };
 
+let restoringCoverFocus = false;
+
+// distinguish programmatic cover restoration from operator focus
+export const isRestoringCoverFocus = (): boolean => restoringCoverFocus;
+
+// keep synchronous focus events passive through a cover handoff
+export function restoreCoverFocus(restore: () => void) {
+  const previous = restoringCoverFocus;
+  restoringCoverFocus = true;
+  try { restore(); } finally { restoringCoverFocus = previous; }
+}
+
 // coordinate one destructive client action with the painted fullscreen cover
 export function useFullscreenAction(): { action?: FullscreenAction; begin: (kind: FullscreenAction) => Promise<boolean>; finish: (kind: FullscreenAction) => void; entered: () => void } {
   const [action, setAction] = useState<FullscreenAction>();
@@ -152,10 +164,13 @@ export function FullscreenLoader({ label, children, onEntered, focusReturnKey, p
       }
       // a removed action leaves body focused before the loader's first effect
       const returnKey = focusReturnRef.current ?? previousFocusKey;
-      // restore a surviving control rather than the document body
-      if (previousFocus?.isConnected && previousFocus !== document.body && previousFocus !== document.documentElement) previousFocus.focus({ preventScroll: true });
-      // rejected actions may recreate their toast button while the loader is mounted
-      else if (returnKey) document.querySelector<HTMLElement>(`[data-fullscreen-focus-return="${CSS.escape(returnKey)}"]`)?.focus({ preventScroll: true });
+      // restore focus without acknowledging covered output
+      restoreCoverFocus(() => {
+        // restore a surviving control rather than the document body
+        if (previousFocus?.isConnected && previousFocus !== document.body && previousFocus !== document.documentElement) previousFocus.focus({ preventScroll: true });
+        // rejected actions may recreate their toast button while the loader is mounted
+        else if (returnKey) document.querySelector<HTMLElement>(`[data-fullscreen-focus-return="${CSS.escape(returnKey)}"]`)?.focus({ preventScroll: true });
+      });
     };
   }, []);
 

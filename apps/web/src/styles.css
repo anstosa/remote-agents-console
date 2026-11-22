@@ -499,11 +499,12 @@ button.model-chip:hover, button.model-chip.active, .watches-chip:hover, .watches
 .agent-panel .launch-tab-badge { display: inline-flex; flex: none; align-items: center; gap: .15rem; color: var(--launch-kind); }
 .agent-state-pill { --agent-state-color: var(--overlay-1); display: inline-flex; flex: none; align-items: center; gap: .3rem; height: 1.25rem; padding: 0 .45rem; border: 1px solid color-mix(in srgb, var(--agent-state-color) 70%, var(--surface-1)); border-radius: 999px; color: var(--agent-state-color); font: 800 .56rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
 .agent-state-pill::before { flex: none; width: var(--status-dot-size); height: var(--status-dot-size); border-radius: 50%; background: currentColor; content: ''; }
-.agent-state-pill.working { --agent-state-color: var(--peach); }
-.agent-state-pill.starting { --agent-state-color: var(--blue); }
-.agent-state-pill.restarting { --agent-state-color: var(--yellow); }
-.agent-state-pill.needs-answer, .agent-state-pill.failed, .agent-state-pill.stopping { --agent-state-color: var(--red); }
-.agent-state-pill.done { --agent-state-color: var(--green); }
+/* share the agent state colors with passive screensaver badges */
+:is(.agent-state-pill, .screensaver-state).working { --agent-state-color: var(--peach); }
+:is(.agent-state-pill, .screensaver-state).starting { --agent-state-color: var(--blue); }
+:is(.agent-state-pill, .screensaver-state).restarting { --agent-state-color: var(--yellow); }
+:is(.agent-state-pill, .screensaver-state):is(.needs-answer, .failed, .stopping) { --agent-state-color: var(--red); }
+:is(.agent-state-pill, .screensaver-state).done { --agent-state-color: var(--green); }
 .agent-panel .panel-header .log-status { position: static; height: 1.25rem; padding: 0 .4rem; font-size: .58rem; white-space: nowrap; }
 /* the header's conversations, cancel and power controls */
 /* :where keeps a toggle's own state colours (active, unread) ahead of these resting styles */
@@ -1591,11 +1592,13 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .project-stack-toggle svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
 .project-stack-trigger .project-stack-server-icon { width: 1rem; height: 1rem; stroke-width: 2; }
 .project-stack-status-dot { position: absolute; top: .2rem; right: .2rem; width: var(--status-dot-size); height: var(--status-dot-size); border-radius: 50%; pointer-events: none; }
-.project-stack-status-dot { background: var(--overlay-0); box-shadow: 0 0 .4rem color-mix(in srgb, var(--overlay-0) 60%, transparent); }
-.project-stack-status-dot:is(.status-healthy, .status-running) { background: var(--green); box-shadow: 0 0 .45rem color-mix(in srgb, var(--green) 75%, transparent); }
-.project-stack-status-dot:is(.status-down, .status-stopped, .status-exited) { background: var(--red); box-shadow: 0 0 .45rem color-mix(in srgb, var(--red) 75%, transparent); }
-.project-stack-status-dot.status-partial { background: var(--yellow); box-shadow: 0 0 .45rem color-mix(in srgb, var(--yellow) 75%, transparent); }
-.project-stack-status-dot.status-working { background: var(--peach); box-shadow: 0 0 .45rem color-mix(in srgb, var(--peach) 75%, transparent); }
+/* share the stack health palette between toolbar dots and screensaver labels */
+.project-stack-status-dot { background: var(--stack-status-color, var(--overlay-0)); box-shadow: 0 0 .4rem color-mix(in srgb, var(--overlay-0) 60%, transparent); }
+.project-stack-status-dot:not(.status-unknown) { box-shadow: 0 0 .45rem color-mix(in srgb, var(--stack-status-color) 75%, transparent); }
+:is(.project-stack-status-dot, .screensaver-stack-status):is(.status-healthy, .status-running) { --stack-status-color: var(--green); }
+:is(.project-stack-status-dot, .screensaver-stack-status):is(.status-down, .status-stopped, .status-exited) { --stack-status-color: var(--red); }
+:is(.project-stack-status-dot, .screensaver-stack-status).status-partial { --stack-status-color: var(--yellow); }
+:is(.project-stack-status-dot, .screensaver-stack-status).status-working { --stack-status-color: var(--peach); }
 /* a Process notice's warning, marked beside whatever state the status dot shows */
 .project-stack-toggle svg.project-stack-warning { position: absolute; bottom: -.3rem; right: -.3rem; width: .85rem; height: .85rem; fill: var(--yellow); stroke: var(--crust); stroke-width: 2; pointer-events: none; filter: drop-shadow(0 0 .2rem color-mix(in srgb, var(--crust) 70%, transparent)); }
 .more-menu.stack-menu { width: 13rem; }

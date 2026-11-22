@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
-import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationName, claudeConversationSummaries, claudeLastAssistantMessage, latestClaudeMessageFromRecords, lastAssistantMessageFromRecords, locateClaudeSession, validClaudeSessionId } from '../../src/adapters/claude-conversations.js';
+import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationName, claudeConversationSummaries, claudeLastAssistantMessage, claudeLatestResponse, latestClaudeMessageFromRecords, latestClaudeResponseFromRecords, lastAssistantMessageFromRecords, locateClaudeSession, validClaudeSessionId } from '../../src/adapters/claude-conversations.js';
 
 const cwd = '/tachi/code/remoteagents';
 const encoded = '-tachi-code-remoteagents';
@@ -317,6 +317,8 @@ describe('claude final assistant message', () => {
     const record = (messageId: string, content: unknown) => JSON.stringify({ type: 'assistant', message: { id: messageId, content } });
     expect(lastAssistantMessageFromRecords([record('a', [{ type: 'text', text: 'old' }]), record('b', [{ type: 'text', text: 'one' }]), record('b', [{ type: 'tool_use' }]), record('b', [{ type: 'text', text: 'two' }])])).toEqual({ id: 'b', text: 'one\n\ntwo' });
     expect(lastAssistantMessageFromRecords([record('a', [{ type: 'text', text: 'old' }]), record('b', [{ type: 'tool_use' }])])).toEqual({ id: 'b' });
+    // a tool-only record must not displace the current conversation's last visible response
+    expect(lastAssistantMessageFromRecords([record('a', [{ type: 'text', text: 'latest visible' }]), record('b', [{ type: 'tool_use' }])], true)).toEqual({ id: 'a', text: 'latest visible' });
     expect(lastAssistantMessageFromRecords(['not json', ''])).toBeUndefined();
   });
 
@@ -361,6 +363,59 @@ describe('claude final assistant message', () => {
       record('a', [{ type: 'text', text: 'old question?' }]),
       record('b', [{ type: 'thinking', thinking: 'new response' }]),
     ])).toBeUndefined();
+  });
+
+  it('publishes only main-thread messages with native end-turn evidence', () => {
+    // create one representative persisted assistant fragment
+    const record = (messageId: string, content: unknown, stopReason: unknown, isSidechain = false) => JSON.stringify({ type: 'assistant', isSidechain, message: { id: messageId, content, stop_reason: stopReason } });
+    expect(latestClaudeResponseFromRecords([
+      record('a', [{ type: 'text', text: 'tool progress' }], 'tool_use'),
+      record('side', [{ type: 'text', text: 'side answer' }], 'end_turn', true)
+    ])).toBeUndefined();
+    expect(latestClaudeResponseFromRecords([
+      record('a', [{ type: 'thinking', thinking: 'hidden' }], 'end_turn'),
+      record('a', [{ type: 'text', text: 'Completed answer' }], 'end_turn')
+    ])).toBe('Completed answer');
+  });
+
+  it('retains an earlier proven response when a later message is incomplete', () => {
+    // create one representative persisted assistant fragment
+    const record = (messageId: string, content: unknown, stopReason: unknown) => JSON.stringify({ type: 'assistant', isSidechain: false, message: { id: messageId, content, stop_reason: stopReason } });
+    expect(latestClaudeResponseFromRecords([
+      record('a', [{ type: 'text', text: 'Proven answer' }], 'end_turn'),
+      record('b', [{ type: 'text', text: 'unfinished prose' }], null)
+    ])).toBe('Proven answer');
+  });
+
+  it('rejects synthetic and API-error messages even with end-turn fields', () => {
+    const valid = JSON.stringify({ type: 'assistant', isSidechain: false, message: { id: 'valid', content: [{ type: 'text', text: 'Proven answer' }], stop_reason: 'end_turn' } });
+    const synthetic = JSON.stringify({ type: 'assistant', isSidechain: false, synthetic: true, message: { id: 'synthetic', content: [{ type: 'text', text: 'Synthetic answer' }], stop_reason: 'end_turn' } });
+    const error = JSON.stringify({ type: 'assistant', isSidechain: false, isApiErrorMessage: true, message: { id: 'error', content: [{ type: 'text', text: 'API failed' }], stop_reason: 'end_turn' } });
+    expect(latestClaudeResponseFromRecords([valid, synthetic, error])).toBe('Proven answer');
+  });
+
+  it('requires a correlated successful terminal when native chain records are present', () => {
+    const sessionId = id;
+    const chain = (preventedContinuation: boolean, suffix = 'one', text = 'Completed answer') => [
+      { type: 'assistant', uuid: `assistant-${suffix}`, sessionId, session_id: sessionId, isSidechain: false, message: { id: `answer-${suffix}`, role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'end_turn' } },
+      { type: 'attachment', uuid: `attachment-${suffix}`, parentUuid: `assistant-${suffix}`, sessionId, session_id: sessionId, isSidechain: false },
+      { type: 'system', subtype: 'stop_hook_summary', uuid: `stop-${suffix}`, parentUuid: `attachment-${suffix}`, sessionId, session_id: sessionId, isSidechain: false, preventedContinuation },
+      { type: 'system', subtype: 'turn_duration', uuid: `terminal-${suffix}`, parentUuid: `stop-${suffix}`, sessionId, session_id: sessionId, isMeta: false, isSidechain: false, durationMs: 10, messageCount: 1 },
+      { type: 'last-prompt', uuid: `marker-${suffix}`, sessionId, session_id: sessionId, leafUuid: `terminal-${suffix}` }
+    ].map(record => JSON.stringify(record));
+    expect(latestClaudeResponseFromRecords(chain(false))).toBe('Completed answer');
+    expect(latestClaudeResponseFromRecords(chain(true))).toBeUndefined();
+    expect(latestClaudeResponseFromRecords([...chain(false), JSON.stringify({ type: 'last-prompt', sessionId, session_id: sessionId, leafUuid: 'superseding-leaf' })])).toBeUndefined();
+    expect(latestClaudeResponseFromRecords([...chain(false), ...chain(true, 'two', 'Interrupted answer')])).toBe('Completed answer');
+  });
+
+  it('reads a completion-proven response for the exact native session', async () => {
+    const configDir = await transcript([
+      { type: 'assistant', isSidechain: false, message: { id: 'progress', content: [{ type: 'text', text: 'not done' }], stop_reason: 'tool_use' } },
+      { type: 'assistant', isSidechain: false, message: { id: 'answer', content: [{ type: 'text', text: 'Final response' }], stop_reason: 'end_turn' } }
+    ]);
+    await expect(claudeLatestResponse(id, cwd, { RAC_CLAUDE_CONFIG_DIR: configDir } as NodeJS.ProcessEnv)).resolves.toBe('Final response');
+    await expect(claudeLatestResponse('not-a-session', cwd, { RAC_CLAUDE_CONFIG_DIR: configDir } as NodeJS.ProcessEnv)).resolves.toBeUndefined();
   });
 
   it('ignores malformed and non-record json values', () => {

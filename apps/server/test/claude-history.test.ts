@@ -1,12 +1,23 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { claudeHistory } from '../src/transports/claude.js';
+import { claudeHistory, claudeHistoryPreviewAnswer } from '../src/transports/claude.js';
 
 // session JSONL as Claude Code 2.1.319 writes it (sanitized from the probes' sessions), and an Edit
 // and a Write in the shape it keeps them
 const records = (name: string): string[] => readFileSync(new URL(`./fixtures/claude/structured/${name}`, import.meta.url), 'utf8').split('\n');
 
 describe('a Claude Conversation reloaded from its session JSONL', () => {
+  // only Claude's persisted end-turn assistant message may publish a restored answer
+  it('proves preview answers from completed session records rather than assistant drafts or errors', () => {
+    expect(claudeHistoryPreviewAnswer(records('session-interrupt.jsonl'))).toMatch(/^PEAR/u);
+    expect(claudeHistoryPreviewAnswer(records('session-steer-compact.jsonl'))).toBe('1\n2\n3');
+    expect(claudeHistoryPreviewAnswer([JSON.stringify({ type: 'assistant', message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'text', text: 'not done' }] } })])).toBeUndefined();
+    expect(claudeHistoryPreviewAnswer([
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'valid answer' }] } }),
+      JSON.stringify({ type: 'assistant', synthetic: true, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'synthetic replacement' }] } })
+    ])).toBe('valid answer');
+  });
+
   it('groups each prompt with the steer it folded in, its tool calls and answers, and keeps notices for /rename and /compact', () => {
     const items = claudeHistory(records('session-steer-compact.jsonl'));
     expect(items.map(item => [item.kind, item.id])).toEqual([

@@ -390,6 +390,30 @@ test("bounds private requests and emits only fixed CLI failures", async () => {
   } finally { await fx.cleanup(); }
 });
 
+test("accepts 25 second Codex requests while retaining strict descriptor caps", async () => {
+  const fx = await fixture();
+  try {
+    const path = join(fx.root, "bounded-request.json");
+    const accepted = [{}, { kind: "omx" }, { kind: "codex", program: fx.codex }];
+    // accept the full host watchdog for every Codex-backed descriptor
+    for (const overrides of accepted) {
+      const value = request(fx, { ...overrides, timeoutMs: 25_000 });
+      await writeFile(path, JSON.stringify(value), { mode: 0o600 });
+      assert.deepEqual(await readDiscoveryRequest(path), value);
+    }
+    const rejected = [
+      { kind: "omx", timeoutMs: 25_001 },
+      { kind: "codex", program: fx.codex, timeoutMs: 25_001 },
+      { kind: "claude", program: fx.claude, timeoutMs: 10_001 }
+    ];
+    // reject values beyond each native lane's watchdog
+    for (const overrides of rejected) {
+      await writeFile(path, JSON.stringify(request(fx, overrides)), { mode: 0o600 });
+      await assert.rejects(readDiscoveryRequest(path), error => error.code === "invalid_request");
+    }
+  } finally { await fx.cleanup(); }
+});
+
 test("sanitizes malformed configured Codex executables and protocol", async () => {
   const fx = await fixture();
   try {

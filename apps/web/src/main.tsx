@@ -43,7 +43,7 @@ import type { KeysConfig } from '../../server/src/config/keys.js';
 import { applyColorTheme, useColorTheme } from './color-theme.js';
 import { serverPreferences, ServerPreferencesProvider, useServerPreferences, type FileOpenAction } from './server-preferences.js';
 import { applyReducedMotion, prefersReducedMotion } from './reduced-motion.js';
-import { useFullscreenAction } from './fullscreen-loader.js';
+import { isRestoringCoverFocus, useFullscreenAction } from './fullscreen-loader.js';
 import { hasUiReloadBlockers, setUiReloadBlocker, useUiReloadBlocked, useUiReloadBlocker } from './ui-reload-guard.js';
 import { readNotificationSounds } from './notification-sounds.js';
 import { UpstreamRebaseNotification, type GitUpstreamSummary } from './upstream-rebase.js';
@@ -69,7 +69,7 @@ import { SettingsHeaderActionsContext, SettingsHeaderSearchContext } from './set
 import { isSettingsSnapshot, settingsResponseError, type SettingsStatus } from './settings/contracts.js';
 import { instanceIconHashPattern, isInstanceIconName } from '../../server/src/instance-icon-name.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
-import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
+import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useConsoleRestartCover, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
 import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
 import { installProgressAnimationSync, type ProgressKind } from './progress-animation.js';
 import { Skeleton } from './skeleton.js';
@@ -83,6 +83,8 @@ import { commitAgentUpdateFingerprint, commitRacUpdateFingerprint, reserveAgentU
 import { captureNotificationInventory, closeNotificationEvent, displayNotificationEvent, disposeNotificationCoordinator, isBrowserNotificationEvent, listenForWorkerNotificationDisplays, reconcileNotificationSnapshot, type CapturedNotificationInventory } from './notification-coordinator.js';
 import { flushNotificationJournal, recordNotificationJournal } from './notification-journal.js';
 import { PushSubscriptionLifecycle, type PushEnrollmentHealth } from './push-subscription-lifecycle.js';
+import { Screensaver, useScreensaver, type ScreensaverConfig, type ScreensaverWorkspace } from './screensaver.js';
+import { screensaverShowsOutput } from '../../server/src/screensaver/contracts.js';
 import './styles.css';
 
 // preserve both middle-click and context-menu presses
@@ -195,7 +197,7 @@ function CleanupSkeletons() {
 // `worktreeLabel`/`worktreeOrder` are no longer on the wire (the server carries them on the
 // Worktree); they remain as optional read-only fallbacks the tab bar consults when an Agent's
 // Worktree is not present in the payload, absent from the real server.
-type Agent = { id: string; recoveryProcessKey?: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; messageReplySuggestionKey?: string; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; notificationSuppressed?: boolean; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
+type Agent = { id: string; previewIdentity?: string; recoveryProcessKey?: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; spawnedBy?: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; messageReplySuggestionKey?: string; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; notificationSuppressed?: boolean; queuedPromptCount: number; launch?: LaunchResolution; watches?: WatchSummary[] };
 type Worktree = { id: string; projectId: string; label: string; customLabel?: boolean; path: string; main: boolean; detached: boolean; locked: boolean; branch?: string; sha?: string; consoleShells?: number; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; available: boolean; pinned: boolean; order: number; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; stack?: Stack; launch?: LaunchResolution };
 // `mode: 'directory'` marks a non-git Project the console launches in place (like Scratch);
 // `launch` is its resolved Launch profile for the Project-level Launch button. A git
@@ -216,7 +218,7 @@ type ReviewButtonState = ReviewTourIndicator & { onOpen: () => void; panel?: Rea
 // a directory-Project or Scratch Place, listed beside the Worktrees (a Worktree is a Place with the same id)
 // `adhoc` marks a Scratch folder other than the configured one: the console cannot launch into it
 type Place = { id: string; kind: 'directory' | 'scratch'; projectId: string; label: string; home: string; adhoc?: true; pinned: boolean; consoleShells?: number; launch?: LaunchResolution };
-type Dashboard = { tmuxOutage?: { unavailableSockets: number; since: string; lastHealthyAt?: string }; notesRevision?: number; githubRevision?: number; githubBadge?: number; generation?: number; serverStartedAt?: number; adapters?: AdapterCapabilities; agents: Agent[]; projects: Project[]; places?: Place[]; cleanupPending?: number; cleanupTargets?: CleanupTarget[]; cleanupVersion?: CleanupVersion; scratchLaunch?: LaunchResolution; reviewTour?: ReviewTourCapability; codeReview?: CodeReviewCapability; reviews?: StoredReviewSummary[]; editor?: boolean; keys?: KeysConfig; buttons?: ButtonCatalog };
+type Dashboard = { screensaver?: ScreensaverConfig; tmuxOutage?: { unavailableSockets: number; since: string; lastHealthyAt?: string }; notesRevision?: number; githubRevision?: number; githubBadge?: number; generation?: number; serverStartedAt?: number; adapters?: AdapterCapabilities; agents: Agent[]; projects: Project[]; places?: Place[]; cleanupPending?: number; cleanupTargets?: CleanupTarget[]; cleanupVersion?: CleanupVersion; scratchLaunch?: LaunchResolution; reviewTour?: ReviewTourCapability; codeReview?: CodeReviewCapability; reviews?: StoredReviewSummary[]; editor?: boolean; keys?: KeysConfig; buttons?: ButtonCatalog };
 // every Worktree across the dashboard's Projects, flattened for tab and launcher rendering
 const allWorktrees = (dashboard: Pick<Dashboard, 'projects'>): Worktree[] => dashboard.projects.flatMap(project => project.worktrees);
 // why a Worktree's Remove is disabled (it is the Project's Main checkout, git holds a lock,
@@ -409,6 +411,24 @@ const actionRequired = (agent: Agent) => agent.attention === 'question' || agent
 // reuse the same displayed attention for badges and notifications
 const agentState = (agent: Agent): AgentState => actionRequired(agent) ? 'action-required' : agent.attention === 'working' ? 'working' : 'prompt-done';
 const agentLabel = (agent: Agent) => (agent.displayLabel ?? (actionRequired(agent) ? agent.title.replace(/(?:\[\s*.\s*\]\s*)?action required\s*\|?\s*/i, '🚨 ') : agent.title)) || agent.home;
+// omit the repeated workspace suffix without rewriting actual conversation names
+const screensaverConversationLabel = (agent: Agent, workspace: Pick<DashboardItem, 'label' | 'worktree' | 'place'>): string => {
+  const name = agent.structured?.conversationName;
+  // use the native name as-is when the transport supplies it separately
+  if (name?.trim()) return name;
+  const label = agentLabel(agent);
+  const separator = label.lastIndexOf(' | ');
+  // only inspect the final suffix, since authored names can contain pipes
+  if (separator <= 0) return label;
+  const suffix = label.slice(separator + 3).trim().toLowerCase();
+  const location = [workspace.label, workspace.worktree?.label, workspace.worktree?.path, workspace.place?.home, agent.worktreeLabel, agent.home];
+  // native titles may use the directory basename instead of the custom workspace label
+  const repeated = location.some(value => {
+    const path = value?.trim().toLowerCase().replace(/[\\/]+$/u, '');
+    return path === suffix || path?.split(/[\\/]/u).at(-1) === suffix;
+  });
+  return repeated ? label.slice(0, separator).trimEnd() : label;
+};
 // keep server-owned update advisors inside their modal surface
 const isEmbeddedUpdateAdvisor = (agent: Pick<Agent, 'displayLabel' | 'worktreeId'>): boolean => agent.worktreeId === undefined && /^Update Advisor (?:(?:Starting v[34]|v[234]) )?[0-9a-f]{7}$/u.test(agent.displayLabel ?? '');
 // list other open worktrees once, labelling each by its Worktree (the server carries the
@@ -715,7 +735,9 @@ const tabStatus = (entry: DashboardItem) => {
       : entry.operation === 'launching' || entry.operation === 'new-task' ? 'blue'
         : entry.state === 'working' ? 'peach' : undefined;
   const busy = entry.operation !== undefined || entry.state === 'working';
-  return { transition, label, progress, busy, className: `${transition === undefined ? `status-${entry.state}` : 'status-transitioning'}${entry.unread ? ' unread' : ''}${progress === undefined ? '' : ` progress-border progress-${progress}`}` };
+  // give passive tab labels the same urgency and transition colors
+  const color: ProgressColor | undefined = progress ?? (entry.unread ? 'green' : entry.state === 'action-required' ? 'red' : undefined);
+  return { transition, label, progress, busy, color, className: `${transition === undefined ? `status-${entry.state}` : 'status-transitioning'}${entry.unread ? ' unread' : ''}${progress === undefined ? '' : ` progress-border progress-${progress}`}` };
 };
 const subscribeToPendingOperation = (key: string, listener: () => void) => {
   const listeners = pendingOperationListeners.get(key) ?? new Set();
@@ -10179,7 +10201,8 @@ function PruneWorktreesDialog({ project, request, onClose, onPruned }: { project
 }
 
 // render the active console dashboard
-function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdateError }: { onUnauthorized: () => void; onInactive: () => void; updateError?: string; onDismissUpdateError: () => void }) {
+// coordinate the console while keeping passive monitoring read-only
+function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdateError, fullscreenBlocked }: { onUnauthorized: () => void; onInactive: () => void; updateError?: string; onDismissUpdateError: () => void; fullscreenBlocked: boolean }) {
   const serverInfo = useContext(ServerContext) ?? fallbackServerInfo();
   const clientSettings = useContext(ClientSettingsContext);
   const davo = clientSettings?.davo ?? legacyDavoSettings;
@@ -10189,6 +10212,15 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const [data, setData] = useState<Dashboard>();
   const [outageDashboard, setOutageDashboard] = useState<Dashboard>();
   const [previewTmuxRecovery, setPreviewTmuxRecovery] = useState(false);
+  // keep workspaces mounted and yield the overview to higher-priority covers
+  const restartCover = useConsoleRestartCover();
+  const showRecovery = outageDashboard !== undefined || previewTmuxRecovery;
+  const coverActive = fullscreenBlocked || restartCover || showRecovery;
+  const screensaver = useScreensaver(data?.screensaver, coverActive);
+  const coverActiveRef = useRef(coverActive);
+  coverActiveRef.current = coverActive;
+  // neither passive viewing nor automatic focus restoration acknowledges output
+  const canAcknowledge = useCallback(() => !coverActiveRef.current && !screensaver.observing.current && !isRestoringCoverFocus(), [screensaver.observing]);
   // the dashboard generation as reactive state, updated on every advancing snapshot even when the
   // content itself is deduped, so an open notes fly-out or pane refetches after any Run outcome
   const [dashboardGeneration, setDashboardGeneration] = useState<number>();
@@ -10402,6 +10434,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   }, []);
   // remember the completion before clearing its optimistic highlight
   const viewAgent = useCallback((agent: Pick<Agent, 'id' | 'worktreeId' | 'completionId' | 'notificationEvent' | 'attention'>) => {
+    // observation must not acknowledge completions or notifications
+    if (!canAcknowledge()) return;
     const latest = dashboardSnapshot.current?.agents.find(candidate => candidate.id === agent.id);
     // ignore callbacks rendered for an older completed turn or removed agent
     if (latest === undefined || latest.completionId !== agent.completionId) return;
@@ -10413,7 +10447,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       return { ...current, agents: current.agents.map(candidate => candidate.id === agent.id && candidate.completionId === agent.completionId ? { ...candidate, unread: false } : candidate) };
     });
     dismissAgentNotifications(agent);
-  }, []);
+  }, [canAcknowledge]);
   // dismiss fallback launch notices when their countdown reaches zero
   useEffect(() => {
     // leave empty or persistent notices without a timer
@@ -10807,7 +10841,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       const notificationEvent = isBrowserNotificationEvent(agent.notificationEvent) ? agent.notificationEvent : undefined;
       const tag = notificationEvent?.tag ?? agentNotificationTag(agent);
       const names = agentNotificationNames(agent, data.projects);
-      const focused = viewedAgentId.current === agent.id && pageFocused();
+      const focused = canAcknowledge() && viewedAgentId.current === agent.id && pageFocused();
       const hasQueuedPrompt = agent.queuedPromptCount > 0;
       observed.add(agent.id);
       const pendingCompletion = pendingCompletions.current.get(agent.id);
@@ -10844,7 +10878,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       pendingCompletions.current.delete(agentId);
     }
     agentStates.current = next;
-  }, [data, viewAgent]);
+  }, [data, viewAgent, canAcknowledge]);
   const worktrees = data === undefined ? [] : allWorktrees(data);
   // a Place tab shows and orders by its Worktree (the server no longer stamps the label/order on
   // the agent); a directory-Project or Scratch Place, and an Agent placed nowhere, sort last
@@ -11075,6 +11109,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   useKeyActions({
     // open a local preview without fabricating a dashboard snapshot
     'preview-tmux-recovery': () => { setPreviewTmuxRecovery(true); },
+    // a disabled feature declines every configured alias without swallowing native input
+    screensaver: screensaver.enter,
     'new-terminal': onPanels(view => view.openTerminal()),
     // the split is columns only, so beside and below both open a Terminal panel
     'split-beside': onPanels(view => view.openTerminal()),
@@ -11600,7 +11636,6 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     return true;
   };
   // render recovery above the last healthy dashboard without remounting it
-  const showRecovery = outageDashboard !== undefined || previewTmuxRecovery;
   const preview = outageDashboard === undefined;
   const recoveryDashboard = showRecovery ? data ?? outageDashboard : undefined;
   // a cold outage can still carry the server's cached worktree names
@@ -12001,7 +12036,21 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     { id: entry.key, label: entry.label, detail: tabStatus(entry).label, current: index === visibleActive, onSelect: () => select(index) },
     ...(tree ? retainedSplits(entry).map(split => ({ id: `${entry.key}\u0000${split.key}`, label: split.label, nested: true, onSelect: () => jumpToSplit(entry, split.key, true) })) : [])
   ]);
-  const keyboardOverlays = <><KeyboardLayer keys={data.keys} />{keyPicker !== undefined && <KeyPicker title={keyPicker === 'tree' ? 'Workspaces and panels' : 'Workspaces'} options={keyPickerOptions(keyPicker === 'tree')} onClose={() => setKeyPicker(undefined)} />}</>;
+  // reuse the exact navigation membership and existing agent state semantics
+  const screensaverWorkspaces: ScreensaverWorkspace[] = items.map(entry => ({
+    id: entry.key,
+    label: entry.label,
+    detail: entry.worktree?.branch ?? entry.place?.home,
+    status: tabStatus(entry),
+    stack: entry.worktree?.stack ?? entry.agents.find(candidate => candidate.stack !== undefined)?.stack,
+    // keep every sibling and its conversation identity independent
+    agents: entry.agents.map(candidate => {
+      const state = agentPanelState(candidate, false);
+      const liveOutput = screensaverShowsOutput(candidate);
+      return { id: candidate.id, identity: candidate.previewIdentity, label: screensaverConversationLabel(candidate, entry), state: state.label, tone: state.tone, liveOutput, revision: JSON.stringify([candidate.previewIdentity, candidate.conversationId, candidate.completionId, liveOutput ? undefined : candidate.structured?.revision, state.label]) };
+    })
+  }));
+  const keyboardOverlays = <>{screensaver.active && <Screensaver workspaces={screensaverWorkspaces} request={request} onUnauthorized={onUnauthorized} onInactive={onInactive} />}<KeyboardLayer keys={data.keys} />{keyPicker !== undefined && <KeyPicker title={keyPicker === 'tree' ? 'Workspaces and panels' : 'Workspaces'} options={keyPickerOptions(keyPicker === 'tree')} onClose={() => setKeyPicker(undefined)} />}</>;
   const configuredButtonContext = { placeId: item?.placeId, projectId: activeProject?.id ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined), agentId: agent?.id, worktreeId: activeWorktreeId };
   // place trusted action bytes in the owning editor without executing the action
   const editConfiguredAction = async (draft: ButtonActionDraft, panelKey?: string): Promise<void> => {
@@ -12740,7 +12789,7 @@ function App() {
   const screen = state === 'checking'
       ? <LoadingScreen />
       : state === 'ready'
-        ? <NoteFeedbackProvider><DashboardView onUnauthorized={handleUnauthorized} onInactive={handleInactive} updateError={agentUpdateError} onDismissUpdateError={() => { /* dismiss only the agent update failure */ setAgentUpdateError(''); }} /></NoteFeedbackProvider>
+        ? <NoteFeedbackProvider><DashboardView onUnauthorized={handleUnauthorized} onInactive={handleInactive} updateError={agentUpdateError} fullscreenBlocked={reconnecting || action !== undefined} onDismissUpdateError={() => { /* dismiss only the agent update failure */ setAgentUpdateError(''); }} /></NoteFeedbackProvider>
         : (state === 'inactive' || state === 'naming') && sessionInfo !== undefined
           ? <ControlScreen session={sessionInfo} claimed={claimSession} />
           : <PublicEntry initialError={error} done={applySession} />;

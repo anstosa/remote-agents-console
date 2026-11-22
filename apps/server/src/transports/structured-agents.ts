@@ -24,6 +24,8 @@ import { setAside } from '../set-aside.js';
 import type { ReplySuggestionMessage, ReplySuggestionSource } from '../reply-suggestions/types.js';
 import { piReplyRuntimeGeneration } from '../reply-suggestions/pi-runtime.js';
 import { nativeReplyScope } from '../reply-suggestions/native-scope.js';
+import { styledTerminalTail, type TerminalPreview } from '../adapters/terminal-preview.js';
+import { screensaverRuntimeIdentity } from '../screensaver/identity.js';
 
 /**
  * Where a structured Agent's process runs: its holder's socket and tmux pane (ADR 0016), the
@@ -188,7 +190,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
 // by `offers` so the web takes each one once. `nonce` is what the latest process's launch report
 // must echo, and `refusal` why its report refused it. `access` is the console MCP token a
 // Conductor's process is given once it reports in, and `scripts` the deadlines of its scripts running
-type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; historyConversationId?: string; replyRuntimeGeneration?: string; replySourceGeneration: number; observedAt: Map<string, string>; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; nativeModel?: ModelInfo; models?: ModelInfo[]; modelGuard?: Promise<void>; desiredModel?: ModelSetting; desiredNativeDefault?: true; guarded?: boolean; noticeCount: number; notices: TranscriptItem[]; launchNotice?: string };
+type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; previewOrder: Map<string, number>; previewRevision: number; previewFrontier?: number; previewAnswer?: { conversationId: string; generation: number; text: string }; historyConversationId?: string; historyGeneration?: number; replyRuntimeGeneration?: string; replySourceGeneration: number; observedAt: Map<string, string>; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; nativeModel?: ModelInfo; models?: ModelInfo[]; modelGuard?: Promise<void>; desiredModel?: ModelSetting; desiredNativeDefault?: true; guarded?: boolean; noticeCount: number; notices: TranscriptItem[]; launchNotice?: string };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -223,6 +225,71 @@ const transcriptText = (item: TranscriptItem): string | undefined => {
     case 'tool': return `${item.parentId === undefined ? '' : '  '}- ${item.name}(${item.summary})${item.result === undefined ? '' : ` -> ${item.result}`}`;
     default: return undefined;
   }
+};
+// expose only authored assistant text and adapter-provided tool payloads
+const transcriptPreviewText = (item: TranscriptItem): string | undefined => {
+  switch (item.kind) {
+    case 'message': return item.role === 'assistant' && item.text !== '' ? item.text : undefined;
+    case 'tool': {
+      const output = [item.output, item.diff?.patch].filter((value): value is string => value !== undefined && value !== '');
+      return output.length === 0 ? undefined : output.join('\n');
+    }
+    default: return undefined;
+  }
+};
+// move changed visible content to the newest emitted observation
+const observePreview = (live: Live, item: TranscriptItem, previous?: TranscriptItem): void => {
+  const text = transcriptPreviewText(item);
+  // remove content that a replacement no longer exposes
+  if (text === undefined) {
+    live.previewOrder.delete(item.id);
+    return;
+  }
+  // preserve recency when a streaming replacement has no visible change
+  if (text === transcriptPreviewText(previous ?? item) && live.previewOrder.has(item.id)) return;
+  live.previewOrder.set(item.id, live.previewRevision += 1);
+};
+// rebuild observation order from one protocol history snapshot
+const resetPreview = (live: Live): void => {
+  live.previewOrder = new Map();
+  live.previewRevision = 0;
+  // history order is the only recency evidence before live updates arrive
+  for (const item of live.transcript) observePreview(live, item);
+};
+// anchor restored output after the latest ordinary prompt's preceding visible sequence
+const restoredPreviewFrontier = (live: Live): number | undefined => {
+  let promptIndex = -1;
+  // locate the active turn's authoritative user boundary
+  for (let index = 0; index < live.transcript.length; index += 1) {
+    const item = live.transcript[index]!;
+    if (item.kind === 'message' && item.role === 'user' && item.steer !== true) promptIndex = index;
+  }
+  if (promptIndex < 0) return undefined;
+  let frontier = 0;
+  // retain the visible sequence observed before that prompt
+  for (let index = 0; index < promptIndex; index += 1) frontier = Math.max(frontier, live.previewOrder.get(live.transcript[index]!.id) ?? 0);
+  return frontier;
+};
+// render the newest visible observations without prompt or thinking content
+const structuredPreview = (live: Live | undefined, rows: number): TerminalPreview => {
+  // let the terminal helper define invalid and empty windows
+  if (live === undefined || !Number.isInteger(rows) || rows <= 0) return styledTerminalTail('', rows, true);
+  const observed = live.transcript.flatMap((item, index) => {
+    const text = transcriptPreviewText(item);
+    const order = live.previewOrder.get(item.id) ?? index - live.transcript.length;
+    // an ordinary active turn cannot borrow observations from its predecessor
+    return text === undefined || live.working && live.previewFrontier !== undefined && order <= live.previewFrontier ? [] : [{ text, order }];
+  }).sort((left, right) => left.order - right.order);
+  const selected: string[] = [];
+  let lines = 0;
+  // collect from newest until the requested nonblank tail is covered
+  for (let index = observed.length - 1; index >= 0 && lines < rows; index -= 1) {
+    const text = observed[index]!.text;
+    selected.unshift(text);
+    lines += Math.max(1, text.split('\n').filter(line => line.trim() !== '').length);
+  }
+  // reset rendition between independent transcript observations
+  return styledTerminalTail(selected.join('\x1b[0m\n'), rows, true);
 };
 const nonNegativeInt = (value: unknown): boolean => value === undefined || Number.isSafeInteger(value) && (value as number) >= 0;
 // compare a reported version with its bundled minimum
@@ -709,7 +776,7 @@ export class StructuredAgents {
 
   // what this console knows of an Agent it has no process for yet
   private idle(): Live {
-    return { generation: 0, working: false, busy: false, questions: [], steers: [], offers: 0, transcript: [], replySourceGeneration: 0, observedAt: new Map(), revision: 0, status: new Map(), noticeCount: 0, notices: [] };
+    return { generation: 0, working: false, busy: false, questions: [], steers: [], offers: 0, transcript: [], previewOrder: new Map(), previewRevision: 0, replySourceGeneration: 0, observedAt: new Map(), revision: 0, status: new Map(), noticeCount: 0, notices: [] };
   }
 
 
@@ -865,6 +932,25 @@ export class StructuredAgents {
       const lines = (this.live.get(id)?.transcript ?? []).flatMap(item => transcriptText(item)?.split('\n') ?? []);
       return { text: lines.slice(-rows).join('\n'), older: lines.length > rows };
     },
+    previewOutput: async (id, rows, expectedIdentity) => {
+      const record = (await this.load()).find(candidate => candidate.id === id);
+      const live = this.live.get(id);
+      const agent = record === undefined ? undefined : this.projectAgent(record);
+      // hide transcript state until this exact process's native history proves the current conversation
+      if (record?.conversationId === undefined || live === undefined || live.resyncing === true || live.historyConversationId !== record.conversationId || live.historyGeneration !== live.generation || expectedIdentity !== undefined && (agent === undefined || screensaverRuntimeIdentity(agent, 'output') !== expectedIdentity)) return undefined;
+      return structuredPreview(live, rows);
+    },
+    previewAnswer: async (id, expectedIdentity) => {
+      const record = (await this.load()).find(candidate => candidate.id === id);
+      const live = this.live.get(id);
+      const agent = record === undefined ? undefined : this.projectAgent(record);
+      // hide answers until this exact process's native history proves the current conversation
+      if (record?.conversationId === undefined || live === undefined || live.working || live.resyncing === true || live.historyConversationId !== record.conversationId || live.historyGeneration !== live.generation || expectedIdentity !== undefined && (agent === undefined || screensaverRuntimeIdentity(agent, 'response') !== expectedIdentity)) return undefined;
+      const completed = live.previewAnswer;
+      // prefer the protocol's canonical completed answer for this conversation
+      if (completed?.conversationId === record.conversationId && completed.generation === live.generation && completed.text.trim() !== '') return completed.text;
+      return undefined;
+    },
     steer: async (id, prompt, mayDispatch) => await this.steer(id, prompt, mayDispatch),
     interrupt: async (id, returned, mayDispatch) => await this.interrupt(id, returned, mayDispatch),
     close: async id => await this.close(id)
@@ -1014,17 +1100,21 @@ export class StructuredAgents {
 
   /** The dashboard's view of every structured Agent, at its Place. */
   async agents(): Promise<Agent[]> {
-    return (await this.load()).map(record => {
-      const live = this.live.get(record.id);
-      const lifecycle = record.lifecycle;
-      const current = live?.model;
-      const name = current === undefined ? undefined : live?.models?.find(model => model.id === current.model)?.name;
-      const questions = (live?.questions ?? []).map(shaped);
-      // one resyncing after a reattach may be working: nothing takes it to have finished
-      const attention = questions.length > 0 ? 'question' : live?.working === true || live?.resyncing === true ? 'working' : 'finished';
-      const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' && 'conductor' in record.origin ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(live?.desiredModel !== undefined || live?.modelGuard !== undefined ? { preparing: true as const } : {}), ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(live?.conversationName === undefined ? {} : { conversationName: live.conversationName }), ...(model === undefined ? {} : { model }), switchable: record.role === undefined && (this.allowed(record.kind).length > 0 || this.anyListed(record.kind)), ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }), ...(live?.compacting === true ? { compacting: true } : {}) } };
-    });
+    return (await this.load()).map(record => this.projectAgent(record));
+  }
+
+  // project the same process identity for dashboard tokens and transport reads
+  private projectAgent(record: StructuredRecord): Agent {
+    const live = this.live.get(record.id);
+    const lifecycle = record.lifecycle;
+    const current = live?.model;
+    const name = current === undefined ? undefined : live?.models?.find(model => model.id === current.model)?.name;
+    const questions = (live?.questions ?? []).map(shaped);
+    // one resyncing after a reattach may be working: nothing takes it to have finished
+    const attention = questions.length > 0 ? 'question' : live?.working === true || live?.resyncing === true ? 'working' : 'finished';
+    const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
+    const recoveryProcessKey = tokenHash(JSON.stringify([record.processGeneration ?? 0, live?.generation ?? 0, record.holder?.pid ?? null, record.holder?.startTime ?? null]));
+    return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, recoveryProcessKey, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' && 'conductor' in record.origin ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(live?.desiredModel !== undefined || live?.modelGuard !== undefined ? { preparing: true as const } : {}), ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(live?.conversationName === undefined ? {} : { conversationName: live.conversationName }), ...(model === undefined ? {} : { model }), switchable: record.role === undefined && (this.allowed(record.kind).length > 0 || this.anyListed(record.kind)), ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }), ...(live?.compacting === true ? { compacting: true } : {}) } };
   }
 
   async agent(id: string): Promise<Agent | undefined> {
@@ -1252,7 +1342,7 @@ export class StructuredAgents {
         // the console's own notices belong to the Conversation they were made in
         if (record.conversationId !== undefined && record.conversationId !== event.id) live.notices = [];
         // a Conversation is unready until its matching history arrives
-        if (record.conversationId !== event.id) { live.historyConversationId = undefined; live.replySourceGeneration += 1; }
+        if (record.conversationId !== event.id) { live.historyConversationId = undefined; live.historyGeneration = undefined; live.previewAnswer = undefined; live.replySourceGeneration += 1; }
         record.conversationId = event.id;
         if (live.launchNotice !== undefined) { this.notice(live, live.launchNotice, 'warning'); delete live.launchNotice; }
         live.conversationName = event.name;
@@ -1289,6 +1379,10 @@ export class StructuredAgents {
         live.replySourceGeneration += 1;
         this.observeTurnEvent(record, event.turn);
         live.working = event.turn.type === 'started';
+        // keep the last proven answer while live output owns the active display
+        if (event.turn.type === 'started') live.previewFrontier = live.previewRevision;
+        // bind only a nonblank answer the adapter explicitly proved for this process history
+        if (event.turn.type === 'settled' && event.previewAnswer !== undefined && event.previewAnswer.trim() !== '' && record.conversationId !== undefined && live.historyConversationId === record.conversationId && live.historyGeneration === live.generation) live.previewAnswer = { conversationId: record.conversationId, generation: live.generation, text: event.previewAnswer };
         if (event.turn.type !== 'started') { live.turn = event.turn; live.resyncing = false; this.endScripts(live); this.idlePoint(record, live); this.restartOffPin(record, live); }
         break;
       case 'steers':
@@ -1319,17 +1413,26 @@ export class StructuredAgents {
         }
         if (item.kind === 'tool' && item.source !== undefined && item.parentId === undefined) this.watchScript(record, live, item);
         const index = live.transcript.findIndex(candidate => candidate.id === item.id);
+        const previous = index === -1 ? undefined : live.transcript[index];
         // retain the first server-observation time across streaming replacements
         if (index === -1) {
           live.observedAt.set(item.id, new Date().toISOString());
           live.transcript.push(item);
         } else live.transcript[index] = item;
+        observePreview(live, item, previous);
         // only authored prose can change suggestion context
         if (item.kind === 'message' && (item.role === 'user' || item.role === 'assistant')) live.replySourceGeneration += 1;
         live.transcript.splice(0, live.transcript.length - maxTranscriptItems);
-        // prune timestamps for transcript entries no longer retained
+        // prune observation metadata for transcript entries no longer retained
         const retained = new Set(live.transcript.map(candidate => candidate.id));
-        for (const id of live.observedAt.keys()) if (!retained.has(id)) live.observedAt.delete(id);
+        for (const id of live.observedAt.keys()) {
+          // discard the timestamp with its removed transcript item
+          if (!retained.has(id)) live.observedAt.delete(id);
+        }
+        for (const id of live.previewOrder.keys()) {
+          // keep preview recency bounded to retained transcript items
+          if (!retained.has(id)) live.previewOrder.delete(id);
+        }
         break;
       }
       case 'history':
@@ -1339,11 +1442,17 @@ export class StructuredAgents {
         // notices the console made for this Conversation since
         live.transcript = [...event.items, ...live.notices].slice(-maxTranscriptItems);
         live.historyConversationId = event.conversationId;
+        live.historyGeneration = live.generation;
         live.replySourceGeneration += 1;
         // history protocols provide no source time, so record bounded server observation explicitly
         live.observedAt = new Map(live.transcript.map(item => [item.id, live.observedAt.get(item.id) ?? new Date().toISOString()]));
+        resetPreview(live);
+        // an active restored turn starts after its latest native prompt
+        live.previewFrontier = live.working ? event.activePrompt === false ? live.previewRevision : restoredPreviewFrontier(live) : undefined;
         live.prompt = event.items.filter((item): item is Extract<TranscriptItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'user' && item.steer !== true).at(-1)?.text;
         this.observeTurnHistory(record, live, event.items);
+        // history may restore a protocol-proven completed answer without a live turn event
+        if (event.previewAnswer !== undefined && event.previewAnswer.trim() !== '' && record.conversationId !== undefined && event.conversationId === record.conversationId) live.previewAnswer = { conversationId: record.conversationId, generation: live.generation, text: event.previewAnswer };
         break;
       case 'status':
         if (event.text === undefined) live.status.delete(event.key); else live.status.set(event.key, event.text);

@@ -29,6 +29,7 @@ import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { GithubService } from '../src/github/service.js';
 import { graphqlGithub, sha, type PullFixture } from './helpers/github-graphql.js';
 import { scratchProjectId } from '../src/places/places.js';
+import { screensaverRuntimeIdentity } from '../src/screensaver/identity.js';
 
 const dirs: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); vi.restoreAllMocks(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -629,6 +630,139 @@ describe('a structured Agent over HTTP', () => {
     expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript?item=s1`, headers })).json().item.source).toBe('await tools.bash({ command: "pnpm test" })');
     expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript?item=nowhere`, headers })).statusCode).toBe(404);
     expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript?limit=0`, headers })).statusCode).toBe(400);
+    await app.close();
+  });
+
+  // live preview recency follows visible streaming updates instead of transcript insertion order
+  it('previews the newest structured output with colors while leaving recent lines summary-only', async () => {
+    const fake = fakeAgent();
+    const { app, headers, structuredAgents } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: 'preview-conversation' });
+    fake.emit({ type: 'history', conversationId: 'preview-conversation', items: [] });
+    fake.emit({ type: 'transcript', item: { id: 'prompt', kind: 'message', role: 'user', text: 'private prompt' } });
+    fake.emit({ type: 'transcript', item: { id: 'first', kind: 'tool', name: 'Run', summary: 'first', state: 'running', output: '\x1b[31mstale output\x1b[0m' } });
+    fake.emit({ type: 'transcript', item: { id: 'thinking', kind: 'thinking', text: 'hidden reasoning' } });
+    fake.emit({ type: 'transcript', item: { id: 'answer', kind: 'message', role: 'assistant', text: 'assistant status' } });
+    fake.emit({ type: 'transcript', item: { id: 'second', kind: 'tool', name: 'Run', summary: 'second', state: 'running', output: '\x1b[33mmiddle output\x1b[0m' } });
+    fake.emit({ type: 'transcript', item: { id: 'first', kind: 'tool', name: 'Run', summary: 'first', state: 'running', output: '\x1b[32mnew tool output\x1b[0m', diff: { path: 'file', patch: '--- file\n+++ file\n+newest diff' } } });
+
+    await expect(structuredAgents.turns.previewOutput!(id, 5)).resolves.toEqual({
+      text: 'middle output\nnew tool output\n--- file\n+++ file\n+newest diff',
+      colors: [
+        { from: 0, to: 13, foreground: 3 },
+        { from: 14, to: 29, foreground: 2 }
+      ]
+    });
+    await expect(structuredAgents.turns.recentLines(id, 20)).resolves.toEqual({
+      text: '> private prompt\n- Run(first)\nassistant status\n- Run(second)',
+      older: false
+    });
+    await app.close();
+  });
+
+  // screensaver content stays bound to matching native conversation history
+  it('rejects an earlier structured answer during a conversation switch and shows only the current reply or live tail', async () => {
+    const fake = fakeAgent();
+    const { app, headers, structuredAgents } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: 'old-conversation' });
+    fake.emit({ type: 'history', conversationId: 'old-conversation', items: [{ id: 'old-answer', kind: 'message', role: 'assistant', text: 'old transcript answer' }] });
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'old canonical answer' }, previewAnswer: 'old canonical answer' });
+    await expect(structuredAgents.turns.previewAnswer!(id)).resolves.toBe('old canonical answer');
+
+    fake.emit({ type: 'conversation', id: 'current-conversation' });
+    await expect(structuredAgents.turns.previewAnswer!(id)).resolves.toBeUndefined();
+    await expect(structuredAgents.turns.previewOutput!(id, 7)).resolves.toBeUndefined();
+    fake.emit({ type: 'history', conversationId: 'old-conversation', items: [{ id: 'late-old-answer', kind: 'message', role: 'assistant', text: 'late old answer' }] });
+    await expect(structuredAgents.turns.previewAnswer!(id)).resolves.toBeUndefined();
+
+    fake.emit({ type: 'history', conversationId: 'current-conversation', previewAnswer: 'current restored answer', items: [
+      { id: 'current-prompt', kind: 'message', role: 'user', text: 'continue' },
+      { id: 'blank-answer', kind: 'message', role: 'assistant', text: '   ' },
+      { id: 'current-answer', kind: 'message', role: 'assistant', text: 'current restored answer' },
+      { id: 'current-settled', kind: 'settled', outcome: 'done' }
+    ] });
+    await expect(structuredAgents.turns.previewAnswer!(id)).resolves.toBe('current restored answer');
+
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    await expect(structuredAgents.turns.previewOutput!(id, 7)).resolves.toEqual({ text: '' });
+    fake.emit({ type: 'transcript', item: { id: 'partial-answer', kind: 'message', role: 'assistant', text: 'unfinished response' } });
+    fake.emit({ type: 'turn', turn: { type: 'failed' } });
+    await expect(structuredAgents.turns.previewAnswer!(id)).resolves.toBe('current restored answer');
+
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'transcript', item: { id: 'current-output', kind: 'tool', name: 'Run', summary: 'current', state: 'running', output: 'current line 1\ncurrent line 2\ncurrent line 3\ncurrent line 4\ncurrent line 5\ncurrent line 6\ncurrent line 7\ncurrent line 8\ncurrent line 9' } });
+    await expect(structuredAgents.turns.previewAnswer!(id)).resolves.toBeUndefined();
+    await expect(structuredAgents.turns.previewOutput!(id, 7)).resolves.toEqual({ text: 'current line 3\ncurrent line 4\ncurrent line 5\ncurrent line 6\ncurrent line 7\ncurrent line 8\ncurrent line 9' });
+    fake.emit({ type: 'transcript', item: { id: 'current-draft', kind: 'message', role: 'assistant', text: 'current transcript answer' } });
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'current canonical answer' }, previewAnswer: 'current canonical answer' });
+    await expect(structuredAgents.turns.previewAnswer!(id)).resolves.toBe('current canonical answer');
+    // an empty settled event must not erase the last native-proven answer
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: '' }, previewAnswer: '   ' });
+    await expect(structuredAgents.turns.previewAnswer!(id)).resolves.toBe('current canonical answer');
+    await app.close();
+  });
+
+  // restored history may arrive after the live started event during reattachment
+  it('anchors a restored live preview at the latest prompt regardless of event order', async () => {
+    const fake = fakeAgent();
+    const { app, headers, structuredAgents } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: 'restored-conversation' });
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'history', conversationId: 'restored-conversation', items: [
+      { id: 'old-prompt', kind: 'message', role: 'user', text: 'old prompt' },
+      { id: 'old-answer', kind: 'message', role: 'assistant', text: 'old answer' },
+      { id: 'old-end', kind: 'settled', outcome: 'done' },
+      { id: 'active-prompt', kind: 'message', role: 'user', text: 'active prompt' },
+      { id: 'active-tool', kind: 'tool', name: 'Run', summary: 'active', state: 'running', output: 'current output' }
+    ] });
+
+    await expect(structuredAgents.turns.previewOutput!(id, 7)).resolves.toEqual({ text: 'current output' });
+    await app.close();
+  });
+
+  // standalone compaction places the live frontier after all completed history
+  it('does not expose a preceding answer as live output during restored compaction', async () => {
+    const fake = fakeAgent();
+    const { app, headers, structuredAgents } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: 'compacting-conversation' });
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'history', conversationId: 'compacting-conversation', activePrompt: false, previewAnswer: 'earlier answer', items: [
+      { id: 'old-prompt', kind: 'message', role: 'user', text: 'old prompt' },
+      { id: 'old-answer', kind: 'message', role: 'assistant', text: 'earlier answer' },
+      { id: 'old-end', kind: 'settled', outcome: 'done' }
+    ] });
+
+    await expect(structuredAgents.turns.previewOutput!(id, 7)).resolves.toEqual({ text: '' });
+    await app.close();
+  });
+
+  // a replacement process must prove its own history before serving the same Conversation
+  it('retires structured preview identities and history across a same-conversation relaunch', async () => {
+    const fake = fakeAgent();
+    const { app, headers, structuredAgents } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: 'same-conversation' });
+    fake.emit({ type: 'history', conversationId: 'same-conversation', previewAnswer: 'first process answer', items: [] });
+    const before = (await structuredAgents.agent(id))!;
+    const retiredIdentity = screensaverRuntimeIdentity(before, 'response');
+    await expect(structuredAgents.turns.previewAnswer!(id, retiredIdentity)).resolves.toBe('first process answer');
+
+    await expect(structuredAgents.restart(id)).resolves.toBe(true);
+    const after = (await structuredAgents.agent(id))!;
+    const currentIdentity = screensaverRuntimeIdentity(after, 'response');
+    expect(currentIdentity).not.toBe(retiredIdentity);
+    await expect(structuredAgents.turns.previewAnswer!(id, retiredIdentity)).resolves.toBeUndefined();
+    await expect(structuredAgents.turns.previewAnswer!(id, currentIdentity)).resolves.toBeUndefined();
+
+    fake.emit({ type: 'conversation', id: 'same-conversation' });
+    fake.emit({ type: 'history', conversationId: 'same-conversation', previewAnswer: 'replacement answer', items: [] });
+    await expect(structuredAgents.turns.previewAnswer!(id, currentIdentity)).resolves.toBe('replacement answer');
     await app.close();
   });
 

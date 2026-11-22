@@ -434,6 +434,7 @@ describe('configuration safety', () => {
     expect(config.usagePace).toBe(true);
     expect(config.autoDeleteSentNotes).toBe(false);
     expect(config.resourceMonitoring).toBe(false);
+    expect(config.screensaver).toEqual({ enabled: false, idleMinutes: 0 });
     expect(config.integrations).toEqual({ enabled: false, mcp: { readEnabled: true, writeEnabled: false, dangerousEnabled: false }, realtime: { enabled: false, name: 'Davo', context: defaultDavoContext, writeToolsEnabled: false }, multiInstance: { enabled: false } });
   });
   // preserve explicit opt-in and opt-out values
@@ -468,6 +469,14 @@ describe('configuration safety', () => {
   // reject nonboolean resource monitoring values
   it.each(['true', 'false', 1, null])('rejects invalid resource monitoring enablement: %s', async resourceMonitoring => {
     await expect(validateConfig({ ...scratch, resourceMonitoring })).rejects.toThrow();
+  });
+  // validate one coherent server-wide screensaver policy
+  it('accepts screensaver policy and rejects invalid idle minutes', async () => {
+    await expect(validateConfig({ ...scratch, screensaver: { enabled: true, idleMinutes: 15 } })).resolves.toMatchObject({ screensaver: { enabled: true, idleMinutes: 15 } });
+    for (const idleMinutes of [-1, 1.5, 525_601, Number.NaN, '5']) {
+      await expect(validateConfig({ ...scratch, screensaver: { enabled: true, idleMinutes } })).rejects.toThrow();
+    }
+    await expect(validateConfig({ ...scratch, screensaver: { enabled: 'true', idleMinutes: 5 } })).rejects.toThrow();
   });
   it('accepts a known default agent and rejects unknown kinds', async () => {
     expect((await validateConfig({ ...scratch, defaultAgent: 'claude' })).defaultAgent).toBe('claude');

@@ -28,6 +28,7 @@ import { SettingsMultiSelect, SettingsSelect, type SettingsMultiSelectOption, ty
 import { inheritedProjectButtons, isConfiguredButtonPath, SettingsButtonColorSwatch, SettingsButtonFields, SettingsButtonPreview } from './button-fields.js';
 import { CloudflareSettings, useCloudflareSetupDraft } from './cloudflare-settings.js';
 import { GoogleCalendarSettings, useGoogleCalendarSetup } from './google-calendar-settings.js';
+import { ScreensaverSettings } from './screensaver-settings.js';
 import { fetchInstanceIcons, InstanceIconPreview, type LibraryIcon } from './icon-preview.js';
 import { iconSourceLabel, iconSourceName, isInstanceIconName, newIconRevision } from '../../../server/src/instance-icon-name.js';
 import { composeOptionSettings, environmentDescription, knownEnvironmentKeys, labels as sourceLabels, protectedSettingIdentity } from '../../../server/src/settings/catalog.js';
@@ -82,7 +83,7 @@ const pendingSourceFormats = { app: 'json', env: 'env', installation: 'installat
 // reuse the authoritative labels before the installation catalog arrives
 const pendingSourceNavigation: Pick<SettingsSource, 'id' | 'label' | 'format' | 'path'>[] = Object.entries(pendingSourceFormats).map(([id, format]) => ({ id, label: sourceLabels[id] ?? id, format }));
 // keep dedicated and automatically derived controls out of the application field tree
-const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'conductor', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', ...applicationPreferences.map(({ key }) => key), 'proxy', 'integrations.multiInstance', 'integrations.mcp', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
+const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'conductor', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', 'screensaver', ...applicationPreferences.map(({ key }) => key), 'proxy', 'integrations.multiInstance', 'integrations.mcp', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
 // keep dedicated source selectors with their application and tmux consumers
 const dedicatedInstallationPaths = new Set(['version', 'sources']);
 
@@ -1715,7 +1716,7 @@ const sourceGroup = (source: Pick<SettingsSource, 'id' | 'format'>): string => {
 // flag backing sources and the dedicated pages that own their invalid controls
 function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
   const pages = new Set<string>();
-  const applicationPages: Record<string, string> = { defaultAgent: 'agents', adapters: 'agents', conductor: 'conductor', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard', ...Object.fromEntries(applicationPreferences.map(({ key, page }) => [key, page])) };
+  const applicationPages: Record<string, string> = { defaultAgent: 'agents', adapters: 'agents', conductor: 'conductor', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', screensaver: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard', ...Object.fromEntries(applicationPreferences.map(({ key, page }) => [key, page])) };
   // route only authoritative issue identities never field values or error text
   for (const { sourceId, path } of issues) {
     pages.add(sourceId);
@@ -2273,8 +2274,8 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'projects' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('projects');
   // keep review edits attached to their original application transaction
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'review' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('reviews');
-  // surface button drafts on Interface
-  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'buttons' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('interface');
+  // surface button and screensaver drafts on Interface
+  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'buttons' || next.path[0] === 'screensaver' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('interface');
   const applicationChange = changes.find(change => change.sourceId === 'app');
   // mark dedicated setting pages without moving their backing patches
   for (const { key, page } of applicationPreferences) {
@@ -2614,9 +2615,20 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   </div>;
   // keep appearance, flyouts and buttons together on Interface
   const buttonsSchema = voiceSource?.schema?.properties?.buttons;
+  const screensaverSchema = voiceSource?.schema?.properties?.screensaver;
   const interfaceEditor = <div className="settings-interface">
     {browserDraft.interfaceContent}
     {renderApplicationPreferences('interface')}
+    {voiceSource === undefined ? <section className="settings-schema-section" aria-label="Screensaver"><header><h3>Screensaver</h3></header><p role="note">Load Application configuration before editing screensaver settings.</p></section>
+      : voiceSource.value === undefined ? <section className="settings-schema-section" aria-label="Screensaver"><header><h3>Screensaver</h3></header><p role="note">Repair the Application whole source before editing screensaver settings.</p></section>
+        : screensaverSchema === undefined ? <section className="settings-schema-section" aria-label="Screensaver"><header><h3>Screensaver</h3></header><p role="note">Screensaver settings are unavailable in this configuration.</p></section>
+          : <>
+            {!voiceSource.writable && <p role="note">Screensaver settings are read-only in this installation.</p>}
+            {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing screensaver settings.</p>}
+            {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing screensaver settings.</p>}
+            {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing screensaver settings.</p>}
+            <ScreensaverSettings source={voiceSource} draft={voiceFileDraft} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} onPatch={patch} />
+          </>}
     <section className="settings-schema-section" aria-label="Custom buttons"><header><h3>Custom buttons</h3></header>
       {voiceSource === undefined ? <p role="note">Load Application configuration before editing custom buttons.</p>
         : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing custom buttons.</p>
@@ -2705,7 +2717,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     { id: 'browser', group: 'Console', label: 'This browser', keywords: 'client browser device rename identity name', content: browserDraft.content },
     { id: 'voice', group: 'Console', label: 'Voice', keywords: `davo voice assistant name context enable write tools advanced OpenAI realtime MCP ${[...voiceEnvironmentKeys].join(' ')}`, content: <>{voiceEditor}{voiceFieldsEditor}{voiceEnvironmentEditor}</> },
     { id: 'keyboard', group: 'Console', label: 'Keyboard shortcuts', keywords: 'keyboard shortcuts bindings keys prefix terminal command', content: keyboardSettings },
-    { id: 'interface', group: 'Application', label: 'Interface', keywords: 'custom buttons actions slots shell command appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers resource monitoring cpu memory disk storage wsl', content: interfaceEditor },
+    { id: 'interface', group: 'Application', label: 'Interface', keywords: 'screensaver screen saver idle inactivity automatic workspace overview custom buttons actions slots shell command appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers resource monitoring cpu memory disk storage wsl', content: interfaceEditor },
     { id: 'notes', group: 'Application', label: 'Notes', keywords: 'sent queued unlocked locked notes cleanup auto delete undo', content: renderApplicationPreferences('notes') },
     { id: 'files', group: 'Application', label: 'Files', keywords: 'default file action open preview edit editor', content: renderApplicationPreferences('files') },
     { id: 'projects', group: 'Application', label: 'Projects', keywords: 'projects repositories directories dynamic worktrees launcher paths overrides commands tasks button overrides', content: projectsEditor },

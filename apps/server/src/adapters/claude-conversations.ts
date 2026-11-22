@@ -297,7 +297,7 @@ export async function claudeConversationSummaries(directories: readonly string[]
   return summaries;
 }
 
-type AssistantRecord = { type?: unknown; isMeta?: unknown; isSidechain?: unknown; message?: { id?: unknown; role?: unknown; content?: unknown } };
+type AssistantRecord = { type?: unknown; isMeta?: unknown; isSidechain?: unknown; isApiErrorMessage?: unknown; synthetic?: unknown; message?: { id?: unknown; role?: unknown; model?: unknown; content?: unknown; stop_reason?: unknown } };
 
 // identify a typed main-thread user message rather than a tool result
 function isRealUserMessage(record: AssistantRecord): boolean {
@@ -370,7 +370,7 @@ export type ClaudeAssistantMessage = { id?: string; text?: string };
  * record's id, joined in order. Subagent (sidechain) records are skipped. `undefined` when there is
  * no assistant message; `text` is absent when the last one has no text.
  */
-export function lastAssistantMessageFromRecords(lines: Iterable<string>): ClaudeAssistantMessage | undefined {
+export function lastAssistantMessageFromRecords(lines: Iterable<string>, requireText = false): ClaudeAssistantMessage | undefined {
   let message: ClaudeAssistantMessage | undefined;
   let messageId: unknown;
   let texts: string[] = [];
@@ -378,13 +378,15 @@ export function lastAssistantMessageFromRecords(lines: Iterable<string>): Claude
     if (line === '') continue;
     let record: AssistantRecord;
     try { record = JSON.parse(line) as AssistantRecord; } catch { continue; }
-    if (record.type !== 'assistant' || record.isSidechain === true || record.message === undefined || record.message === null) continue;
+    if (record?.type !== 'assistant' || record.isSidechain === true || record.message === undefined || record.message === null) continue;
     // a new message id starts the next model message
     if (record.message.id !== messageId || messageId === undefined) { messageId = record.message.id; texts = []; }
     const content = record.message.content;
     if (typeof content === 'string') texts.push(content);
     else if (Array.isArray(content)) for (const block of content as Array<{ type?: unknown; text?: unknown }>) if (block?.type === 'text' && typeof block.text === 'string') texts.push(block.text);
     const text = texts.join('\n\n');
+    // an empty thinking or tool message is not a replacement for visible prose
+    if (requireText && !text.trim()) continue;
     message = { ...(typeof messageId === 'string' ? { id: messageId } : {}), ...(text.trim() === '' ? {} : { text }) };
   }
   return message;
@@ -395,6 +397,96 @@ const lastAssistantMessageCache = new FileChangeCache<ClaudeAssistantMessage | u
   async path => lastAssistantMessageFromRecords(await readFileTail(path, maxFinalMessageScanBytes)),
   { maxEntries: 512 }
 );
+
+// identify when a rich native transcript exposes the strict post-answer chain
+function claudeResponseHasNativeChain(records: readonly (ClaudeReplyRecord & Record<string, unknown>)[], assistant: ClaudeReplyAssistantLeaf, sessionId: string): boolean {
+  // the attachment directly after this assistant makes terminal correlation available
+  return records.some((record, index) => index > assistant.index && record.type === 'attachment'
+    && record.parentUuid === assistant.uuid && record.isSidechain === false && claudeReplySameSession(record, sessionId));
+}
+
+// retain only protocol-completed main-thread responses
+export function latestClaudeResponseFromRecords(lines: Iterable<string>): string | undefined {
+  const records: Array<ClaudeReplyRecord & Record<string, unknown>> = [];
+  const nodes = new Map<string, ClaudeReplyNode>();
+  const duplicateNodes = new Set<string>();
+  // retain valid transcript records and their exact native links
+  for (const line of lines) {
+    let parsed: unknown;
+    // malformed tail fragments cannot create completion evidence
+    try { parsed = JSON.parse(line) as unknown; } catch { continue; }
+    // reject primitives without discarding earlier proven output
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+    const record = parsed as ClaudeReplyRecord & Record<string, unknown>;
+    const index = records.push(record) - 1;
+    const uuid = claudeReplyUuid(record.uuid);
+    // duplicate identifiers make only the strict chain unusable
+    if (uuid !== undefined && !duplicateNodes.has(uuid) && !nodes.has(uuid)) nodes.set(uuid, { index, record });
+    else if (uuid !== undefined) {
+      nodes.delete(uuid);
+      duplicateNodes.add(uuid);
+    }
+  }
+  let response: string | undefined;
+  let messageId: unknown;
+  let texts: string[] = [];
+  let completed = false;
+  let eligible = true;
+  let assistantLeaf: ClaudeReplyAssistantLeaf | undefined;
+  let sessionId: string | undefined;
+  // publish one assembled message only with its strongest available proof
+  const finish = () => {
+    const text = texts.join('\n\n');
+    if (!eligible || !completed || text.trim() === '') return;
+    const strict = assistantLeaf !== undefined && sessionId !== undefined && claudeResponseHasNativeChain(records, assistantLeaf, sessionId);
+    // a correlated native chain supersedes the message-local end-turn fallback
+    if (!strict || claudeReplyTurnComplete(records, nodes, assistantLeaf, sessionId!, false)) response = text;
+  };
+  // fold split content blocks into their native message
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!;
+    // reject sidechains and non-assistant bookkeeping
+    if (record.type !== 'assistant' || record.isSidechain === true || record.message === undefined || record.message === null) continue;
+    // close one message before accumulating the next
+    if (record.message.id !== messageId || messageId === undefined) {
+      finish();
+      messageId = record.message.id;
+      texts = [];
+      completed = false;
+      eligible = true;
+      assistantLeaf = undefined;
+      sessionId = undefined;
+    }
+    const synthetic = record.isMeta === true || record.isApiErrorMessage === true || record.synthetic === true || record.message.model === '<synthetic>';
+    // one synthetic or API-error fragment invalidates the whole native message
+    if (synthetic) eligible = false;
+    else appendClaudeText(record.message.content, texts);
+    // tool-use and partial messages remain candidates until a real end turn
+    if (!synthetic && record.message.stop_reason === 'end_turn') completed = true;
+    const uuid = claudeReplyUuid(record.uuid);
+    const currentSession = typeof record.sessionId === 'string' && claudeReplySameSession(record, record.sessionId) ? record.sessionId : undefined;
+    // strict proof follows the newest valid physical fragment of this message
+    if (!synthetic && uuid !== undefined && currentSession !== undefined) {
+      assistantLeaf = { index, messageId: typeof messageId === 'string' ? messageId : '', uuid };
+      sessionId = currentSession;
+    }
+  }
+  finish();
+  return response;
+}
+
+// reuse only completion-proven replies while transcript bytes remain unchanged
+const latestResponseCache = new FileChangeCache<string | undefined>(
+  async path => latestClaudeResponseFromRecords(await readFileTail(path, maxFinalMessageScanBytes)),
+  { maxEntries: 512 }
+);
+
+// require the reported Claude session id and pane cwd before reading any response
+export async function claudeLatestResponse(id: string, cwd: string | undefined, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+  // unknown identities must never inherit another conversation's response
+  if (!validClaudeSessionId(id) || cwd === undefined) return undefined;
+  return latestResponseCache.get(transcriptPath(id, cwd, env)).catch(() => undefined);
+}
 
 // reuse the latest visible reply while discovery continues checking file metadata
 const latestMessageCache = new FileChangeCache<string | undefined>(
@@ -450,13 +542,15 @@ type ClaudeReplyRecord = TranscriptRecord & {
   subtype?: unknown;
   isMeta?: unknown;
   isSidechain?: unknown;
+  isApiErrorMessage?: unknown;
+  synthetic?: unknown;
   preventedContinuation?: unknown;
   durationMs?: unknown;
   messageCount?: unknown;
   leafUuid?: unknown;
   local_command_source?: unknown;
   local_command_run?: unknown;
-  message?: { id?: unknown; role?: unknown; content?: unknown };
+  message?: { id?: unknown; role?: unknown; model?: unknown; content?: unknown; stop_reason?: unknown };
 };
 
 type ClaudeReplyNode = { index: number; record: ClaudeReplyRecord & Record<string, unknown> };
@@ -530,22 +624,23 @@ function claudeReplySameSession(record: ClaudeReplyRecord, sessionId: string): b
 }
 
 // prove the latest physical assistant record reached the native terminal leaf
-function claudeReplyTurnComplete(records: readonly (ClaudeReplyRecord & Record<string, unknown>)[], nodes: ReadonlyMap<string, ClaudeReplyNode>, assistant: ClaudeReplyAssistantLeaf | undefined, sessionId: string): boolean {
+function claudeReplyTurnComplete(records: readonly (ClaudeReplyRecord & Record<string, unknown>)[], nodes: ReadonlyMap<string, ClaudeReplyNode>, assistant: ClaudeReplyAssistantLeaf | undefined, sessionId: string, latestOnly = true): boolean {
   // no authored assistant leaf means no reply can be terminal
   if (assistant === undefined) return false;
-  let latestMarker: ClaudeReplyRecord | undefined;
-  // native persistence can place the terminal marker before or after the terminal record
+  let turnEnd = records.length;
+  // the next main-thread user or assistant record begins another turn
   for (let index = assistant.index + 1; index < records.length; index += 1) {
     const record = records[index]!;
-    // only the latest marker from this conversation can corroborate completion
-    if (record.type === 'last-prompt' && claudeReplySameSession(record, sessionId)) latestMarker = record;
+    const sameSession = record.sessionId === undefined || claudeReplySameSession(record, sessionId);
+    // session files may omit the redundant session id on message records
+    if (sameSession && record.isSidechain !== true && (record.type === 'user' || record.type === 'assistant')) {
+      turnEnd = index;
+      break;
+    }
   }
-  const latestLeafUuid = claudeReplyUuid(latestMarker?.leafUuid);
-  // missing or malformed latest markers never fall back to an older leaf
-  if (latestLeafUuid === undefined) return false;
   let latestTerminal: { attachmentUuid: string; terminalUuid: string } | undefined;
   // inspect each possible terminal after the latest assistant record
-  for (let index = assistant.index + 1; index < records.length; index += 1) {
+  for (let index = assistant.index + 1; index < turnEnd; index += 1) {
     const terminal = records[index]!;
     // require the pinned main-thread terminal shape and current session
     if (terminal.type !== 'system' || terminal.subtype !== 'turn_duration' || terminal.isMeta !== false || terminal.isSidechain !== false
@@ -572,7 +667,24 @@ function claudeReplyTurnComplete(records: readonly (ClaudeReplyRecord & Record<s
     // retain the newest fully linked terminal for latest-marker corroboration
     latestTerminal = { attachmentUuid, terminalUuid };
   }
-  return latestTerminal !== undefined && (latestTerminal.terminalUuid === latestLeafUuid || latestTerminal.attachmentUuid === latestLeafUuid);
+  // an incomplete native chain cannot establish either historical or latest completion
+  if (latestTerminal === undefined) return false;
+  let turnMarkerIndex: number | undefined;
+  let latestSessionMarkerIndex: number | undefined;
+  // select physical marker order before validating leaf shape
+  for (let index = assistant.index + 1; index < records.length; index += 1) {
+    const record = records[index]!;
+    // only same-session markers participate in this conversation
+    if (record.type !== 'last-prompt' || !claudeReplySameSession(record, sessionId)) continue;
+    latestSessionMarkerIndex = index;
+    // historical completion uses the actual last marker inside this turn
+    if (index < turnEnd) turnMarkerIndex = index;
+  }
+  // current-source callers require this turn's marker to remain physically latest
+  if (latestOnly && latestSessionMarkerIndex !== turnMarkerIndex) return false;
+  const latestLeafUuid = turnMarkerIndex === undefined ? undefined : claudeReplyUuid(records[turnMarkerIndex]!.leafUuid);
+  // malformed or superseding markers never fall back to earlier valid evidence
+  return latestLeafUuid !== undefined && (latestTerminal.terminalUuid === latestLeafUuid || latestTerminal.attachmentUuid === latestLeafUuid);
 }
 
 // extract only text a person typed, excluding attachments and tool results

@@ -126,6 +126,13 @@ export async function openPaneThreads(root: number): Promise<{ rollouts: Rollout
   return { rollouts: [...rollouts.values()], writers };
 }
 
+// require this process tree to own the exact conversation's exclusive writer lock
+export async function codexProcessOwnsConversation(pid: number, conversationId: string): Promise<boolean> {
+  // malformed identifiers never reach proc or profile paths
+  if (!validCodexThreadId(conversationId)) return false;
+  return (await writerOwnedRollout(pid))?.id === conversationId;
+}
+
 // parse bounded metadata from one Codex rollout
 function parseRolloutMetadata(lines: readonly string[]): RolloutMetadata | undefined {
   try {
@@ -319,6 +326,14 @@ async function rolloutByWriters(writers: ReadonlySet<string>, open: readonly Rol
   return unresolved.size === 0 && main.length === 1 ? main[0] : undefined;
 }
 
+// resolve one unambiguous top-level writer without any descriptor or cwd fallback
+async function writerOwnedRollout(pid: number): Promise<{ id: string; file: string } | undefined> {
+  const { rollouts, writers } = await openPaneThreads(pid);
+  // missing writer evidence cannot prove a current native conversation
+  if (writers.size === 0) return undefined;
+  return await rolloutByWriters(writers, rollouts);
+}
+
 // the pane's single top-level rollout or the legacy directory fallback
 async function paneRollout(pane: { pid: number; cwd?: string }): Promise<{ id: string; file: string } | undefined> {
   const { rollouts, writers } = await openPaneThreads(pane.pid);
@@ -500,6 +515,101 @@ export async function codexLatestMessage(pane: { pid: number; cwd?: string; conv
   // fail closed when the pane no longer matches its reported conversation
   if (selected === undefined || (pane.conversationId !== undefined && selected.id !== pane.conversationId)) return undefined;
   return latestMessageCache.get(selected.file).catch(() => undefined);
+}
+
+// retain the latest protocol-completed response, never unfinished prose
+export function latestCodexResponseFromRecords(lines: Iterable<string>, threadId?: string): string | undefined {
+  let response: string | undefined;
+  let activeTurnId: string | undefined;
+  let pending: { text: string; turnId?: string } | undefined;
+  // fold candidates only within their terminal turn boundary
+  for (const line of lines) {
+    let record: { type?: unknown; payload?: { type?: unknown; thread_id?: unknown; turn_id?: unknown; role?: unknown; phase?: unknown; content?: unknown; message?: unknown; last_agent_message?: unknown; internal_chat_message_metadata_passthrough?: { turn_id?: unknown }; item?: { type?: unknown; turn_id?: unknown; phase?: unknown; content?: unknown } } } | null;
+    // ignore malformed tail fragments without replacing proven output
+    try { record = JSON.parse(line) as typeof record; } catch { continue; }
+    const payload = record?.payload;
+    // another thread cannot complete or replace this conversation's answer
+    if (payload == null || (threadId !== undefined && typeof payload.thread_id === 'string' && payload.thread_id !== threadId)) continue;
+    const turnId = typeof payload.turn_id === 'string' ? payload.turn_id
+      : typeof payload.internal_chat_message_metadata_passthrough?.turn_id === 'string' ? payload.internal_chat_message_metadata_passthrough.turn_id
+        : undefined;
+    // a new native turn replaces only unfinished prose
+    if (record?.type === 'event_msg' && payload.type === 'task_started') {
+      activeTurnId = turnId;
+      pending = undefined;
+      continue;
+    }
+    // a persisted user boundary can carry the next turn's native id
+    if (record?.type === 'event_msg' && payload.type === 'user_message'
+      || record?.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
+      activeTurnId = turnId;
+      pending = undefined;
+      continue;
+    }
+    // an abort applies only to the same native turn generation
+    if (record?.type === 'event_msg' && payload.type === 'turn_aborted') {
+      if (turnId === activeTurnId) {
+        activeTurnId = undefined;
+        pending = undefined;
+      }
+      continue;
+    }
+    // terminal completion is the only event allowed to publish this turn
+    if (record?.type === 'event_msg' && payload.type === 'task_complete') {
+      const terminal = assistantText(payload.last_agent_message);
+      // the terminal's own answer is already correlated by the native event
+      if (terminal !== undefined) response = terminal;
+      // an empty terminal may promote only prose from its exact native turn
+      else if (pending !== undefined && pending.turnId === turnId) response = pending.text;
+      // retire only the matching active generation
+      if (activeTurnId === turnId) {
+        activeTurnId = undefined;
+        pending = undefined;
+      }
+      continue;
+    }
+    const prose = record?.type === 'response_item' && payload.type === 'message' && payload.role === 'assistant' ? payload
+      : record?.type === 'event_msg' && payload.type === 'item_completed' && payload.item?.type === 'AgentMessage' ? payload.item
+        : record?.type === 'event_msg' && payload.type === 'agent_message' ? payload : undefined;
+    // commentary and nonmessage activity never become answer candidates
+    if (prose === undefined || prose.phase !== undefined && prose.phase !== null && prose.phase !== 'final_answer') continue;
+    const text = assistantText(prose.content ?? ('message' in prose ? prose.message : undefined));
+    const nestedTurnId = typeof prose.turn_id === 'string' ? prose.turn_id : undefined;
+    // enclosing and nested native attribution must describe the same turn
+    if (turnId !== undefined && nestedTurnId !== undefined && turnId !== nestedTurnId) continue;
+    const proseTurnId = nestedTurnId ?? turnId ?? activeTurnId;
+    // ignore prose explicitly attributed to another active turn
+    if (text !== undefined && (activeTurnId === undefined || proseTurnId === activeTurnId)) pending = { text, ...(proseTurnId === undefined ? {} : { turnId: proseTurnId }) };
+  }
+  return response;
+}
+
+// reuse a bounded completion parse until the exact rollout changes
+const latestResponseCache = new FileChangeCache<string | undefined>(
+  async file => latestCodexResponseFromRecords(await readFileTail(file, maxCompletionScanBytes), file.slice(-42, -6)),
+  { maxEntries: 1_024 }
+);
+
+/** read the latest completed response from the writer-owned current rollout */
+export async function codexLatestResponse(pane: { pid: number; agentPid?: number; cwd?: string; conversationId?: string }): Promise<string | undefined> {
+  const threadId = pane.conversationId;
+  // reject malformed reported identities before native discovery
+  if (threadId !== undefined && !validCodexThreadId(threadId)) return undefined;
+  // use the same writer-aware resolver as discovery and reply inference
+  const selected = await paneRollout({ pid: pane.agentPid ?? pane.pid, cwd: pane.cwd }).catch(() => undefined);
+  // never fall back around unresolved writer evidence or a mismatched reported id
+  if (selected === undefined || threadId !== undefined && selected.id !== threadId) return undefined;
+  return latestResponseCache.get(selected.file).catch(() => undefined);
+}
+
+/** read a preview response only from the exact process tree's unique writer */
+export async function codexLatestWriterResponse(pid: number, conversationId: string): Promise<string | undefined> {
+  // preview attribution never uses legacy descriptor or working-directory fallbacks
+  if (!validCodexThreadId(conversationId)) return undefined;
+  const selected = await writerOwnedRollout(pid).catch(() => undefined);
+  // a missing, unresolved or different writer withholds the response
+  if (selected?.id !== conversationId) return undefined;
+  return latestResponseCache.get(selected.file).catch(() => undefined);
 }
 
 // normalize whitespace and clamp a Codex display string to the shared bound, so

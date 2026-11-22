@@ -38,6 +38,43 @@ describe('DiscoveryService reply source targets', () => {
     expect(service.replySuggestionTarget(agent!.id)).toBeUndefined();
   });
 
+  it('requires the replacement Claude process to report its own conversation', async () => {
+    const firstSession = '11111111-2222-4333-8444-555555555555';
+    const secondSession = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    let process = { kind: 'claude' as const, pid: 456, startTime: '100', wrapped: false };
+    const processes = { recognizeAgent: vi.fn(async () => ({ ...process })) };
+    const pane = {
+      paneId: '%4', sessionId: '$0', pid: 123, path: '/tmp', title: 'Ready',
+      reportedAttention: 'finished', reportedSession: firstSession,
+      reportedSessionProcesses: `${firstSession}|456:100` as string | undefined
+    };
+    const service = new DiscoveryService(socketFinder(), paneLister([pane]) as never, processes);
+    const [agent] = await service.refresh(true);
+    const original = service.replySuggestionTarget(agent!.id)!;
+    await expect(service.previewConversationOwned(original)).resolves.toBe(true);
+
+    // a session-only update cannot reuse ancestry reported for another session
+    pane.reportedSession = secondSession;
+    await service.refresh(true);
+    await expect(service.previewConversationOwned(service.replySuggestionTarget(agent!.id)!)).resolves.toBe(false);
+
+    // absent proof remains unavailable even while the process stays live
+    pane.reportedSessionProcesses = undefined;
+    await service.refresh(true);
+    await expect(service.previewConversationOwned(service.replySuggestionTarget(agent!.id)!)).resolves.toBe(false);
+
+    // a retained report from the previous process cannot authorize the replacement
+    process = { ...process, pid: 789, startTime: '200' };
+    await service.refresh(true);
+    const mixed = service.replySuggestionTarget(agent!.id)!;
+    await expect(service.previewConversationOwned(mixed)).resolves.toBe(false);
+
+    // a hook report from the replacement establishes its exact lifetime
+    pane.reportedSessionProcesses = `${secondSession}|789:200`;
+    await service.refresh(true);
+    await expect(service.previewConversationOwned(service.replySuggestionTarget(agent!.id)!)).resolves.toBe(true);
+  });
+
   it('publishes an observed source key for a tmux message question', async () => {
     const latestMessage = vi.spyOn(adapterFor('codex')!.conversations!, 'latestMessage').mockResolvedValue('Should I deploy now?');
     const service = new DiscoveryService(socketFinder(), paneLister([{

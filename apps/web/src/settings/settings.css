@@ -570,3 +570,19 @@ button.settings-installation-file-link:disabled { background: transparent; color
 
 /* keep read and write descriptions on separate lines within each capability */
 .settings-mcp-table small { white-space: pre-line; }
+
+/* keep automatic screensaver controls grouped beneath the master gate */
+.settings-screensaver-auto { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); }
+.settings-screensaver-auto-toggle { display: flex; min-width: 0; align-items: flex-start; gap: .65rem; color: var(--text); cursor: pointer; }
+.settings-screensaver-auto-toggle > input { width: 1rem; height: 1rem; margin-top: .1rem; accent-color: var(--mauve); }
+.settings-screensaver-auto-toggle > span { display: grid; min-width: 0; gap: .2rem; }
+.settings-screensaver-auto-toggle small { color: var(--subtext-0); font-size: .62rem; line-height: 1.4; }
+.settings-screensaver-minutes { display: flex; flex: none; align-items: center; gap: .55rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-screensaver-minutes input { width: 5.5rem; }
+.settings-screensaver-auto:has(input:disabled) { opacity: .65; }
+
+/* stack the secondary value on narrow settings panels */
+@container settings-panel (max-width: 620px) {
+  .settings-screensaver-auto { align-items: stretch; flex-direction: column; }
+  .settings-screensaver-minutes { justify-content: space-between; }
+}

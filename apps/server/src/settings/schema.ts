@@ -50,6 +50,18 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
     label: 'Resource monitoring',
     description: 'CPU and memory update every 1 second while a server flyout is open and every 1 minute while closed. Disk usage updates every 10 minutes.'
   });
+  const screensaver = schema.properties!.screensaver!;
+  screensaver.label = 'Screensaver';
+  screensaver.description = 'Show a passive overview of every open Workspace and its Agents.';
+  // label the persisted policy behind the composite Interface control
+  Object.assign(screensaver.properties!.enabled!, {
+    label: 'Enable screensaver',
+    description: 'Allow the configured shortcut and optional automatic start after saving and restarting RAC.'
+  });
+  Object.assign(screensaver.properties!.idleMinutes!, {
+    label: 'Idle minutes',
+    description: 'Start automatically after this many minutes without browser input. Zero disables automatic start.'
+  });
   // keep legacy source compatibility without publishing an obsolete control
   delete schema.properties!.integrations!.properties!.multiInstance;
   delete schema.properties!.remoteServers!.items!.properties!.icon;

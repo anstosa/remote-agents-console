@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { applyPatch } from "../../server/src/settings/patches.js";
 import { mockAccountSocket } from "./account-fixture.js";
+import { confirmSettingsDiscard } from "./settings-confirmation-helpers.js";
 
 type SettingsPatch = {
   op: "set" | "remove" | "insert" | "move";
@@ -160,6 +161,23 @@ const appSchema = {
     name: { type: "string", label: "Configuration server name" },
     publicOrigin: { type: "string", label: "Public URL" },
     behavior: behaviorSchema,
+    screensaver: {
+      type: "object",
+      label: "Screensaver",
+      default: { enabled: false, idleMinutes: 0 },
+      properties: {
+        enabled: {
+          type: "boolean",
+          label: "Enable screensaver",
+          default: false,
+        },
+        idleMinutes: {
+          type: "number",
+          label: "Idle minutes",
+          default: 0,
+        },
+      },
+    },
     keys: {
       type: "record",
       label: "Key tables",
@@ -760,6 +778,63 @@ test("keeps protected keyboard defaults masked and renders their reuse switch", 
   ).toHaveCount(0);
   expect(state.reveals).toBe(0);
   expect(state.saves).toHaveLength(0);
+});
+
+test("maps screensaver automatic start to one numeric application setting", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const { settings, state } = await setupDefaults(page);
+  // keep the composite control off the generic Application tree
+  await expect(settings.locator('[data-settings-path="screensaver"]')).toHaveCount(0);
+  await selectSection(settings, "interface", "Interface");
+  const master = settings.getByRole("switch", { name: "Enable screensaver", exact: true });
+  const automatic = settings.getByRole("checkbox", { name: "Start screensaver automatically", exact: true });
+  const minutes = settings.getByRole("spinbutton", { name: "Screensaver idle minutes", exact: true });
+  await expect(master).not.toBeChecked();
+  await expect(automatic).not.toBeChecked();
+  await expect(automatic).toBeDisabled();
+  await expect(minutes).toBeDisabled();
+  await expect(minutes).toHaveValue("5");
+  const search = settings.getByRole("searchbox", { name: "Search settings", exact: true });
+  await search.fill("screensaver idle");
+  const result = page.getByRole("listbox", { name: "Settings search results", exact: true }).getByRole("option").filter({ hasText: "Screensaver" }).first();
+  await expect(result).toContainText("Interface");
+  await search.fill("");
+
+  // discard both fields through the shared application transaction
+  await master.check();
+  await automatic.check();
+  await minutes.fill("12");
+  await settings.getByRole("button", { name: "Discard changes", exact: true }).click();
+  await confirmSettingsDiscard(page);
+  await expect(master).not.toBeChecked();
+  await expect(automatic).not.toBeChecked();
+  await expect(automatic).toBeDisabled();
+  expect(state.saves).toHaveLength(0);
+
+  // map an unchecked automatic control to numeric zero
+  await master.check();
+  await automatic.check();
+  await minutes.fill("12");
+  await automatic.uncheck();
+  await expect(minutes).toBeDisabled();
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  expect(state.value.screensaver).toEqual({ enabled: true, idleMinutes: 0 });
+  expect(state.saves[0]!.changes[0]!.patches).toContainEqual({ op: "set", path: ["screensaver", "idleMinutes"], value: 0 });
+
+  // preserve the remembered positive threshold while the master feature is disabled
+  await automatic.check();
+  await expect(minutes).toHaveValue("12");
+  await master.uncheck();
+  await expect(automatic).toBeDisabled();
+  await expect(automatic).toBeChecked();
+  await expect(minutes).toHaveValue("12");
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => state.saves.length).toBe(2);
+  expect(state.value.screensaver).toEqual({ enabled: false, idleMinutes: 12 });
+  const patches = state.saves[1]!.changes[0]!.patches ?? [];
+  expect(patches).toContainEqual({ op: "set", path: ["screensaver", "idleMinutes"], value: 12 });
+  expect(patches.at(-1)).toEqual({ op: "set", path: ["screensaver", "enabled"], value: false });
 });
 
 test("shows read-only defaults while disabling every mutation", async ({

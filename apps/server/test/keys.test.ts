@@ -269,3 +269,16 @@ describe('terminalBindingCommand', () => {
     expect(terminalBindingCommand(undefined, '__proto__', 'x')).toBeUndefined();
   });
 });
+
+// keep screensaver entry in the same configurable key tables as other commands
+describe('screensaver shortcut', () => {
+  // preserve the requested default and allow ordinary removal and remapping
+  it('registers ctrl+l and supports server key overrides', () => {
+    expect(keyActions.screensaver?.description).toBe('Start screensaver');
+    expect(defaultKeyTables.root?.['C-l']).toBe('screensaver');
+    const keys = parseKeysConfig({ root: { 'C-l': null, 'C-F8': 'screensaver' } });
+    const resolved = resolveKeyTables(keys);
+    expect(resolved.root?.['C-l']?.source).toBe('removed');
+    expect(resolved.root?.['C-F8']?.binding).toBe('screensaver');
+  });
+});

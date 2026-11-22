@@ -76,9 +76,9 @@ describe('bridged Codex catalog projection', () => {
     const codexManifest = manifest(response, 'codex');
 
     expect(codexProbe).toHaveBeenCalledOnce();
-    expect(codexProbe).toHaveBeenCalledWith(codex, context, 5_000);
+    expect(codexProbe).toHaveBeenCalledWith(codex, context, 25_000);
     expect(codexProbe.mock.calls[0]?.[0]).not.toBe(omx);
-    expect(omxProbe).toHaveBeenCalledWith(omx, context, 5_000);
+    expect(omxProbe).toHaveBeenCalledWith(omx, context, 25_000);
     expect(createCodexClient).not.toHaveBeenCalled();
     expect(codexManifest.modelPolicy).toMatchObject({
       state: 'native-default',
@@ -91,6 +91,33 @@ describe('bridged Codex catalog projection', () => {
     expect(JSON.stringify(response)).not.toContain('native-secret');
     expect(JSON.stringify(response)).not.toContain('codex-secret');
     expect(JSON.stringify(response)).not.toContain('omx-secret');
+  });
+
+  // native config may choose effort without choosing a model
+  it('uses configured effort with the recommended model when config omits model', async () => {
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/host-tmux');
+    const probe = async () => hostProbe({
+      config: { config: { model: null, model_reasoning_effort: 'high' } },
+      pages: [{ data: [nativeModel('openai/gpt-4', ['low', 'high'], 'low', true)], nextCursor: null }]
+    });
+    const service = new LaunchOptionsService({ codex: codexConfig() }, { codexHostProbe: probe });
+    const result = manifest(await service.list({ cwd: '/console/worktree', hostCwd: '/host/worktree', home: '/host/accounts/team' }), 'codex');
+    expect(result.modelPolicy.allowed).toEqual([{ model: 'openai/gpt-4', effort: 'high', available: true }]);
+  });
+
+  // a native default with explicit sandbox flags still needs live capability evidence
+  it('rejects retired security capabilities during native-default confirmation', async () => {
+    vi.stubEnv('RAC_HOST_TMUX_DIR', undefined);
+    let now = 0;
+    const capabilities = vi.fn().mockResolvedValueOnce({ filesystem: true, approvals: true, bypass: true }).mockResolvedValueOnce({});
+    const service = new LaunchOptionsService({ codex: codexConfig() }, { capabilities, now: () => now, ttlMs: 1 });
+    const context = { cwd: '/console/worktree', targetId: 'worktree' };
+    const prepared = await service.prepare('codex', { kind: 'codex', model: { mode: 'native-default' }, security: { filesystem: 'read-only' } }, context);
+    expect(prepared).toMatchObject({ nativeDefault: true, security: { filesystem: 'read-only' } });
+    expect(prepared.model).toBeUndefined();
+    now += 2;
+    await expect(service.revalidate(prepared, context)).rejects.toMatchObject({ code: 'launch_options_stale' });
+    expect(capabilities).toHaveBeenCalledTimes(2);
   });
 
   // accept proven model grammar without claiming unproven filesystem or approval controls
@@ -142,6 +169,91 @@ describe('bridged Codex catalog projection', () => {
     expect(probe).toHaveBeenCalledTimes(2);
     expect(createCodexClient).not.toHaveBeenCalled();
     expect(capabilities).not.toHaveBeenCalled();
+  });
+
+  // preserve explicit short deadlines for deterministic callers
+  it('honors a shorter configured deadline for bridged Codex and OMX probes', async () => {
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/host-tmux');
+    const codex = codexConfig();
+    const omx = { program: '/host/tools/omx', args: [], env: {}, launchable: true };
+    const codexProbe = vi.fn(async () => hostProbe({ identity: 'codex' }));
+    const omxProbe = vi.fn(async () => hostProbe({ identity: 'omx' }));
+    const service = new LaunchOptionsService({ codex, omx }, { codexHostProbe: codexProbe, omxProbe, deadlineMs: 600 });
+    const context = { cwd: '/console/repo', hostCwd: '/host/repo', home: '/host/home' };
+
+    await service.list(context);
+
+    expect(codexProbe).toHaveBeenCalledWith(codex, context, 600);
+    expect(omxProbe).toHaveBeenCalledWith(omx, context, 600);
+  });
+
+  // keep one failed prepare to one host budget and retry on the next request
+  it('does not repeat a failed host probe during prepare and retries later', async () => {
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/host-tmux');
+    const config = codexConfig({ allowedModels: [{ model: 'openai/gpt-4' }] });
+    const probe = vi.fn()
+      .mockRejectedValueOnce(new Error('host account unavailable'))
+      .mockResolvedValueOnce(hostProbe());
+    const service = new LaunchOptionsService({ codex: config }, { codexHostProbe: probe });
+    const context = { cwd: '/console/repo', hostCwd: '/host/repo', home: '/host/home' };
+    const choice = { kind: 'codex' as const, model: { mode: 'model' as const, id: 'openai/gpt-4' } };
+
+    await expect(service.prepare('codex', choice, context)).rejects.toMatchObject({ code: 'launch_option_unsupported' });
+    expect(probe).toHaveBeenCalledTimes(1);
+    await expect(service.prepare('codex', choice, context)).resolves.toMatchObject({ kind: 'codex', model: { model: 'openai/gpt-4' } });
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+
+  // keep an opaque native launch within the evidence budget acquired by preparation
+  it('revalidates a failed native-default snapshot without another host probe', async () => {
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/host-tmux');
+    const probe = vi.fn(async () => { throw new Error('host account unavailable'); });
+    const service = new LaunchOptionsService({ codex: codexConfig() }, { codexHostProbe: probe });
+    const context = { cwd: '/console/repo', hostCwd: '/host/repo', home: '/host/home' };
+
+    const prepared = await service.prepare('codex', { kind: 'codex' }, context);
+    await expect(service.revalidate(prepared, context)).resolves.toBeUndefined();
+
+    expect(prepared).toMatchObject({ nativeDefault: true });
+    expect(probe).toHaveBeenCalledOnce();
+  });
+
+  // keep an unchanged restart within its first bounded host failure
+  it('revalidates keep-current after one failed host probe', async () => {
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/host-tmux');
+    const probe = vi.fn(async () => { throw new Error('host account unavailable'); });
+    const service = new LaunchOptionsService({ codex: codexConfig({ allowedModels: [{ model: 'openai/gpt-4' }] }) }, { codexHostProbe: probe });
+    const context = { cwd: '/console/repo', hostCwd: '/host/repo', home: '/host/home', restart: true as const, currentKind: 'codex' as const, currentModel: { model: 'openai/gpt-4' } };
+
+    const prepared = await service.prepare('codex', { kind: 'codex' }, context);
+    await expect(service.revalidate(prepared, context)).resolves.toBeUndefined();
+    await expect(service.revalidate(prepared, { ...context, targetId: 'agent:replacement' })).rejects.toMatchObject({ code: 'launch_options_stale' });
+
+    expect(prepared).toMatchObject({ keepCurrent: true });
+    expect(probe).toHaveBeenCalledOnce();
+  });
+
+  // reject evidence retired while the pre-side-effect confirmation is in flight
+  it('rejects an account invalidated during revalidation', async () => {
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/host-tmux');
+    let now = 0;
+    let release: (() => void) | undefined;
+    const confirmation = new Promise<void>(resolve => { release = resolve; });
+    const probe = vi.fn()
+      .mockResolvedValueOnce(hostProbe())
+      .mockImplementationOnce(async () => { await confirmation; return hostProbe(); });
+    const service = new LaunchOptionsService({ codex: codexConfig({ allowedModels: [{ model: 'openai/gpt-4' }] }) }, { codexHostProbe: probe, now: () => now, ttlMs: 1 });
+    const context = { cwd: '/console/repo', hostCwd: '/host/repo', home: '/host/home' };
+    const prepared = await service.prepare('codex', { kind: 'codex', model: { mode: 'model', id: 'openai/gpt-4' } }, context);
+    now = 2;
+
+    const pending = service.revalidate(prepared, context);
+    await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+    service.invalidate('codex');
+    release?.();
+
+    await expect(pending).rejects.toMatchObject({ code: 'launch_options_stale' });
+    expect(probe).toHaveBeenCalledTimes(2);
   });
 });
 

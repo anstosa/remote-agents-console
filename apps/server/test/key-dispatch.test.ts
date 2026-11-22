@@ -22,11 +22,22 @@ beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
 
 describe('key dispatcher', () => {
+  // ordinary unbound terminal keys remain native input
   it('passes keys with no root binding straight through', () => {
     const { press, ran } = setup();
     expect(press('a')).toBe('pass');
-    expect(press('C-l')).toBe('pass');
+    expect(press('C-r')).toBe('pass');
     expect(ran).toEqual([]);
+  });
+
+  // the master feature gate declines both default and remapped shortcuts
+  it('passes disabled screensaver shortcuts through without marking a match', () => {
+    const defaults = setup({}, ['screensaver']);
+    expect(defaults.press('C-l')).toBe('pass');
+    expect(defaults.matched).not.toHaveBeenCalled();
+    const remapped = setup({ root: { 'C-l': null, 'C-F8': 'screensaver' } }, ['screensaver']);
+    expect(remapped.press('C-F8')).toBe('pass');
+    expect(remapped.matched).not.toHaveBeenCalled();
   });
 
   it('runs a root action and lets a declining one pass', () => {

@@ -13,6 +13,8 @@ const maxOutputBytes = 900 * 1024;
 const maxProtocolSessionBytes = 2 * maxOutputBytes;
 const maxPages = 10;
 const maxModels = 500;
+// match the bounded Codex host watchdog in launch/omx-catalog.ts
+const maxCodexProbeMs = 25_000;
 const claudeIsolationArgs = [
   "--safe-mode", "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
   "--permission-prompts", "none", "--permission-mode", "dontAsk", "--no-session-persistence",
@@ -58,7 +60,7 @@ export async function readDiscoveryRequest(path) {
   let value;
   try { value = JSON.parse(await readFile(path, "utf8")); } catch { throw failure("invalid_request"); }
   // reject malformed request fields
-  if (value === null || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || value.kind !== undefined && value.kind !== "omx" && value.kind !== "codex" && value.kind !== "claude" || typeof value.program !== "string" || !isAbsolute(value.program) || value.program.length > 4096 || value.program.includes("\0") || !Array.isArray(value.args) || value.args.length > 128 || !value.args.every(arg => typeof arg === "string" && arg.length <= 8192 && !arg.includes("\0")) || typeof value.cwd !== "string" || !isAbsolute(value.cwd) || value.cwd.length > 4096 || value.cwd.includes("\0") || value.home !== undefined && (typeof value.home !== "string" || !isAbsolute(value.home) || value.home.length > 4096 || value.home.includes("\0")) || value.env === null || typeof value.env !== "object" || Array.isArray(value.env) || Object.keys(value.env).length > 128 || !Object.entries(value.env).every(([key, entry]) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) && typeof entry === "string" && entry.length <= 32_768 && !entry.includes("\0")) || !Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1 || value.timeoutMs > 10_000 || value.expiresAt !== undefined && (!Number.isSafeInteger(value.expiresAt) || value.expiresAt < 1) || Object.keys(value).some(key => !["version", "kind", "program", "args", "cwd", "home", "env", "timeoutMs", "expiresAt"].includes(key))) throw failure("invalid_request");
+  if (value === null || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || value.kind !== undefined && value.kind !== "omx" && value.kind !== "codex" && value.kind !== "claude" || typeof value.program !== "string" || !isAbsolute(value.program) || value.program.length > 4096 || value.program.includes("\0") || !Array.isArray(value.args) || value.args.length > 128 || !value.args.every(arg => typeof arg === "string" && arg.length <= 8192 && !arg.includes("\0")) || typeof value.cwd !== "string" || !isAbsolute(value.cwd) || value.cwd.length > 4096 || value.cwd.includes("\0") || value.home !== undefined && (typeof value.home !== "string" || !isAbsolute(value.home) || value.home.length > 4096 || value.home.includes("\0")) || value.env === null || typeof value.env !== "object" || Array.isArray(value.env) || Object.keys(value.env).length > 128 || !Object.entries(value.env).every(([key, entry]) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) && typeof entry === "string" && entry.length <= 32_768 && !entry.includes("\0")) || !Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1 || value.timeoutMs > (value.kind === "claude" ? 10_000 : maxCodexProbeMs) || value.expiresAt !== undefined && (!Number.isSafeInteger(value.expiresAt) || value.expiresAt < 1) || Object.keys(value).some(key => !["version", "kind", "program", "args", "cwd", "home", "env", "timeoutMs", "expiresAt"].includes(key))) throw failure("invalid_request");
   return value;
 }
 

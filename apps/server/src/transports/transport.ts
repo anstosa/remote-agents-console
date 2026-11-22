@@ -1,4 +1,5 @@
 import type { AgentKind } from '../adapters/types.js';
+import type { TerminalPreview } from '../adapters/terminal-preview.js';
 import type { Agent } from '../domain/models.js';
 
 /**
@@ -58,4 +59,8 @@ export interface AgentTransport {
   latestAnswer(agentId: string): Promise<string | undefined>;
   /** The latest `rows` lines the Agent shows, and whether it shows earlier ones; undefined when unreadable. */
   recentLines(agentId: string, rows: number): Promise<{ text: string; older: boolean } | undefined>;
+  /** A passive text preview with display colors but no interactive terminal controls. */
+  previewOutput?(agentId: string, rows: number, expectedIdentity?: string): Promise<TerminalPreview | undefined>;
+  /** The current Conversation's answer when the transport can read beyond the visible screen. */
+  previewAnswer?(agentId: string, expectedIdentity?: string): Promise<string | undefined>;
 }

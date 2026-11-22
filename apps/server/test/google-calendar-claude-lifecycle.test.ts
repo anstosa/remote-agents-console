@@ -125,7 +125,10 @@ describe('Claude managed lifecycle hook', () => {
     await test.invokeAttention(['working'], startPayload(prompt));
     expect(await test.state()).toEqual(original);
     await expect(readFile(test.spool, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await test.commands()).toEqual([['set-option', '-p', '-t', '%7', '@rac_attention', 'working', ';', 'set-option', '-p', '-t', '%7', '@rac_question', '', ';', 'set-option', '-p', '-t', '%7', '@rac_session', sessionId]]);
+    const [initialAttention] = await test.commands();
+    expect(initialAttention?.slice(0, 20)).toEqual(['set-option', '-p', '-t', '%7', '@rac_attention', 'working', ';', 'set-option', '-p', '-t', '%7', '@rac_question', '', ';', 'set-option', '-p', '-t', '%7', '@rac_session', sessionId]);
+    expect(initialAttention?.slice(20, 26)).toEqual([';', 'set-option', '-p', '-t', '%7', '@rac_session_processes']);
+    expect(initialAttention?.[26]).toMatch(new RegExp(`^${sessionId}\\|\\d+:\\d+(?:,\\d+:\\d+)*$`, 'u'));
 
     await test.invokeAttention(['working', '--lifecycle', 'start'], startPayload(prompt));
     const question = questionPayload();

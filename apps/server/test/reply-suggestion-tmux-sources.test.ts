@@ -212,6 +212,7 @@ describe('TmuxReplySuggestionSources', () => {
     forwardSpoof.splice(6, 2, forwardSpoof[7]!, forwardSpoof[6]!);
     const duplicate = [...claudeTerminalRecords(sessionId, 'assistant-1', 'duplicate'), { type: 'future-record', uuid: 'terminal-duplicate', sessionId }];
     const latestLeafMismatch = [...claudeTerminalRecords(sessionId, 'assistant-1', 'latest-leaf'), { type: 'last-prompt', lastPrompt: 'omitted', leafUuid: 'not-the-terminal', sessionId }];
+    const malformedLatestLeaf = [...claudeTerminalRecords(sessionId, 'assistant-1', 'malformed-leaf'), { type: 'last-prompt', lastPrompt: 'omitted', sessionId }];
     const siblingLeaf = [
       { type: 'attachment', uuid: 'attachment-sibling', parentUuid: 'assistant-1', sessionId, session_id: sessionId, isSidechain: false },
       ...claudeTerminalRecords(sessionId, 'assistant-1', 'sibling'),
@@ -232,7 +233,7 @@ describe('TmuxReplySuggestionSources', () => {
       message: { id: 'empty', role: 'assistant', content: [{ type: 'thinking', thinking: 'private' }, { type: 'tool_use', name: 'none' }] }
     };
     const staleVisibleReply = [...initialRecords, ...claudeTerminalRecords(sessionId, 'assistant-1', 'valid'), emptyAssistant, ...claudeTerminalRecords(sessionId, 'assistant-empty', 'empty')];
-    const invalidTerminals = [priorTurn, unrelated, wrongSession, [...initialRecords, ...leafMismatch], [...initialRecords, ...forwardSpoof], [...initialRecords, ...duplicate], [...initialRecords, ...latestLeafMismatch], [...initialRecords, ...siblingLeaf], oldAttachmentLeaf, staleVisibleReply];
+    const invalidTerminals = [priorTurn, unrelated, wrongSession, [...initialRecords, ...leafMismatch], [...initialRecords, ...forwardSpoof], [...initialRecords, ...duplicate], [...initialRecords, ...latestLeafMismatch], [...initialRecords, ...malformedLatestLeaf], [...initialRecords, ...siblingLeaf], oldAttachmentLeaf, staleVisibleReply];
     // every incomplete, unrelated or spoofed terminal remains unavailable
     for (const records of invalidTerminals) {
       await writeFile(transcript, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);

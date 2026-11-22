@@ -25,6 +25,7 @@ type SettingsRuntime = {
 };
 
 const SettingsRuntimeContext = createContext<SettingsRuntime | undefined>(undefined);
+const ConsoleRestartCoverContext = createContext(false);
 
 const dismissedRestartKey = 'rac.settings.dismissed-restart-result';
 const restartConfirmationMs = 15_000;
@@ -474,7 +475,8 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
   }, [dismissRestartResult, successfulRestartId]);
   // share only the current restart notice and actions with the toast and cover
   const value = useMemo<SettingsRuntime>(() => ({ request, status, statusError, restartPending, restartError, restart, refreshStatus, securityEpoch, canMutate, restartResult, dismissRestartResult, tunnelHealth, tunnelReconnectPending, tunnelReconnectError, tunnelReconnectCoverActive, reconnectTunnel, refreshTunnelHealth }), [canMutate, dismissRestartResult, request, restart, restartError, restartPending, refreshStatus, securityEpoch, status, statusError, restartResult, tunnelHealth, tunnelReconnectPending, tunnelReconnectError, tunnelReconnectCoverActive, reconnectTunnel, refreshTunnelHealth]);
-  return <SettingsRuntimeContext.Provider value={value}>{children}</SettingsRuntimeContext.Provider>;
+  // notify fullscreen consumers only when the cover changes, not on every status poll
+  return <SettingsRuntimeContext.Provider value={value}><ConsoleRestartCoverContext.Provider value={activeServerRestart(status?.operation)}>{children}</ConsoleRestartCoverContext.Provider></SettingsRuntimeContext.Provider>;
 }
 
 // require the runtime inside the settings feature
@@ -487,6 +489,9 @@ export const useSettingsRuntime = (): SettingsRuntime => {
 
 // inspect the optional runtime from the shared toast host
 export const useOptionalSettingsRuntime = (): SettingsRuntime | undefined => useContext(SettingsRuntimeContext);
+
+// expose the durable restart cover to dashboard features that must yield to it
+export const useConsoleRestartCover = (): boolean => useContext(ConsoleRestartCoverContext);
 
 // retain actionable pending changes after a recovered restart without repeating its failure
 const hasPendingRestartNotice = (status: SettingsStatus | undefined): boolean => status !== undefined && (status.pending
@@ -583,7 +588,7 @@ export function ConsoleFullscreenLoader({ action, reconnecting, checkingRestartU
   const runtime = useOptionalSettingsRuntime();
   const status = runtime?.status;
   const operation = status?.operation;
-  const serverRestart = activeServerRestart(operation);
+  const serverRestart = useConsoleRestartCover();
   const restarting = action !== 'reload' && (action === 'restart' || serverRestart);
   const reconnectingTunnel = action === 'tunnel-reconnect';
   // leave normal console content mounted and uncovered when no action is active

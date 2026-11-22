@@ -4,6 +4,7 @@
 #
 #   @rac_attention  working | finished | question
 #   @rac_session    the agent's current session id (when known)
+#   @rac_session_processes  session|pid:start-time ancestry proof
 #   @rac_question   the base64 hook payload of a reported Inline question (ADR 0006)
 #
 # The console injects this script into Claude Code through per-launch hooks, and
@@ -100,6 +101,30 @@ if [ -z "$explicit_session" ] && [ -n "$hook_session" ]; then
   session=$hook_session
 fi
 
+# bind a reported session to the live agent ancestry that emitted this hook
+session_processes=
+reporter_pid=$PPID
+reporter_depth=0
+while [ "$reporter_depth" -lt 12 ] && [ "$reporter_pid" -gt 1 ] 2>/dev/null; do
+  reporter_stat=$(cat "/proc/$reporter_pid/stat" 2>/dev/null) || break
+  # proc comm may contain spaces and parentheses, so discard through its final delimiter
+  reporter_fields=${reporter_stat##*) }
+  set -- $reporter_fields
+  [ "$#" -ge 20 ] || break
+  reporter_parent=$2
+  reporter_start=${20}
+  case $reporter_parent:$reporter_start in
+    *[!0-9:]*|:*|*:) break ;;
+  esac
+  if [ -z "$session_processes" ]; then
+    session_processes=$reporter_pid:$reporter_start
+  else
+    session_processes=$session_processes,$reporter_pid:$reporter_start
+  fi
+  reporter_pid=$reporter_parent
+  reporter_depth=$((reporter_depth + 1))
+done
+
 # @rac_question carries the reported payload (base64, newlines stripped so the
 # list-panes line stays tab-safe), empty unless --payload supplied a small-enough
 # hook body. An oversize payload (over 64 KiB) is dropped; the state still reports.
@@ -131,6 +156,8 @@ elif [ "$state" != question ]; then
 fi
 if [ -n "$session" ]; then
   set -- "$@" \; set-option -p -t "$TMUX_PANE" @rac_session "$session"
+  # bind ancestry to this session and replace stale proof even when ancestry is unreadable
+  set -- "$@" \; set-option -p -t "$TMUX_PANE" @rac_session_processes "$session|$session_processes"
 fi
 "$tmux_bin" "$@"
 exit 0

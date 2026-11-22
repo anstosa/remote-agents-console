@@ -64,10 +64,11 @@ export type StructuredQuestion = { id: string; text: string; detail?: string; pe
  */
 export type StructuredEvent =
   | { type: 'report'; report: LaunchReport }
-  | { type: 'turn'; turn: TurnEvent }
+  // a completed answer is present only when the native adapter proves it
+  | { type: 'turn'; turn: TurnEvent; previewAnswer?: string }
   | { type: 'transcript'; item: TranscriptItem }
   // the Conversation's transcript as loaded from its history, replacing what was shown
-  | { type: 'history'; items: TranscriptItem[]; conversationId?: string }
+  | { type: 'history'; items: TranscriptItem[]; conversationId?: string; previewAnswer?: string; activePrompt?: boolean }
   // a status line the Agent's extension set, or cleared (no `text`)
   | { type: 'status'; key: string; text?: string }
   | { type: 'usage'; usage: AgentUsage }

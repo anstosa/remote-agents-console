@@ -65,6 +65,8 @@ export const isFocusKeyTable = (table: string): boolean => focusKeyTableLabel(ta
 // `repeat` actions stay live for a moment after they run, like tmux `bind -r`.
 export const keyActions: Record<string, { description: string; repeat?: true }> = {
   'show-bindings': { description: 'Show key bindings' },
+  // share screensaver entry with ordinary remapping and command discovery
+  screensaver: { description: 'Start screensaver' },
   'command-palette': { description: 'Command palette' },
   'launch-agent': { description: 'Launch a new agent' },
   'new-terminal': { description: 'New Terminal panel' },
@@ -109,6 +111,8 @@ export const defaultKeyTables: Record<string, Record<string, KeyBinding>> = {
   root: {
     'C-b': { table: 'prefix' },
     'C-?': 'show-bindings',
+    // disabled screensavers decline this action and preserve terminal clear-screen
+    'C-l': 'screensaver',
     'S-Left': 'previous-workspace',
     'S-Right': 'next-workspace',
     'C-=': 'font-larger', 'C-+': 'font-larger', 'Super-=': 'font-larger', 'Super-+': 'font-larger',

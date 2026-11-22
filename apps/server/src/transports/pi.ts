@@ -157,6 +157,17 @@ export function piHistory(messages: readonly unknown[], { running = false } = {}
   return items;
 }
 
+// recover only prose explicitly completed by Pi's native terminal stop reason
+export function piHistoryPreviewAnswer(messages: readonly unknown[]): string | undefined {
+  let proven: string | undefined;
+  for (const message of messages) {
+    if (!isObject(message) || message.role !== 'assistant' || message.stopReason !== 'stop') continue;
+    const answer = answerText(message);
+    if (answer.trim() !== '') proven = answer;
+  }
+  return proven;
+}
+
 /** Pi's thinking levels, which RAC calls Efforts. */
 export const piEfforts = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 // the levels a model supports, decided as Pi's own `getSupportedThinkingLevels` does
@@ -201,6 +212,7 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
   let working: boolean | undefined = attached !== undefined && attached.dropped > 0 ? undefined : false;
   let prompted = false;
   let answer = '';
+  let previewAnswer: string | undefined;
   let errored = false;
   let cost = 0;
   let toolCalls = 0;
@@ -237,6 +249,7 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
   let latestHistoryRequest = 0;
   const pendingHistoryRequests = new Set<number>();
   let historyRefreshNeeded = false;
+  let historyHasActivePrompt = false;
   const history = (ready: Promise<void> = Promise.resolve()) => {
     const requestId = latestHistoryRequest = historyRequests += 1;
     const requestedTurnGeneration = historyTurnGeneration;
@@ -252,7 +265,8 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
       // an invalid latest read retries after the current Turn settles
       if (conversationId === undefined || messages === undefined) { historyRefreshNeeded = true; return; }
       historyRefreshNeeded = false;
-      emit({ type: 'history', conversationId, items: piHistory(messages, { running: working === true }) });
+      const previewAnswer = piHistoryPreviewAnswer(messages);
+      emit({ type: 'history', conversationId, items: piHistory(messages, { running: historyHasActivePrompt }), ...(previewAnswer === undefined ? {} : { previewAnswer }), ...(working === true ? { activePrompt: historyHasActivePrompt } : {}) });
     }).finally(() => { pendingHistoryRequests.delete(requestId); });
   };
   let current: ModelSetting | undefined;
@@ -261,13 +275,14 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
   const refresh = async (): Promise<void> => {
     const state = (await request({ type: 'get_state' })).data;
     if (!isObject(state)) return;
+    let activeHistoryNeeded = false;
     if (working === undefined) {
-      working = state.isStreaming === true || state.isCompacting === true;
+      historyHasActivePrompt = state.isStreaming === true;
+      working = historyHasActivePrompt || state.isCompacting === true;
       if (working) {
-        historyTurnGeneration += 1;
-        // a reattached working Turn also retires its pre-state history read
-        if (pendingHistoryRequests.has(latestHistoryRequest)) historyRefreshNeeded = true;
-        prompted = true;
+        // only a streaming turn supersedes the startup history generation
+        if (historyHasActivePrompt) { historyTurnGeneration += 1; activeHistoryNeeded = true; }
+        prompted = historyHasActivePrompt;
         emit({ type: 'turn', turn: { type: 'started' } });
       }
     }
@@ -277,6 +292,8 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
       currentConversationId = state.sessionId;
       emit({ type: 'conversation', id: state.sessionId, ...(typeof state.sessionName === 'string' ? { name: state.sessionName } : {}) });
     }
+    // do not wait for a long or blocked restored Turn to settle before proving its frontier
+    if (activeHistoryNeeded) void history();
     const model = modelInfo(state.model);
     // clear an earlier native route when Pi can no longer confirm its model
     if (model === undefined) {
@@ -362,7 +379,7 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
         historyTurnGeneration += 1;
         // a history read started before this Turn must be replaced once it settles
         if (pendingHistoryRequests.has(latestHistoryRequest)) historyRefreshNeeded = true;
-        working = true; prompted = false; answer = ''; errored = false; cost = 0; toolCalls = 0;
+        working = true; historyHasActivePrompt = true; prompted = false; answer = ''; previewAnswer = undefined; errored = false; cost = 0; toolCalls = 0;
         emit({ type: 'turn', turn: { type: 'started' } });
         return;
       case 'message_start':
@@ -393,6 +410,8 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
         const said = text(message.content);
         const shown = answerText(message);
         if (said !== '') answer = said;
+        // retain only Pi's explicit successful terminal answer
+        if (message.stopReason === 'stop' && shown.trim() !== '') previewAnswer = shown;
         if (shown !== '') transcript({ id: next('m'), kind: 'message', role: 'assistant', text: shown });
         void usage();
         return;
@@ -436,11 +455,11 @@ export const piClient: ProtocolClient = (channel, emit, { attached }) => {
       }
       case 'agent_settled':
         if (working === false) return;
-        working = false;
+        working = false; historyHasActivePrompt = false;
         // a settled Turn waits on no dialog; an aborted one's dialogs were dismissed with it
         for (const id of [...dialogs.keys()]) closeDialog(id);
         transcript({ id: next('e'), kind: 'settled', outcome: outcome(record.aborted === true, errored), cost, toolCalls });
-        emit({ type: 'turn', turn: record.aborted === true ? { type: 'aborted' } : errored ? { type: 'failed' } : { type: 'settled', message: answer } });
+        emit({ type: 'turn', turn: record.aborted === true ? { type: 'aborted' } : errored ? { type: 'failed' } : { type: 'settled', message: answer }, ...(record.aborted === true || errored || previewAnswer === undefined ? {} : { previewAnswer }) });
         // recover readiness when a live Turn retired the startup history read
         if (historyRefreshNeeded) { historyRefreshNeeded = false; void history(); }
         return;

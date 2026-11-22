@@ -57,6 +57,7 @@ const applicationDedicatedPaths = new Set([
   'projects',
   'buttons',
   ...applicationPreferences.map(({ key }) => key),
+  'screensaver',
   'review',
   'googleCalendar',
   'proxy',
@@ -353,6 +354,13 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
       if (schema !== undefined) visitSchema(index, page, schema, childValue(source.value, key), [key], [], { keywordFor: () => keywords });
     }
   }
+
+  const screensaver = baseSchema.properties?.screensaver;
+  // keep the passive workspace overview searchable on Interface
+  if (screensaver !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'interface', screensaver, childValue(source.value, 'screensaver'), ['screensaver'], [], {
+    forceAbsentChildren: true,
+    keywordFor: () => 'screen saver idle inactivity automatic workspace overview agents'
+  });
 
   const review = baseSchema.properties?.review;
   // keep permanent Review controls searchable without creating omitted configuration

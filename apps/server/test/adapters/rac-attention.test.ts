@@ -46,6 +46,7 @@ describe('rac-attention', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain('set-option -p -t %7 @rac_attention working');
     expect(calls[0]).toContain('set-option -p -t %7 @rac_session sid-123');
+    expect(calls[0]).toMatch(/set-option -p -t %7 @rac_session_processes sid-123\|\d+:\d+(?:,\d+:\d+)*/u);
   });
 
   it('sets only @rac_attention when no session id is known', async () => {
@@ -55,6 +56,7 @@ describe('rac-attention', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain('@rac_attention finished');
     expect(calls[0]).not.toContain('@rac_session');
+    expect(calls[0]).not.toContain('@rac_session_processes');
   });
 
   it('prefers an explicit --session over $CLAUDE_CODE_SESSION_ID and ignores extra args', async () => {

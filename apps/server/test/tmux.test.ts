@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 const { run } = vi.hoisted(() => ({ run: vi.fn() }));
 // mock only the process spawner; keep tmuxBinary and the id patterns real
@@ -6,6 +7,8 @@ vi.mock('../src/tmux/command.js', async (importOriginal) => ({ ...(await importO
 
 import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { codexDraftState, latestAgentMessageFromHistory, latestCompletedAssistantMessage, latestCompletedAssistantTurn } from '../src/adapters/codex-turns.js';
+import { codexPaneOutputPreview, TmuxTransport } from '../src/transports/tmux.js';
+import { screensaverRuntimeIdentity } from '../src/screensaver/identity.js';
 
 describe('TmuxAdapter capture', () => {
   beforeEach(() => {
@@ -23,6 +26,69 @@ describe('TmuxAdapter capture', () => {
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'capture-pane', '-e', '-p', '-t', '%1', '-S', '-800']);
   });
 
+  it('coalesces concurrent passive captures for one exact pane lifetime', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    let release: ((value: { code: number; stdout: string; stderr: string }) => void) | undefined;
+    run.mockImplementationOnce(async () => await new Promise(resolve => { release = resolve; }));
+    const adapter = new TmuxAdapter();
+
+    const first = adapter.capturePreview(socket, '%1', 'conversation-one');
+    const second = adapter.capturePreview(socket, '%1', 'conversation-one');
+    expect(run).toHaveBeenCalledTimes(1);
+    release?.({ code: 0, stdout: 'shared preview', stderr: '' });
+    await expect(Promise.all([first, second])).resolves.toEqual(['shared preview', 'shared preview']);
+  });
+
+  it('does not share passive captures across conversation or process identities', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    let release: ((value: { code: number; stdout: string; stderr: string }) => void) | undefined;
+    run.mockImplementationOnce(async () => await new Promise(resolve => { release = resolve; }));
+    const adapter = new TmuxAdapter();
+
+    const first = adapter.capturePreview(socket, '%1', 'conversation-one');
+    const second = adapter.capturePreview(socket, '%1', 'conversation-two');
+    expect(run).toHaveBeenCalledTimes(2);
+    await expect(second).resolves.toBe('Codex UI');
+    release?.({ code: 0, stdout: 'first conversation', stderr: '' });
+    await expect(first).resolves.toBe('first conversation');
+  });
+
+  it('keeps a vanished pane failure local to that pane', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'socket unavailable' });
+    const adapter = new TmuxAdapter();
+
+    await expect(adapter.capturePreview(socket, '%1', 'conversation-one')).resolves.toBeUndefined();
+    await expect(adapter.capturePreview(socket, '%1', 'conversation-one')).resolves.toBeUndefined();
+    await expect(adapter.capturePreview(socket, '%2', 'conversation-two')).resolves.toBe('Codex UI');
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('respects a socket outage cooldown established by inventory', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'socket unavailable' });
+    const adapter = new TmuxAdapter();
+
+    await expect(adapter.listPaneInventory(socket)).resolves.toEqual({ status: 'unavailable' });
+    await expect(adapter.capturePreview(socket, '%1', 'conversation-one')).resolves.toBeUndefined();
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('verifies the current pane pid and reported conversation directly', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const conversationId = '0198c777-7777-7777-8777-777777777777';
+    const conversationProof = `${conversationId}|11:100`;
+    run.mockResolvedValueOnce({ code: 0, stdout: `%1\t10\t${conversationId}\t${conversationProof}\n`, stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: `%1\t11\t${conversationId}\t${conversationProof}\n`, stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: `%1\t10\t${conversationId}\t${conversationId}|12:200\n`, stderr: '' });
+    const adapter = new TmuxAdapter();
+
+    await expect(adapter.previewTargetMatches(socket, '%1', 10, conversationId, conversationProof)).resolves.toBe(true);
+    await expect(adapter.previewTargetMatches(socket, '%1', 10, conversationId, conversationProof)).resolves.toBe(false);
+    await expect(adapter.previewTargetMatches(socket, '%1', 10, conversationId, conversationProof)).resolves.toBe(false);
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'display-message', '-p', '-t', '%1', '#{pane_id}\t#{pane_pid}\t#{@rac_session}\t#{@rac_session_processes}']);
+  });
+
   // preserve semantic color state while browser snapshots retain their own row resets
   it('preserves composer background across wrapped rows for draft observation', async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
@@ -34,9 +100,220 @@ describe('TmuxAdapter capture', () => {
     expect(codexDraftState(captured!, 'First paragraph second paragraph')).toBe('visible');
   });
 
+  // reproduce a working codex pane whose last five physical rows are all chrome
+  it('reads the latest five meaningful preview rows above the native composer', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const agent = { id: 'agent', transport: 'tmux' as const, placeId: 'place', kind: 'codex' as const, conversationId: '0198c777-7777-7777-8777-777777777777', recoveryProcessKey: 'process-one', pane: { paneId: '%1', socketFingerprint: socket.fingerprint } };
+    const proof = { id: agent.id, kind: agent.kind, attention: 'working' as const, panePid: 10, cwd: '/example', conversationId: agent.conversationId, process: { pid: 11, startTime: '100' }, generation: 1 };
+    const discovery = { target: async () => ({ socket, agent }), paneProcessId: () => 10, agentProcessId: () => 11, replySuggestionTarget: () => proof, previewConversationOwned: async () => true, validateReplySuggestionTarget: async () => true };
+    const tmux = new TmuxAdapter();
+    vi.spyOn(tmux, 'previewTargetMatches').mockResolvedValue(true);
+    const transport = new TmuxTransport(discovery as never, tmux, {} as never);
+    const identity = screensaverRuntimeIdentity(agent as never, 'output');
+    // mimic the styled composer and preserve unstyled Unicode in the actual output
+    const capture = (latest: string) => [
+      '› Submitted request', '', '• Older output', '  one', '', '  two', '  three', '  café 日本語 ⠁',
+      `  \x1b[32m${latest}\x1b[0m`, '',
+      '\x1b[48;2;30;30;30m› Unsent draft \x1b[38;2;20;20;20m⠁⡀\x1b[0m', '',
+      '  gpt-6.2-sol · ~/example · main', '  Tab to queue message', '', ''
+    ].join('\n');
+    run.mockResolvedValueOnce({ code: 0, stdout: capture('first update'), stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: capture('newest update'), stderr: '' });
+
+    const prefix = '  one\n  two\n  three\n  café 日本語 ⠁\n  ';
+    // keep the captured foreground but never return the native footer or control characters
+    for (const update of ['first update', 'newest update']) {
+      await expect(transport.previewOutput('agent', 5, identity)).resolves.toEqual({
+        text: `${prefix}${update}`,
+        colors: [{ from: prefix.length, to: prefix.length + update.length, foreground: 2 }]
+      });
+    }
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'capture-pane', '-e', '-p', '-t', '%1', '-S', '-64']);
+  });
+
+  // the seven-line tail spans current activity blocks without reviving prior turns or pane chrome
+  it('shows seven recent pane rows rather than just the latest progress marker', () => {
+    const capture = ['• Old conversation answer', '› Current prompt', '  prompt wrap', '',
+      '• Command started', '  one', '  two', '  three', '• Another update', '  four', '  five',
+      '\x1b[32m• Latest progress\x1b[0m', '', '› Draft', '', '  model · ~/worktree'].join('\n');
+    const text = '  one\n  two\n  three\n• Another update\n  four\n  five\n• Latest progress';
+    expect(codexPaneOutputPreview(capture, 7)).toEqual({ text, colors: [{ from: text.indexOf('• Latest'), to: text.length, foreground: 2 }] });
+  });
+
+  // an empty current interaction cannot use the last answer as its live output
+  it('does not pad the live tail with previous-conversation text', () => {
+    const capture = '• Previous answer\n› New prompt\n\n› Draft\n\n  model · ~/worktree';
+    expect(codexPaneOutputPreview(capture, 7)).toEqual({ text: '' });
+  });
+
+  // native choice mode replaces the composer but must retain only its content
+  it('keeps a current native choice while excluding its keyboard footer', () => {
+    const capture = ['• Previous answer', '› Current prompt', '• Working', '', 'Choose the next step.', '\x1b[1;7m› 1. Continue\x1b[0m', '  2. Stop', 'tab to add notes | enter to submit answer | esc to interrupt'].join('\n');
+    expect(codexPaneOutputPreview(capture, 7)).toEqual({
+      text: '• Working\nChoose the next step.\n› 1. Continue\n  2. Stop',
+      colors: [{ from: 32, to: 45, foreground: undefined, background: undefined, inverse: true, dim: undefined }]
+    });
+  });
+
+  it('preserves captured wide and narrow inverse-styled selectors', () => {
+    const captures = JSON.parse(readFileSync(new URL('./fixtures/codex/queued-questions.json', import.meta.url), 'utf8')) as Array<{ name: string; lines: string[] }>;
+    // both captured expanded layouts retain choices without their keyboard footer
+    for (const capture of captures.filter(candidate => candidate.name.includes('expanded'))) {
+      const preview = codexPaneOutputPreview(capture.lines.join('\n'), 7);
+      expect(preview?.text).toContain('› 1. Yes (Recommended)');
+      expect(preview?.text).toContain('3. Other');
+      expect(preview?.text).not.toMatch(/enter\s+submit|ctrl\+\]|main prompt/u);
+    }
+  });
+
+  it('rejects a multiline numbered draft that imitates choice text and a footer', () => {
+    const capture = ['› Current prompt', '• Working', '  latest output', '', '› 1. first authored draft line', '  2. second authored draft line', 'enter to submit answer'].join('\n');
+    expect(codexPaneOutputPreview(capture, 7)).toBeUndefined();
+  });
+
+  it('does not let an older styled choice group authorize a newer numbered draft', () => {
+    // exercise both separated and adjacent selector and composer rows
+    for (const separator of [['enter to submit answer', ''], []]) {
+      const capture = ['Old question', '\x1b[1;7m› 1. Old choice\x1b[0m', '  2. Old other', ...separator,
+        '› 1. current authored draft', '  2. current authored continuation', 'enter to submit answer'].join('\n');
+      expect(codexPaneOutputPreview(capture, 7)).toBeUndefined();
+    }
+  });
+
+  it('does not treat a palette index of seven as inverse selector styling', () => {
+    const capture = ['Question', '\x1b[38;5;7m› 1. Color only\x1b[0m', '  2. Other', 'enter to submit answer'].join('\n');
+    expect(codexPaneOutputPreview(capture, 7)).toBeUndefined();
+  });
+
+  // one numbered composer row is authored input rather than a proven native selector
+  it('strips a numbered unsent draft from the current output', () => {
+    const capture = ['› Current prompt', '• Working', '  latest output', '', '› 1. add the missing tests', '', '  model · ~/worktree'].join('\n');
+    expect(codexPaneOutputPreview(capture, 7)).toEqual({ text: '• Working\n  latest output' });
+  });
+
+  it('does not use an older choice footer to expose a current numbered draft', () => {
+    const capture = ['Choose an old action', '› 1. Old choice', '  2. Other choice', 'enter to submit answer',
+      '› Current prompt', '• Working', '  latest output', '', '› 1. add the missing tests', '', '  model · ~/worktree'].join('\n');
+    expect(codexPaneOutputPreview(capture, 7)).toEqual({ text: '• Working\n  latest output' });
+  });
+
+  // multiple selector-like rows without native footer evidence are ambiguous
+  it('rejects an incomplete numbered selector layout', () => {
+    const capture = ['› Current prompt', '• Working', 'Choose one', '› 1. Continue', '  2. Stop'].join('\n');
+    expect(codexPaneOutputPreview(capture, 7)).toBeUndefined();
+  });
+
+  it('rejects Codex scrollback without a current native boundary', () => {
+    expect(codexPaneOutputPreview('• Previous answer\n  old tool output', 7)).toBeUndefined();
+  });
+
+  // Claude previews omit its draft and status rows while preserving live output colors
+  it('reads Claude output without its active composer or permission footer', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const agent = { id: 'agent', transport: 'tmux' as const, placeId: 'place', kind: 'claude' as const, conversationId: '11111111-2222-4333-8444-555555555555', recoveryProcessKey: 'process-one', pane: { paneId: '%1', socketFingerprint: socket.fingerprint } };
+    const proof = { id: agent.id, kind: agent.kind, attention: 'working' as const, panePid: 10, cwd: '/example', conversationId: agent.conversationId, process: { pid: 11, startTime: '100' }, generation: 1 };
+    const discovery = { target: async () => ({ socket, agent }), paneProcessId: () => 10, agentProcessId: () => 11, replySuggestionTarget: () => proof, previewConversationOwned: async () => true, validateReplySuggestionTarget: async () => true };
+    const tmux = new TmuxAdapter();
+    vi.spyOn(tmux, 'previewTargetMatches').mockResolvedValue(true);
+    const transport = new TmuxTransport(discovery as never, tmux, {} as never);
+    const identity = screensaverRuntimeIdentity(agent as never, 'output');
+    run.mockResolvedValueOnce({ code: 0, stdout: ['> Current prompt', 'Older row', '\x1b[36mLatest response\x1b[0m', '', '❯ unsent draft', '⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n'), stderr: '' });
+
+    await expect(transport.previewOutput('agent', 7, identity)).resolves.toEqual({ text: 'Older row\nLatest response', colors: [{ from: 10, to: 25, foreground: 6 }] });
+  });
+
+  // a capture completed after native process replacement cannot be published
+  it('discards a preview when fresh process proof changes behind stale inventory', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const agent = { id: 'agent', transport: 'tmux' as const, placeId: 'place', kind: 'codex' as const, conversationId: '0198c777-7777-7777-8777-777777777777', recoveryProcessKey: 'process-one', pane: { paneId: '%1', socketFingerprint: socket.fingerprint } };
+    const proof = { id: agent.id, kind: agent.kind, attention: 'working' as const, panePid: 10, cwd: '/example', conversationId: agent.conversationId, process: { pid: 11, startTime: '100' }, generation: 1 };
+    let liveProcess = 11;
+    const discovery = { target: async () => ({ socket, agent }), paneProcessId: () => 10, agentProcessId: () => 11, replySuggestionTarget: () => proof, previewConversationOwned: async () => true, validateReplySuggestionTarget: async () => liveProcess === proof.process.pid };
+    const tmux = new TmuxAdapter();
+    vi.spyOn(tmux, 'previewTargetMatches').mockResolvedValue(true);
+    const transport = new TmuxTransport(discovery as never, tmux, {} as never);
+    const identity = screensaverRuntimeIdentity(agent as never, 'output');
+    run.mockImplementationOnce(async () => {
+      liveProcess = 12;
+      return { code: 0, stdout: '› Prompt\n• New output\n\n› Draft\n\n  model · ~/worktree', stderr: '' };
+    });
+
+    await expect(transport.previewOutput('agent', 7, identity)).resolves.toBeUndefined();
+  });
+
+  it('rejects an already-mixed stale conversation and replacement process', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const agent = { id: 'agent', transport: 'tmux' as const, placeId: 'place', kind: 'codex' as const, conversationId: '0198c777-7777-7777-8777-777777777777', recoveryProcessKey: 'process-one', pane: { paneId: '%1', socketFingerprint: socket.fingerprint } };
+    const proof = { id: agent.id, kind: agent.kind, attention: 'working' as const, panePid: 10, cwd: '/example', conversationId: agent.conversationId, process: { pid: 11, startTime: '100' }, generation: 1 };
+    const discovery = {
+      target: async () => ({ socket, agent }),
+      paneProcessId: () => 10,
+      agentProcessId: () => 11,
+      replySuggestionTarget: () => proof,
+      previewConversationOwned: async () => false,
+      validateReplySuggestionTarget: async () => true
+    };
+    const tmux = new TmuxAdapter();
+    vi.spyOn(tmux, 'previewTargetMatches').mockResolvedValue(true);
+    const transport = new TmuxTransport(discovery as never, tmux, {} as never);
+
+    await expect(transport.previewOutput('agent', 7, screensaverRuntimeIdentity(agent as never, 'output'))).resolves.toBeUndefined();
+    await expect(transport.previewAnswer('agent', screensaverRuntimeIdentity(agent as never, 'response'))).resolves.toBeUndefined();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('withholds output and response when writer ownership disappears during the read', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const agent = { id: 'agent', transport: 'tmux' as const, placeId: 'place', kind: 'codex' as const, conversationId: '0198c777-7777-7777-8777-777777777777', recoveryProcessKey: 'process-one', pane: { paneId: '%1', socketFingerprint: socket.fingerprint } };
+    const proof = { id: agent.id, kind: agent.kind, attention: 'working' as const, panePid: 10, cwd: '/example', conversationId: agent.conversationId, process: { pid: 11, startTime: '100' }, generation: 1 };
+    let ownershipChecks = 0;
+    const discovery = {
+      target: async () => ({ socket, agent }), paneProcessId: () => 10, agentProcessId: () => 11,
+      replySuggestionTarget: () => proof, previewConversationOwned: async () => ++ownershipChecks === 1,
+      validateReplySuggestionTarget: async () => true, paneWorkingDirectory: () => '/example'
+    };
+    const tmux = new TmuxAdapter();
+    vi.spyOn(tmux, 'previewTargetMatches').mockResolvedValue(true);
+    const transport = new TmuxTransport(discovery as never, tmux, {} as never);
+    run.mockResolvedValueOnce({ code: 0, stdout: '› Prompt\n• New output\n\n› Draft\n\n  model · ~/worktree', stderr: '' });
+    await expect(transport.previewOutput('agent', 7, screensaverRuntimeIdentity(agent as never, 'output'))).resolves.toBeUndefined();
+    expect(ownershipChecks).toBe(2);
+
+    ownershipChecks = 0;
+    await expect(transport.previewAnswer('agent', screensaverRuntimeIdentity(agent as never, 'response'))).resolves.toBeUndefined();
+    expect(ownershipChecks).toBe(2);
+  });
+
+  it('discards a preview when the exact native process key changes during capture', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const agent = { id: 'agent', transport: 'tmux' as const, placeId: 'place', kind: 'codex' as const, conversationId: '0198c777-7777-7777-8777-777777777777', recoveryProcessKey: 'process-one', pane: { paneId: '%1', socketFingerprint: socket.fingerprint } };
+    const proof = { id: agent.id, kind: agent.kind, attention: 'working' as const, panePid: 10, cwd: '/example', conversationId: agent.conversationId, process: { pid: 11, startTime: '100' }, generation: 1 };
+    const discovery = { target: async () => ({ socket, agent }), paneProcessId: () => 10, agentProcessId: () => 11, replySuggestionTarget: () => proof, previewConversationOwned: async () => true, validateReplySuggestionTarget: async () => true };
+    const tmux = new TmuxAdapter();
+    vi.spyOn(tmux, 'previewTargetMatches').mockResolvedValue(true);
+    const transport = new TmuxTransport(discovery as never, tmux, {} as never);
+    const identity = screensaverRuntimeIdentity(agent as never, 'output');
+    run.mockImplementationOnce(async () => {
+      agent.recoveryProcessKey = 'process-two';
+      return { code: 0, stdout: '› Prompt\n• New output\n\n› Draft\n\n  model · ~/worktree', stderr: '' };
+    });
+
+    await expect(transport.previewOutput('agent', 7, identity)).resolves.toBeUndefined();
+  });
+
+  it('does not capture output for an unreported native conversation', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const agent = { id: 'agent', transport: 'tmux' as const, placeId: 'place', kind: 'codex' as const, recoveryProcessKey: 'process-one', pane: { paneId: '%1', socketFingerprint: socket.fingerprint } };
+    const discovery = { target: async () => ({ socket, agent }), paneProcessId: () => 10, agentProcessId: () => 11, replySuggestionTarget: () => undefined, validateReplySuggestionTarget: async () => false };
+    const transport = new TmuxTransport(discovery as never, new TmuxAdapter(), {} as never);
+
+    await expect(transport.previewOutput('agent', 7, screensaverRuntimeIdentity(agent as never, 'output'))).resolves.toBeUndefined();
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('reports the tmux session name used to distinguish internal command panes', async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
-    run.mockResolvedValueOnce({ code: 0, stdout: "%1\t$1\trac-stack-owen-a1b2c3\t123\t/home/ubuntu/owen\tbash\tstack\t\texec /bin/bash -lc 'echo ready'\t\t\t\t\t1\t\t\t@7\n", stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: "%1\t$1\trac-stack-owen-a1b2c3\t123\t/home/ubuntu/owen\tbash\tstack\t\texec /bin/bash -lc 'echo ready'\t\t\t\t\t\t1\t\t\t@7\n", stderr: '' });
 
     await expect(new TmuxAdapter().listPanes(socket)).resolves.toEqual([{
       paneId: '%1',
@@ -52,18 +329,18 @@ describe('TmuxAdapter capture', () => {
       socket
     }]);
 
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'list-panes', '-a', '-F', '#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{@rac_process}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_spawned_by}\t#{?pane_output_generation,p#{pane_output_generation},w#{window_activity}}\t#{@rac_worktree}'], undefined, 2_000);
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'list-panes', '-a', '-F', '#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_session_processes}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{@rac_process}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_spawned_by}\t#{?pane_output_generation,p#{pane_output_generation},w#{window_activity}}\t#{@rac_worktree}'], undefined, 2_000);
   });
 
   it("reads a Review run pane's run id", async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
-    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\talex\t123\t/worktrees/alex\tclaude\t\t🔍 Review · Correctness\t\t\t\t\t\t1\t\t\t@7\t\talex:/worktrees/alex\t\trun_abcdefgh1234\n', stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\talex\t123\t/worktrees/alex\tclaude\t\t🔍 Review · Correctness\t\t\t\t\t\t\t1\t\t\t@7\t\talex:/worktrees/alex\t\trun_abcdefgh1234\n', stderr: '' });
     await expect(new TmuxAdapter().listPanes(socket)).resolves.toMatchObject([{ paneId: '%1', displayLabel: '🔍 Review · Correctness', placeMark: 'alex:/worktrees/alex', reviewRun: 'run_abcdefgh1234' }]);
   });
 
   it("reads the Conductor that spawned a worker's pane, before the Stack process's Worktree", async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
-    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\talex\t123\t/worktrees/alex\tclaude\t\t\t\t\t\t\t\t1\t\t\t@7\t\talex:/worktrees/alex\t\t\t0\t\t\tconductor-1\n', stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\talex\t123\t/worktrees/alex\tclaude\t\t\t\t\t\t\t\t\t1\t\t\t@7\t\talex:/worktrees/alex\t\t\t0\t\t\tconductor-1\n', stderr: '' });
     const [pane] = await new TmuxAdapter().listPanes(socket);
     expect(pane).toMatchObject({ paneId: '%1', spawnedBy: 'conductor-1' });
     expect(pane).not.toHaveProperty('processWorktree');
@@ -71,7 +348,7 @@ describe('TmuxAdapter capture', () => {
 
   it("reads a pane's session Place mark and marks a session by its id or one of its panes", async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
-    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\talex\t123\t/srv/elsewhere\tzsh\t\t\t\t\t\t\t\t\tshell\t\t@7\t\talex:/worktrees/alex\n', stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\talex\t123\t/srv/elsewhere\tzsh\t\t\t\t\t\t\t\t\t\tshell\t\t@7\t\talex:/worktrees/alex\n', stderr: '' });
     const adapter = new TmuxAdapter();
 
     await expect(adapter.listPanes(socket)).resolves.toMatchObject([{ paneId: '%1', path: '/srv/elsewhere', role: 'shell', placeMark: 'alex:/worktrees/alex' }]);
@@ -89,7 +366,7 @@ describe('TmuxAdapter capture', () => {
   // it too; only the pane marked as the process takes it
   it("reads a Stack process pane's process name from its window tag", async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
-    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\tcora\t123\t/worktrees/cora\tnode\t\t\t\t\t\t\t\t\tprocess\t\t@7\t\tcora:/worktrees/cora\tdev\n%2\t$1\tcora\t124\t/worktrees/cora\tzsh\t\t\t\t\t\t\t\t\t\t\t@7\t\tcora:/worktrees/cora\tdev\n', stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\tcora\t123\t/worktrees/cora\tnode\t\t\t\t\t\t\t\t\t\tprocess\t\t@7\t\tcora:/worktrees/cora\tdev\n%2\t$1\tcora\t124\t/worktrees/cora\tzsh\t\t\t\t\t\t\t\t\t\t\t\t@7\t\tcora:/worktrees/cora\tdev\n', stderr: '' });
 
     const panes = await new TmuxAdapter().listPanes(socket);
 
@@ -100,7 +377,7 @@ describe('TmuxAdapter capture', () => {
   // dashboard must see it; a history view is left by input itself and stays unreported
   it('reports a pane held in a mode the console cannot leave by typing', async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
-    run.mockResolvedValueOnce({ code: 0, stdout: '%2\t$1\tmain\t99\t/w\tnode\tclaude\t\t\t\t\t\t\t\t\t\t@3\ttree-mode\n%3\t$1\tmain\t98\t/w\tnode\tclaude\t\t\t\t\t\t\t\t\t\t@4\tcopy-mode\n%4\t$1\tmain\t97\t/w\tnode\tclaude\t\t\t\t\t\t\t\t\t\t@5\t\n', stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '%2\t$1\tmain\t99\t/w\tnode\tclaude\t\t\t\t\t\t\t\t\t\t\t@3\ttree-mode\n%3\t$1\tmain\t98\t/w\tnode\tclaude\t\t\t\t\t\t\t\t\t\t\t@4\tcopy-mode\n%4\t$1\tmain\t97\t/w\tnode\tclaude\t\t\t\t\t\t\t\t\t\t\t@5\t\n', stderr: '' });
 
     const panes = await new TmuxAdapter().listPanes(socket);
 
@@ -129,13 +406,14 @@ describe('TmuxAdapter capture', () => {
     await expect(new TmuxAdapter().heldPaneMode(socket, '%2')).resolves.toBeUndefined();
   });
 
-  it('reads the reported Inline question payload from its pane option', async () => {
+  it('reads the reported session proof and Inline question payload from pane options', async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
-    run.mockResolvedValueOnce({ code: 0, stdout: '%2\t$1\tmain\t99\t/w\tnode\tclaude\t\t\tquestion\t\t\tZXlKaGIgcGF5bG9hZA==\t\n', stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '%2\t$1\tmain\t99\t/w\tnode\tclaude\t\t\tquestion\t11111111-2222-4333-8444-555555555555\t11111111-2222-4333-8444-555555555555|456:100\t\tZXlKaGIgcGF5bG9hZA==\t\n', stderr: '' });
 
     await expect(new TmuxAdapter().listPanes(socket)).resolves.toEqual([{
       paneId: '%2', sessionId: '$1', sessionName: 'main', pid: 99, path: '/w', command: 'node', title: 'claude',
-      reportedAttention: 'question', reportedQuestion: 'ZXlKaGIgcGF5bG9hZA==', socket,
+      reportedAttention: 'question', reportedSession: '11111111-2222-4333-8444-555555555555',
+      reportedSessionProcesses: '11111111-2222-4333-8444-555555555555|456:100', reportedQuestion: 'ZXlKaGIgcGF5bG9hZA==', socket,
     }]);
   });
 
@@ -152,7 +430,7 @@ describe('TmuxAdapter capture', () => {
 
     await expect(new TmuxAdapter().unsetReportedState(socket, '%1')).resolves.toBe(true);
 
-    for (const option of ['@rac_attention', '@rac_session', '@rac_sandboxed', '@rac_question', '@rac_spawned_by']) {
+    for (const option of ['@rac_attention', '@rac_session', '@rac_session_processes', '@rac_sandboxed', '@rac_question', '@rac_spawned_by']) {
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'set-option', '-p', '-t', '%1', '-u', option]);
     }
     // never touches the server-owned display label

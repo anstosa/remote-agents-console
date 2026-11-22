@@ -27,6 +27,10 @@ const composerQueueLine = /^ {2}(?:\S+ to queue(?: message)?(?: · Plan mode)?|P
 const composerGoalLine = /^ {2,}(?:(?:\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode) {2,})?(?:Pursuing goal \(\d+[dhms](?: \d+[dhms])*\)|Goal (?:paused|stalled) \(\/goal resume\))(?: · ⚠ \d+(?: warnings? · \S+ to view| · \S+)?)?\s*$/u;
 // narrow panes wrap the native agent label below the workspace status
 const composerAgentLabelContinuation = /^ {2}\[default\]\s*$/u;
+// choice editors can replace the composer and paint their own keyboard footer
+const questionFooterLine = /^(?:tab to add notes\b|enter (?:confirm|submit|to submit answer|to select)\b|esc to (?:interrupt|cancel)\b|press enter to confirm\b|ctrl\s*\+\s*\] skip\b|(?:alt|⌥|shift)\s*\+\s*[↑↓←→] (?:main prompt|prev question|next question|queued messages)\b|←\/→ to navigate questions\b|[↑↓←→](?:\s|$))/iu;
+const questionChoiceRow = /^(?:[›❯>]\s*)?(?:\[[ xX]\]\s*)?\d+[.)]\s+\S/u;
+const questionLayoutLookbehindRows = 40;
 // terminal modifier resets may clear more than one style bit
 const modifierResets: Partial<Record<number, readonly number[]>> = {
   22: [1, 2], 23: [3], 24: [4, 21], 25: [5, 6], 27: [7], 28: [8], 29: [9]
@@ -85,11 +89,85 @@ const plainTerminalText = (value: string) => value
   .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, '')
   .replace(/\r/gu, '');
 
-// read only the bottom-most prompt or shell composer, excluding matching scrollback
-function activeComposerFromCapture(value: string): string | undefined {
-  const lines = plainTerminalText(withoutComposerSparkles(value)).split('\n');
-  // native choice dialogs own input even when a background draft remains visible
-  if (lines.some(line => /^\s*❯\s+(?:\[[ xX]\]\s*)?\d+[.)]\s/u.test(line))) return undefined;
+// require the selected choice marker to be painted by native inverse-video chrome
+function inverseStyledChoiceRow(value: string): boolean {
+  let inverse = false;
+  let cursor = 0;
+  const sgr = /\x1b\[([0-9;:]*)m/gu;
+  // apply each style transition before inspecting the following visible cells
+  for (const match of value.matchAll(sgr)) {
+    const visible = value.slice(cursor, match.index);
+    // the first selector marker under inverse video is positive native evidence
+    if (inverse && /^[ \t]*[›❯>]/u.test(visible)) return true;
+    const parameters = (match[1] || '0').split(';');
+    // update inverse state without interpreting extended-color operands as SGR codes
+    for (let index = 0; index < parameters.length; index += 1) {
+      const parts = parameters[index]!.split(':');
+      const parameter = Number(parts[0] || 0);
+      // colon colors carry every operand inside this parameter
+      if ((parameter === 38 || parameter === 48 || parameter === 58) && parts.length > 1) continue;
+      // semicolon colors consume their mode plus palette or RGB operands
+      if (parameter === 38 || parameter === 48 || parameter === 58) {
+        const mode = Number(parameters[index + 1]);
+        index += mode === 5 ? 2 : mode === 2 ? 4 : 0;
+      } else if (parameter === 0 || parameter === 27) inverse = false;
+      else if (parameter === 7) inverse = true;
+    }
+    cursor = (match.index ?? 0) + match[0].length;
+  }
+  return inverse && /^[ \t]*[›❯>]/u.test(value.slice(cursor));
+}
+
+type ChoiceGroup = { start: number; end: number };
+
+// select only the newest contiguous numbered group in this interaction
+function latestChoiceGroup(rows: readonly string[]): ChoiceGroup | undefined {
+  const plain = rows.map(plainTerminalText);
+  let latest: ChoiceGroup | undefined;
+  // advance by whole groups so separated old choices cannot combine with a current draft
+  for (let index = 0; index < rows.length;) {
+    // skip nonchoice rows
+    if (!questionChoiceRow.test(plain[index]!.trim())) { index += 1; continue; }
+    const start = index;
+    // consume this one contiguous choice group
+    while (index < rows.length && questionChoiceRow.test(plain[index]!.trim())) index += 1;
+    const group = plain.slice(start, index);
+    // require at least two rows and one selected marker
+    if (group.length >= 2 && group.some(row => /^[›❯>]\s*/u.test(row.trim()))) latest = { start, end: index };
+  }
+  return latest;
+}
+
+// require inverse styling on the selected row of the newest complete group
+function inverseStyledChoiceLayout(rows: readonly string[], group = latestChoiceGroup(rows)): boolean {
+  // a choice group needs one selector, not an older selector beside a new composer
+  if (group === undefined) return false;
+  const marked = rows.slice(group.start, group.end).filter(row => /^[›❯>]/u.test(plainTerminalText(row).trimStart()));
+  return marked.length === 1 && inverseStyledChoiceRow(marked[0]!);
+}
+
+// bind the bottom choice group to its current native keyboard footer
+function footerChoiceGroup(rows: readonly string[], plain: readonly string[], finalVisibleRow: number): ChoiceGroup | undefined {
+  let cursor = finalVisibleRow;
+  let footer = false;
+  // consume only trailing blanks and native footer rows
+  while (cursor >= 0 && (!plain[cursor]!.trim() || questionFooterLine.test(plain[cursor]!.trim()))) {
+    if (questionFooterLine.test(plain[cursor]!.trim())) footer = true;
+    cursor -= 1;
+  }
+  // a footer must directly follow a contiguous numbered group, aside from blank spacing
+  if (!footer) return undefined;
+  while (cursor >= 0 && !plain[cursor]!.trim()) cursor -= 1;
+  const end = cursor + 1;
+  while (cursor >= 0 && questionChoiceRow.test(plain[cursor]!.trim())) cursor -= 1;
+  const start = cursor + 1;
+  const group = { start, end };
+  const choices = plain.slice(start, end);
+  return choices.length >= 2 && choices.some(row => /^[›❯>]\s*/u.test(row.trim())) ? group : undefined;
+}
+
+// locate the live prompt or shell composer, excluding matching scrollback
+function activeComposer(lines: string[]): { index: number; draft: string } | undefined {
   let finalVisibleRow = lines.length - 1;
   // locate the terminal footer row above trailing space
   while (finalVisibleRow >= 0 && !lines[finalVisibleRow]!.trim()) finalVisibleRow -= 1;
@@ -124,9 +202,74 @@ function activeComposerFromCapture(value: string): string | undefined {
     // inspect only a live composer
     if (submitted) continue;
     // retain visual wraps separately from authored spaces
-    return draft.join('\n');
+    return { index, draft: draft.join('\n') };
   }
   return undefined;
+}
+
+// read the draft independently of the rendered output above it
+const activeComposerFromCapture = (value: string): string | undefined => {
+  const rows = withoutComposerSparkles(value).split('\n');
+  // only a recent inverse-styled native selector may hide a background composer
+  if (inverseStyledChoiceLayout(rows.slice(-questionLayoutLookbehindRows))) return undefined;
+  return activeComposer(rows.map(plainTerminalText))?.draft;
+};
+
+// identify composer chrome with plain text but retain rendition data on its preceding rows
+export function codexOutputFromCapture(value: string): string | undefined {
+  const rows = withoutComposerSparkles(value).split('\n');
+  const plain = rows.map(plainTerminalText);
+  let finalVisibleRow = plain.length - 1;
+  // native choice chrome must own the bottom of the pane, not matching scrollback
+  while (finalVisibleRow >= 0 && !plain[finalVisibleRow]!.trim()) finalVisibleRow -= 1;
+  let interactionStart = 0;
+  // ignore selectors that precede the newest ordinary prompt or composer
+  for (let index = finalVisibleRow; index >= 0; index -= 1) {
+    if (/^[›!]\s+\S/u.test(plain[index]!) && !selectedChoice.test(plain[index]!)) {
+      interactionStart = index + 1;
+      break;
+    }
+  }
+  const choiceWindowStart = Math.max(interactionStart, finalVisibleRow - questionLayoutLookbehindRows);
+  const choiceRows = rows.slice(choiceWindowStart, finalVisibleRow + 1);
+  const latestGroup = latestChoiceGroup(choiceRows);
+  const currentGroup = footerChoiceGroup(rows, plain, finalVisibleRow);
+  const activeChoice = currentGroup !== undefined && currentGroup.start >= choiceWindowStart && inverseStyledChoiceLayout(rows, currentGroup);
+  const ambiguousChoice = !activeChoice && latestGroup !== undefined;
+  // an incomplete selector layout cannot establish a safe input boundary
+  if (ambiguousChoice) return undefined;
+  // only a verified selector may hide what otherwise parses as a numbered draft
+  const composer = activeChoice ? undefined : activeComposer(plain);
+  const submittedPrompt = plain.some(row => /^[›!]\s+\S/u.test(row) && !selectedChoice.test(row));
+  const activeWork = plain.some(row => /^(?:[•■─].*\b(?:Working|esc to interrupt)\b|.*\besc to interrupt\b)/iu.test(row.trim()));
+  // without an input or working boundary, pane scrollback may be another turn
+  if (composer === undefined && !activeChoice && !submittedPrompt && !activeWork) return undefined;
+  let end = composer?.index ?? rows.length;
+  // a native question can replace the composer, so remove its footer explicitly
+  while (end > 0 && (!plain[end - 1]!.trim() || questionFooterLine.test(plain[end - 1]!.trim()))) end -= 1;
+  // never retain a standard footer when a temporarily hidden composer cannot anchor it
+  const auxiliary = plain[end - 1] ?? '';
+  if (composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) || composerGoalLine.test(auxiliary)) end -= 1;
+  const statusEnd = end - 1;
+  const statusStart = composerAgentLabelContinuation.test(plain[statusEnd] ?? '') ? statusEnd - 1 : statusEnd;
+  if (composerWorkspaceStatusLine.test(plain[statusStart] ?? '') && plain[statusStart - 1]?.trim() === '') end = statusStart;
+  return rows.slice(0, end).join('\n');
+}
+
+// bound the live tail to the current prompt, not to a single progress marker
+export function codexOutputStartRow(output: string): number {
+  const lines = output.split('\n').map(plainTerminalText);
+  // find the latest submitted prompt if it is still visible
+  for (let row = lines.length - 1; row >= 0; row -= 1) {
+    const line = lines[row]!;
+    // ignore output and inline choices instead of mistaking them for prompts
+    if (!/^[›!]\s+\S/u.test(line) || selectedChoice.test(line)) continue;
+    let start = row + 1;
+    // skip the visual wraps of the user's own prompt
+    while (start < lines.length && /^ {2}\S/u.test(lines[start]!)) start += 1;
+    return start;
+  }
+  return 0;
 }
 
 // share codex's Unicode-scalar count across native paste observers

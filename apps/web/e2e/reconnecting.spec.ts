@@ -29,6 +29,14 @@ async function mockConsoleRoutes(page: Page, available: () => boolean, overrides
   });
 }
 
+// publish one controlled worktree with screensaver policy enabled
+const screensaverDashboard = (idleMinutes = 0) => ({
+  generation: 1,
+  screensaver: { enabled: true, idleMinutes },
+  agents: [{ id: 'agent-1', previewIdentity: 'agent-1:current', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', displayLabel: 'Ready', title: 'Ready', attention: 'working', structured: { lifecycle: 'live', revision: 1 }, panel: 'transcript', queuedPromptCount: 0 }],
+  projects: [{ id: 'fixture', label: 'Fixture', available: true, worktrees: [{ id: 'cora', projectId: 'fixture', label: 'Cora', path: '/worktrees/cora', main: true, detached: false, locked: false, available: true, pinned: true, order: 0 }] }]
+});
+
 // restore the opaque client status while retaining mounted console panes
 test('blocks the console with a reconnecting overlay until the tunnel recovers', async ({ page }) => {
   test.setTimeout(60_000);
@@ -108,6 +116,54 @@ test('blocks the console with a reconnecting overlay until the tunnel recovers',
   expect(takeoverRequests).toBe(0);
 });
 
+// reconnect owns the fullscreen boundary and restarts inactivity only after recovery
+test('reconnecting dismisses and suppresses screensaver until a fresh idle interval elapses', async ({ page }) => {
+  test.setTimeout(30_000);
+  await installPaneMock(page);
+  // hold browser timers so build load cannot cross either idle boundary
+  const start = Date.parse('2026-11-21T12:00:00.000Z');
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(start + 5_000);
+  let tunnelAvailable = true;
+  let previewReads = 0;
+  await mockConsoleRoutes(page, () => tunnelAvailable, {
+    // accelerate only the browser inactivity interval
+    '/api/dashboard': async route => route.fulfill({ json: screensaverDashboard(0.01) }),
+    // count overview-only reads so blocker teardown is observable
+    '/api/agents/agent-1/screensaver': async route => {
+      previewReads += 1;
+      return route.fulfill({ json: { identity: 'agent-1:current', kind: 'output', text: 'latest output', available: true } });
+    }
+  });
+
+  await page.goto('/');
+  await expect(page.getByRole('tab', { name: /^Cora/u })).toBeVisible();
+  await page.keyboard.press('Control+l');
+  const screensaver = page.getByRole('dialog', { name: 'Screensaver' });
+  await expect(screensaver).toBeVisible();
+  await expect.poll(() => previewReads).toBeGreaterThan(0);
+
+  tunnelAvailable = false;
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  const reconnecting = page.getByRole('alert', { name: 'Reconnecting to console' });
+  await expect(reconnecting).toBeVisible();
+  await expect(screensaver).toHaveCount(0);
+  const readsAtDisconnect = previewReads;
+  await page.keyboard.press('Control+l');
+  await page.clock.runFor(1_200);
+  await expect(screensaver).toHaveCount(0);
+  expect(previewReads).toBe(readsAtDisconnect);
+
+  tunnelAvailable = true;
+  // advance the existing reconnect probe without consuming recovered idle time
+  await page.clock.runFor(800);
+  await expect(reconnecting).toBeHidden({ timeout: 5_000 });
+  await page.clock.runFor(599);
+  await expect(screensaver).toHaveCount(0);
+  await page.clock.runFor(1);
+  await expect(screensaver).toBeVisible();
+});
+
 // keep a displaced client blocked through every passive recovery path
 test('requires an explicit takeover after a disconnected controller is displaced', async ({ page }) => {
   test.setTimeout(60_000);
@@ -127,11 +183,15 @@ test('requires an explicit takeover after a disconnected controller is displaced
       takeoverRequests += 1;
       hasControl = true;
       return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    }
+    },
+    // enable manual screensaver only on the controlled dashboard
+    '/api/dashboard': async route => route.fulfill({ json: screensaverDashboard() }),
+    // settle overview content after control returns
+    '/api/agents/agent-1/screensaver': async route => route.fulfill({ json: { identity: 'agent-1:current', kind: 'output', text: 'controlled output', available: true } })
   });
 
   await page.goto('/');
-  const agentTab = page.getByRole('tab', { name: /^Ready/u });
+  const agentTab = page.getByRole('tab', { name: /^Cora/u });
   const overlay = page.getByRole('alert', { name: 'Reconnecting to console' });
   const takeControl = page.getByRole('button', { name: 'Take control', exact: true });
   await expect(agentTab).toBeVisible();
@@ -145,6 +205,8 @@ test('requires an explicit takeover after a disconnected controller is displaced
   await expect(takeControl).toBeVisible();
   await expect(page.getByText('Other device is active', { exact: true })).toBeVisible();
   expect(takeoverRequests).toBe(0);
+  await page.keyboard.press('Control+l');
+  await expect(page.getByRole('dialog', { name: 'Screensaver' })).toHaveCount(0);
 
   const sessionsBeforeFocus = sessionRequests;
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
@@ -168,6 +230,8 @@ test('requires an explicit takeover after a disconnected controller is displaced
   await takeControl.click();
   await expect.poll(() => takeoverRequests).toBe(1);
   await expect(agentTab).toBeVisible();
+  await page.keyboard.press('Control+l');
+  await expect(page.getByRole('dialog', { name: 'Screensaver' })).toBeVisible();
 });
 
 // resume initial authentication when reachability returns

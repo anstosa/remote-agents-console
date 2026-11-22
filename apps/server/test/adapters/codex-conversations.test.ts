@@ -1,7 +1,7 @@
 import { appendFile, mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { codexConversationName, codexConversationSummaries, codexLatestMessage, latestCodexMessageFromRecords, discoverCodexConversation, openPaneThreads, validCodexThreadId } from '../../src/adapters/codex-conversations.js';
+import { codexConversationName, codexConversationSummaries, codexLatestMessage, codexLatestResponse, codexLatestWriterResponse, codexProcessOwnsConversation, latestCodexMessageFromRecords, latestCodexResponseFromRecords, discoverCodexConversation, openPaneThreads, validCodexThreadId } from '../../src/adapters/codex-conversations.js';
 import { codexHome, fakeProc, tempDir } from '../helpers/codex-fixtures.js';
 
 // write one representative Codex rollout, returning its absolute path
@@ -98,6 +98,7 @@ describe('Codex conversation lookup', () => {
     process.env.RAC_HOST_PROC = await fakeWriterProc(home, [id]);
 
     await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toEqual({ id, title: 'Resumed conversation' });
+    await expect(codexProcessOwnsConversation(123, id)).resolves.toBe(true);
   });
 
   // multiple writers do not say which conversation is foreground
@@ -111,6 +112,8 @@ describe('Codex conversation lookup', () => {
     process.env.RAC_HOST_PROC = await fakeWriterProc(home, [first, second]);
 
     await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toBeUndefined();
+    await expect(codexProcessOwnsConversation(123, first)).resolves.toBe(false);
+    await expect(codexProcessOwnsConversation(123, second)).resolves.toBe(false);
   });
 
   // a known child writer does not obscure its sole parent
@@ -148,6 +151,7 @@ describe('Codex conversation lookup', () => {
     process.env.RAC_HOST_PROC = await fakeWriterProc(home, ['0198c777-7777-7777-8777-777777777777'], { owner: 456 });
 
     await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toEqual({ id, title: 'Legacy history' });
+    await expect(codexProcessOwnsConversation(123, '0198c777-7777-7777-8777-777777777777')).resolves.toBe(false);
   });
 
   // a valid owner and filename cannot authorize a different profile's inode
@@ -233,6 +237,40 @@ describe('Codex conversation lookup', () => {
     await expect(codexLatestMessage({ pid: 456, cwd: '/home/ubuntu/cora' })).resolves.toBe('Do you want me to continue?');
     await expect(codexLatestMessage({ pid: 456, cwd: '/home/ubuntu/cora', conversationId: '0198c888-8888-7888-8888-888888888888' })).resolves.toBeUndefined();
   });
+
+  // preview selection must obey the current writer even while old history remains open
+  it('reads completed output only from the writer-owned current conversation', async () => {
+    const home = await codexHome();
+    const cwd = '/home/ubuntu/cora';
+    const currentId = '0198c777-7777-7777-8777-777777777777';
+    const oldId = '0198c888-8888-7888-8888-888888888888';
+    const current = await writeSession(home, 'rollout-current', { id: currentId, cwd, prompt: 'Current prompt' });
+    const old = await writeSession(home, 'rollout-old', { id: oldId, cwd, prompt: 'Old prompt' });
+    await appendFile(current, `${JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', last_agent_message: 'Current response' } })}\n`);
+    await appendFile(old, `${JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', last_agent_message: 'Old response' } })}\n`);
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(home, [currentId], { open: [old] });
+
+    await expect(codexLatestResponse({ pid: 123, cwd, conversationId: currentId })).resolves.toBe('Current response');
+    await expect(codexLatestWriterResponse(123, currentId)).resolves.toBe('Current response');
+    await expect(codexLatestResponse({ pid: 123, cwd, conversationId: oldId })).resolves.toBeUndefined();
+
+    // losing the writer cannot fall back to a still-open rollout descriptor
+    process.env.RAC_HOST_PROC = await fakeProc(123, [current]);
+    await expect(codexLatestWriterResponse(123, currentId)).resolves.toBeUndefined();
+  });
+
+  // a writer can precede its first persisted rollout and is authoritative over old cwd history
+  it('does not return an older response for an unwritten current writer', async () => {
+    const home = await codexHome();
+    const cwd = '/home/ubuntu/cora';
+    const old = await writeSession(home, 'rollout-old', { id: '0198c888-8888-7888-8888-888888888888', cwd, prompt: 'Old prompt' });
+    await appendFile(old, `${JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', last_agent_message: 'Old response' } })}\n`);
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(home, ['0198c777-7777-7777-8777-777777777777'], { open: [old] });
+
+    await expect(codexLatestResponse({ pid: 123, cwd })).resolves.toBeUndefined();
+  });
 });
 
 describe('Codex latest assistant message', () => {
@@ -272,6 +310,54 @@ describe('Codex latest assistant message', () => {
       '{bad json',
       line('event_msg', { type: 'agent_message', message: 'Valid reply' }),
     ])).toBe('Valid reply');
+  });
+});
+
+describe('Codex latest completed response', () => {
+  // create one native event under the current thread
+  const event = (payload: object) => JSON.stringify({ type: 'event_msg', payload });
+
+  it('publishes prose only after its matching terminal completion', () => {
+    const incomplete = [
+      event({ type: 'task_started' }),
+      event({ type: 'agent_message', phase: 'final_answer', message: 'not completed yet' })
+    ];
+    expect(latestCodexResponseFromRecords(incomplete)).toBeUndefined();
+    expect(latestCodexResponseFromRecords([...incomplete, event({ type: 'task_complete', last_agent_message: null })])).toBe('not completed yet');
+  });
+
+  it('does not promote prose on another native turn terminal', () => {
+    const incomplete = [
+      event({ type: 'task_started', turn_id: 'turn-one' }),
+      event({ type: 'agent_message', turn_id: 'turn-one', phase: 'final_answer', message: 'matching answer' }),
+      event({ type: 'task_complete', turn_id: 'turn-two', last_agent_message: null })
+    ];
+    expect(latestCodexResponseFromRecords(incomplete)).toBeUndefined();
+    expect(latestCodexResponseFromRecords([...incomplete, event({ type: 'task_complete', turn_id: 'turn-one', last_agent_message: null })])).toBe('matching answer');
+  });
+
+  it('correlates nested assistant items with their enclosing native turn', () => {
+    const start = event({ type: 'task_started', turn_id: 'turn-one' });
+    const matching = event({ type: 'item_completed', turn_id: 'turn-one', item: { type: 'AgentMessage', turn_id: 'turn-one', phase: 'final_answer', content: 'matching nested answer' } });
+    const conflicting = event({ type: 'item_completed', turn_id: 'turn-two', item: { type: 'AgentMessage', turn_id: 'turn-one', phase: 'final_answer', content: 'foreign nested answer' } });
+    const complete = event({ type: 'task_complete', turn_id: 'turn-one', last_agent_message: null });
+    expect(latestCodexResponseFromRecords([start, matching, complete])).toBe('matching nested answer');
+    expect(latestCodexResponseFromRecords([start, conflicting, complete])).toBeUndefined();
+  });
+
+  it('retains the earlier completed answer across failed, aborted and empty turns', () => {
+    const completed = [event({ type: 'agent_message', message: 'Proven answer' }), event({ type: 'task_complete', last_agent_message: null })];
+    expect(latestCodexResponseFromRecords([...completed, event({ type: 'task_started' }), event({ type: 'agent_message', message: 'partial' }), event({ type: 'turn_aborted' })])).toBe('Proven answer');
+    expect(latestCodexResponseFromRecords([...completed, event({ type: 'task_started' }), event({ type: 'task_complete', last_agent_message: null })])).toBe('Proven answer');
+  });
+
+  it('ignores other threads and commentary at completion', () => {
+    expect(latestCodexResponseFromRecords([
+      event({ type: 'agent_message', thread_id: 'child', message: 'Child answer' }),
+      event({ type: 'task_complete', thread_id: 'child', last_agent_message: 'Child answer' }),
+      event({ type: 'agent_message', thread_id: 'parent', phase: 'commentary', message: 'Progress' }),
+      event({ type: 'task_complete', thread_id: 'parent', last_agent_message: null })
+    ], 'parent')).toBeUndefined();
   });
 });
 

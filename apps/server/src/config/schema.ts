@@ -169,6 +169,11 @@ const conductorSchema = z.object({
   maxSelfStartedTurnsPerHour: z.number().int().min(1).max(1_000).default(30),
   scriptDeadlineMinutes: z.number().int().min(1).max(120).default(10)
 }).strict();
+// keep screensaver policy server-wide while each browser measures its own idle time
+const screensaverSchema = z.object({
+  enabled: z.boolean().default(false),
+  idleMinutes: z.number().int().min(0).max(365 * 24 * 60).default(0)
+}).strict().default({});
 export const sourceSchema = z.object({
   listen: z.object({ host: z.string(), port: z.number().int().min(1).max(65535) }).strict().default({ host: '127.0.0.1', port: 8787 }),
   name: serverName.default('Remote Agents'),
@@ -209,6 +214,7 @@ export const sourceSchema = z.object({
   autoDeleteSentNotes: z.boolean().default(false),
   // opt in to server-wide host resource inspection
   resourceMonitoring: z.boolean().default(false),
+  screensaver: screensaverSchema,
   buttons: applicationButtonsSchema,
   // a repository the console manages; its checkouts are discovered from git, never
   // declared. `path` is any checkout (a bare repository included); `hostPath` maps the
@@ -225,6 +231,7 @@ export type ConfigInput = z.input<typeof sourceSchema>;
 export type RemoteServer = { url: URL; name?: string };
 export type IntegrationConfig = z.output<typeof integrationFeatures>;
 export type DavoSettings = z.output<typeof davoSettingsSchema>;
+export type ScreensaverConfig = z.output<typeof screensaverSchema>;
 /**
  * The Conductor as configured: its kind, directory Project, Allowed model and Effort, MCP scopes,
  * the kinds its workers may be, and limits; `unavailable` says why its Project cannot be used now,
@@ -232,7 +239,7 @@ export type DavoSettings = z.output<typeof davoSettingsSchema>;
  */
 export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; permissions?: McpPermissions; spawnKinds: ConductorSpawnKind[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
 // launchHome is runtime-only; null means account lookup failed, omission supports legacy callers
-export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: string; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; launchHome?: string | null; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; replySuggestions: boolean; fileOpenAction: 'preview' | 'edit'; flyoutMarkers: boolean; dynamicWorktrees: boolean; usagePace: boolean; autoDeleteSentNotes: boolean; resourceMonitoring: boolean; buttons?: ButtonSlots; projects: Project[] };
+export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: string; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; launchHome?: string | null; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; replySuggestions: boolean; fileOpenAction: 'preview' | 'edit'; flyoutMarkers: boolean; dynamicWorktrees: boolean; usagePace: boolean; autoDeleteSentNotes: boolean; resourceMonitoring: boolean; screensaver?: ScreensaverConfig; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable
 // programs, a crossed OMX/Codex program); `checkExecutables` runs the boot X_OK probe
 // and is skipped under the host bridge, where `program` is a host path the container
@@ -561,5 +568,5 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
   }
   // retain disabled source configuration without exposing a running Conductor or its tools
   const conductor = parsed.conductor === undefined || parsed.conductor.enabled === false ? undefined : conductorConfig(parsed.conductor, projects, adapters);
-  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), launchHome: launchHome ?? null, ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), ...(conductor === undefined ? {} : { conductor }), googleCalendar: parsed.googleCalendar, review, replySuggestions: parsed.replySuggestions, fileOpenAction: parsed.fileOpenAction, flyoutMarkers: parsed.flyoutMarkers, dynamicWorktrees: parsed.dynamicWorktrees, usagePace: parsed.usagePace, autoDeleteSentNotes: parsed.autoDeleteSentNotes, resourceMonitoring: parsed.resourceMonitoring, buttons: parsed.buttons, projects };
+  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), launchHome: launchHome ?? null, ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), ...(conductor === undefined ? {} : { conductor }), googleCalendar: parsed.googleCalendar, review, replySuggestions: parsed.replySuggestions, fileOpenAction: parsed.fileOpenAction, flyoutMarkers: parsed.flyoutMarkers, dynamicWorktrees: parsed.dynamicWorktrees, usagePace: parsed.usagePace, autoDeleteSentNotes: parsed.autoDeleteSentNotes, resourceMonitoring: parsed.resourceMonitoring, screensaver: parsed.screensaver, buttons: parsed.buttons, projects };
 }

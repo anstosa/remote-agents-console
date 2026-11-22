@@ -13,6 +13,8 @@ export type ClaudeCatalogProbe = { version: 1; models: unknown[]; capabilities: 
 type ProbeDependencies = { command?: typeof run; environment?: NodeJS.ProcessEnv; checkout?: string };
 
 const maxProbeBytes = 900 * 1024;
+// allow time for host shell startup plus native help and app-server metadata
+export const hostCodexCatalogDeadlineMs = 25_000;
 // quote only server-owned values used by the fixed helper invocation
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -53,7 +55,8 @@ async function probeNativeCatalog(kind: 'codex' | 'omx' | 'claude', config: Adap
   const hostDirectory = bridged ? join(hostCheckout!, '.data', basename(directory)) : directory;
   const hostDescriptor = join(hostDirectory, 'request.json');
   const helper = join(bridged ? hostCheckout! : checkout, 'scripts', 'discover-omx-models.mjs');
-  const duration = Math.max(250, Math.min(timeoutMs, 10_000));
+  // keep the longer watchdog scoped to Codex-backed host probes
+  const duration = Math.max(250, Math.min(timeoutMs, bridged && kind !== 'claude' ? hostCodexCatalogDeadlineMs : 10_000));
   try {
     // keep configured credentials out of process argv and shared output
     await writeFile(descriptor, JSON.stringify({ version: 1, kind, program: config.program, args: config.args, cwd, home, env: environment, timeoutMs: duration, expiresAt: Date.now() + duration }), { mode: 0o600, flag: 'wx' });
