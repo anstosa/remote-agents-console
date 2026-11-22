@@ -131,7 +131,8 @@ const sandboxLists = z.object({ allowedDomains: z.array(sandboxDomain).max(256).
 const piEntry = adapterEntry.omit({ program: true, updates: true, allowedModels: true }).extend({ allowedModels: piAllowedModels.optional(), sandbox: sandboxLists.optional() }).strict('adapters.pi takes only args, env, setup, teardown, allowedModels and sandbox: Pi is pinned by the console as its own dependency, so it has no program or update commands');
 // Claude launches over either Transport (ADR 0021): `transport` picks the one new launches use;
 // a kind with one Transport has no such key
-const claudeEntry = adapterEntry.extend({ transport: z.enum(['tmux', 'structured']).optional() }).strict();
+// `sandbox` confines only a Claude Conductor (ADR 0022); the operator's other Claude Agents run under their own settings
+const claudeEntry = adapterEntry.extend({ transport: z.enum(['tmux', 'structured']).optional(), sandbox: sandboxLists.optional() }).strict();
 // keyed by kind, one strict entry each; an omitted block is observe-only (nothing launches)
 const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: claudeEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
 // name an icon in the library; an absent one renders the terminal icon
@@ -444,7 +445,7 @@ async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean
   for (const kind of agentKinds) {
     const entry = kind === 'pi' ? undefined : parsed[kind] as z.output<typeof claudeEntry> | undefined;
     if (entry === undefined) continue;
-    const config: AdapterLaunchConfig = { program: entry.program, args: entry.args ?? [], env: inheritedHomeEnvironment(entry.env), launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.updates === undefined ? {} : { updates: entry.updates }), ...(entry.allowedModels === undefined ? {} : { allowedModels: entry.allowedModels }), ...(entry.transport === undefined ? {} : { transport: entry.transport }) };
+    const config: AdapterLaunchConfig = { program: entry.program, args: entry.args ?? [], env: inheritedHomeEnvironment(entry.env), launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.updates === undefined ? {} : { updates: entry.updates }), ...(entry.allowedModels === undefined ? {} : { allowedModels: entry.allowedModels }), ...(entry.transport === undefined ? {} : { transport: entry.transport }), ...(kind === 'claude' ? { sandbox: sandboxSettings(sandbox, entry.sandbox) } : {}) };
     // a missing program, a directory, or a non-executable file never refuses boot;
     // it disables that kind with a reason (a directory is +x, so require a real file)
     if (checkExecutables) {

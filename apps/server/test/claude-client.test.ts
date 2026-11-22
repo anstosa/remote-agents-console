@@ -111,6 +111,21 @@ describe('the Claude client', () => {
     expect(of('conversation')).toEqual([{ type: 'conversation', id: session, name: 'rac-probe' }]);
   });
 
+  it('as the Conductor, initialises with its role prompt and serves ask_user as the operator\'s server, since rac names the console\'s', async () => {
+    const { sent, claude, replies } = claudeOverChannel({ role: 'conductor' });
+    expect(sent[0]).toMatchObject({ type: 'control_request', request: { subtype: 'initialize', sdkMcpServers: ['operator'], appendSystemPrompt: expect.stringContaining('You are the Conductor of a Remote Agent Console') } });
+    // it calls the console's tools directly: it has no code mode, and its shell cannot reach the console
+    expect(sent[0].request.appendSystemPrompt).not.toMatch(/code mode/iu);
+    expect(sent[0].request.appendSystemPrompt).toContain('Your shell cannot reach the console.');
+    const list = (id: string, server: string) => claude({ type: 'control_request', request_id: id, request: { subtype: 'mcp_message', server_name: server, message: { method: 'tools/list', jsonrpc: '2.0', id: 1 } } });
+    list('m1', 'operator');
+    expect(replies().at(-1).response.mcp_response.result.tools.map((tool: { name: string }) => tool.name)).toEqual(['ask_user']);
+    list('m2', 'rac');
+    expect(replies().at(-1)).toMatchObject({ subtype: 'error', request_id: 'm2' });
+    // any other Agent is told nothing of the role
+    expect(claudeOverChannel().sent[0].request).not.toHaveProperty('appendSystemPrompt');
+  });
+
   it('reports every nonce a SessionStart hook printed, so another hook\'s cannot hide the launch\'s', async () => {
     const { claude, play, of } = claudeOverChannel();
     const records = fixture('launch.jsonl');

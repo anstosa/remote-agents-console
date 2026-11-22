@@ -657,6 +657,16 @@ describe('claude adapter configuration', () => {
     expect(config.adapters?.pi?.sandbox).toEqual({ allowedDomains: ['registry.npmjs.org', '*.github.com', 'pypi.org'], deniedDomains: ['evil.example'], allowWrite: ['~/.cache/pnpm'], denyWrite: ['/etc'], denyRead: ['~/.ssh'], env: ['GH_TOKEN', 'NPM_TOKEN'] });
   });
 
+  it('gives Claude the shared sandbox lists followed by its own, for a Conductor\'s settings', async () => {
+    const config = await validateConfig({ ...scratch,
+      sandbox: { allowedDomains: ['registry.npmjs.org'], denyRead: ['~/.ssh'] },
+      adapters: { claude: { program: process.execPath, sandbox: { allowedDomains: ['registry.npmjs.org', 'pypi.org'], allowWrite: ['~/.cache/pnpm'] } } } });
+    expect(config.adapters?.claude?.sandbox).toEqual({ allowedDomains: ['registry.npmjs.org', 'pypi.org'], deniedDomains: [], allowWrite: ['~/.cache/pnpm'], denyWrite: [], denyRead: ['~/.ssh'], env: [] });
+    await expect(validateConfig({ ...scratch, adapters: { claude: { program: process.execPath, sandbox: { allowedDomains: ['https://pypi.org'] } } } })).rejects.toThrow(/not a URL/u);
+    // a kind with no sandbox of its own takes none
+    await expect(validateConfig({ ...scratch, adapters: { codex: { program: process.execPath, sandbox: {} } } })).rejects.toThrow();
+  });
+
   it('refuses sandbox paths that are not absolute or home-relative, URLs as domains, and bad variable names', async () => {
     await expect(validateConfig({ ...scratch, sandbox: { allowWrite: ['relative/dir'] } })).rejects.toThrow(/absolute or start with ~/u);
     await expect(validateConfig({ ...scratch, adapters: { pi: { sandbox: { allowedDomains: ['https://github.com'] } } } })).rejects.toThrow(/not a URL/u);

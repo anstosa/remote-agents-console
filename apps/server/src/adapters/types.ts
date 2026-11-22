@@ -479,7 +479,7 @@ export interface Adapter {
 export interface StructuredAdapter {
   readonly kind: AgentKind;
   /** The CLI arguments for a launch; the console prepends the program and runs it under a holder. */
-  launch(input: StructuredLaunchInput): LaunchSpec;
+  launch(input: StructuredLaunchInput): StructuredLaunchSpec;
   readonly client: ProtocolClient;
   /** Every Effort the kind's models may take; each model offers some of them. */
   readonly efforts: readonly string[];
@@ -539,8 +539,16 @@ export interface StructuredAdapter {
  * `models` scopes the Agent to them and names the model a new Conversation starts on. `files` are
  * the kind's console-rendered files, and `nonce` is what its launch report must echo. `role` launches
  * the Conductor: its client then takes the console's MCP access, and it gets the console's role prompt.
+ * `sandbox` is the kind's sandbox settings, the console's own paths and hosts included, for a kind
+ * that writes them into its launch rather than a rendered file.
  */
-export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; responseOrigin?: string; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string; role?: 'conductor' };
+export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; responseOrigin?: string; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string; role?: 'conductor'; sandbox?: SandboxSettings };
+/**
+ * A structured launch's arguments. A `sealed` launch is the whole of what the process loads: the
+ * console composes only its model and Effort onto it, and none of the operator's arguments, the
+ * Launch menu's permission mode or a folder-trust restriction (a Claude Conductor's, ADR 0022).
+ */
+export type StructuredLaunchSpec = LaunchSpec & { sealed?: true };
 /** one ordered Allowed model for an Adapter, with its optional default Effort. */
 export type AllowedModel = { model: string; effort?: string };
 

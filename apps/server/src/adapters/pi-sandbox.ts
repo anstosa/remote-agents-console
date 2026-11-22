@@ -41,8 +41,8 @@ export type SessionPaths = { cwd: string; stateDir: string; git?: { dir: string;
 // what in Pi's state directory holds credentials, may hold literal keys, or holds other
 // Conversations
 const piSecrets = ['auth.json', 'oauth.json', 'mcp-auth.json', 'models.json', 'mcp.json', 'sessions'];
-// the operator's other credentials a command never needs
-const homeSecrets = ['.ssh', '.gnupg', '.aws', '.config/gh', '.config/gcloud', '.docker/config.json', '.git-credentials', '.netrc', '.npmrc', '.claude/.credentials.json', '.codex/auth.json'];
+/** The operator's other credentials, under the home directory, that a command never needs. */
+export const homeSecrets = ['.ssh', '.gnupg', '.aws', '.config/gh', '.config/gcloud', '.docker/config.json', '.git-credentials', '.netrc', '.npmrc', '.claude/.credentials.json', '.codex/auth.json'];
 /** What in a repository's git directory configures git, runs code, or points git elsewhere. */
 export const gitDirections = ['config', 'config.worktree', 'hooks', 'info', 'modules', 'commondir', 'worktrees', 'remotes', 'branches'];
 // what other tools run code from, as the sandbox runtime protects it from commands: these names

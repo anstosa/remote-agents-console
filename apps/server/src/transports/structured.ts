@@ -146,7 +146,8 @@ export interface LineChannel {
  * console last knew it on, for a protocol that does not say until a Turn starts.
  * `env` is the current profile's server read-view, not a holder launch environment.
  */
-export type ClientContext = { cwd: string; env?: NodeJS.ProcessEnv; model?: ModelSetting; attached?: { dropped: number; conversation?: string } };
+// `role` is the Agent's, on every process of it and every reattach to one
+export type ClientContext = { cwd: string; env?: NodeJS.ProcessEnv; model?: ModelSetting; role?: 'conductor'; attached?: { dropped: number; conversation?: string } };
 /** A protocol client: it speaks one protocol over a channel and reports what it sees as events. */
 export type ProtocolClient = (channel: LineChannel, emit: (event: StructuredEvent) => void, context: ClientContext) => StructuredConnection;
 

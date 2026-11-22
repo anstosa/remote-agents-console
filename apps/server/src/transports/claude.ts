@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { askUser, askUserReply } from '../adapters/ask-user.js';
 import { claudeConversationName, claudeHookNonce, claudeTranscriptRecords, validClaudeSessionId } from '../adapters/claude-conversations.js';
+import { conductorHandoff, conductorPrompt } from '../adapters/conductor-role.js';
 import type { QuestionField } from '../adapters/types.js';
 import { bounded, count, isObject, oneLine, outcome, strings, summary, text, thousands, waitingForAnswer, type Json, type ModelInfo, type ModelSetting, type ProtocolClient, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
 
@@ -22,8 +23,12 @@ export const claudeEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export const claudeMcpServer = 'rac';
 /** `ask_user` as the model calls it. */
 export const claudeAskUserTool = `mcp__${claudeMcpServer}__${askUser.name}`;
+/** The Conductor's SDK MCP server, since `rac` names the console's own MCP server there (ADR 0022). */
+export const claudeConductorMcpServer = 'operator';
+export const claudeConductorAskUserTool = `mcp__${claudeConductorMcpServer}__${askUser.name}`;
+const askUserTools = new Set([claudeAskUserTool, claudeConductorAskUserTool]);
 // Claude's tool names as the transcript's verbs; any other tool keeps its own name
-const verbs: Record<string, string> = { Bash: 'Run', Grep: 'Search', Glob: 'Find', LS: 'List', MultiEdit: 'Edit', WebFetch: 'Fetch', [claudeAskUserTool]: 'Ask' };
+const verbs: Record<string, string> = { Bash: 'Run', Grep: 'Search', Glob: 'Find', LS: 'List', MultiEdit: 'Edit', WebFetch: 'Fetch', [claudeAskUserTool]: 'Ask', [claudeConductorAskUserTool]: 'Ask' };
 const editTools = new Set(['Edit', 'MultiEdit', 'Write']);
 const controlTimeoutMs = 30_000;
 const compactTimeoutMs = 10 * 60_000;
@@ -180,7 +185,7 @@ function transcriptReader() {
             if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking !== '') return [{ id: `${id}:${index}`, kind: 'thinking', text: bounded(block.thinking) }];
             if (block.type !== 'tool_use' || typeof block.id !== 'string' || typeof block.name !== 'string') return [];
             // an `ask_user` question shows once, in the Inline-question box, never as the call's target
-            const item: TranscriptTool = { id: block.id, kind: 'tool', name: verbs[block.name] ?? block.name, summary: block.name === claudeAskUserTool ? '' : summary(block.input), state: 'running' };
+            const item: TranscriptTool = { id: block.id, kind: 'tool', name: verbs[block.name] ?? block.name, summary: askUserTools.has(block.name) ? '' : summary(block.input), state: 'running' };
             calls.set(block.id, { name: block.name, ...(isObject(block.input) && typeof block.input.file_path === 'string' ? { file: block.input.file_path } : {}), at, item });
             return [item];
           });
@@ -309,7 +314,10 @@ type Question = ({ kind: 'permission'; input: unknown; deniable?: true } | { kin
 type Operation = { kind: 'rename' | 'compact' | 'clear' | 'model'; id?: string; seen: boolean; finish: (result?: Json) => void };
 
 // bind protocol history reads to the current profile
-export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: launched, attached }) => {
+export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: launched, role, attached }) => {
+  const conductor = role === 'conductor';
+  // the SDK MCP server serving `ask_user`
+  const server = conductor ? claudeConductorMcpServer : claudeMcpServer;
   // request ids no earlier client used, so a response replayed from before a reattach answers nothing
   const prefix = `rac-${randomUUID().slice(0, 8)}`;
   let requests = 0;
@@ -515,10 +523,10 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
     const message = isObject(request.message) ? request.message : {};
     const params = isObject(message.params) ? message.params : {};
     const respond = (body: Json) => reply(requestId, { mcp_response: { jsonrpc: '2.0', ...(message.id === undefined ? {} : { id: message.id }), ...body } });
-    if (request.server_name !== claudeMcpServer) { refuse(requestId, `No MCP server ${String(request.server_name)} is served here.`); return; }
+    if (request.server_name !== server) { refuse(requestId, `No MCP server ${String(request.server_name)} is served here.`); return; }
     switch (message.method) {
       case 'initialize':
-        respond({ result: { protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: claudeMcpServer, version: '1' } } });
+        respond({ result: { protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: server, version: '1' } } });
         return;
       case 'ping':
         respond({ result: {} });
@@ -735,8 +743,9 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
   });
   // Reattached, the CLI answers a second `initialize` in full, its `session_state` included, and
   // after the holder's replay, so the Conversation is read then. A CLI that does not answer is taken as idle.
+  // The Conductor's role prompt rides it (ADR 0022).
   const initialize = async () => {
-    const response = await control({ subtype: 'initialize', sdkMcpServers: [claudeMcpServer] });
+    const response = await control({ subtype: 'initialize', sdkMcpServers: [server], ...(conductor ? { appendSystemPrompt: conductorPrompt({ codeMode: false }) } : {}) });
     if (response !== undefined) {
       if (typeof response.claude_code_version === 'string') version = response.claude_code_version;
       if (Array.isArray(response.models)) models = response.models.filter(isObject);

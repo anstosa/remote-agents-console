@@ -68,6 +68,8 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
   let cancels = 0;
   let lines = 0;
   const attaches: HolderRef[] = [];
+  // what each reattach was told of its Agent: its folder, Conversation and role
+  const attachedAt: Array<{ cwd: string; conversation?: string; role?: 'conductor' }> = [];
   const grants: Array<{ url: string; token: string }> = [];
   let reporting = reports;
   // `own` is the process's own events, as `emit` was when it started
@@ -126,8 +128,9 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       if (exits) setTimeout(() => emit({ type: 'exited' }), 10);
       return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9', ...(bridged ? { host: true as const, tmuxSocket: '/host-tmux/default' } : {}), ...(sandboxGeneration === undefined ? {} : { sandboxGeneration }) }, connection: connection(), cursor: () => lines, raw: () => raw?.(grants.at(-1)?.token ?? '') ?? [{ from: 'agent' as const, line: '{"type":"agent_start"}' }], ...(notice === undefined ? {} : { notice }) };
     },
-    attach: async (holder, _kind, events) => {
+    attach: async (holder, _kind, events, at) => {
       attaches.push(holder);
+      attachedAt.push(at);
       await attaching;
       if (gone) return undefined;
       emit = events;
@@ -149,7 +152,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       return sandboxGeneration;
     }
   };
-  return { processes, delivered, launches, attaches, grants, operations, compactions, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), emitTo: (id: string, event: StructuredEvent) => emitters.get(id)?.(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
+  return { processes, delivered, launches, attaches, attachedAt, grants, operations, compactions, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), emitTo: (id: string, event: StructuredEvent) => emitters.get(id)?.(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
 }
 
 // the integration gateway's state and audit files, in a temporary folder
@@ -2489,6 +2492,8 @@ describe('the Conductor\'s dispatches', () => {
     const deployed = await restart(next);
     await deployed.reattached;
     await deployed.app.conductor.start();
+    // the Conductor's client is told its role again, and its worker's is told none
+    expect(next.attachedAt.map(at => at.role)).toEqual(expect.arrayContaining(['conductor', undefined]));
     // the Conductor, reattached too, is idle once it reports its Conversation
     next.emitTo(conductor, { type: 'conversation', id: 'conducting' });
     next.emitTo(target, { type: 'turn', turn: { type: 'started' } });

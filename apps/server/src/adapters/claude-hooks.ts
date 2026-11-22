@@ -1,7 +1,8 @@
-import { claudeAskUserTool } from '../transports/claude.js';
+import { claudeAskUserTool, claudeConductorAskUserTool } from '../transports/claude.js';
+import { homeSecrets } from './pi-sandbox.js';
 import { claudeReplyObserverConfiguration } from '../reply-suggestions/claude-observer.js';
 import { responseUrlSessionHookCommand } from './response-urls.js';
-import type { AdapterFileContext, AttentionState } from './types.js';
+import type { AdapterFileContext, AttentionState, SandboxSettings } from './types.js';
 
 /**
  * The Claude Code hooks settings file the console injects with `--settings` on
@@ -111,7 +112,24 @@ export function claudeFiles(context: AdapterFileContext): Record<string, string>
 // The model asks through the console's `ask_user`, which needs no permission. Claude's own
 // `AskUserQuestion` is denied: under `--permission-prompt-tool stdio` it arrives as a permission
 // request, and allowing that answers none of its questions.
+const structuredHooks = { SessionStart: [{ hooks: [{ type: 'command', timeout: 5, command: `printf '{"suppressOutput":true,"rac":"%s"}\\n' "$RAC_LAUNCH_NONCE"` } satisfies CommandHandler, responseUrlSessionHook] }] };
 export const claudeStructuredSettings = JSON.stringify({
-  hooks: { SessionStart: [{ hooks: [{ type: 'command', timeout: 5, command: `printf '{"suppressOutput":true,"rac":"%s"}\\n' "$RAC_LAUNCH_NONCE"` } satisfies CommandHandler, responseUrlSessionHook] }] },
+  hooks: structuredHooks,
   permissions: { allow: [claudeAskUserTool], deny: ['AskUserQuestion'] }
+});
+
+/**
+ * A Claude Conductor's settings (ADR 0022), the only ones it loads: the launch's hooks; a sandbox
+ * that fails closed and lets no command out, on the kind's lists (the console's own hosts and
+ * paths denied) and the operator's credentials unreadable; and, asking no one, the console's MCP
+ * tools, `ask_user` and edits allowed, with the file tools kept to its working folder.
+ */
+export const claudeConductorSettings = (sandbox?: SandboxSettings): string => JSON.stringify({
+  hooks: structuredHooks,
+  sandbox: {
+    enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true,
+    network: { allowedDomains: sandbox?.allowedDomains ?? [], deniedDomains: sandbox?.deniedDomains ?? [] },
+    filesystem: { allowWrite: sandbox?.allowWrite ?? [], denyWrite: sandbox?.denyWrite ?? [], denyRead: [...sandbox?.denyRead ?? [], ...homeSecrets.map(name => `~/${name}`)] }
+  },
+  permissions: { defaultMode: 'dontAsk', allow: ['mcp__rac', claudeConductorAskUserTool, 'Edit', 'Write'], deny: ['AskUserQuestion'], blockFileToolReadsOutsideWorkingDirectories: true, blockWritesOutsideWorkingDirectories: true }
 });

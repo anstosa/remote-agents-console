@@ -1,13 +1,13 @@
 import { basename } from 'node:path';
 import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationName, claudeConversationSummaries, claudeFolderTrusted, latestClaudeConversation, locateClaudeSession, validClaudeSessionId } from './claude-conversations.js';
 import { claudeSkillDirectories, claudeSlash } from './claude-commands.js';
-import { claudeFiles, claudeHooksFileName, claudeStructuredSettings } from './claude-hooks.js';
+import { claudeConductorSettings, claudeFiles, claudeHooksFileName, claudeStructuredSettings } from './claude-hooks.js';
 import { claudeNewConversation } from './claude-new-conversation.js';
 import { claudeReviewRuns } from './claude-review-runs.js';
 import { claudeQuestionTextAnswer, claudeQuestionTextEntry, reportedClaudeQuestion } from './claude-questions.js';
 import { claudeFolderTrustQuestion } from './claude-folder-trust.js';
 import { responseUrlEnvironment } from './response-urls.js';
-import { claudeClient, claudeEfforts, claudeMcpServer } from '../transports/claude.js';
+import { claudeClient, claudeConductorMcpServer, claudeEfforts, claudeMcpServer } from '../transports/claude.js';
 import type { Adapter, ReplacedFlagValue, StructuredAdapter, TmuxKey } from './types.js';
 
 // The packaged CLI entry a `node …` invocation of Claude Code runs.
@@ -130,6 +130,8 @@ const structuredConflictingArgs = new Map<string, ReplacedFlagValue>([
 // Review run does; and the operator's own choice of setting sources
 const untrustedArgs = ['--setting-sources', 'user', '--strict-mcp-config'];
 const untrustedReserved = new Map<string, ReplacedFlagValue>([['--mcp-config', 'many'], ['--setting-sources', 'one'], ['--strict-mcp-config', 'none']]);
+// a Conductor's built-in tools: no web tools, no subagents, and no `AskUserQuestion`
+const conductorTools = 'Bash,Read,Edit,Write,Grep,Glob';
 const untrustedNotice = 'This folder isn\'t trusted by Claude yet, so its project settings, hooks and MCP servers are ignored, and only the console\'s own MCP server runs. Open Claude in Terminal mode here once and accept the trust prompt to use them.';
 
 /**
@@ -145,15 +147,23 @@ const untrustedNotice = 'This folder isn\'t trusted by Claude yet, so its projec
  */
 export const claudeStructuredAdapter = {
   kind: 'claude',
-  launch: ({ nonce = '', responseOrigin, resume }) => ({
-    args: [
-      '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages', '--permission-prompts', 'host', '--permission-prompt-tool', 'stdio',
-      '--mcp-config', JSON.stringify({ mcpServers: { [claudeMcpServer]: { type: 'sdk', name: claudeMcpServer } } }),
-      '--settings', claudeStructuredSettings,
-      ...(resume === undefined ? [] : ['--resume', resume])
-    ],
-    env: { RAC_LAUNCH_NONCE: nonce, ...responseUrlEnvironment(responseOrigin) }
-  }),
+  // A Conductor's launch is sealed (ADR 0022): it loads no setting sources and no MCP server but its
+  // own, has only the tools it needs, and runs on settings the console writes whole
+  launch: ({ nonce = '', responseOrigin, resume, role, sandbox }) => {
+    const conductor = role === 'conductor';
+    const server = conductor ? claudeConductorMcpServer : claudeMcpServer;
+    return {
+      args: [
+        '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages', '--permission-prompts', 'host', '--permission-prompt-tool', 'stdio',
+        ...(conductor ? ['--setting-sources', '', '--strict-mcp-config', '--tools', conductorTools] : []),
+        '--mcp-config', JSON.stringify({ mcpServers: { [server]: { type: 'sdk', name: server } } }),
+        '--settings', conductor ? claudeConductorSettings(sandbox) : claudeStructuredSettings,
+        ...(resume === undefined ? [] : ['--resume', resume])
+      ],
+      env: { RAC_LAUNCH_NONCE: nonce, ...responseUrlEnvironment(responseOrigin) },
+      ...(conductor ? { sealed: true as const } : {})
+    };
+  },
   client: claudeClient,
   efforts: claudeEfforts,
   conversations: { stateDirectory: claudeConfigDir, validId: validClaudeSessionId, list: claudeConversationSummaries, readName: claudeConversationName, locate: locateClaudeSession, latest: latestClaudeConversation },

@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { gte, valid } from 'semver';
 import { structuredAdapterFor } from '../adapters/registry.js';
-import type { AdapterConfigs, AgentKind, AllowedModel, PromptCommand, StructuredAdapter } from '../adapters/types.js';
+import type { AdapterConfigs, AgentKind, AllowedModel, PromptCommand, SandboxSettings, StructuredAdapter } from '../adapters/types.js';
 import type { Agent, AgentLifecycle } from '../domain/models.js';
 import type { ShapedQuestion } from '../adapters/types.js';
 import { placeHostRoot, type Place } from '../places/places.js';
@@ -72,7 +72,7 @@ export interface StructuredProcesses {
    * read (`holder.read`), running in `cwd` on the Conversation the console last knew; undefined
    * when the process is gone.
    */
-  attach(holder: HolderRef, kind: AgentKind, emit: (event: StructuredEvent) => void, at: { cwd: string; conversation?: string }): Promise<StructuredProcess | undefined>;
+  attach(holder: HolderRef, kind: AgentKind, emit: (event: StructuredEvent) => void, at: { cwd: string; conversation?: string; role?: 'conductor' }): Promise<StructuredProcess | undefined>;
   /** The current bridged sandbox/runtime generation, or undefined when it cannot be proven. */
   sandboxGeneration?(kind: AgentKind): Promise<string | undefined>;
   /** The process's recent stderr, shown when it fails: what its holder window shows, its last `lines` (40). */
@@ -119,7 +119,7 @@ function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, he
  * operator's `env` names none. The operator's `env` cannot replace what the Adapter composes from
  * them and the launch (its sandbox policy, the nonce its report must echo).
  */
-export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs, files: (kind: AgentKind) => Promise<Record<string, string> | undefined> = async () => undefined, home?: string): StructuredProcesses {
+export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs, files: (kind: AgentKind) => Promise<Record<string, string> | undefined> = async () => undefined, home?: string, sandbox: (kind: AgentKind) => SandboxSettings | undefined = () => undefined): StructuredProcesses {
   // share current-profile lookup across start, switching and reattachment
   const environment = (kind: AgentKind): NodeJS.ProcessEnv => conversationEnvironment(kind, configs[kind]?.env, home, home);
   return {
@@ -141,13 +141,16 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       const continues = latest === true && adapter.conversations.latest === undefined;
       const allowed = configured.allowedModels ?? (model === undefined ? [] : [{ model: model.model }]);
       const rendered = await files(kind);
-      const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(place.responseOrigin === undefined ? {} : { responseOrigin: place.responseOrigin }), ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(resumed === undefined ? {} : { resume: resumed }), ...(continues ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
+      const settings = sandbox(kind);
+      const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(place.responseOrigin === undefined ? {} : { responseOrigin: place.responseOrigin }), ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(settings === undefined ? {} : { sandbox: settings }), ...(resumed === undefined ? {} : { resume: resumed }), ...(continues ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
       // the operator's arguments, less what the launch composes itself (whatever the boot dropped,
-      // for the Transport configured then), and the model and Launch menu choices, composed as for a pane
-      const choice = model === undefined && security === undefined ? undefined : { ...(model === undefined ? {} : { model }), ...(security === undefined ? {} : { security }) };
+      // for the Transport configured then), and the model and Launch menu choices, composed as for a
+      // pane; a sealed launch takes only its model
+      const sealed = spec.sealed === true;
+      const choice = model === undefined && (security === undefined || sealed) ? undefined : { ...(model === undefined ? {} : { model }), ...(security === undefined || sealed ? {} : { security }) };
       // in a folder the CLI does not trust yet, its restrictions replace the operator's and come last
-      const untrusted = await adapter.untrusted?.(place.home, inheritedHomeEnvironment(configured.env, home));
-      const operatorArgs = [adapter.conflictingArgs, untrusted?.reserved].reduce((args, reserved) => reserved === undefined ? args : withoutFlags(args, reserved), configured.args);
+      const untrusted = sealed ? undefined : await adapter.untrusted?.(place.home, inheritedHomeEnvironment(configured.env, home));
+      const operatorArgs = sealed ? [] : [adapter.conflictingArgs, untrusted?.reserved].reduce((args, reserved) => reserved === undefined ? args : withoutFlags(args, reserved), configured.args);
       const compiled = compileNativeLaunch(kind, { mode: resumed !== undefined ? 'resume' : continues ? 'continue' : 'fresh', ...(resumed === undefined ? {} : { conversationId: resumed }) }, operatorArgs, choice, spec).args;
       const args = untrusted === undefined ? compiled : [...compiled, ...untrusted.args];
       const holder = await windows.openHolderWindow(place, id, { kind, program: configured.program, args, env: { ...configured.env, ...spec.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
@@ -156,15 +159,15 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       // report is (30 s), not given up on first
       const connected = await connectHolder(holder.socket, { attempts: 300 });
       if (connected === undefined) { await windows.closeHolder(holder); return undefined; }
-      return { ...clientOver(adapter, holder, connected, emit, { cwd: place.home, env, ...(model === undefined ? {} : { model }) }), ...(untrusted === undefined ? {} : { notice: untrusted.notice }), ...(replyRuntimeGeneration === undefined ? {} : { replyRuntimeGeneration }) };
+      return { ...clientOver(adapter, holder, connected, emit, { cwd: place.home, env, ...(model === undefined ? {} : { model }), ...(role === undefined ? {} : { role }) }), ...(untrusted === undefined ? {} : { notice: untrusted.notice }), ...(replyRuntimeGeneration === undefined ? {} : { replyRuntimeGeneration }) };
     },
     // restore profile-bound history after reconnecting
-    async attach(holder, kind, emit, { cwd, conversation }) {
+    async attach(holder, kind, emit, { cwd, conversation, role }) {
       const adapter = structuredAdapterFor(kind);
       // a holder that is gone, or not this Agent's any more, is never reached
       if (adapter === undefined || !await windows.holderRunning(holder)) return undefined;
       const connected = await connectHolder(holder.socket, { from: holder.read ?? 0, attempts: 3 });
-      return connected === undefined ? undefined : clientOver(adapter, holder, connected, emit, { cwd, env: environment(kind), attached: { dropped: connected.hello.dropped, ...(conversation === undefined ? {} : { conversation }) } });
+      return connected === undefined ? undefined : clientOver(adapter, holder, connected, emit, { cwd, env: environment(kind), ...(role === undefined ? {} : { role }), attached: { dropped: connected.hello.dropped, ...(conversation === undefined ? {} : { conversation }) } });
     },
     sandboxGeneration: async kind => await windows.holderGeneration?.(kind),
     stderr: (holder, lines) => windows.captureHolder(holder, lines),
@@ -650,7 +653,7 @@ export class StructuredAgents {
       // a deploy may have raised the minimum: an older process restarts once idle
       const minimum = structuredAdapterFor(record.kind)?.pinned()?.version;
       live.offPin = record.version !== undefined && minimum !== undefined && !meetsMinimumVersion(record.version, minimum);
-      const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event), { cwd: record.home, ...(record.conversationId === undefined ? {} : { conversation: record.conversationId }) }).catch(() => undefined);
+      const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event), { cwd: record.home, ...(record.conversationId === undefined ? {} : { conversation: record.conversationId }), ...(record.role === undefined ? {} : { role: record.role }) }).catch(() => undefined);
       if (this.live.get(record.id) !== live || live.generation !== generation) { attached?.connection.close(); return; }
       if (attached === undefined) {
         record.lifecycle = 'exited';

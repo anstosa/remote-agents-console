@@ -15,7 +15,7 @@ import { adapterFileContext, hostVisibleRepoRoot, renderAdapterFiles } from '../
 import { hostPiRuntime, verifyHostPiNode } from '../adapters/pi-runtime.js';
 import { hostHolderRuntime, verifyHostNode } from '../adapters/host-runtime.js';
 import { canonical, staticPolicy } from '../adapters/pi-sandbox.js';
-import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode, type LaunchSpec, type ReplacedFlagValue } from '../adapters/types.js';
+import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode, type LaunchSpec, type ReplacedFlagValue, type SandboxSettings } from '../adapters/types.js';
 import { resolveLaunchProfile, type LaunchResolution, type LaunchScope } from './resolution.js';
 import { WorktreeLaunchStore, scratchLaunchKey } from '../worktrees/store.js';
 import type { Pane, SocketRef, Worktree } from '../domain/models.js';
@@ -243,28 +243,14 @@ export class LaunchService implements HolderWindows {
   // when the kind declares none (Codex) — which keeps the
   // launch hot path off the filesystem. Only a *successful* render is memoized; a
   // transient failure is logged, degrades this launch to no files (it omits
-  // `--settings`) rather than failing, and clears the memo so the next launch retries. A kind's
-  // sandbox settings also keep its commands out of the console's own state: its private directory
-  // (holder sockets), `.data`, `.env` and config file, and its network listener and public origin,
-  // so no command reaches `/mcp` (ADR 0018).
+  // `--settings`) rather than failing, and clears the memo so the next launch retries.
   async adapterFiles(kind: AgentKind): Promise<Record<string, string> | undefined> {
     if ((adapterFor(kind) ?? structuredAdapterFor(kind))?.files === undefined) return undefined;
     // validate old sandbox-controlled paths before boot rendering or reattach can touch them
     if (this.hostSocket !== undefined) await this.prepareHostAdapterDirectory();
-    const checkout = serverCheckout();
-    const hostCheckout = hostVisibleRepoRoot();
-    const configured = process.env.RAC_CONFIG === undefined ? undefined : resolve(process.env.RAC_CONFIG);
     const adapterDirectory = process.env.RAC_ADAPTER_FILES_DIR;
     // bridged policy files must have one absolute spelling in both namespaces
     if (this.hostSocket !== undefined && adapterDirectory !== undefined && !isAbsolute(adapterDirectory)) throw new Error('Pi host bridge requires an absolute adapter policy directory');
-    const configuredRelative = configured === undefined ? undefined : relative(checkout, configured);
-    // protect the same console state in the host namespace a bridged process sees
-    const hostConfigured = hostCheckout === undefined || configuredRelative === undefined || configuredRelative === '..' || configuredRelative.startsWith(`..${sep}`) || isAbsolute(configuredRelative) ? undefined : join(hostCheckout, configuredRelative);
-    const consoleState = [this.root, join(checkout, '.data'), join(checkout, '.env'), ...(adapterDirectory === undefined ? [] : [resolve(adapterDirectory)]), ...(configured === undefined ? [] : [configured]), ...(hostCheckout === undefined ? [] : [join(hostCheckout, '.data'), join(hostCheckout, '.env')]), ...(hostConfigured === undefined ? [] : [hostConfigured])];
-    const hostNode = process.env.RAC_HOST_NODE_BIN?.trim();
-    // deny the executable and its directory so writable Places cannot replace host launch code
-    const consoleRuntime = hostCheckout === undefined ? [] : [join(hostCheckout, 'apps/server/dist'), join(hostCheckout, 'node_modules'), join(hostCheckout, 'apps/server/node_modules'), ...(hostNode === undefined || !isAbsolute(hostNode) ? [] : [hostNode, dirname(hostNode)])];
-    const consoleHosts = [this.config.publicOrigin?.hostname, this.config.listen?.host].filter((host): host is string => host !== undefined);
     // serialize each kind so an older render cannot overwrite a newer observer policy
     while (true) {
       const key = this.adapterFileKey(kind);
@@ -288,9 +274,7 @@ export class LaunchService implements HolderWindows {
       }
       let renderedKey = key;
       const promise = renderAdapterFiles(process.env, candidate => {
-        const settings = this.config.adapters[candidate]?.sandbox ?? { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
-        const repositories = [checkout, ...(hostCheckout === undefined ? [] : [hostCheckout]), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory, ...(project.hostPath === undefined ? [] : [project.hostPath])])];
-        const effective = { ...settings, deniedDomains: [...settings.deniedDomains, ...consoleHosts], denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState, ...consoleRuntime], repositories };
+        const effective = this.sandboxSettings(candidate);
         // retain expected policy bytes independently of mutable on-disk configuration
         if (candidate === 'pi') this.expectedPiPolicy = JSON.stringify(staticPolicy(effective), null, 2);
         return effective;
@@ -308,6 +292,29 @@ export class LaunchService implements HolderWindows {
       const cache: AdapterFileCache = { promise };
       this.adapterFileCache.set(kind, cache);
     }
+  }
+
+  /**
+   * A kind's sandbox settings as its sandbox takes them: the operator's lists, with the console's own
+   * state kept from its commands (its private directory of holder sockets, `.data`, `.env` and config
+   * file), and its network listener and public origin denied, so no command reaches `/mcp` (ADR 0018).
+   */
+  sandboxSettings(kind: AgentKind): SandboxSettings {
+    const checkout = serverCheckout();
+    const hostCheckout = hostVisibleRepoRoot();
+    const configured = process.env.RAC_CONFIG === undefined ? undefined : resolve(process.env.RAC_CONFIG);
+    const adapterDirectory = process.env.RAC_ADAPTER_FILES_DIR;
+    const configuredRelative = configured === undefined ? undefined : relative(checkout, configured);
+    // protect the same console state in the host namespace a bridged process sees
+    const hostConfigured = hostCheckout === undefined || configuredRelative === undefined || configuredRelative === '..' || configuredRelative.startsWith(`..${sep}`) || isAbsolute(configuredRelative) ? undefined : join(hostCheckout, configuredRelative);
+    const consoleState = [this.root, join(checkout, '.data'), join(checkout, '.env'), ...(adapterDirectory === undefined ? [] : [resolve(adapterDirectory)]), ...(configured === undefined ? [] : [configured]), ...(hostCheckout === undefined ? [] : [join(hostCheckout, '.data'), join(hostCheckout, '.env')]), ...(hostConfigured === undefined ? [] : [hostConfigured])];
+    const hostNode = process.env.RAC_HOST_NODE_BIN?.trim();
+    // deny the executable and its directory so writable Places cannot replace host launch code
+    const consoleRuntime = hostCheckout === undefined ? [] : [join(hostCheckout, 'apps/server/dist'), join(hostCheckout, 'node_modules'), join(hostCheckout, 'apps/server/node_modules'), ...(hostNode === undefined || !isAbsolute(hostNode) ? [] : [hostNode, dirname(hostNode)])];
+    const consoleHosts = [this.config.publicOrigin?.hostname, this.config.listen?.host].filter((host): host is string => host !== undefined);
+    const settings = this.config.adapters[kind]?.sandbox ?? { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
+    const repositories = [checkout, ...(hostCheckout === undefined ? [] : [hostCheckout]), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory, ...(project.hostPath === undefined ? [] : [project.hostPath])])];
+    return { ...settings, deniedDomains: [...settings.deniedDomains, ...consoleHosts], denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState, ...consoleRuntime], repositories };
   }
 
   // bind bridged holders to the policy and trusted runtime they actually loaded

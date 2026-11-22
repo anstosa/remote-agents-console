@@ -55,7 +55,7 @@ export default function rac(pi: ExtensionAPI): void {
   if (conductor) {
     createMcpExtension({ loadConfig: () => ({ servers: [], errors: [], autoEnableCodemode: false }) })(pi);
     createCodemodeExtension({ models: false })(pi);
-    pi.on('before_agent_start', event => { event.systemPromptOptions.sections.rac_conductor = conductorPrompt; });
+    pi.on('before_agent_start', event => { event.systemPromptOptions.sections.rac_conductor = conductorPrompt({ codeMode: true }); });
     pi.on('session_before_compact', async (event, ctx) => {
       if (ctx.model === undefined) return undefined;
       const { instructions, state } = compactRequest(event.customInstructions);

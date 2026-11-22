@@ -8,7 +8,7 @@ import { responseUrlEnvironment } from '../../src/adapters/response-urls.js';
 import { structuredAdapterFor } from '../../src/adapters/registry.js';
 import { claudeClient } from '../../src/transports/claude.js';
 import { holderProcesses, type HolderLaunch, type HolderWindows, type StructuredLaunch } from '../../src/transports/structured-agents.js';
-import type { AdapterLaunchConfig } from '../../src/adapters/types.js';
+import type { AdapterLaunchConfig, SandboxSettings } from '../../src/adapters/types.js';
 import type { Place } from '../../src/places/places.js';
 
 const hooks = '/data/adapters/claude/hooks.json';
@@ -70,11 +70,11 @@ describe('structured claude launch', () => {
   };
 
   // what a launch opens its holder window with; the window never opens, so nothing connects
-  async function launched(launch: Partial<StructuredLaunch>, configured: Partial<AdapterLaunchConfig> = {}, at: Place = place): Promise<HolderLaunch> {
+  async function launched(launch: Partial<StructuredLaunch>, configured: Partial<AdapterLaunchConfig> = {}, at: Place = place, sandbox?: SandboxSettings): Promise<HolderLaunch> {
     let opened: HolderLaunch | undefined;
     const windows: HolderWindows = { openHolderWindow: async (_place, _id, holder) => { opened = holder; return undefined; }, captureHolder: async () => undefined, holderRunning: async () => false, closeHolder: async () => {} };
     const claude: AdapterLaunchConfig = { program: '/usr/local/bin/claude', args: [], env: { SOME: '1', CLAUDE_CONFIG_DIR: config, RAC_RESPONSE_URL_INSTRUCTIONS: 'stale' }, launchable: true, transport: 'structured', ...configured };
-    await holderProcesses(windows, { claude }, async () => files).start({ id: 'a', kind: 'claude', place: at, sandboxed: false, nonce: 'n0nce', ...launch }, () => {});
+    await holderProcesses(windows, { claude }, async () => files, undefined, () => sandbox).start({ id: 'a', kind: 'claude', place: at, sandboxed: false, nonce: 'n0nce', ...launch }, () => {});
     return opened!;
   }
   const argsIn = async (home: string) => (await launched({}, {}, { ...place, home })).args;
@@ -160,6 +160,36 @@ describe('structured claude launch', () => {
     expect((await launched({ security: { permissions: 'inherit' } }, { args })).args).toEqual([...protocol, ...args]);
     expect((await launched({ security: { permissions: 'acceptEdits' }, model: { model: 'opus' } }, { args })).args).toEqual([...protocol, '--model', 'opus', '--permission-mode', 'acceptEdits', '--add-dir', '/data']);
     expect((await launched({ security: { permissions: 'bypassPermissions' } }, { args })).args).toEqual([...protocol, '--dangerously-skip-permissions', '--model', 'haiku', '--add-dir', '/data']);
+  });
+
+  it('launches the Conductor on the console\'s settings alone: no setting sources or other MCP server, its own tools, sandbox and permissions, and none of the operator\'s arguments', async () => {
+    // a folder Claude does not trust, and every operator choice that would widen the Conductor
+    await trusting('/elsewhere');
+    const args = ['--permission-mode', 'bypassPermissions', '--add-dir', '/', '--setting-sources', 'user', '--mcp-config', './servers.json', '--settings', '/home/me/wide.json'];
+    const sandbox: SandboxSettings = { allowedDomains: ['registry.npmjs.org'], deniedDomains: ['console.example.com', '172.19.0.1'], allowWrite: ['~/.cache/pnpm'], denyWrite: ['/srv/rac/.data'], denyRead: ['/srv/rac/.data'], env: ['NPM_TOKEN'], repositories: ['/srv/rac'] };
+    const opened = await launched({ role: 'conductor', model: { model: 'opus', effort: 'high' }, security: { permissions: 'bypassPermissions' } }, { args }, place, sandbox);
+    const settings = opened.args[opened.args.indexOf('--settings') + 1]!;
+    expect(opened.args).toEqual([
+      '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages', '--permission-prompts', 'host', '--permission-prompt-tool', 'stdio',
+      '--setting-sources', '', '--strict-mcp-config', '--tools', 'Bash,Read,Edit,Write,Grep,Glob',
+      '--mcp-config', '{"mcpServers":{"operator":{"type":"sdk","name":"operator"}}}', '--settings', settings,
+      '--model', 'opus', '--effort', 'high'
+    ]);
+    expect(JSON.parse(settings)).toEqual({
+      hooks: JSON.parse(claudeStructuredSettings).hooks,
+      sandbox: {
+        enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true,
+        network: { allowedDomains: ['registry.npmjs.org'], deniedDomains: ['console.example.com', '172.19.0.1'] },
+        filesystem: { allowWrite: ['~/.cache/pnpm'], denyWrite: ['/srv/rac/.data'], denyRead: ['/srv/rac/.data', '~/.ssh', '~/.gnupg', '~/.aws', '~/.config/gh', '~/.config/gcloud', '~/.docker/config.json', '~/.git-credentials', '~/.netrc', '~/.npmrc', '~/.claude/.credentials.json', '~/.codex/auth.json'] }
+      },
+      permissions: { defaultMode: 'dontAsk', allow: ['mcp__rac', 'mcp__operator__ask_user', 'Edit', 'Write'], deny: ['AskUserQuestion'], blockFileToolReadsOutsideWorkingDirectories: true, blockWritesOutsideWorkingDirectories: true }
+    });
+    // the operator's environment still names the account
+    expect(opened.env).toEqual({ SOME: '1', CLAUDE_CONFIG_DIR: config, RAC_LAUNCH_NONCE: 'n0nce', ...responseUrlEnvironment() });
+    // with no sandbox settings given, it has no network and writes nowhere beyond its folder
+    const bare = await launched({ role: 'conductor' }, { args });
+    expect(JSON.parse(bare.args[bare.args.indexOf('--settings') + 1]!).sandbox).toMatchObject({ network: { allowedDomains: [], deniedDomains: [] }, filesystem: { allowWrite: [], denyWrite: [] } });
+    expect(bare.args).not.toContain('bypassPermissions');
   });
 
   it('routes structured Claude to a kind-specific generic holder under the host bridge', async () => {
