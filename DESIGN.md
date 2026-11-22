@@ -243,7 +243,7 @@ entry from a friendly present-progress phrase to its confirmed outcome. Keep too
 arguments, results, and identifiers out of these labels; failed or uncertain calls
 must not look successful. Activity rows are silent, excluded from model context,
 and share the existing three-day retention window.
-Agent and terminal connections use output-line skeletons for initial
+Agent and terminal pane connections use output skeletons for initial
 attachment and automatic reconnects, retaining the mounted terminal underneath.
 Keep loading artwork until the current seed has painted in the selected renderer,
 not merely finished parsing. Load terminal font faces before WebGL activation and
@@ -253,9 +253,12 @@ does not need a manual resize or text selection to repair stale glyph coordinate
 When available, agent skeletons replay the last visible text geometry for that pane,
 preserving widths, indentation and blank rows without storing transcript text.
 The geometry is cached in the current tab, scales with the terminal font size and is
-clipped to the split. Cold agent placeholders alternate prompts, paragraphs and indented
-tool output; terminal placeholders use denser shell-command and column-shaped output
-rows. Both generic placeholders fill the available output height.
+clipped to the split. Without cached geometry, show just one new-conversation
+layout: the shared Codex/OMX banner and prompt, Claude's logo and welcome details,
+or an unbranded prompt when the agent is unknown. Match the native launch fixtures;
+do not invent messages or tool output. RAC-native structured transcripts keep their
+empty conversation layout and mounted composer. Standalone terminal placeholders
+still repeat shell commands and column-shaped output through the available height.
 Fresh stream seeds clear the skeleton; explicit failure reasons remain readable.
 Startup/auth and fullscreen connection loaders retain a constant-speed turn.
 Each border type shares the document timeline, including late mounts and portals.

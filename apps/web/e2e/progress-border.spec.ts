@@ -146,7 +146,7 @@ test('keeps branch and agent connection skeletons free of loading borders', asyn
     // restore one controlling browser
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // expose one connected worktree
-    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', kind: 'codex', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     // authorize the mocked pane stream
     if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     // provide empty saved prompts
@@ -167,49 +167,45 @@ test('keeps branch and agent connection skeletons free of loading borders', asyn
   await expect(connection).toHaveAttribute('aria-busy', 'true');
   const agentSkeleton = connection.locator('.output-skeleton-agent');
   await expect(agentSkeleton).toBeVisible();
-  await expect(agentSkeleton.locator('.output-skeleton-prompt')).not.toHaveCount(0);
-  await expect(agentSkeleton.locator('.output-skeleton-paragraph')).not.toHaveCount(0);
-  await expect(agentSkeleton.locator('.output-skeleton-tool')).not.toHaveCount(0);
+  const starter = agentSkeleton.locator(':scope > .output-skeleton-group');
+  await expect(starter).toHaveCount(1);
+  await expect(starter).toHaveAttribute('data-agent-starter', 'codex');
+  await expect(starter.locator('.output-skeleton-welcome')).toBeVisible();
+  await expect(starter.locator('.output-skeleton-prompt > .output-skeleton-line')).toHaveCount(2);
+  await expect(starter.locator('.output-skeleton-logo')).toHaveCount(0);
+  await expect(starter.locator('.output-skeleton-paragraph, .output-skeleton-tool')).toHaveCount(0);
   await expect(agentSkeleton.locator('.output-skeleton-terminal, .output-skeleton-command')).toHaveCount(0);
-  await expect.poll(() => connection.locator('.skeleton').count()).toBeGreaterThanOrEqual(6);
   await expect(connection.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
   const canvas = page.locator('.agent-output .log-canvas');
-  // measure full output coverage without including panel chrome or the composer
+  // measure full panel coverage and the compact starter separately
   const measureAgentSkeleton = async () => {
-    const [canvasBox, skeletonBox, shapes] = await Promise.all([
+    const [canvasBox, skeletonBox, starterBox] = await Promise.all([
       canvas.boundingBox(),
       agentSkeleton.boundingBox(),
-      // serialize every visible placeholder shape for coverage math
-      agentSkeleton.locator('.skeleton:visible').evaluateAll(elements => elements.map(element => {
-        const bounds = element.getBoundingClientRect();
-        return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
-      }))
+      starter.boundingBox()
     ]);
     // return an empty measurement before geometry exists
-    if (canvasBox === null || skeletonBox === null || shapes.length === 0) return { coverage: 0, lastShape: 0, shapes: shapes.length };
-    const canvasBottom = canvasBox.y + canvasBox.height;
-    // exclude shapes fully clipped beyond the output viewport
-    const visibleShapes = shapes.filter(shape => shape.y < canvasBottom && shape.y + shape.height > canvasBox.y);
-    // return an empty fill when every shape is clipped
-    if (visibleShapes.length === 0) return { coverage: skeletonBox.height / canvasBox.height, lastShape: 0, shapes: 0 };
-    const lastBottom = Math.max(...visibleShapes.map(shape => Math.min(shape.y + shape.height, canvasBottom)));
+    if (canvasBox === null || skeletonBox === null || starterBox === null) return { coverage: 0, artworkTop: 1, artworkHeight: 1, fitsWidth: false };
     return {
       coverage: skeletonBox.height / canvasBox.height,
-      lastShape: (lastBottom - canvasBox.y) / canvasBox.height,
-      shapes: visibleShapes.length
+      artworkTop: (starterBox.y - canvasBox.y) / canvasBox.height,
+      artworkHeight: starterBox.height / canvasBox.height,
+      fitsWidth: starterBox.x >= canvasBox.x && starterBox.x + starterBox.width <= canvasBox.x + canvasBox.width
     };
   };
   await expect.poll(async () => (await measureAgentSkeleton()).coverage).toBeGreaterThanOrEqual(0.9);
-  await expect.poll(async () => (await measureAgentSkeleton()).lastShape).toBeGreaterThanOrEqual(0.9);
+  await expect.poll(async () => (await measureAgentSkeleton()).artworkTop).toBeLessThan(0.15);
+  await expect.poll(async () => (await measureAgentSkeleton()).artworkHeight).toBeLessThan(0.45);
+  await expect.poll(async () => (await measureAgentSkeleton()).fitsWidth).toBe(true);
   if (process.env.SHOT_DIR) await canvas.screenshot({ path: `${process.env.SHOT_DIR}/connection-agent-desktop.png` });
   await page.setViewportSize({ width: 320, height: 900 });
   await expect.poll(async () => (await measureAgentSkeleton()).coverage).toBeGreaterThanOrEqual(0.9);
-  await expect.poll(async () => (await measureAgentSkeleton()).lastShape).toBeGreaterThanOrEqual(0.9);
-  const phoneShapeCount = (await measureAgentSkeleton()).shapes;
+  await expect.poll(async () => (await measureAgentSkeleton()).artworkTop).toBeLessThan(0.15);
+  await expect.poll(async () => (await measureAgentSkeleton()).artworkHeight).toBeLessThan(0.45);
+  await expect.poll(async () => (await measureAgentSkeleton()).fitsWidth).toBe(true);
   if (process.env.SHOT_DIR) await canvas.screenshot({ path: `${process.env.SHOT_DIR}/connection-agent-phone.png` });
   await page.setViewportSize({ width: 320, height: 1200 });
-  await expect.poll(async () => (await measureAgentSkeleton()).shapes).toBeGreaterThan(phoneShapeCount);
-  await expect.poll(async () => (await measureAgentSkeleton()).lastShape).toBeGreaterThanOrEqual(0.9);
+  await expect(starter).toHaveCount(1);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole('button', { name: /^Git status:/u }).click();
   const branchPanel = page.getByRole('region', { name: 'Changed files' });
@@ -283,6 +279,51 @@ test('keeps branch and agent connection skeletons free of loading borders', asyn
   expect(savedShape).toEqual([expect.any(Number), expect.any(Number), [[0, 3, 18]]]);
   // bound the cell dimensions while the exact run assertion bounds every coordinate
   expect(savedShape?.slice(0, 2).every(value => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 4)).toBe(true);
+});
+
+// match cold agent artwork to the native adapter without inventing conversation output
+test('matches cold agent skeletons to their terminal adapters', async ({ page }) => {
+  let agentKind: 'omx' | 'claude' | undefined = 'omx';
+  await installPaneMock(page);
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    // restore one controlling browser
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // expose one cold terminal agent with the current adapter
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', ...(agentKind === undefined ? {} : { kind: agentKind }), sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    // authorize the mocked pane stream
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    // provide empty saved prompts
+    if (path === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
+    // disable push enrollment
+    if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  const variants = [
+    { kind: 'omx' as const, starter: 'codex', promptLines: 2, welcome: 1, logo: 0 },
+    { kind: 'claude' as const, starter: 'claude', promptLines: 1, welcome: 1, logo: 1 },
+    { kind: undefined, starter: 'generic', promptLines: 2, welcome: 0, logo: 0 }
+  ];
+  // reload one empty pane per adapter so retained output cannot mask its starter
+  for (const variant of variants) {
+    agentKind = variant.kind;
+    await page.goto('/');
+    const skeleton = page.locator('.agent-output .output-skeleton-agent');
+    await expect(skeleton).toBeVisible();
+    const group = skeleton.locator(':scope > .output-skeleton-group');
+    await expect(group).toHaveCount(1);
+    await expect(group).toHaveAttribute('data-agent-starter', variant.starter);
+    await expect(group.locator('.output-skeleton-welcome')).toHaveCount(variant.welcome);
+    await expect(group.locator('.output-skeleton-logo')).toHaveCount(variant.logo);
+    // keep exactly one prompt with the expected marker and optional hint
+    const prompt = group.locator(':scope > .output-skeleton-prompt');
+    await expect(prompt).toHaveCount(1);
+    await expect(prompt.locator(':scope > .output-skeleton-line')).toHaveCount(variant.promptLines);
+    await expect(group.locator('.output-skeleton-paragraph, .output-skeleton-tool')).toHaveCount(0);
+    // capture the native claude welcome for visual comparison when requested
+    if (variant.kind === 'claude' && process.env.SHOT_DIR) await page.locator('.agent-output .log-canvas').screenshot({ path: `${process.env.SHOT_DIR}/connection-agent-claude.png` });
+  }
 });
 
 // distinguish cleanup skeletons from the user-confirmed cleanup mutation

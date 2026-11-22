@@ -29,7 +29,7 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
   }
 };
 
-type FixtureOptions = { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; captureExit?: boolean; loadingKind?: 'agent' | 'terminal'; preferNativeMouseSelection?: boolean; trackAtlasRemovals?: boolean; keep?: TerminalKeep };
+type FixtureOptions = { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; captureExit?: boolean; loadingKind?: 'agent' | 'terminal'; loadingAgentKind?: StreamedTerminalOptions['loadingAgentKind']; preferNativeMouseSelection?: boolean; trackAtlasRemovals?: boolean; keep?: TerminalKeep };
 let lastOptions: FixtureOptions = {};
 // each mount's disposals, by its keep's workspace and panel, so a spec can see exactly-once
 const disposals = new Map<string, number>();
@@ -101,8 +101,9 @@ const terminalOptions = (container: HTMLElement, options: FixtureOptions): Strea
   // stands in for a Terminal panel, which closes on exit
   onExit: options.captureExit ? reason => { container.dataset.exited = reason; } : undefined,
   onQuestion: question => questions.push(question),
-  // expose both placeholder variants before output arrives
+  // expose the starter variant before output arrives
   ...(options.loadingKind === undefined ? {} : { loadingKind: options.loadingKind }),
+  loadingAgentKind: options.loadingAgentKind,
   connect: next => {
     handlers = next;
     connectCount += 1;
@@ -127,13 +128,13 @@ let left: HTMLElement | undefined;
 export const leavePanel = () => { left = root; root!.remove(); releaseKeptTerminal(lastOptions.keep, handle!); };
 // what the panel the terminal left still holds: children, classes and pane data attributes
 export const leftContainer = () => ({ children: left?.childElementCount, className: left?.className, data: Object.keys(left?.dataset ?? {}).filter(name => name !== 'ready') });
-// a panel with the last mount's options mounts in a new container `id`; whether it reclaimed
-// the same xterm instance
-export const showPanel = (id: string): boolean => {
+// claim the same xterm in a new panel, optionally with a newly discovered agent kind
+export const showPanel = (id: string, loadingAgentKind = lastOptions.loadingAgentKind): boolean => {
   const previous = handle!.terminal;
   const container = document.createElement('div');
   container.id = id;
   document.body.append(container);
+  lastOptions = { ...lastOptions, loadingAgentKind };
   mountInto(container, lastOptions);
   return handle!.terminal === previous;
 };

@@ -1675,6 +1675,34 @@ test('a kept terminal shows its last screen at once when shown again, then resee
   expect(await drive(page, 'disposalsOf', 'A', 'p')).toBe(0);
 });
 
+// a parked agent can gain an adapter identity without discarding its output
+test('a kept agent updates its cold starter and keeps warm geometry on reattach', async ({ page }) => {
+  await setup(page, { ...keepIn('A'), loadingKind: 'agent' });
+  // inspect only the pane currently holding the kept renderer
+  const starter = (id: string) => page.locator(`#${id} .output-skeleton-agent > .output-skeleton-group`);
+  await expect(starter('term')).toHaveAttribute('data-agent-starter', 'generic');
+  await drive(page, 'leavePanel');
+  expect(await drive(page, 'showPanel', 'back', 'claude')).toBe(true);
+  await expect(starter('back')).toHaveCount(1);
+  await expect(starter('back')).toHaveAttribute('data-agent-starter', 'claude');
+  await expect(starter('back').locator('.output-skeleton-logo')).toBeVisible();
+
+  // once seeded, a reattach shows the kept screen before replaying its shape on a retry
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'RETAINED-SCREEN\r\n');
+  await expect(page.locator('#back .streamed-terminal-status')).toBeHidden();
+  await expect(page.locator('#back .xterm-rows')).toContainText('RETAINED-SCREEN');
+  await drive(page, 'leavePanel');
+  expect(await drive(page, 'showPanel', 'warm', 'codex')).toBe(true);
+  await expect(page.locator('#warm .xterm-rows')).toContainText('RETAINED-SCREEN');
+  await expect(page.locator('#warm .streamed-terminal-status')).toBeHidden();
+  await drive(page, 'pushClose', 1006, 'lost');
+  const cached = page.locator('#warm .output-skeleton-cached');
+  await expect(cached).toBeVisible();
+  await expect(cached.locator(':scope > .output-skeleton-line')).toHaveCount(1);
+  await expect(starter('warm')).toHaveCount(0);
+});
+
 test('a parked terminal stays closed through visibilitychange, online and a late close', async ({ page }) => {
   await setup(page, keepIn('A'));
   await drive(page, 'pushSize', 40, 10);

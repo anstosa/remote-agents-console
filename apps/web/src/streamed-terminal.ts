@@ -15,6 +15,7 @@ import { safeHttpTarget } from './terminal-link-metadata.js';
 import { preserveOutputLongPressSelection } from './output-touch.js';
 import { measureOutputShape, readOutputShape, renderOutputShape, saveOutputShape, type OutputShape } from './output-skeleton-shape.js';
 import { encodeInputBytes, maxInputFrameBytes, type PaneConnection, type PaneConnector, type PaneMetadata, type PaneServerFrame } from './pane-stream.js';
+import type { AgentKind } from './launch-profile.js';
 
 export interface StreamedTerminalOptions {
   // Opens a pane connection; called once per subscribe, including every reconnect.
@@ -26,6 +27,8 @@ export interface StreamedTerminalOptions {
   preferNativeMouseSelection?: boolean;
   // mirror transcript or shell geometry while the connection is pending
   loadingKind?: 'agent' | 'terminal';
+  // choose the cold welcome layout for a pane-backed agent
+  loadingAgentKind?: AgentKind;
   // retain the agent's text geometry across reloads and remounts
   outputShapeKey?: string;
   // route codex/omx's app-owned transcript scrolling and return control
@@ -74,8 +77,8 @@ export interface StreamedTerminalHandle {
 
 const coarsePointer = () => window.matchMedia('(pointer: coarse)').matches;
 
-// build decorative transcript or shell groups without inventing output text
-const createOutputSkeletonGroup = (kind: 'agent' | 'terminal'): HTMLElement => {
+// build decorative startup or shell geometry without inventing output text
+const createOutputSkeletonGroup = (kind: 'agent' | 'terminal', agentKind?: AgentKind): HTMLElement => {
   const group = document.createElement('div');
   group.className = 'output-skeleton-group';
   // share the existing skeleton paint across content-shaped segments
@@ -93,29 +96,36 @@ const createOutputSkeletonGroup = (kind: 'agent' | 'terminal'): HTMLElement => {
     for (const width of widths) line.append(bar(width));
     return line;
   };
-  // agent output alternates prompts, prose and indented tool activity
+  // show a single empty conversation instead of implying saved messages or tool activity
   if (kind === 'agent') {
-    group.append(row('output-skeleton-prompt', ['.65em', '68%']));
-    const paragraph = document.createElement('div');
-    paragraph.className = 'output-skeleton-paragraph';
-    // shape a wrapped assistant paragraph with a shorter final line
-    for (const width of ['92%', '86%', '96%', '61%']) paragraph.append(bar(width));
-    const tool = document.createElement('div');
-    tool.className = 'output-skeleton-tool';
-    tool.append(row('output-skeleton-tool-heading', ['.7em', '28%']));
-    // indent the command and its bounded output beneath the tool heading
-    for (const width of ['66%', '81%', '49%']) tool.append(bar(width));
-    const followup = paragraph.cloneNode(true) as HTMLElement;
-    followup.lastElementChild?.remove();
-    group.append(paragraph, tool, followup);
-  } else {
-    group.append(row('output-skeleton-command', ['19%', '.55em', '42%']));
-    // alternate dense shell lines with short status and listing columns
-    for (const widths of [['9%', '33%', '14%'], ['12%', '41%', '18%'], ['8%', '27%', '12%'], ['76%'], ['91%'], ['67%'], ['11%', '36%', '21%'], ['82%'], ['53%']]) {
-      group.append(row('output-skeleton-output-row', widths));
+    const welcome = document.createElement('div');
+    welcome.className = 'output-skeleton-welcome';
+    // codex and omx share the native title, model hint and composer
+    if (agentKind === 'codex' || agentKind === 'omx') {
+      group.dataset.agentStarter = 'codex';
+      welcome.append(row('output-skeleton-welcome-row', ['1.15em', '62%']), row('output-skeleton-welcome-row', ['37%', '31%']));
+      group.append(welcome, row('output-skeleton-prompt', ['.65em', '51%']), row('output-skeleton-footer', ['34%', '20%']));
+    // claude's banner has a logo beside the title, account and directory
+    } else if (agentKind === 'claude') {
+      group.dataset.agentStarter = 'claude';
+      const details = document.createElement('div');
+      details.className = 'output-skeleton-welcome-details';
+      details.append(bar('60%'), bar('86%'), bar('48%'));
+      welcome.append(bar('3.55em', 'output-skeleton-logo'), details);
+      group.append(welcome, row('output-skeleton-prompt', ['.65em']));
+    // unknown pane kinds get an unbranded prompt rather than another agent's welcome
+    } else {
+      group.dataset.agentStarter = 'generic';
+      group.append(row('output-skeleton-prompt', ['.65em', '42%']));
     }
-    group.append(row('output-skeleton-command', ['16%', '.55em', '31%']));
+    return group;
   }
+  group.append(row('output-skeleton-command', ['19%', '.55em', '42%']));
+  // alternate dense shell lines with short status and listing columns
+  for (const widths of [['9%', '33%', '14%'], ['12%', '41%', '18%'], ['8%', '27%', '12%'], ['76%'], ['91%'], ['67%'], ['11%', '36%', '21%'], ['82%'], ['53%']]) {
+    group.append(row('output-skeleton-output-row', widths));
+  }
+  group.append(row('output-skeleton-command', ['16%', '.55em', '31%']));
   return group;
 };
 
@@ -147,20 +157,20 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   outputSkeleton.className = `output-skeleton output-skeleton-${loadingKind}`;
   outputSkeleton.setAttribute('aria-hidden', 'true');
   outputSkeleton.hidden = true;
-  const skeletonGroup = createOutputSkeletonGroup(loadingKind);
+  let skeletonGroup = createOutputSkeletonGroup(loadingKind, options.loadingAgentKind);
   outputSkeleton.append(skeletonGroup);
   status.append(statusMessage, outputSkeleton);
   const shapeKey = loadingKind === 'agent' ? options.outputShapeKey : undefined;
   let cachedShape = shapeKey === undefined ? undefined : readOutputShape(shapeKey);
   let displayedShape: OutputShape | undefined;
 
-  // repeat measured content groups through the entire available output height
+  // size artwork with the terminal font and repeat only shell output groups
   const syncOutputSkeleton = () => {
     // live output and explicit errors have no pending artwork to resize
     if (status.hidden || outputSkeleton.hidden) return;
     outputSkeleton.style.fontSize = `${readTerminalFontSize()}px`;
-    // cached bars scale with the font and clip to the pane without repeating
-    if (displayedShape !== undefined) return;
+    // cached bars and cold agent welcomes never repeat
+    if (displayedShape !== undefined || loadingKind === 'agent') return;
     const groupHeight = skeletonGroup.getBoundingClientRect().height;
     // defer measurement while a minimized or unmounted split has no geometry
     if (groupHeight <= 0) return;
@@ -497,7 +507,7 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     if (pending && displayedShape !== cachedShape) {
       displayedShape = cachedShape;
       outputSkeleton.classList.toggle('output-skeleton-cached', displayedShape !== undefined);
-      // use the generic transcript only when there is no text geometry
+      // use the default starter only when there is no text geometry
       if (displayedShape === undefined) outputSkeleton.replaceChildren(skeletonGroup);
       else renderOutputShape(outputSkeleton, displayedShape);
     }
@@ -864,6 +874,12 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     reattach: (next, nextOptions) => {
       if (disposed || !parked) return;
       parked = false;
+      // refresh the cold starter when discovery identifies a previously unknown agent
+      if (loadingKind === 'agent' && options.loadingAgentKind !== nextOptions.loadingAgentKind) {
+        skeletonGroup = createOutputSkeletonGroup(loadingKind, nextOptions.loadingAgentKind);
+        // keep cached geometry ahead of any welcome layout
+        if (displayedShape === undefined) outputSkeleton.replaceChildren(skeletonGroup);
+      }
       options = nextOptions;
       attachTo(next);
       for (const [name, value] of Object.entries(parkedData)) if (value !== undefined) container.dataset[name] = value;

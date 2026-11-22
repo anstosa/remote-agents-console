@@ -3188,13 +3188,16 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 /* replay text runs at their terminal coordinates without padding or repeated rows */
 .output-skeleton-cached { position: relative; display: block; padding: 0; }
 .output-skeleton-cached > .output-skeleton-line { position: absolute; min-height: 0; }
-/* transcripts retain prompt markers, paragraph spacing and indented tool output */
-.output-skeleton-agent .output-skeleton-group { gap: 1.4em; }
-.output-skeleton-prompt, .output-skeleton-tool-heading { display: flex; align-items: center; gap: .85em; min-height: 1.5em; }
-.output-skeleton-prompt { padding: .5em .65em; background: color-mix(in srgb, var(--surface-0) 35%, transparent); border-radius: .3em; }
-.output-skeleton-paragraph { display: grid; gap: .85em; padding-left: 1.5em; }
-.output-skeleton-tool { display: grid; gap: .85em; margin-left: 1.5em; padding: .65em 1em; border-left: 2px solid var(--surface-1); background: color-mix(in srgb, var(--surface-0) 20%, transparent); }
-.output-skeleton-tool > .output-skeleton-line { margin-left: 1.55em; }
+/* reserve one native welcome and leave the rest of an empty conversation blank */
+.output-skeleton-agent:not(.output-skeleton-cached) { padding: .55em 1em; }
+.output-skeleton-agent .output-skeleton-group { gap: .35em; width: min(100%, 30em); }
+.output-skeleton-welcome { display: grid; gap: .35em; margin-bottom: .65em; }
+.output-skeleton-welcome-row, .output-skeleton-prompt, .output-skeleton-footer { display: flex; align-items: center; gap: .7em; min-height: 1.2em; }
+.output-skeleton-group[data-agent-starter='codex'] .output-skeleton-welcome { padding: .55em .75em; border: 1px solid var(--surface-1); border-radius: .45em; }
+.output-skeleton-group[data-agent-starter='codex'] .output-skeleton-footer { padding-left: 1.35em; opacity: .65; }
+.output-skeleton-group[data-agent-starter='claude'] .output-skeleton-welcome { grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 1em; }
+.output-skeleton-welcome-details { display: grid; gap: .5em; }
+.output-skeleton-logo { height: 2.7em; clip-path: polygon(0 20%, 12% 20%, 12% 0, 88% 0, 88% 20%, 100% 20%, 100% 75%, 88% 75%, 88% 100%, 65% 100%, 65% 84%, 35% 84%, 35% 100%, 12% 100%, 12% 75%, 0 75%); }
 /* shell prompts alternate with compact log lines and aligned output columns */
 .output-skeleton-terminal .output-skeleton-group { gap: .15em; }
 .output-skeleton-command, .output-skeleton-output-row { display: flex; align-items: center; gap: 1em; min-height: 1.4em; }
