@@ -18,6 +18,8 @@ type ConductorFixtureOptions = {
   saveSuccessfully?: boolean;
   catalogFailures?: number;
   catalogModels?: CatalogModel[];
+  kind?: string;
+  claudeAllowedModels?: string[];
 };
 type ConductorSettingsRequest = { changes: Array<{ sourceId: string; patches?: SettingsPatch[] }> };
 
@@ -44,12 +46,12 @@ async function setupConductorSettings(page: Page, options: ConductorFixtureOptio
   const allowedModels = options.allowedModels ?? ['openai/gpt-5.1-codex', 'anthropic/claude-opus-4.1'];
   const value: Record<string, unknown> = {
     name: 'Fixture',
-    adapters: { pi: { allowedModels: allowedModels.map(entry => typeof entry === 'string' ? { model: entry } : entry) } },
+    adapters: { pi: { allowedModels: allowedModels.map(entry => typeof entry === 'string' ? { model: entry } : entry) }, ...(options.claudeAllowedModels === undefined ? {} : { claude: { program: '/usr/bin/claude', allowedModels: options.claudeAllowedModels.map(model => ({ model })) } }) },
     projects: [{ id: 'conductor-home', path: '/tmp/conductor-home' }]
   };
   // configure only fixtures with an authored Conductor object
   if (!options.conductorAbsent) value.conductor = {
-    kind: 'pi',
+    kind: options.kind ?? 'pi',
     project: 'conductor-home',
     model: options.model ?? 'openai/gpt-5.1-codex',
     ...(options.enabled === undefined ? {} : { enabled: options.enabled }),
@@ -139,10 +141,9 @@ test('uses the full API model catalog and fixed controls without dirtying on dis
   await expect(settings).toContainText('configured directory Project');
   await expect(settings.getByRole('switch', { name: 'Conductor enabled', exact: true })).toBeChecked();
   await expect(settings.getByRole('button', { name: /Remove Conductor|Remove section/u })).toHaveCount(0);
-  await expect(settings.getByRole('combobox', { name: 'Kind', exact: true })).toHaveCount(0);
-  await search.fill('Kind');
-  await expect(page.getByRole('listbox', { name: 'Settings search results', exact: true }).getByRole('option').filter({ has: page.locator('.settings-search-result-title strong').filter({ hasText: /^Kind$/u }) })).toHaveCount(0);
-  await search.fill('');
+  const kind = settings.getByRole('switch', { name: 'Kind', exact: true });
+  await expect(kind).toHaveAttribute('data-value', 'pi');
+  await expect(kind).toHaveText(/Claude.*Pi/u);
 
   const model = settings.getByRole('combobox', { name: 'Model', exact: true });
   await expect(model).toBeEnabled();
@@ -302,4 +303,46 @@ test('keeps effort and scopes permanent', async ({ page }) => {
   expect(patches.find(patch => patch.path.join('.') === 'conductor.effort')).toMatchObject({ op: 'remove' });
   expect(patches.find(patch => patch.path.join('.') === 'conductor.scopes')?.value).toEqual(['status:read', 'logs:read', 'legacy:unknown']);
   await expect(settings.getByRole('button', { name: 'Remove Effort' })).toHaveCount(0);
+});
+
+test('offers a Claude Conductor only Claude\'s Allowed models, without the Pi catalog', async ({ page }) => {
+  const { settings, validationRequests, catalogRequestCount } = await setupConductorSettings(page, { kind: 'claude', model: 'claude-retired', claudeAllowedModels: ['claude-opus-5-5', 'claude-sonnet-5-5'] });
+  await openConductor(settings);
+  await expect(settings.locator('[data-settings-path="conductor.kind"]')).toContainText('ignoring your own Claude settings');
+  const model = settings.getByRole('combobox', { name: 'Model', exact: true });
+  await expect(model.locator('.settings-select-current-label')).toContainText('claude-retired (not allowed)');
+  await expect(settings.getByRole('note').filter({ hasText: 'not allowed for Claude agents' })).toBeVisible();
+  await expect(settings.getByRole('note').filter({ hasText: 'all Pi agents' })).toHaveCount(0);
+  await model.click();
+  await expect(page.getByRole('listbox', { name: 'Model options', exact: true }).getByRole('option')).toHaveCount(3);
+  await page.keyboard.press('Escape');
+  await chooseOption(model, 'claude-sonnet-5-5');
+  await settings.getByRole('button', { name: 'Save changes' }).click();
+  await expect.poll(() => validationRequests.length).toBe(1);
+  const patches = validationRequests[0]!.changes.flatMap(change => change.patches ?? []);
+  expect(patches.find(patch => patch.path.join('.') === 'conductor.model')).toMatchObject({ op: 'set', value: 'claude-sonnet-5-5' });
+  expect(patches.some(patch => patch.path[0] === 'adapters')).toBe(false);
+  expect(catalogRequestCount()).toBe(0);
+});
+
+test('says a Claude Conductor needs an Allowed model first', async ({ page }) => {
+  const { settings } = await setupConductorSettings(page, { kind: 'claude', model: '' });
+  await openConductor(settings);
+  await expect(settings.getByRole('combobox', { name: 'Model', exact: true })).toBeDisabled();
+  await expect(settings.getByRole('note').filter({ hasText: 'No models are allowed for Claude agents' })).toBeVisible();
+});
+
+test('switches the model field to Claude\'s Allowed models when Kind changes in the draft', async ({ page }) => {
+  const { settings, validationRequests } = await setupConductorSettings(page, { claudeAllowedModels: ['claude-opus-5-5'] });
+  await openConductor(settings);
+  await settings.getByRole('switch', { name: 'Kind', exact: true }).click();
+  const model = settings.getByRole('combobox', { name: 'Model', exact: true });
+  await expect(model.locator('.settings-select-current-label')).toContainText('openai/gpt-5.1-codex (not allowed)');
+  await chooseOption(model, 'claude-opus-5-5');
+  await settings.getByRole('button', { name: 'Save changes' }).click();
+  await expect.poll(() => validationRequests.length).toBe(1);
+  const patches = validationRequests[0]!.changes.flatMap(change => change.patches ?? []);
+  expect(patches.find(patch => patch.path.join('.') === 'conductor.kind')).toMatchObject({ op: 'set', value: 'claude' });
+  expect(patches.find(patch => patch.path.join('.') === 'conductor.model')).toMatchObject({ op: 'set', value: 'claude-opus-5-5' });
+  expect(patches.some(patch => patch.path[0] === 'adapters')).toBe(false);
 });

@@ -26,6 +26,15 @@ describe('shell command settings metadata', () => {
     expect(sourceSchema.parse({ publicOrigin: 'https://agents.example.com', adapters: { pi: { env: { HOME: '/home/test', CUSTOM: 'value' }, sandbox: { allowWrite: [], denyRead: ['/private'] } } } }).adapters?.pi).toMatchObject({ env: { CUSTOM: 'value' }, sandbox: { allowWrite: [], denyRead: ['/private'] } });
   });
 
+  // Claude's lists confine only a Claude Conductor (ADR 0022), and take no environment names
+  it('labels Claude policy lists as the Conductor\'s sandbox rules', () => {
+    const sandbox = property(property(property(applicationSettingsSchema(), 'adapters'), 'claude'), 'sandbox');
+    expect(sandbox).toMatchObject({ type: 'object', optional: true, label: 'Conductor sandbox rules' });
+    expect(sandbox.description).toContain('Claude Conductor only');
+    expect(sandbox.properties?.env).toBeUndefined();
+    expect(property(sandbox, 'denyRead')).toMatchObject({ label: 'Deny read', description: 'Paths a Claude Conductor’s commands must not read.', items: { label: 'Denied read path' } });
+  });
+
   // mark application and adapter shell commands without marking literal launch values
   it('annotates application and adapter shell commands only', () => {
     const application = applicationSettingsSchema();

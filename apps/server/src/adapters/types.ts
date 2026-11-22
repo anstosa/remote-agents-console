@@ -513,6 +513,11 @@ export interface StructuredAdapter {
    */
   readonly hostsConductor?: true;
   /**
+   * The kind can host the Conductor under the host bridge too. Pi's confinement there is its own
+   * host runtime's (ADR 0017); a Claude Conductor's was probed only off the bridge (ADR 0022).
+   */
+  readonly conductsUnderBridge?: true;
+  /**
    * The operator arguments its launch composes itself, or that would break its protocol client,
    * each with the values it takes: dropped from every launch of it, whatever the boot dropped.
    */

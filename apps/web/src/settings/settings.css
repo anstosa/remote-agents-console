@@ -134,8 +134,8 @@
 .settings-adapter-card-action { position: absolute; z-index: 1; top: .42rem; right: .55rem; }
 .settings-adapter-card-action > .settings-remove-button { min-height: 1.85rem; }
 .settings-adapter-card-body { min-width: 0; padding: 0 .75rem .75rem; }
-.settings-pi-sandbox > header { align-items: flex-start; }
-.settings-pi-sandbox > header .client-settings-toggle { flex: none; }
+.settings-console-sandbox > header { align-items: flex-start; }
+.settings-console-sandbox > header .client-settings-toggle { flex: none; }
 /* keep future adapters visible without implying their controls work */
 .settings-unimplemented-field { opacity: .55; }
 .settings-unimplemented-field :is(h3, strong, small) { color: var(--overlay-0); }

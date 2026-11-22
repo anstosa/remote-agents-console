@@ -825,7 +825,7 @@ function EnumChecklist({ label, options, value, fallback, disabled, onChange, de
 
 // what a choice in an EnumChecklist shows: its name and, below it, what choosing it means
 type EnumChoice = { label: string; detail?: string; caution?: true };
-// the Conductor's worker kinds: only Pi carries the console's sandbox guarantee (ADR 0018)
+// the Conductor's kinds, as its host and its workers: only Pi workers carry the console's sandbox guarantee (ADR 0018)
 const conductorSpawnKindChoices: Record<string, EnumChoice> = {
   pi: { label: 'Pi', detail: 'Sandboxed by the console, which arms and confirms the sandbox itself. The only kind with that guarantee.' },
   claude: { label: 'Claude', detail: 'Runs under your own Claude configuration. The console neither sandboxes nor checks it: make sure its permissions and sandbox settings restrict a worker as you want.', caution: true },
@@ -1096,14 +1096,32 @@ function McpEditor({ source, schema, issues, disabled, onPatch, ...fields }: App
   </section>;
 }
 
+// offer a non-Pi Conductor the kind's own Allowed models, which its validation requires (ADR 0022)
+function ConductorAllowedModelField({ source, schema, kind, value, issues, disabled, onPatch }: { source: SettingsSource; schema: SettingsSchema; kind: string; value: unknown; issues: SettingsIssue[]; disabled: boolean; onPatch: SetPatch }) {
+  const configured = typeof value === 'string' ? value : '';
+  const allowed = agentAllowedModelsFrom(valueAt(source.value, ['adapters', kind, 'allowedModels'])).map(entry => entry.model);
+  const notAllowed = configured !== '' && !allowed.includes(configured);
+  const kindLabel = conductorSpawnKindChoices[kind]?.label ?? kind;
+  const options: SettingsSelectOption[] = [
+    ...(notAllowed ? [{ value: configured, label: `${configured} (not allowed)`, disabled: true }] : []),
+    ...allowed.map(model => ({ value: model, label: model }))
+  ];
+  return <div className="settings-field settings-field-string" data-settings-path="conductor.model" data-settings-search-path={JSON.stringify(['conductor', 'model'])}>
+    <div className="settings-field-summary"><span className="settings-field-copy"><strong>{schema.label ?? 'Model'}</strong>{schema.description && <small>{schema.description}</small>}</span></div>
+    <SettingsSelect searchable label={schema.label ?? 'Model'} value={configured} options={options} disabled={disabled || allowed.length === 0} onChange={model => { /* stage only the chosen Allowed model */ onPatch(source, { op: 'set', path: ['conductor', 'model'], value: model }); }} />
+    {allowed.length === 0 && <p className="settings-field-guidance" role="note">No models are allowed for {kindLabel} agents. Allow one in the Agents settings first; that list also limits your own {kindLabel} launches.</p>}
+    {allowed.length > 0 && notAllowed && <p className="settings-field-guidance" role="note">The saved model is not allowed for {kindLabel} agents. Choose one that is.</p>}
+    <FieldIssues issues={issues} sourceId={source.id} path={['conductor', 'model']} />
+  </div>;
+}
+
 // render Conductor's permanent enable boundary and fixed field set
 function ConductorEditor({ source, schema, issues, disabled, onPatch, ...fields }: ApplicationSectionEditorProps) {
   const configured = valueAt(source.value, ['conductor']);
   const record = configured !== null && typeof configured === 'object' && !Array.isArray(configured) ? configured as Record<string, unknown> : undefined;
   const enabled = record !== undefined && record.enabled !== false;
-  const kindSchema = schema.properties?.kind;
-  const hideKind = kindSchema?.options?.length === 1;
-  const properties = Object.entries(schema.properties ?? {}).filter(([key]) => key !== 'enabled' && key !== 'permissions' && key !== 'scopes' && !(key === 'kind' && hideKind));
+  const kind = typeof record?.kind === 'string' ? record.kind : 'pi';
+  const properties = Object.entries(schema.properties ?? {}).filter(([key]) => key !== 'enabled' && key !== 'permissions' && key !== 'scopes');
   const permissionSchema = schema.properties?.permissions;
   const mcpPermissionSchema = source.schema?.properties?.integrations?.properties?.mcp?.properties?.permissions;
   const scopes = schema.properties?.scopes;
@@ -1128,7 +1146,9 @@ function ConductorEditor({ source, schema, issues, disabled, onPatch, ...fields 
     {schema.description && <p className="settings-preference-description">{schema.description}</p>}
     {permissionSchema !== undefined && mcpPermissionSchema !== undefined && <CapabilityEditor surface="Conductor" root={['conductor', 'permissions']} schema={permissionSchema} ceiling={{ root: ['integrations', 'mcp', 'permissions'], schema: mcpPermissionSchema }} source={source} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />}
     <div className="settings-object-fields">{properties.map(([key, property]) => key === 'model'
-      ? <ConductorModelField key={key} source={source} schema={property} value={record?.[key]} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />
+      ? kind === 'pi'
+        ? <ConductorModelField key={key} source={source} schema={property} value={record?.[key]} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />
+        : <ConductorAllowedModelField key={key} source={source} schema={property} kind={kind} value={record?.[key]} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />
       : <SchemaField {...fields} key={key} source={source} schema={property} value={record?.[key]} path={['conductor', key]} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />)}</div>
     {scopes !== undefined && <details className="settings-mcp-gates"><summary>Existing scope restrictions</summary><SchemaField {...fields} source={source} schema={scopes} value={record?.scopes} path={['conductor', 'scopes']} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} /></details>}
     <FieldIssues issues={issues} sourceId={source.id} path={['conductor']} />
@@ -1283,8 +1303,10 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   const adapterBlock = source.id === 'app' && path.length === 2 && path[0] === 'adapters';
   const adapterEnvironment = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && path[2] === 'env';
   const adapterAllowedModels = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && path[2] === 'allowedModels';
-  const piSandbox = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && path[1] === 'pi' && path[2] === 'sandbox';
-  const piSandboxRule = source.id === 'app' && path.length === 4 && path[0] === 'adapters' && path[1] === 'pi' && path[2] === 'sandbox';
+  // the sandbox lists the console writes: every Pi's, and a Claude Conductor's (ADR 0022)
+  const consoleSandboxPath = source.id === 'app' && path[0] === 'adapters' && path[2] === 'sandbox';
+  const consoleSandbox = consoleSandboxPath && path.length === 3;
+  const consoleSandboxRule = consoleSandboxPath && path.length === 4;
   // retain lifecycle controls when their optional command is omitted
   const adapterLifecycleCommand = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && ['setup', 'teardown'].includes(path[2]!);
   const adapterUpdateCommand = source.id === 'app' && path.length === 4 && path[0] === 'adapters' && path[2] === 'updates';
@@ -1299,7 +1321,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   if (projectHostPath && installationKind !== 'compose') return null;
   // keep resettable fields visible while omission selects their default state
   const reviewField = source.id === 'app' && path[0] === 'review';
-  const permanentField = reviewField || conductorEffort || enumArray || adapterLifecycleCommand || buttonIcon || piSandbox || piSandboxRule || source.id === 'app' && path.length === 1 && ['scratchDirectory', 'editor'].includes(path[0]!);
+  const permanentField = reviewField || conductorEffort || enumArray || adapterLifecycleCommand || buttonIcon || consoleSandbox || consoleSandboxRule || source.id === 'app' && path.length === 1 && ['scratchDirectory', 'editor'].includes(path[0]!);
   const removable = schema.optional && !hasSchemaDefault(schema) && !projectField && !permanentField;
   // seed only a deliberately edited missing container and retain exact leaf identity
   const stagePatch: SetPatch = (target, next, disclosureDerived) => {
@@ -1315,7 +1337,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
     // revoke command disclosures before a reset removes their protected control
     if (reset && (adapterUpdateCommand || adapterLifecycleCommand)) onHideCollection?.(target, authored.path);
     // create a missing preset or policy list only when an item is added
-    if ((reviewField || piSandboxRule) && schema.type === 'array' && value === undefined && authored.op === 'insert') onPatch(target, { op: 'set', path, value: [] });
+    if ((reviewField || consoleSandboxRule) && schema.type === 'array' && value === undefined && authored.op === 'insert') onPatch(target, { op: 'set', path, value: [] });
     // sequence defaults while keeping blank resets independent of revoked plaintext
     for (const prepared of settingsDefaultPatches(schema, value, path, authored)) onPatch(target, prepared, prepared === authored && !reset && disclosureDerived);
   };
@@ -1411,7 +1433,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   } else if (schema.type === 'enum') {
     const resettable = conductorEffort || reviewField && (schema.optional || defaulted);
     // present the adapter kind without changing its stored identity
-    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: conductorField && path[1] === 'kind' && option === 'pi' ? 'Pi' : calendarMomentLabel(path, option) ?? transportLabel(path, option) ?? option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
+    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: conductorField && path[1] === 'kind' ? conductorSpawnKindChoices[option]?.label ?? option : calendarMomentLabel(path, option) ?? transportLabel(path, option) ?? option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
     // keep the two file actions visible side by side
     if (source.id === 'app' && path.length === 1 && path[0] === 'fileOpenAction') {
       control = <div className="client-settings-segmented" role="radiogroup" aria-label={label}>{/* use only the choices supported by the server */}{schema.options?.map(option => <button key={option} type="button" role="radio" aria-checked={effectiveValue === option} className={effectiveValue === option ? 'active' : undefined} disabled={disabled} onClick={() => { /* stage the file action in application config */ if (effectiveValue !== option) stagePatch(source, { op: 'set', path, value: option }); }}>{labelForKey(option)}</button>)}</div>;
@@ -1433,8 +1455,8 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   } else {
     control = <input id={controlId} type="text" value={typeof scalarValue === 'string' ? scalarValue : ''} placeholder={placeholder} disabled={disabled} onChange={event => stagePatch(source, { op: 'set', path, value: event.target.value })} />;
   }
-  // custom policy presence never changes whether a Pi launch is sandboxed
-  if (piSandbox) return <section className="settings-schema-section settings-pi-sandbox" data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}><header><div><h3>{label}</h3></div><label className="client-settings-toggle"><input type="checkbox" role="switch" aria-label="Pi sandbox policy overrides" checked={value !== undefined} disabled={disabled} onChange={event => {
+  // custom policy presence never changes whether a launch is sandboxed
+  if (consoleSandbox) return <section className="settings-schema-section settings-console-sandbox" data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}><header><div><h3>{label}</h3>{schema.description && <p>{schema.description}</p>}</div><label className="client-settings-toggle"><input type="checkbox" role="switch" aria-label={`${path[1] === 'pi' ? 'Pi' : 'Claude Conductor'} sandbox policy overrides`} checked={value !== undefined} disabled={disabled} onChange={event => {
     // remove only custom rules while preserving native launch security
     if (!event.currentTarget.checked) onHideCollection?.(source, path);
     stagePatch(source, event.currentTarget.checked ? { op: 'set', path, value: {} } : { op: 'remove', path });

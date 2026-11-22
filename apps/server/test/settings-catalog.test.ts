@@ -235,7 +235,8 @@ describe('settings schema metadata', () => {
   // defaulted scopes describe runtime omission without granting dangerous access
   it('describes Conductor home, model, effort and its complete fixed scope set', () => {
     const conductor = applicationSettingsSchema().properties!.conductor!;
-    expect(conductor.properties!.kind).toMatchObject({ type: 'enum', options: ['pi'] });
+    expect(conductor.properties!.kind).toMatchObject({ type: 'enum', options: ['claude', 'pi'] });
+    expect(conductor.properties!.kind!.description).toMatch(/ignoring your own Claude settings/u);
     expect(conductor.properties!.project!.description).toMatch(/AGENTS\.md/u);
     expect(conductor.properties!.project!.description).toMatch(/does not limit/u);
     expect(conductor.properties!.model!.description).toMatch(/API/u);

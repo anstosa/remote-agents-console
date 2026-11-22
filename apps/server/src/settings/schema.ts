@@ -124,9 +124,9 @@ function describeConductorSettings(schema: SettingsSchema): void {
   conductor.label = 'Conductor';
   conductor.description = 'An always-running sandboxed agent that coordinates work through the console.';
   Object.assign(fields.enabled!, { label: 'Conductor enabled', description: 'Save and restart the console to apply. Turning off preserves the configuration.' });
-  Object.assign(fields.kind!, { label: 'Kind', description: 'The agent kinds that can host Conductor. Only Pi currently supports the required sandbox and console tools.' });
+  Object.assign(fields.kind!, { label: 'Kind', description: 'The agent that runs Conductor. Pi or Claude; either way the console arms and confirms its sandbox. A Claude Conductor always runs in print mode (-p) on settings the console writes, ignoring your own Claude settings, hooks, plugins, MCP servers and adapter arguments, and cannot run under the host bridge. Its Conversation does not carry over when you change kind.' });
   Object.assign(fields.project!, { label: 'Project', description: 'The ID of a configured directory Project: Conductor’s home folder, containing its files and standing AGENTS.md guidance. Use a non-Git directory. This does not limit which projects it can coordinate.' });
-  Object.assign(fields.model!, { label: 'Model', description: 'Choose an available model from the API catalog for your configured providers.' });
+  Object.assign(fields.model!, { label: 'Model', description: 'For Pi, choose an available model from the API catalog for your configured providers. For Claude, choose one of Claude’s allowed models (Agents settings).' });
   Object.assign(fields.effort!, { label: 'Effort', placeholder: 'Default', description: 'Default uses the selected model’s configured effort, or the agent default when no model effort is configured.' });
   Object.assign(fields.scopes!, { label: 'Existing scopes', description: 'These legacy scope restrictions remain an additional limit on Conductor capabilities.', default: conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)) });
   Object.assign(fields.spawnKinds!, { label: 'Worker kinds', description: 'The kinds of Agent Conductor may spawn as workers (with the agents:spawn scope). Only Sandboxed Pi workers carry the console’s sandbox guarantee. Claude and Codex workers run under your own configuration of those agents, which the console does not sandbox or check, and text Conductor reads can steer what it asks them to do: before enabling one, make sure its permissions and sandbox settings restrict a worker as you want.' });
@@ -209,23 +209,28 @@ function describeApplicationCommands(schema: SettingsSchema): void {
       default: 'tmux',
       description: 'Terminal runs Claude Code’s own screen in a tmux pane. Transcript drives it in print mode (-p) and shows its transcript, with steer, questions and the model picker, but no ! commands and no /model or /resume pickers. Applies to new launches; resume a Conversation to move it over.'
     });
-    // distinguish additional sandbox rules from launch security and variable values
-    if (kind === 'pi') {
+    // distinguish additional sandbox rules from launch security and variable values; Claude's rules
+    // confine only a Claude Conductor, whose sandbox the console writes (ADR 0022)
+    if (adapter.properties!.sandbox !== undefined) {
+      const commands = kind === 'pi' ? 'sandboxed commands' : 'a Claude Conductor’s commands';
       const policy = adapter.properties!.sandbox!;
-      Object.assign(policy, { label: 'Custom sandbox rules' });
+      Object.assign(policy, kind === 'pi' ? { label: 'Custom sandbox rules' } : { label: 'Conductor sandbox rules', description: 'Added to the shared sandbox rules for a Claude Conductor only. Other Claude agents follow your own Claude sandbox settings.' });
       const fields = policy.properties!;
-      Object.assign(fields.allowedDomains!, { label: 'Allowed domains', description: 'Additional host names or patterns sandboxed commands may reach.' });
-      Object.assign(fields.deniedDomains!, { label: 'Denied domains', description: 'Host names or patterns sandboxed commands must not reach.' });
-      Object.assign(fields.allowWrite!, { label: 'Allow write', description: 'Additional paths sandboxed commands may write to.' });
-      Object.assign(fields.denyWrite!, { label: 'Deny write', description: 'Paths sandboxed commands must not write to.' });
-      Object.assign(fields.denyRead!, { label: 'Deny read', description: 'Paths sandboxed commands must not read.' });
-      Object.assign(fields.env!, { label: 'Environment variable names', description: 'Additional Pi environment variable names sandboxed commands may inherit. Set their values in Environment & keys above.' });
+      Object.assign(fields.allowedDomains!, { label: 'Allowed domains', description: `Additional host names or patterns ${commands} may reach.` });
+      Object.assign(fields.deniedDomains!, { label: 'Denied domains', description: `Host names or patterns ${commands} must not reach.` });
+      Object.assign(fields.allowWrite!, { label: 'Allow write', description: `Additional paths ${commands} may write to.` });
+      Object.assign(fields.denyWrite!, { label: 'Deny write', description: `Paths ${commands} must not write to.` });
+      Object.assign(fields.denyRead!, { label: 'Deny read', description: `Paths ${commands} must not read.` });
       Object.assign(fields.allowedDomains!.items!, { label: 'Allowed domain' });
       Object.assign(fields.deniedDomains!.items!, { label: 'Denied domain' });
       Object.assign(fields.allowWrite!.items!, { label: 'Write path' });
       Object.assign(fields.denyWrite!.items!, { label: 'Denied write path' });
       Object.assign(fields.denyRead!.items!, { label: 'Denied read path' });
-      Object.assign(fields.env!.items!, { label: 'Environment variable' });
+      // Claude's sandbox passes its commands the CLI's environment, so it takes no names
+      if (fields.env !== undefined) {
+        Object.assign(fields.env, { label: 'Environment variable names', description: 'Additional Pi environment variable names sandboxed commands may inherit. Set their values in Environment & keys above.' });
+        Object.assign(fields.env.items!, { label: 'Environment variable' });
+      }
     }
     Object.assign(adapter.properties!.setup!, { editor: 'shell' as const, default: '', placeholder: 'Disabled (when blank)' });
     Object.assign(adapter.properties!.teardown!, { editor: 'shell' as const, default: '', placeholder: 'Disabled (when blank)' });

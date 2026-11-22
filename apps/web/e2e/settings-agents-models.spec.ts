@@ -581,6 +581,21 @@ test('toggles Pi custom sandbox policy without changing runtime sandbox choices'
   expect(second.some(patch => patch.path.includes('sandboxed') || patch.path.includes('security'))).toBe(false);
 });
 
+// Claude's lists confine only a Claude Conductor, and take no environment names (ADR 0022)
+test('toggles the Claude Conductor sandbox rules as Pi\'s are toggled', async ({ page }) => {
+  const { settings, saves } = await setupAgentModels(page, { conductorEnabled: false, adapters: { claude: {} } });
+  const claude = settings.locator('details[data-settings-path="adapters.claude"]');
+  await claude.locator('summary').click();
+  await expect(claude.getByRole('heading', { name: 'Conductor sandbox rules', exact: true })).toBeVisible();
+  await expect(claude.getByText(/for a Claude Conductor only/u)).toBeVisible();
+  await claude.getByRole('switch', { name: 'Claude Conductor sandbox policy overrides', exact: true }).check();
+  await expect(claude.getByRole('button', { name: '+ Add Denied read path', exact: true })).toBeVisible();
+  await expect(claude.getByText('Environment variable names', { exact: true })).toHaveCount(0);
+  await settings.getByRole('button', { name: 'Save changes' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0]!.changes.flatMap(change => change.patches ?? [])).toEqual([expect.objectContaining({ op: 'set', path: ['adapters', 'claude', 'sandbox'], value: {} })]);
+});
+
 // path rules remain visible without a separate permissions toggle
 test('keeps every Pi sandbox path placeholder visible without permission checkboxes', async ({ page }) => {
   const { settings, saves, source } = await setupAgentModels(page, { conductorEnabled: false, pi: { sandbox: {} } });

@@ -173,5 +173,6 @@ export const claudeStructuredAdapter = {
   untrusted: async (cwd, env) => await claudeFolderTrusted(cwd, env) ? undefined : { args: untrustedArgs, reserved: untrustedReserved, notice: untrustedNotice },
   launchSetsModel: true,
   modelsWithoutPolicy: true,
-  attachments: true
+  attachments: true,
+  hostsConductor: true
 } satisfies StructuredAdapter;

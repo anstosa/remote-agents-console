@@ -896,8 +896,27 @@ describe('Conductor configuration', () => {
     expect(source.conductor).toEqual({ enabled: false, kind: 'pi', project: 'home', model: 'openai/gpt-5.6', scopes: ['status:read'] });
   });
 
-  it('refuses another kind, a model that is not Allowed, a repository or unknown Project, an unknown scope, and Pi left unconfigured', async () => {
-    await expect(validateConfig(await configured({ kind: 'claude', project: 'home', model: 'openai/gpt-5.6' }))).rejects.toThrow();
+  it('runs Claude on one of its own Allowed models and Efforts, whatever transport the operator\'s Claude launches use', async () => {
+    const claude = { claude: { program: '/bin/echo', transport: 'tmux', allowedModels: [{ model: 'claude-opus-5-5' }, { model: 'claude-sonnet-5-5' }] } };
+    const config = await validateConfig(await configured({ kind: 'claude', project: 'home', model: 'claude-sonnet-5-5', effort: 'high' }, { ...pi, ...claude }));
+    expect(config.conductor).toMatchObject({ kind: 'claude', projectId: 'home', model: 'claude-sonnet-5-5', effort: 'high', spawnKinds: ['pi'] });
+    await expect(validateConfig(await configured({ kind: 'claude', project: 'home', model: 'openai/gpt-5.6' }, { ...pi, ...claude }))).rejects.toThrow(/adapters\.claude\.allowedModels/u);
+    await expect(validateConfig(await configured({ kind: 'claude', project: 'home', model: 'claude-opus-5-5', effort: 'off' }, { ...pi, ...claude }))).rejects.toThrow(/Effort claude takes/u);
+    await expect(validateConfig(await configured({ kind: 'claude', project: 'home', model: 'claude-opus-5-5' }, pi))).rejects.toThrow(/adapters\.claude/u);
+  });
+
+  it('refuses a Claude Conductor under the host bridge, where its confinement is unproven, but not a Pi one', async () => {
+    const source = await configured({ kind: 'claude', project: 'home', model: 'claude-opus-5-5' }, { claude: { program: '/bin/echo', allowedModels: [{ model: 'claude-opus-5-5' }] } });
+    const piSource = await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6' });
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/run/rac-host-tmux');
+    // refused before Claude's own bridge requirement (RAC_HOST_REPOSITORY) is reported
+    await expect(validateConfig(source, { checkExecutables: false })).rejects.toThrow(/cannot host the Conductor under the host bridge/u);
+    // a bridged Pi gets as far as its own host runtime, which this test does not provision
+    await expect(validateConfig(piSource, { checkExecutables: false })).rejects.toThrow(/adapters\.pi must be configured and launchable \(Pi host bridge/u);
+  });
+
+  it('refuses a kind that cannot host it, a model that is not Allowed, a repository or unknown Project, an unknown scope, and Pi left unconfigured', async () => {
+    await expect(validateConfig(await configured({ kind: 'codex', project: 'home', model: 'openai/gpt-5.6' }, { ...pi, codex: { program: '/bin/echo' } }))).rejects.toThrow(/Expected 'claude' \| 'pi', received 'codex'/u);
     await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-4' }))).rejects.toThrow(/Allowed model/u);
     await expect(validateConfig(await configured({ kind: 'pi', project: 'code', model: 'openai/gpt-5.6' }))).rejects.toThrow(/directory Project/u);
     await expect(validateConfig(await configured({ kind: 'pi', project: 'nowhere', model: 'openai/gpt-5.6' }))).rejects.toThrow(/directory Project/u);

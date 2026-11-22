@@ -462,6 +462,8 @@ directory must resolve to the same bytes inside the container and on the host �
 bind mount at the same path, or an explicit shared `RAC_ADAPTER_FILES_DIR` — so the
 host-side agent reads the file the container wrote.
 
+**`adapters.claude.sandbox`** takes the same lists as `adapters.pi.sandbox` except `env`, and confines only a Claude Conductor (see [The Conductor](#the-conductor)). Your other Claude Agents run under your own Claude sandbox settings.
+
 ### Pi
 
 `adapters.pi` enables Pi Agents. The console runs its own pinned Pi, so the entry
@@ -557,9 +559,10 @@ What is not confined: the Pi process itself (its provider traffic and its own st
 
 Edit its controls under **Global settings → Conductor**. Its on/off switch keeps
 the configuration when disabled; save and restart RAC to apply the change. Kind
-is hidden while Pi is the only supported kind. Model searches the API-backed
-catalog for configured providers, independently of running agents. Choosing a
+switches between Pi and Claude. For Pi, Model searches the API-backed
+catalog for configured providers, independently of running agents, and choosing a
 model not already allowed also adds it to Pi's Allowed models in the same save.
+For Claude, Model offers Claude's Allowed models (Agents → Claude).
 Effort's **Default** uses the model's configured effort rather than
 an explicit override. Scopes are a fixed set of permission checkboxes: all are
 enabled by default except `admin:dangerous` and `github:read`, and clearing every box grants none.
@@ -568,7 +571,7 @@ only kind that carries the console's sandbox guarantee.
 Project is the ID of its configured non-Git directory Project—its home folder
 and standing `AGENTS.md` guidance—not a limit on the projects it coordinates.
 
-The Conductor is one always-running Pi Agent that can act on the console itself, through the console's MCP server (ADR 0018). It is the only Agent with that access. Configure it with a top-level `conductor` block:
+The Conductor is one always-running Pi or Claude Agent that can act on the console itself, through the console's MCP server (ADR 0018). It is the only Agent with that access. Configure it with a top-level `conductor` block:
 
 ```json
 {
@@ -579,23 +582,23 @@ The Conductor is one always-running Pi Agent that can act on the console itself,
 ```
 
 - `enabled` defaults to `true` for existing configurations. Set it to `false` to turn Conductor off while preserving its home, model and permissions.
-- `kind` is `pi`, the only kind that can host it. When enabled, `adapters.pi` must be configured, and `model` must be one of its Allowed models; `effort` is optional.
+- `kind` is `pi` or `claude` (see "A Claude Conductor" below). When enabled, that kind's adapter must be configured, and `model` must be one of its Allowed models (`adapters.<kind>.allowedModels`); `effort` is optional and must be one the kind takes. Changing kind starts a new Conversation: none carries over between kinds.
 - `project` names a directory Project (a folder that is not a git checkout). It is the Conductor's working folder and the only place its commands may write, and its `AGENTS.md` is your standing guidance to it. Its tab sorts first. If that folder is missing, the console still starts: the Conductor stays off and you get one push saying why.
 - `scopes` chooses what it may call, from `status:read`, `logs:read`, `files:read`, `prompts:write`, `agents:control`, `stack:operate`, `review:write`, `agents:spawn`, `notes:write`, `github:read` and `admin:dangerous` (`agents:spawn`, `notes:write` and `github:read` are the Conductor's own). The default is every scope but `admin:dangerous` and `github:read`, which you name to grant. Its tool list shows only what its scopes allow; `deactivate_agent`, `start_new_task` and `switch_pull_request` need `admin:dangerous`. It never gets `answer_agent_question`, `move_queued_prompt` or the `launch_*` tools, whatever its scopes: one Agent never consents for you, and those launches are unsandboxed. A tool added to the console later stays closed to it until it is listed for it.
 - `spawnKinds` (default `["pi"]`) names the kinds its workers may be: `pi`, `claude` and `codex`, each one configured under `adapters`. **Only Pi workers carry the console's sandbox guarantee.** A Claude or Codex worker runs under your own configuration of that agent, which the console neither sandboxes nor checks (ADR 0018): before you add one, make sure its permissions and sandbox settings restrict a worker as you want, since text the Conductor reads can steer what it asks a worker to do.
 - `maxWorkers` (default 4) caps the workers it has starting or live at once, of every kind.
 - `maxSelfStartedTurnsPerHour` (default 30) caps the Turns it did not get from you: reports, Watch events and Schedule Runs aimed at it. The excess waits in its queue, behind any prompt of yours, and you get one push that it is throttled.
-- `scriptDeadlineMinutes` (default 10): a code mode script that runs longer cancels its Turn, and its transcript says so.
+- `scriptDeadlineMinutes` (default 10): a code mode script that runs longer cancels its Turn, and its transcript says so. A Claude Conductor has no code mode, so this does not apply to it.
 
-**Lifecycle.** The console launches an enabled Conductor when it starts and again whenever it exits, on the same Conversation, keeping its queue. After 3 exits in 10 minutes it stays Exited and you get a push; prompts to it keep queueing until you resume it. It is always Sandboxed (see Pi's sandbox above). Its menu offers Restart, which starts its process again in place, and its Conversations menu offers New Conversation; there is no Close or Turn off in that menu. Use the Conductor settings switch to turn it off without losing its configuration; removing the `conductor` block also turns it off. Its model chip shows its configured model without a picker, and it loads no skills or prompt templates from its folder.
+**Lifecycle.** The console launches an enabled Conductor when it starts and again whenever it exits, on the same Conversation, keeping its queue. After 3 exits in 10 minutes it stays Exited and you get a push; prompts to it keep queueing until you resume it. It is always Sandboxed (see Pi's sandbox above, and "A Claude Conductor" below). Its menu offers Restart, which starts its process again in place, and its Conversations menu offers New Conversation; there is no Close or Turn off in that menu. Use the Conductor settings switch to turn it off without losing its configuration; removing the `conductor` block also turns it off. Its model chip shows its configured model without a picker, and it loads no skills or prompt templates from its folder.
 
-**Its MCP access.** At each start of its process the console mints a token, keeps only its hash, and hands it to the RAC Pi extension over Pi's RPC channel; the extension registers the console's `/mcp` (at your `publicOrigin`) with it. The token never enters a command's environment, never reaches the model and is redacted from Raw events. Commands cannot reach the endpoint anyway: the console's `publicOrigin` host and listener address are denied domains for every Pi's commands. The token stops working when the process exits or is restarted.
+**Its MCP access.** At each start of its process the console mints a token, keeps only its hash, and hands it to the RAC Pi extension over Pi's RPC channel; the extension registers the console's `/mcp` (at your `publicOrigin`) with it. The token never enters a command's environment, never reaches the model and is redacted from Raw events. Commands cannot reach the endpoint anyway: the console's `publicOrigin` host and listener address are denied domains for every Pi's commands. The token stops working when the process exits or is restarted. A Claude Conductor gets its token the same way, over Claude's control protocol, and only after the console has read Claude's effective settings back and confirmed its sandbox (see below).
 
 - `/mcp` is served whenever a Conductor is configured, though the OAuth and voice parts remain off without `integrations.enabled`. Its `scopes`, optional `conductor.permissions` restrictions, and the shared `integrations.mcp.permissions` ceiling decide which capabilities it may call. `integrations.mcp.writeEnabled` and `dangerousEnabled` gate only OAuth and voice clients, while `integrations.mcp.readEnabled` (on by default) still gates Conductor reads.
 - It acts without Davo's voice mode, has its own rate limit (120 calls a minute, counted per MCP call, so one script cannot hammer the console), and never reaches another console through federation. Every call is in the integration audit log.
 - It acts only within its scope: every configured Project, and any other Place while its Workspace exists. Worktrees and Agents elsewhere are not listed, and a call on one answers not found.
-- Its commands share every Pi's network allowlist (`sandbox` and `adapters.pi.sandbox`). Since it can read across your Projects, keep that list to what you would let it send data to. The denied console hosts are names and the listener address; a wildcard you allow that resolves to the same proxy can still reach `/mcp`, where only the token admits a caller.
-- It uses code mode to batch and filter console calls: a script calls them as `tools.mcp__rac__<tool>(args)`, and each result carries its data in `structuredContent`. Scripts get no `models` (no direct provider calls outside the Allowed models).
+- Its commands share every Pi's network allowlist (`sandbox` and `adapters.pi.sandbox`; for a Claude Conductor, `sandbox` and `adapters.claude.sandbox`). Since it can read across your Projects, keep that list to what you would let it send data to. The denied console hosts are names and the listener address; a wildcard you allow that resolves to the same proxy can still reach `/mcp`, where only the token admits a caller.
+- A Pi Conductor uses code mode to batch and filter console calls (a Claude Conductor calls the `mcp__rac__*` tools directly): a script calls them as `tools.mcp__rac__<tool>(args)`, and each result carries its data in `structuredContent`. Scripts get no `models` (no direct provider calls outside the Allowed models).
 
 **Shared capability permissions.** The MCP, Conductor, and Voice settings pages use
 the same grouped Read and Write controls. MCP is the maximum allowed access;
@@ -648,7 +651,23 @@ these settings do not grant Voice raw execution or replace Conductor's sandbox.
 - Watches belong to the Conductor, not its Conversation: they survive New Conversation, restarts, deploys and reboots. The console stores each with the last state it saw (`.data/watches.json`, or `RAC_WATCHES_FILE`), so a change during a deploy is told once the console is back, and nothing is told twice. Output a command printed after the console stopped and before it exited during the same deploy is lost; its exit is still told.
 - `list_watches` and `unwatch` manage them; it may keep 50, at most 5 of them commands (each runs its own processes). One event keeps at most 64 KiB of a command's output and says how many more lines it skipped. The Conductor's header shows a Watches button with the count, listing each Watch with Remove, which also stops a command Watch's command. When the Conductor is turned off, its Watches go too.
 
-**Why Pi.** The console can arm and confirm Pi's sandbox itself, and hold the token inside Pi's process where commands cannot read it. It cannot see whether Claude's or Codex's own sandbox is on, and an Agent whose commands are unconfined could read another process's token from `/proc` or drive any pane. So only Pi can be the Conductor, and by default it spawns only Sandboxed Pi workers. Adding `claude` or `codex` to `spawnKinds` is your judgment that your configuration of that agent confines its workers well enough; the console takes your word for it.
+**A Claude Conductor** (`"kind": "claude"`, ADR 0022) needs `adapters.claude` with `allowedModels`:
+
+```json
+{
+  "adapters": { "claude": { "program": "/usr/local/bin/claude", "allowedModels": [{ "model": "claude-opus-5-5" }], "sandbox": { "allowedDomains": ["registry.npmjs.org"] } } },
+  "conductor": { "kind": "claude", "project": "conductor", "model": "claude-opus-5-5", "effort": "high" }
+}
+```
+
+- `model` must be one of `adapters.claude.allowedModels`, which also limits your own Claude launches to that list. Its workers default to Pi (`spawnKinds`), so without `adapters.pi` name them, e.g. `"spawnKinds": ["claude"]`.
+- It always runs in print mode (`claude -p`, the Transcript interface), whatever `adapters.claude.transport` says; that setting chooses only your own Claude launches. The console refuses it under the Docker host bridge, where its confinement has not been proven.
+- **It ignores your Claude configuration.** It loads no user, project or local settings, so none of your hooks, plugins, MCP servers, permission rules or sandbox lists, and only the built-in tools `Bash`, `Read`, `Edit`, `Write`, `Grep` and `Glob`. `adapters.claude.args` and the Launch menu's permission mode do not apply to it; `adapters.claude.env` still does, since it names the account.
+- The console writes its whole settings inline: a sandbox that is on, fails closed and allows no unsandboxed command, taking its lists from the top-level `sandbox` block plus `adapters.claude.sandbox` (`allowedDomains`, `deniedDomains`, `allowWrite`, `denyWrite`, `denyRead`; no `env`, since its commands get the CLI's environment), with the same denied paths and console hosts as a Sandboxed Pi; and permissions that allow the console's tools and edits in its Project only. `adapters.claude.sandbox` confines only the Conductor: your other Claude Agents follow your own sandbox settings.
+- Before it gets the token, the console reads Claude's effective settings back and refuses unless its own are the only source, the sandbox is on, fails closed and allows no unsandboxed command, and file tools are blocked outside its working folders. A Claude update that breaks that check fails the Conductor's launch rather than running it unconfined.
+- Anthropic may bill print-mode use differently from the terminal, and an always-running Conductor is the most exposed case. Setting `kind` back to `pi` is the way out.
+
+**Why Pi or Claude.** The console can arm and confirm Pi's sandbox itself, and hold the token inside Pi's process where commands cannot read it; for structured Claude it writes every setting Claude loads and reads them back, and hands the token over Claude's protocol. It cannot see whether a Claude you configure yourself, or Codex, has its sandbox on, and an Agent whose commands are unconfined could read another process's token from `/proc` or drive any pane. So only Pi and a console-confined Claude can be the Conductor, and by default it spawns only Sandboxed Pi workers. Adding `claude` or `codex` to `spawnKinds` is your judgment that your configuration of that agent confines its workers well enough; the console takes your word for it.
 
 ## Reviews
 

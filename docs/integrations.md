@@ -12,6 +12,11 @@ and no voice-mode gate; see "The Conductor" in `setup.md`. They do not expose th
 terminal or an arbitrary shell. Integration prompts beginning with `!` are
 rejected rather than entering the console's local shell mode.
 
+The Conductor is Pi or Claude (`conductor.kind`). A Claude Conductor runs on
+settings the console writes, ignoring your own Claude settings, hooks, plugins,
+MCP servers and `adapters.claude.args`; its sandbox lists come from `sandbox`
+plus `adapters.claude.sandbox`.
+
 ## Configuration
 
 Add the integration gates to the server JSON configuration:

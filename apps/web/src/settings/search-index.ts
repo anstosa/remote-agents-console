@@ -328,8 +328,8 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
   if (conductor !== undefined && !options.rawSourceIds.has(source.id)) {
     visitSchema(index, 'conductor', conductor, childValue(source.value, 'conductor'), ['conductor'], [], {
       forceAbsentChildren: true,
-      // omit the grouped permission tree and fixed implementation kind
-      skip: path => path.length === 2 && path[0] === 'conductor' && (path[1] === 'permissions' || path[1] === 'kind' && conductor.properties?.kind?.options?.length === 1)
+      // omit the grouped permission tree
+      skip: path => path.length === 2 && path[0] === 'conductor' && path[1] === 'permissions'
     });
     addPermissionGroups('conductor', 'Conductor', ['conductor', 'permissions'], conductor.properties?.permissions);
   }

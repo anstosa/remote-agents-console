@@ -91,10 +91,13 @@ const adapterArgument = z.string().max(4096).refine(value => !value.includes('\0
 // `admin:dangerous` and `github:read`, which the operator names, and spawns only Sandboxed Pi
 // workers unless the operator names other configured kinds
 function conductorConfig({ project, scopes, enabled: _enabled, ...conductor }: z.output<typeof conductorSchema>, projects: readonly Project[], adapters: AdapterConfigs): ConductorConfig {
+  const structured = structuredAdapterFor(conductor.kind)!;
+  // refused outright before anything the operator could fix for it (ADR 0022)
+  if (structured.conductsUnderBridge !== true && process.env.RAC_HOST_TMUX_DIR !== undefined) throw new Error(`conductor: ${conductor.kind} cannot host the Conductor under the host bridge, where its confinement is unproven`);
   const adapter = adapters[conductor.kind];
   if (adapter?.launchable !== true) throw new Error(`conductor: adapters.${conductor.kind} must be configured and launchable${adapter?.unavailableReason === undefined ? '' : ` (${adapter.unavailableReason})`}`);
   if (!(adapter.allowedModels ?? []).some(entry => entry.model === conductor.model)) throw new Error(`conductor: ${conductor.model} is not an Allowed model (adapters.${conductor.kind}.allowedModels)`);
-  if (conductor.effort !== undefined && !structuredAdapterFor(conductor.kind)!.efforts.includes(conductor.effort)) throw new Error(`conductor: ${conductor.effort} is not an Effort ${conductor.kind} takes`);
+  if (conductor.effort !== undefined && !structured.efforts.includes(conductor.effort)) throw new Error(`conductor: ${conductor.effort} is not an Effort ${conductor.kind} takes`);
   for (const kind of conductor.spawnKinds) if (adapters[kind] === undefined) throw new Error(`conductor: spawnKinds names ${kind}, but adapters.${kind} is not configured`);
   const named = projects.find(candidate => candidate.id === project);
   // a Project whose folder is missing leaves the Conductor off, with a notice, rather than stopping the console
