@@ -25,5 +25,6 @@ Run each outside the sandbox (`node docs/research/claude-conductor/probe.mjs`). 
 
 - **Settings merge, they do not replace.** With `--setting-sources user`, the operator's `sandbox.network.allowedDomains` (which included `*.i.grosinger.net`, where the console lives), `sandbox.excludedCommands` (run unsandboxed), Bash allow rules, hooks (run unsandboxed) and plugins all merged into the inline settings. A Conductor must load no setting sources.
 - **`mcp_status` echoes the server config, header included.** The console must never log that response.
+- **`mcp_set_servers` replaces the whole set.** Sent with only `rac`, it answered `removed: ["operator"]` and dropped the SDK server the launch declared in `--mcp-config` and `initialize`. Sent with `operator: { type: 'sdk', name: 'operator' }` beside `rac`, it answered `added: ["rac"], removed: []`. (Checked on 2.1.328 with control requests alone, no Turn.)
 - **`dontAsk` denies writes inside the working folder too.** A Conductor that may write in its own directory Project needs an explicit allow rule for Edit/Write; the outside-folder blocks keep that rule from reaching further.
 - `get_settings` also reports `served_settings_state` (`ineligible` here); it is unrelated to the sandbox.

@@ -3,7 +3,7 @@ import { askUser, askUserReply } from '../adapters/ask-user.js';
 import { claudeConversationName, claudeHookNonce, claudeTranscriptRecords, validClaudeSessionId } from '../adapters/claude-conversations.js';
 import { conductorHandoff, conductorPrompt } from '../adapters/conductor-role.js';
 import type { QuestionField } from '../adapters/types.js';
-import { bounded, count, isObject, oneLine, outcome, strings, summary, text, thousands, waitingForAnswer, type Json, type ModelInfo, type ModelSetting, type ProtocolClient, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
+import { bounded, count, isObject, oneLine, outcome, strings, summary, text, thousands, waitingForAnswer, type Json, type LaunchReport, type ModelInfo, type ModelSetting, type ProtocolClient, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
 
 /**
  * The Claude protocol client (ADR 0015): Claude Code driven headless over stream-json lines,
@@ -49,6 +49,20 @@ const unknown = (kind: string): void => {
   if (ignored.has(kind) || logged.has(kind)) return;
   logged.add(kind);
   console.warn(`[claude] ignoring ${kind} lines`);
+};
+
+// Why the settings a Conductor's CLI says it runs under (`get_settings`) do not confine it as its
+// launch asked (ADR 0022), or undefined when they do: the console's inline settings alone, a
+// sandbox that fails closed with no unsandboxed command, and file tools kept to its folders.
+const whyUnconfined = (settings: Json | undefined): string | undefined => {
+  if (settings === undefined) return 'Claude did not say which settings it runs under';
+  const sources = Array.isArray(settings.sources) ? settings.sources.map(source => isObject(source) ? String(source.source) : '?') : [];
+  if (sources.length !== 1 || sources[0] !== 'flagSettings') return `it loaded settings other than the console's (${sources.join(', ') || 'none'})`;
+  const sandbox = isObject(settings.effective) && isObject(settings.effective.sandbox) ? settings.effective.sandbox : {};
+  if (sandbox.enabled !== true || sandbox.failIfUnavailable !== true || sandbox.allowUnsandboxedCommands !== false) return 'Claude\'s sandbox is not enabled to fail closed with no unsandboxed commands';
+  const applied = isObject(settings.applied) ? settings.applied : {};
+  if (applied.outsideFileToolReadsBlocked !== true || applied.outsideFileToolWritesBlocked !== true) return 'Claude\'s file tools are not kept to its folders';
+  return undefined;
 };
 
 // a local command's output, as `<local-command-stdout>…</local-command-stdout>`
@@ -324,6 +338,8 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
   const server = claudeAskUserServer(role);
   // the console's state for the compaction under way, given once to its SessionStart callback
   let handoff: string | undefined;
+  // the console's MCP access, which is given once
+  let accessAsked = false;
   // request ids no earlier client used, so a response replayed from before a reattach answers nothing
   const prefix = `rac-${randomUUID().slice(0, 8)}`;
   let requests = 0;
@@ -426,14 +442,20 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
     sessionId = id;
     if (reported) void resync();
   };
+  // why the CLI does not run confined as a Conductor, or undefined once it says it does
+  const readConfinement = async () => whyUnconfined(await control({ subtype: 'get_settings' }));
   // the launch report, once the CLI has said its version: one for each nonce a SessionStart hook
-  // printed, of which the console keeps the one its launch minted
+  // printed, of which the console keeps the one its launch minted. A Conductor's says its sandbox
+  // is engaged only once the CLI confirms the settings it runs under.
   const reportIn = () => {
-    if (version === undefined) return;
+    const known = version;
+    if (known === undefined) return;
+    const report = (nonce: string, sandbox: LaunchReport['sandbox']) => emit({ type: 'report', report: { loaded: true, sandbox, version: known, nonce } });
     for (const nonce of nonces) {
       if (told.has(nonce)) continue;
       told.add(nonce);
-      emit({ type: 'report', report: { loaded: true, sandbox: { engaged: false, reason: 'the console does not sandbox Claude; its own sandbox follows the operator\'s settings' }, version, nonce } });
+      if (!conductor) report(nonce, { engaged: false, reason: 'the console does not sandbox Claude; its own sandbox follows the operator\'s settings' });
+      else void readConfinement().then(reason => report(nonce, reason === undefined ? { engaged: true } : { engaged: false, reason }));
     }
     if (reported || told.size === 0) return;
     reported = true;
@@ -858,6 +880,18 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
       }
       closeQuestion(questionId);
       return true;
+    },
+    // Only a Conductor whose CLI says, asked again now, that it runs confined takes the console's
+    // endpoint and token, and only once, whoever asks. The token goes in an MCP server's header,
+    // never in a log line or an event: `mcp_status` would echo it, so it is never asked.
+    async consoleAccess({ url, token }) {
+      if (!conductor || accessAsked) return false;
+      accessAsked = true;
+      if (await readConfinement() !== undefined) return false;
+      // the set replaces the CLI's whole set (probed on 2.1.328), so it names the operator's SDK server again
+      const set = await control({ subtype: 'mcp_set_servers', servers: { [server]: { type: 'sdk', name: server }, [claudeMcpServer]: { type: 'http', url, headers: { Authorization: `Bearer ${token}` } } } });
+      const added = strings(set?.added);
+      return set !== undefined && added.length === 1 && added[0] === claudeMcpServer && strings(set.removed).length === 0 && Object.keys(isObject(set.errors) ? set.errors : {}).length === 0;
     },
     close: () => channel.close()
   };

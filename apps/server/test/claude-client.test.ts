@@ -58,10 +58,25 @@ async function sessionFrom(name: string): Promise<void> {
   await mkdir(join(config, 'projects', '-work-project'), { recursive: true });
   await writeFile(join(config, 'projects', '-work-project', `${session}.jsonl`), await readFile(new URL(`./fixtures/claude/structured/${name}`, import.meta.url), 'utf8'));
 }
-// a client that has reported in, its launch's handshake played
+// what `get_settings` answers for a Conductor launched on the console's settings alone, as
+// Claude Code 2.1.328 answered the probe (`docs/research/claude-conductor/`)
+const confinedSettings = () => ({
+  effective: { sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } },
+  sources: [{ source: 'flagSettings', settings: { sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } } }],
+  served_settings_state: 'ineligible',
+  applied: { model: 'claude-haiku-4-5', outsideFileToolReadsBlocked: true, outsideFileToolWritesBlocked: true }
+});
+const answer = (subtype: string, response: Record<string, unknown>) => ({ type: 'control_response', response: { subtype: 'success', request_id: subtype, response } });
+const refused = (subtype: string) => ({ type: 'control_response', response: { subtype: 'error', request_id: subtype, error: `Unknown subtype: ${subtype}` } });
+const access = { url: 'http://172.19.0.1:8787/mcp', token: 'rac-conductor.secret' };
+// a client that has reported in, its launch's handshake played; a Conductor's settings confirmed
 const launched = async (context?: Partial<ClientContext>) => {
   const client = claudeOverChannel(context);
   client.play(fixture('launch.jsonl'));
+  if (context?.role === 'conductor') {
+    await vi.waitFor(() => expect(client.sent.at(-1)?.request?.subtype).toBe('get_settings'));
+    client.claude(answer('get_settings', confinedSettings()));
+  }
   await vi.waitFor(() => expect(client.of('report')).toHaveLength(1));
   return client;
 };
@@ -124,6 +139,91 @@ describe('the Claude client', () => {
     expect(replies().at(-1)).toMatchObject({ subtype: 'error', request_id: 'm2' });
     // any other Agent is told nothing of the role
     expect(claudeOverChannel().sent[0].request).not.toHaveProperty('appendSystemPrompt');
+  });
+
+  it('as the Conductor, reports its sandbox engaged once the CLI confirms it runs on the console\'s settings, then takes the console\'s access over the protocol', async () => {
+    const { connection, sent, events, claude, of } = await launched({ role: 'conductor' });
+    expect(of('report')).toEqual([{ type: 'report', report: { loaded: true, sandbox: { engaged: true }, version: '2.1.319', nonce: 'nonce-1' } }]);
+    const granted = connection.consoleAccess!(access);
+    // the settings are read afresh before the token goes
+    await vi.waitFor(() => expect(sent.at(-1).request.subtype).toBe('get_settings'));
+    claude(answer('get_settings', confinedSettings()));
+    await vi.waitFor(() => expect(sent.at(-1).request.subtype).toBe('mcp_set_servers'));
+    // the set replaces the CLI's, so the operator's SDK server is named again with the console's
+    expect(sent.at(-1).request.servers).toEqual({
+      operator: { type: 'sdk', name: 'operator' },
+      rac: { type: 'http', url: 'http://172.19.0.1:8787/mcp', headers: { Authorization: 'Bearer rac-conductor.secret' } }
+    });
+    claude(answer('mcp_set_servers', { added: ['rac'], removed: [], errors: {} }));
+    expect(await granted).toBe(true);
+    // the token is in no event
+    expect(JSON.stringify(events)).not.toContain('secret');
+  });
+
+  const settings = confinedSettings();
+  const says = (answered: Record<string, unknown>) => answer('get_settings', answered);
+  it.each([
+    ['loaded the operator\'s settings too', says({ ...settings, sources: [{ source: 'userSettings', settings: {} }, ...settings.sources] }), 'other than the console\'s (userSettings, flagSettings)'],
+    ['loaded no settings at all', says({ ...settings, sources: [] }), 'other than the console\'s (none)'],
+    ['has no sandbox', says({ ...settings, effective: {} }), 'sandbox is not enabled'],
+    ['has its sandbox off', says({ ...settings, effective: { sandbox: { ...settings.effective.sandbox, enabled: false } } }), 'sandbox is not enabled'],
+    ['runs commands where the sandbox is unavailable', says({ ...settings, effective: { sandbox: { ...settings.effective.sandbox, failIfUnavailable: false } } }), 'sandbox is not enabled'],
+    ['may run commands unsandboxed', says({ ...settings, effective: { sandbox: { enabled: true, failIfUnavailable: true } } }), 'sandbox is not enabled'],
+    ['lets file tools read outside its folders', says({ ...settings, applied: { outsideFileToolWritesBlocked: true } }), 'file tools are not kept'],
+    ['lets file tools write outside its folders', says({ ...settings, applied: { outsideFileToolReadsBlocked: true, outsideFileToolWritesBlocked: false } }), 'file tools are not kept'],
+    // an older or changed Claude
+    ['does not answer get_settings', refused('get_settings'), 'Claude did not say which settings it runs under']
+  ])('as the Conductor, refuses the console\'s access to a CLI that %s, and reports its sandbox not engaged', async (_, reply, reason) => {
+    const { connection, sent, claude, play, of } = claudeOverChannel({ role: 'conductor' });
+    play(fixture('launch.jsonl'));
+    await vi.waitFor(() => expect(sent.at(-1)?.request?.subtype).toBe('get_settings'));
+    claude(reply);
+    await vi.waitFor(() => expect(of('report')).toHaveLength(1));
+    expect(of('report')[0]!.report.sandbox).toEqual({ engaged: false, reason: expect.stringContaining(reason) });
+    const granted = connection.consoleAccess!(access);
+    await vi.waitFor(() => expect(sent.filter(line => line.request?.subtype === 'get_settings')).toHaveLength(2));
+    claude(reply);
+    expect(await granted).toBe(false);
+    expect(sent.some(line => line.request?.subtype === 'mcp_set_servers')).toBe(false);
+    expect(JSON.stringify(sent)).not.toContain('secret');
+  });
+
+  it.each([
+    ['did not add the console\'s server', answer('mcp_set_servers', { added: [], removed: [], errors: {} })],
+    ['could not reach it', answer('mcp_set_servers', { added: ['rac'], removed: [], errors: { rac: 'ECONNREFUSED: Unable to connect.' } })],
+    ['dropped the operator\'s server', answer('mcp_set_servers', { added: ['rac'], removed: ['operator'], errors: {} })],
+    ['added another server too', answer('mcp_set_servers', { added: ['operator', 'rac'], removed: [], errors: {} })],
+    // an older or changed Claude
+    ['does not answer mcp_set_servers', refused('mcp_set_servers')]
+  ])('as the Conductor, is not given the console\'s access when the CLI %s', async (_, reply) => {
+    const { connection, sent, claude } = await launched({ role: 'conductor' });
+    const granted = connection.consoleAccess!(access);
+    await vi.waitFor(() => expect(sent.at(-1).request.subtype).toBe('get_settings'));
+    claude(answer('get_settings', confinedSettings()));
+    await vi.waitFor(() => expect(sent.at(-1).request.subtype).toBe('mcp_set_servers'));
+    claude(reply);
+    expect(await granted).toBe(false);
+  });
+
+  it('gives the console\'s access once, and only to a Conductor', async () => {
+    const { connection, sent, claude } = await launched({ role: 'conductor' });
+    const first = connection.consoleAccess!(access);
+    await vi.waitFor(() => expect(sent.at(-1).request.subtype).toBe('get_settings'));
+    // asked again while the first is under way, or after, it is refused without a request
+    const asked = sent.length;
+    expect(await connection.consoleAccess!({ ...access, token: 'rac-conductor.other' })).toBe(false);
+    expect(sent).toHaveLength(asked);
+    claude(answer('get_settings', confinedSettings()));
+    await vi.waitFor(() => expect(sent.at(-1).request.subtype).toBe('mcp_set_servers'));
+    claude(answer('mcp_set_servers', { added: ['rac'], removed: [], errors: {} }));
+    expect(await first).toBe(true);
+    expect(await connection.consoleAccess!({ ...access, token: 'rac-conductor.other' })).toBe(false);
+    expect(JSON.stringify(sent)).not.toContain('rac-conductor.other');
+
+    const worker = await launched();
+    const before = worker.sent.length;
+    expect(await worker.connection.consoleAccess!(access)).toBe(false);
+    expect(worker.sent).toHaveLength(before);
   });
 
   it('reports every nonce a SessionStart hook printed, so another hook\'s cannot hide the launch\'s', async () => {
