@@ -72,6 +72,7 @@ export const piAdapter = {
   efforts: piEfforts,
   conversations: { stateDirectory: piAgentDir, validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession },
   sandbox: true,
+  hostsConductor: true,
   // the static policy: the kind's sandbox lists as the sandbox runtime takes them (none: no
   // network, no writes beyond what the extension adds), and the extra environment names commands get
   files: ({ sandbox: settings = { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] } }) => ({ 'sandbox.json': JSON.stringify(staticPolicy(settings), null, 2) })

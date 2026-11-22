@@ -44,7 +44,17 @@ export function adapterFor(kind: AgentKind): Adapter | undefined {
  * The kinds driven through a protocol client (ADR 0015). A kind here only is never recognised in
  * a pane; a kind also in `adapters` (Claude, ADR 0021) can launch over either Transport.
  */
-export const structuredAdapters: readonly StructuredAdapter[] = [claudeStructuredAdapter, piAdapter];
+const structuredRegistered = [claudeStructuredAdapter, piAdapter] as const;
+export const structuredAdapters: readonly StructuredAdapter[] = structuredRegistered;
+
+type ConductorAdapter = Extract<typeof structuredRegistered[number], { readonly hostsConductor: true }>;
+/** The kinds that can host the Conductor (ADR 0022): the structured Adapters that declare `hostsConductor`. */
+export type ConductorKind = ConductorAdapter['kind'];
+const conductorAdapters = structuredRegistered.filter((adapter): adapter is ConductorAdapter => 'hostsConductor' in adapter);
+/** The Conductor kinds in registry order, as a non-empty tuple for schema enums. */
+export const conductorKinds = conductorAdapters.map(adapter => adapter.kind) as [ConductorKind, ...ConductorKind[]];
+/** Every Effort some Conductor kind takes, for the schema; the configured kind's own are checked against its Adapter. */
+export const conductorEfforts = [...new Set(conductorAdapters.flatMap(adapter => adapter.efforts))] as [string, ...string[]];
 export function structuredAdapterFor(kind: AgentKind): StructuredAdapter | undefined {
   return structuredAdapters.find(adapter => adapter.kind === kind);
 }

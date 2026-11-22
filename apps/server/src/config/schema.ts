@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { Project, StackCommands, WorktreeOverride } from '../domain/models.js';
 import { declaredProcesses, dependencyCycle } from '../domain/stack-processes.js';
 import { gitCommonDir, listWorktrees } from '../git/worktrees.js';
-import { adapterFor, structuredAdapterFor } from '../adapters/registry.js';
+import { adapterFor, conductorEfforts, conductorKinds, structuredAdapterFor, type ConductorKind } from '../adapters/registry.js';
 import { codexProgramName, omxProgramName } from '../adapters/program-names.js';
 import { hostVisibleRepoRoot } from '../adapters/files.js';
 import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKind, type SandboxSettings } from '../adapters/types.js';
@@ -86,13 +86,15 @@ const serverName = z.string().trim().min(1).max(80).refine(value => !value.inclu
 // console shell-quotes them), so placeholders are literal; env is not for secrets.
 const adapterProgram = z.string().min(1).max(4096).startsWith('/', 'adapter program must be an absolute path').refine(value => !value.includes('\0'), 'NUL is forbidden');
 const adapterArgument = z.string().max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden');
-// the Conductor runs Pi, which must be enabled, on an Allowed model, in a directory Project; by
-// default it gets every scope but `admin:dangerous` and `github:read`, which the operator names,
-// and spawns only Sandboxed Pi workers unless the operator names other configured kinds
+// the Conductor runs a kind that can host it (ADR 0022), which must be enabled, on an Allowed model
+// and one of that kind's Efforts, in a directory Project; by default it gets every scope but
+// `admin:dangerous` and `github:read`, which the operator names, and spawns only Sandboxed Pi
+// workers unless the operator names other configured kinds
 function conductorConfig({ project, scopes, enabled: _enabled, ...conductor }: z.output<typeof conductorSchema>, projects: readonly Project[], adapters: AdapterConfigs): ConductorConfig {
   const adapter = adapters[conductor.kind];
   if (adapter?.launchable !== true) throw new Error(`conductor: adapters.${conductor.kind} must be configured and launchable${adapter?.unavailableReason === undefined ? '' : ` (${adapter.unavailableReason})`}`);
   if (!(adapter.allowedModels ?? []).some(entry => entry.model === conductor.model)) throw new Error(`conductor: ${conductor.model} is not an Allowed model (adapters.${conductor.kind}.allowedModels)`);
+  if (conductor.effort !== undefined && !structuredAdapterFor(conductor.kind)!.efforts.includes(conductor.effort)) throw new Error(`conductor: ${conductor.effort} is not an Effort ${conductor.kind} takes`);
   for (const kind of conductor.spawnKinds) if (adapters[kind] === undefined) throw new Error(`conductor: spawnKinds names ${kind}, but adapters.${kind} is not configured`);
   const named = projects.find(candidate => candidate.id === project);
   // a Project whose folder is missing leaves the Conductor off, with a notice, rather than stopping the console
@@ -154,13 +156,13 @@ const integrationFeatures = z.object({
   multiInstance: z.object({ enabled: z.boolean().default(false) }).strict().default({})
 }).strict().default({});
 // The Conductor (ADR 0018): one always-running Sandboxed Agent in a directory Project, with the
-// console's MCP tools its scopes allow. Only Pi can host it so far.
+// console's MCP tools its scopes allow, run by any kind that can host it (`conductorKinds`).
 const conductorSchema = z.object({
   enabled: z.boolean().default(true),
-  kind: z.literal('pi'),
+  kind: z.enum(conductorKinds),
   project: z.string().min(1).max(80),
   model: agentModel,
-  effort: z.enum(piEfforts).optional(),
+  effort: z.enum(conductorEfforts).optional(),
   scopes: z.array(z.enum(conductorScopes)).max(conductorScopes.length).optional(),
   permissions: mcpPermissionsSchema.optional(),
   // the kinds its workers may be: only Pi's sandbox is the console's own (ADR 0018)
@@ -237,7 +239,7 @@ export type ScreensaverConfig = z.output<typeof screensaverSchema>;
  * the kinds its workers may be, and limits; `unavailable` says why its Project cannot be used now,
  * which leaves it off.
  */
-export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; permissions?: McpPermissions; spawnKinds: ConductorSpawnKind[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
+export type ConductorConfig = { kind: ConductorKind; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; permissions?: McpPermissions; spawnKinds: ConductorSpawnKind[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
 // launchHome is runtime-only; null means account lookup failed, omission supports legacy callers
 export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: string; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; launchHome?: string | null; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; replySuggestions: boolean; fileOpenAction: 'preview' | 'edit'; flyoutMarkers: boolean; dynamicWorktrees: boolean; usagePace: boolean; autoDeleteSentNotes: boolean; resourceMonitoring: boolean; screensaver?: ScreensaverConfig; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable

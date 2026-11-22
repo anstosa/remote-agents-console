@@ -9,7 +9,7 @@ import { hostHolderRuntime, verifyHostPiNode } from './host-runtime.js';
 export { verifyHostPiNode } from './host-runtime.js';
 
 const piPackage = '@earendil-works/pi-coding-agent';
-const runtimeFiles = ['adapters/pi-extension.js', 'adapters/ask-user.js', 'adapters/pi-sandbox.js', 'git/overrides.js', 'transports/holder.js', 'watches/sandboxed-command.js'];
+const runtimeFiles = ['adapters/pi-extension.js', 'adapters/ask-user.js', 'adapters/conductor-role.js', 'adapters/pi-sandbox.js', 'git/overrides.js', 'transports/holder.js', 'watches/sandboxed-command.js'];
 const dependencies = [piPackage, '@earendil-works/pi-codemode', '@anthropic-ai/sandbox-runtime'];
 
 // locate a package without relying on its public exports

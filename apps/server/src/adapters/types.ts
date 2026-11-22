@@ -508,6 +508,11 @@ export interface StructuredAdapter {
   /** The kind confines its own tool calls when launched Sandboxed, failing its launch if it cannot. */
   readonly sandbox?: true;
   /**
+   * The kind can host the Conductor (ADR 0018, ADR 0022): a launch with role `conductor` is
+   * confined by the console, and its client takes the console's access (`consoleAccess`).
+   */
+  readonly hostsConductor?: true;
+  /**
    * The operator arguments its launch composes itself, or that would break its protocol client,
    * each with the values it takes: dropped from every launch of it, whatever the boot dropped.
    */

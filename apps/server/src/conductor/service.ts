@@ -161,7 +161,7 @@ export class Conductor {
       if (this.exits.length >= maxExits) {
         this.stopped = true;
         this.notify(kept === undefined
-          ? { kind: 'conductor', title: 'The Conductor could not start', body: `It failed to start ${maxExits} times in ${exitWindowMs / 60_000} minutes. Check adapters.pi and restart the console.`, tag: 'conductor-stopped', url: '/' }
+          ? { kind: 'conductor', title: 'The Conductor could not start', body: `It failed to start ${maxExits} times in ${exitWindowMs / 60_000} minutes. Check adapters.${config.kind} and restart the console.`, tag: 'conductor-stopped', url: '/' }
           : { kind: 'conductor', title: 'The Conductor stopped', body: `It exited ${maxExits} times in ${exitWindowMs / 60_000} minutes and stays down until you resume it. Prompts to it keep queueing.`, tag: 'conductor-stopped', url: `/#agent=${encodeURIComponent(kept.id)}` });
         return;
       }
