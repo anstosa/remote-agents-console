@@ -27,3 +27,5 @@ Claude Code has run only as its TUI in a tmux pane. It can now also be driven ov
 - **A Conversation switch restarts the process.** The CLI cannot switch session in place, so the console restarts it with `--resume` on the chosen Conversation and on the model the Agent was on, keeping the Agent's id and queue.
 - **Not under the host bridge.** There the holder comes with Pi's host runtime, which a Claude launch cannot rely on, so `structured` falls back to `tmux` with a boot warning, and a structured Claude Agent from before is not started again (it stays Exited; launching Claude anew runs it in a pane).
 - **Both Transports share Claude's session files**, so a Conversation moves from one to the other when a new launch resumes it, and changing `adapters.claude.transport` changes only new launches.
+
+*Amended by ADR 0022 (2026-11-21):* structured Claude may host the Conductor. Its Conductor launch loads none of the operator's settings, arguments or MCP servers, and is confined by sandbox and permission settings the console writes and confirms, unlike every other Claude launch here.
