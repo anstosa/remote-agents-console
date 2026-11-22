@@ -396,6 +396,40 @@ describe('the Claude client', () => {
     expect(await refused).toBe('Not enough messages to compact.');
   });
 
+  it('as the Conductor, carries the console\'s state through a compaction as context the CLI adds after its summary', async () => {
+    const { connection, sent, claude, play, replies } = await launched({ role: 'conductor' });
+    const hooks = sent[0].request.hooks;
+    expect(hooks).toEqual({ SessionStart: [{ matcher: 'compact', hookCallbackIds: [expect.any(String)] }] });
+    const callback = (id: string, callbackId: string) => claude({ type: 'control_request', request_id: id, request: { subtype: 'hook_callback', callback_id: callbackId, input: { hook_event_name: 'SessionStart', source: 'compact' } } });
+    const [compactHook] = hooks.SessionStart[0].hookCallbackIds as string[];
+    // with no compaction of the console's under way (Claude's own), there is nothing to add
+    callback('h0', compactHook!);
+    expect(replies().at(-1)).toEqual({ subtype: 'success', request_id: 'h0', response: {} });
+
+    const compacted = connection.compact({ instructions: 'Keep the plan', state: 'STATE: two workers' });
+    // the summarizer is given the Conductor's handoff focus and the operator's instructions
+    expect(sent.at(-1).message.content).toMatch(/^\/compact This summary is the Conductor's handoff to itself/u);
+    expect(sent.at(-1).message.content).toContain('The operator asks of this summary: Keep the plan');
+    expect(sent.at(-1).message.content).not.toContain('STATE: two workers');
+    callback('h1', 'another');
+    expect(replies().at(-1)).toEqual({ subtype: 'success', request_id: 'h1', response: {} });
+    callback('h2', compactHook!);
+    expect(replies().at(-1)).toEqual({ subtype: 'success', request_id: 'h2', response: { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: 'STATE: two workers' } } });
+    play(fixture('compact.jsonl'));
+    expect(await compacted).toBeUndefined();
+    // the state is given once
+    callback('h3', compactHook!);
+    expect(replies().at(-1)).toEqual({ subtype: 'success', request_id: 'h3', response: {} });
+
+    // one that did not compact leaves no state for a later compaction of Claude's own
+    const refused = connection.compact({ state: 'STATE: stale' });
+    expect(sent.at(-1).message.content).not.toContain('The operator asks');
+    play([result({ result: 'Not enough messages to compact.' })]);
+    expect(await refused).toBe('Not enough messages to compact.');
+    callback('h4', compactHook!);
+    expect(replies().at(-1)).toEqual({ subtype: 'success', request_id: 'h4', response: {} });
+  });
+
   it('lists the models initialize gave with their Efforts, and switches with set_model, but not the Effort, which stays the launch\'s', async () => {
     const { connection, sent, play, claude, of, items } = await launched({ model: { model: 'haiku', effort: 'low' } });
     const efforts = ['low', 'medium', 'high', 'xhigh', 'max'];

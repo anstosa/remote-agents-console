@@ -27,6 +27,9 @@ export const claudeAskUserTool = `mcp__${claudeMcpServer}__${askUser.name}`;
 export const claudeConductorMcpServer = 'operator';
 export const claudeConductorAskUserTool = `mcp__${claudeConductorMcpServer}__${askUser.name}`;
 const askUserTools = new Set([claudeAskUserTool, claudeConductorAskUserTool]);
+// the Conductor's SessionStart (`compact`) hook callback; fixed, so a reattached client answers the
+// one an earlier client registered
+const compactStateHook = 'rac-compact-state';
 // Claude's tool names as the transcript's verbs; any other tool keeps its own name
 const verbs: Record<string, string> = { Bash: 'Run', Grep: 'Search', Glob: 'Find', LS: 'List', MultiEdit: 'Edit', WebFetch: 'Fetch', [claudeAskUserTool]: 'Ask', [claudeConductorAskUserTool]: 'Ask' };
 const editTools = new Set(['Edit', 'MultiEdit', 'Write']);
@@ -318,6 +321,8 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
   const conductor = role === 'conductor';
   // the SDK MCP server serving `ask_user`
   const server = conductor ? claudeConductorMcpServer : claudeMcpServer;
+  // the console's state for the compaction under way, given once to its SessionStart callback
+  let handoff: string | undefined;
   // request ids no earlier client used, so a response replayed from before a reattach answers nothing
   const prefix = `rac-${randomUUID().slice(0, 8)}`;
   let requests = 0;
@@ -602,6 +607,12 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
         if (typeof record.request_id !== 'string' || request === undefined) return;
         if (request.subtype === 'mcp_message') mcp(record.request_id, request);
         else if (request.subtype === 'can_use_tool') permission(record.request_id, request);
+        // the Conductor's compaction asking for what to add after the summary; Claude's own has nothing
+        else if (request.subtype === 'hook_callback' && conductor) {
+          const state = request.callback_id === compactStateHook ? handoff : undefined;
+          if (state !== undefined) handoff = undefined;
+          reply(record.request_id, state === undefined ? {} : { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: state } });
+        }
         else { unknown(`control_request/${String(request.subtype)}`); refuse(record.request_id, `The console does not handle ${String(request.subtype)} requests.`); }
         return;
       }
@@ -743,9 +754,10 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
   });
   // Reattached, the CLI answers a second `initialize` in full, its `session_state` included, and
   // after the holder's replay, so the Conversation is read then. A CLI that does not answer is taken as idle.
-  // The Conductor's role prompt rides it (ADR 0022).
+  // The Conductor's role prompt rides it, and the hook that carries the console's state through a
+  // compaction (ADR 0022).
   const initialize = async () => {
-    const response = await control({ subtype: 'initialize', sdkMcpServers: [server], ...(conductor ? { appendSystemPrompt: conductorPrompt({ codeMode: false }) } : {}) });
+    const response = await control({ subtype: 'initialize', sdkMcpServers: [server], ...(conductor ? { appendSystemPrompt: conductorPrompt({ codeMode: false }), hooks: { SessionStart: [{ matcher: 'compact', hookCallbackIds: [compactStateHook] }] } } : {}) });
     if (response !== undefined) {
       if (typeof response.claude_code_version === 'string') version = response.claude_code_version;
       if (Array.isArray(response.models)) models = response.models.filter(isObject);
@@ -777,10 +789,15 @@ export const claudeClient: ProtocolClient = (channel, emit, { cwd, env, model: l
     async renameConversation(name) {
       return (await command('rename', `/rename ${name.replace(/\s+/gu, ' ').trim()}`)).seen;
     },
-    // Claude never hosts the Conductor, so a compaction carries no console state
-    async compact({ instructions }) {
-      const { result, seen } = await command('compact', instructions === undefined || instructions.trim() === '' ? '/compact' : `/compact ${instructions.trim()}`, compactTimeoutMs);
+    // The Conductor's summary keeps its handoff focus, and the console's state follows it as
+    // context of its own, through the SessionStart callback; one that did not compact leaves none
+    async compact({ instructions, state }) {
+      const asked = instructions?.trim() ?? '';
+      const focus = conductor ? [conductorHandoff, ...(asked === '' ? [] : [`The operator asks of this summary: ${asked}`])].join('\n\n') : asked;
+      handoff = conductor ? state : undefined;
+      const { result, seen } = await command('compact', focus === '' ? '/compact' : `/compact ${focus}`, compactTimeoutMs);
       if (seen) return undefined;
+      handoff = undefined;
       return typeof result?.result === 'string' && result.result !== '' ? result.result : 'The agent did not compact.';
     },
     async models() {
