@@ -17,11 +17,14 @@ export { codexNewConversation } from './codex-new-conversation.js';
  * apart. This is a helper module, not an Adapter: neither Adapter imports the other.
  */
 
-// build the supported-version codex compatibility catalog
+// list public codex tui built-ins; model tiers come from the app-server
 function codexSlash(): PromptCommand[] {
   return [
     { name: '/help', description: 'Show available commands' },
     { name: '/model', description: 'Choose what model and reasoning effort to use' },
+    { name: '/presets', description: 'Save and run reusable prompts or commands' },
+    { name: '/daybreak', description: 'Toggle Daybreak when available' },
+    { name: '/config', description: 'Open Codex preferences' },
     { name: '/ide', description: 'Include current selection, open files, and other IDE context' },
     { name: '/permissions', description: 'Choose what Codex is allowed to do' },
     { name: '/keymap', description: 'Remap TUI shortcuts' },
@@ -40,10 +43,12 @@ function codexSlash(): PromptCommand[] {
     { name: '/delete', description: 'Permanently delete this session and exit' },
     { name: '/resume', description: 'Resume a saved chat' },
     { name: '/fork', description: 'Fork the current chat' },
+    { name: '/worktree', description: 'Move or start a conversation in a new worktree' },
     { name: '/init', description: 'Create an AGENTS.md file with instructions for Codex' },
     { name: '/compact', description: 'Summarize the conversation to prevent hitting the context limit' },
     { name: '/recap', description: 'Summarize the current conversation now' },
     { name: '/plan', description: 'Switch to Plan mode' },
+    { name: '/voice', description: 'Manage voice mode and settings' },
     { name: '/goal', description: 'Set or view the goal for a long-running task' },
     { name: '/agent', description: 'Switch the active agent thread' },
     { name: '/agents', description: 'View and switch between all active agent sessions' },
@@ -52,9 +57,12 @@ function codexSlash(): PromptCommand[] {
     { name: '/copy', description: 'Copy the last response, code block, or quote' },
     { name: '/export', description: 'Export the conversation as markdown' },
     { name: '/raw', description: 'Toggle raw scrollback mode for copy-friendly terminal selection' },
+    { name: '/tui', description: 'Set the terminal mode for the next launch' },
     { name: '/diff', description: 'Show git diff, including untracked files' },
     { name: '/mention', description: 'Mention a file' },
     { name: '/status', description: 'Show current session configuration and token usage' },
+    { name: '/daemon', description: 'Control the local background server' },
+    { name: '/warnings', description: 'Inspect recent warnings and diagnostics' },
     { name: '/cd', description: 'Change the current working directory' },
     { name: '/pwd', description: 'Show the current working directory' },
     { name: '/usage', description: 'View account usage or use a usage limit reset' },

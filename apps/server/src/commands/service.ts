@@ -1,7 +1,7 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Adapter } from '../adapters/types.js';
-import { codexAppServerCatalog, type RuntimeCommandCatalog } from './codex-app-server.js';
+import type { RuntimeCommandCatalog } from './codex-app-server.js';
 
 /**
  * The prompt-box command catalog, served per Agent from the Adapter (ADR 0002).
@@ -195,7 +195,7 @@ export class CommandCatalogService {
   private readonly runtimeLoads = new Map<string, Promise<RuntimeCommandCatalog | undefined>>();
 
   // accept one runtime loader for deterministic tests and compatibility fallback
-  constructor(private readonly loadRuntimeCatalog: RuntimeCatalogLoader = codexAppServerCatalog) {}
+  constructor(private readonly loadRuntimeCatalog: RuntimeCatalogLoader) {}
 
   // cache and coalesce one workspace runtime lookup
   private async runtimeCatalog(workspace: string, stateDirectory: string): Promise<RuntimeCommandCatalog | undefined> {

@@ -11,7 +11,7 @@ test('includes repo-local skills in prompt autocomplete', async ({ page }) => {
     if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // return runtime and built-in commands
-    if (url.pathname === '/api/agents/agent-1/commands') return route.fulfill({ json: { commands: [{ value: '$oh-my-codex:plan', description: 'Plan through the installed plugin.' }, { value: '$push', description: 'Review, commit, and push the current branch.' }, { value: '/permissions', description: 'Choose what Codex is allowed to do' }, { value: '/fast', description: '1.5x speed, increased usage' }] } });
+    if (url.pathname === '/api/agents/agent-1/commands') return route.fulfill({ json: { commands: [{ value: '$oh-my-codex:plan', description: 'Plan through the installed plugin.' }, { value: '$push', description: 'Review, commit, and push the current branch.' }, { value: '/permissions', description: 'Choose what Codex is allowed to do' }, { value: '/fast', description: 'Faster responses' }, { value: '/ultrafast', description: 'Fastest responses' }] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -21,7 +21,13 @@ test('includes repo-local skills in prompt autocomplete', async ({ page }) => {
   await expect(page.getByRole('option', { name: /\$oh-my-codex:plan/u })).toBeVisible();
   await prompt.fill('/');
   await expect(page.getByRole('option', { name: /\/permissions/u })).toBeVisible();
-  await expect(page.getByRole('option', { name: /\/fast/u })).toBeVisible();
+  // both tier commands match the /fast search but enter should complete /fast
+  await prompt.fill('/fast');
+  await expect(page.getByRole('option', { name: /^\/fast\b/u })).toBeVisible();
+  await expect(page.getByRole('option', { name: /^\/ultrafast\b/u })).toBeVisible();
+  await prompt.press('Enter');
+  await expect(prompt).toHaveValue('/fast');
+  await expect(page.getByRole('listbox', { name: '/ commands' })).toHaveCount(0);
   await prompt.fill('$pu');
 
   const option = page.getByRole('option', { name: /\$push/u });

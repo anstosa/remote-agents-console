@@ -3,6 +3,7 @@
 // `/skills` route.)
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
+import * as protocol from '../src/accounts/protocol.js';
 import { StructuredAgents } from '../src/transports/structured-agents.js';
 import { testConfig, testWorktree } from './helpers/config.js';
 
@@ -14,7 +15,8 @@ const ferry = testWorktree({ id: 'ferry-fyi', projectId: 'ferry', label: 'Ferry 
 
 describe('agent command catalog API', () => {
   let app: Awaited<ReturnType<typeof buildApp>>;
-  afterEach(async () => { vi.unstubAllEnvs(); await app?.close(); });
+  // reset the environment and protocol stubs between requests
+  afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await app?.close(); });
 
   it('serves the catalog for the agent kind using service-visible runtime paths', async () => {
     vi.stubEnv('HOME', '/service-home');
@@ -34,6 +36,41 @@ describe('agent command catalog API', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ commands: [{ value: '$push', description: 'Review and push.' }, { value: '/help', description: 'Show available commands' }] });
     expect(seen).toEqual([{ kind: 'codex', workspace: '/worktrees/ferry.fyi', stateDirectory: '/service-codex' }]);
+  });
+
+  // exercise the default catalog wiring rather than injecting a catalog
+  it('uses the configured Codex app-server to serve model-tier commands for OMX', async () => {
+    vi.stubEnv('RAC_CODEX_BIN', '/service/bin/codex');
+    vi.stubEnv('CODEX_HOME', '/service-codex');
+    const agent = { id: 'agent-1', home: '/home/ubuntu/ferry.fyi', title: 'Ready', kind: 'omx' };
+    const createClient = vi.spyOn(protocol, 'createCodexProtocolClient').mockResolvedValue({
+      // supply the protocol responses for one catalog load
+      request: vi.fn().mockResolvedValueOnce({}).mockResolvedValueOnce({ data: [{ cwd: ferry.path, skills: [] }] }).mockResolvedValueOnce({
+        data: [{ serviceTiers: [
+          { id: 'priority', name: 'Fast', description: 'Faster responses' },
+          { id: 'ultrafast', name: 'Ultrafast', description: 'Fastest responses' },
+        ] }],
+      }),
+      notify: vi.fn(),
+      onNotification: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+    app = await buildApp(config, {
+      auth: { unsign: () => 'session', get: () => ({ id: 'session', csrf: 'csrf' }) } as never,
+      control: { connect: () => true } as never,
+      // resolve one tmux agent and its service-visible workspace
+      discovery: { target: async () => ({ agent }), worktreesNow: () => [ferry] } as never,
+      structuredAgents: noStructuredAgents(),
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/api/agents/agent-1/commands', headers: { host: 'agents.example.com' } });
+
+    expect(response.statusCode).toBe(200);
+    expect(createClient).toHaveBeenCalledWith('/service-codex', { command: '/service/bin/codex' });
+    expect(response.json().commands).toEqual(expect.arrayContaining([
+      { value: '/fast', description: 'Faster responses' },
+      { value: '/ultrafast', description: 'Fastest responses' },
+    ]));
   });
 
   it('serves the catalog for a structured agent, which discovery does not list', async () => {

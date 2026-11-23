@@ -79,10 +79,10 @@ async function withDeadline<T>(task: Promise<T>, onTimeout?: () => void): Promis
 }
 
 // discover the exact skills and dynamic commands codex exposes for one workspace
-export async function codexAppServerCatalog(workspace: string, stateDirectory: string, createClient: CodexProtocolClientFactory = createCodexProtocolClient): Promise<RuntimeCommandCatalog> {
+export async function codexAppServerCatalog(workspace: string, stateDirectory: string, program: string | undefined, createClient: CodexProtocolClientFactory = createCodexProtocolClient): Promise<RuntimeCommandCatalog> {
   let client: CodexProtocolClient | undefined;
   try {
-    client = await withDeadline(createClient(stateDirectory));
+    client = await withDeadline(createClient(stateDirectory, { command: program }));
     await withDeadline(initializeCodexProtocol(client), () => void client?.close());
     const skillResult = await withDeadline(client.request('skills/list', { cwds: [workspace], forceReload: true }), () => void client?.close());
     const skills = skillsFrom(skillResult, workspace);

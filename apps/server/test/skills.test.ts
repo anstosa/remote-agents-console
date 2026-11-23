@@ -61,6 +61,14 @@ describe('command catalog', () => {
     expect(catalog.find(command => command.value === '/plugins')).toEqual({ value: '/plugins', description: 'Browse plugins' });
     expect(catalog.some(command => command.value === '/agent')).toBe(true);
     expect(catalog.some(command => command.value === '/agents')).toBe(true);
+    // include public built-ins even without a runtime catalog
+    expect(catalog.map(command => command.value)).toEqual(expect.arrayContaining([
+      '/presets', '/daybreak', '/config', '/worktree', '/voice', '/tui', '/daemon', '/warnings',
+    ]));
+    // do not guess model tiers for codex
+    expect(catalog.map(command => command.value)).not.toContain('/fast');
+    // the default codex release does not support remote control
+    expect(catalog.map(command => command.value)).not.toContain('/rc');
     // the slash list follows the skills
     expect(catalog.findIndex(command => command.value === '/help')).toBeGreaterThan(catalog.findIndex(command => command.value === '$push'));
   });
@@ -91,6 +99,9 @@ describe('command catalog', () => {
     expect(catalog.filter(command => command.value === '/review')).toEqual([{ value: '/review', description: 'Custom project review workflow.' }]);
     // a built-in with no colliding skill is untouched
     expect(catalog.find(command => command.value === '/help')).toEqual({ value: '/help', description: 'Show available commands' });
+    expect(catalog.map(command => command.value)).toEqual(expect.arrayContaining([
+      '/fast', '/effort', '/plan', '/goal', '/btw', '/mcp', '/plugin', '/skills', '/tasks',
+    ]));
   });
 
   it('tolerates a zero-byte file where a skills root should be', async () => {
@@ -232,10 +243,11 @@ input.on('line', line => {
     await chmod(executable, 0o755);
 
     const home = await tempRoot('rac-home-');
-    // verify the isolated protocol home
-    const catalog = await codexAppServerCatalog(workspace, codexHome(home), async stateDirectory => {
+    // verify the isolated protocol home and configured program
+    const catalog = await codexAppServerCatalog(workspace, codexHome(home), executable, async (stateDirectory, options) => {
       expect(stateDirectory).toBe(codexHome(home));
-      return await createCodexProtocolClient(stateDirectory, { command: executable, args: ['app-server', '--stdio'] });
+      expect(options?.command).toBe(executable);
+      return await createCodexProtocolClient(stateDirectory, options);
     });
 
     expect(catalog).toEqual({
