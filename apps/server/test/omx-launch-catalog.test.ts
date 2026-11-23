@@ -295,6 +295,8 @@ else {
       buffer = buffer.slice(newline + 1);
       // no user prompt is accepted
       if (message.request?.subtype !== 'initialize') process.exit(2);
+      // claude 2.1.330 can emit an unprompted system event before the response
+      process.stdout.write(JSON.stringify({ type: 'system', subtype: 'ui_invalidate', event: 'ui.render' }) + '\\n');
       process.stdout.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: { models: [{ value: 'sonnet' }] } } }) + '\\n');
     }
   });

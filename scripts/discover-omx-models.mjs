@@ -379,6 +379,8 @@ async function queryClaude(program, env, cwd, remaining) {
       if (Buffer.byteLength(line) > maxProtocolLineBytes) { abort("claude_protocol_invalid"); return; }
       let record;
       try { record = JSON.parse(line); } catch { abort("claude_protocol_invalid"); return; }
+      // claude may announce unprompted system events (e.g. ui_invalidate) before answering
+      if (record?.type === "system") return;
       const envelope = record?.type === "control_response" && record.response?.request_id === requestId ? record.response : undefined;
       // no prompt means no other native event is expected
       if (envelope?.subtype !== "success" || envelope.response === null || typeof envelope.response !== "object" || Array.isArray(envelope.response)) { abort("claude_protocol_invalid"); return; }
@@ -435,7 +437,9 @@ function claudeEnvironment(effective) {
     // reject unreviewed vendor routes rather than silently retargeting them
     if (/^(?:ANTHROPIC_|CLAUDE_)/u.test(name) && value !== "" && value !== "0") throw failure("claude_capabilities_unproven");
   }
-  return { ...env, DISABLE_AUTOUPDATER: "1", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" };
+  // forcing DISABLE_TELEMETRY or CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC swaps claude's live model list
+  // for a built-in one with different ids, so those follow the launch's own environment
+  return { ...env, DISABLE_AUTOUPDATER: "1", DISABLE_ERROR_REPORTING: "1" };
 }
 
 // prepare one bounded native discovery context
