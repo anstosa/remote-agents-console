@@ -1,4 +1,5 @@
 import type { ControlService } from './auth/control.js';
+import { codexGoalResumeAvailable } from './adapters/codex-turns.js';
 import { adapterFor } from './adapters/registry.js';
 import { withQuestionShape } from './adapters/inline-questions.js';
 import type { ShapedQuestion } from './adapters/types.js';
@@ -234,7 +235,9 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
         const parseInput = adapter?.turns === undefined ? captured.text : captured.latestAgentMessage ?? captured.text;
         if (parseInput !== lastParseInput) { lastParseInput = parseInput; const parsed = adapter?.questions?.parse?.(parseInput); lastQuestion = parsed === undefined ? undefined : withQuestionShape(parsed); }
         const question = lastQuestion;
-        const metadata = { message: captured.latestAssistantMessage ?? '', overflow: captured.latestAssistantMessageOverflows === true };
+        // use the live footer even when there is no final assistant message
+        const goalResumeAvailable = agent?.kind === 'omx' && codexGoalResumeAvailable(captured.text);
+        const metadata = { message: captured.latestAssistantMessage ?? '', overflow: captured.latestAssistantMessageOverflows === true, ...(goalResumeAvailable ? { goalResumeAvailable: true } : {}) };
         const questionKey = JSON.stringify(question ?? null);
         const metadataKey = JSON.stringify(metadata);
         if (!transport.open()) return;

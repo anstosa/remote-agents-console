@@ -724,6 +724,29 @@ describe('pane stream flow control', () => {
 describe('pane stream derive', () => {
   const question = { id: 'q', text: 'Pick one', choices: ['1. keep', '2. drop'], source: 'parsed' as const };
 
+  // derive the command from the current footer, independently of the assistant message
+  it.each(['omx', 'codex'])('scopes goal resume availability to live OMX status (%s)', async kind => {
+    const stream = fakePaneStream();
+    const adapter = new TmuxAdapter();
+    const { tmux } = fakeTmux(stream, { captureWindow: adapter.captureWindow.bind(adapter) });
+    const composer = '› Ask Codex to do anything\n\n  GPT-6.2-Sol high · ~/repo · main';
+    const paused = `${composer}\n  ← for agents · ? for shortcuts     \x1b[33mGoal paused (/goal resume)\x1b[0m`;
+    stream.setCapture(paused);
+    const conn = await connect(stream.provider, { kind, tmux });
+    // inspect the newest metadata as the same pane redraws
+    const metadata = () => conn.frames.filter(frame => frame.type === 'metadata').at(-1)?.metadata;
+    await waitFor(() => metadata() !== undefined);
+    expect(metadata()).toEqual({ message: '', overflow: false, ...(kind === 'omx' ? { goalResumeAvailable: true } : {}) });
+
+    // a paused badge in scrollback must not survive a live running footer
+    stream.setCapture(`${paused}\n\n${composer}\n  ← for agents · ? for shortcuts     Pursuing goal (1m 02s)`);
+    // a normal OMX redraw publishes the clearing frame without polling
+    if (kind === 'omx') stream.activity();
+    else conn.send({ type: 'metadata' });
+    await waitFor(() => conn.frames.filter(frame => frame.type === 'metadata').length === 2);
+    expect(metadata()).toEqual({ message: '', overflow: false });
+  });
+
   // the native picker must drive answer mode without sending terminal input
   it.each(['codex', 'omx'])('frames the current %s model picker and clears it when closed', async kind => {
     const stream = fakePaneStream();

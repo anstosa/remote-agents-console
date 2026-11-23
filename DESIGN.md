@@ -187,9 +187,16 @@ available while suggestions are pending or unavailable.
 Native model discovery uses a vendor-scoped environment and inert startup controls.
 Unreviewed Claude account routes stay unavailable rather than selecting a fallback.
 
+When the live OMX footer advertises `/goal resume`, show that command first in
+the suggestion row independently of the Reply suggestions toggle, assistant
+questions, or provider availability. Activation drafts the standalone command
+without sending it. If text or attachments are already present, keep the option
+visible but disabled rather than altering the existing draft. Remove it when the
+footer no longer advertises it or the pane disconnects.
+
 Labels contain at most three words. Each pill exposes its full editable draft in its
 tooltip and accessible description. Suggestions are never selected, inserted or sent by
-default. Every tap or keyboard activation appends to and focuses the existing draft without
+default. Activating a generated reply appends to and focuses the existing draft without
 submitting a prompt, answering a question or sending terminal input. Preserve typed text
 and earlier selections. Pills use half the standard control height with sufficient target
 separation, without shrinking Send or answer-mode controls. Keep them in one horizontally

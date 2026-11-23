@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { codexDraftState, codexOwnsDraft } from '../../src/adapters/codex-turns.js';
+import { codexDraftState, codexGoalResumeAvailable, codexOwnsDraft } from '../../src/adapters/codex-turns.js';
 import { codexNewConversation } from '../../src/adapters/codex-new-conversation.js';
 import { codexComposerWithAuxiliary, codexComposerWithFooter, codexGoalFooters } from '../helpers/codex-composer.js';
 
@@ -20,8 +20,56 @@ const capturedFooters = JSON.parse(readFileSync(new URL('../fixtures/codex/queue
 // retain the actual failed filled-composer frame rather than translating a placeholder
 const failedFilledComposer = JSON.parse(readFileSync(new URL('../fixtures/codex/filled-composer-warning.json', import.meta.url), 'utf8')) as { prompt: string; lines: string[] };
 
+// verify the resume command follows native footer layouts, not conversation text
+describe('Codex goal resume badge', () => {
+  // exercise a wrapped native agent label and a plain footer
+  it.each(codexGoalFooters)('reads the live goal state from %s', footer => {
+    expect(codexGoalResumeAvailable(codexComposerWithAuxiliary('', footer, true))).toBe(footer.includes('/goal resume'));
+  });
+
+  // support both wide inline badges and the auxiliary row without workspace labels
+  it('recognizes paused chrome with and without a workspace segment', () => {
+    expect(codexGoalResumeAvailable(capture('› Ask Codex to do anything'))).toBe(true);
+    expect(codexGoalResumeAvailable('› Ask Codex to do anything\n\n  ? for shortcuts     Goal paused (/goal resume)\n')).toBe(true);
+  });
+
+  // a wrapped draft can sit above a lone goal footer when the workspace row is absent
+  it('finds a standalone pause badge beneath a wrapped composer', () => {
+    expect(codexGoalResumeAvailable('› first line\n  wrapped continuation\n\n        Goal paused (/goal resume)\n')).toBe(true);
+  });
+
+  // native compact widths can keep just a one-column gap between footer groups
+  it('recognizes a compact pause badge sharing the auxiliary row', () => {
+    expect(codexGoalResumeAvailable(codexComposerWithAuxiliary('', '  ? for shortcuts Goal paused (/goal resume) · IDE'))).toBe(true);
+  });
+
+  // do not mistake authored text or scrolled-off footer chrome for the current status
+  it.each([
+    '• The banner reads Goal paused (/goal resume)',
+    '  GPT-6.2-Sol high · ~/repo · main     Goal paused (/goal resume)',
+    '› Goal paused (/goal resume)',
+    '› A long draft\n  Goal paused (/goal resume)',
+    '› First draft\n\n  Goal paused (/goal resume) and more text',
+    `${capture('› Previous composer')}\n• Working\n${codexComposerWithFooter('')}`
+  ])('ignores a non-footer resume mention in %j', pane => {
+    expect(codexGoalResumeAvailable(pane)).toBe(false);
+  });
+});
+
 // keep composer acknowledgements independent of decorative animation
 describe('Codex draft observation', () => {
+  // native magenta identifies a lone goal footer without trusting lookalike draft text
+  it('owns a wrapped draft above styled standalone goal chrome', () => {
+    const draft = '› first line\n  wrapped continuation';
+    const prompt = 'first line wrapped continuation';
+    const footer = '        \x1b[38;5;5mGoal paused (/goal resume)\x1b[0m';
+    const pane = `${draft}\n\n${footer}`;
+    expect(codexDraftState(pane, prompt)).toBe('visible');
+    expect(codexOwnsDraft(pane, prompt)).toBe(true);
+    expect(codexOwnsDraft(pane.replace('wrapped continuation', 'wrapped continuation plus edits'), prompt)).toBe(false);
+    expect(codexOwnsDraft(`${draft}\n\n  Goal paused (/goal resume) · IDE`, prompt)).toBe(false);
+  });
+
   // goal badges remain native chrome even while the draft hides shortcut hints
   it.each(codexGoalFooters)('owns a draft above the goal footer %s', auxiliary => {
     // cover wide footers and narrow wrapped agent labels

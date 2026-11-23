@@ -7,11 +7,12 @@
 // so the component can be driven by a real WebSocket in the app and by a scripted
 // socket in tests.
 
-// the latest assistant response and capture overflow feed notes
+// the latest assistant response and current OMX footer feed the agent panel
 // the derive owns the shape; the component only forwards it
 export interface PaneMetadata {
   message: string;
   overflow: boolean;
+  goalResumeAvailable?: true;
 }
 
 // Browser → server.
@@ -36,7 +37,7 @@ export type PaneServerFrame =
   | { type: 'exit'; reason: string }
   // The Agent pane's current Inline question, or null when there is none.
   | { type: 'question'; question: unknown }
-  // The Agent pane's latest Turn.
+  // The Agent pane's latest turn and current footer state.
   | { type: 'metadata'; metadata: PaneMetadata }
   // Text copied in a pane of the session (OSC 52 or a tmux copy-mode yank).
   | { type: 'clipboard'; text: string }

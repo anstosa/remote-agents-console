@@ -24,8 +24,14 @@ const composerShortcutsLine = /^ {2}(?:(?:← for agents · )?\? for shortcuts|�
 const composerWarningLine = /^ {2,}⚠ \d+(?: warnings? · \S+ to view| · \S+)?\s*$/u;
 // filled working composers expose queue hints with optional native context counters
 const composerQueueLine = /^ {2}(?:\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode)(?:\s{2,}(?:\d+% context left|[\d.,]+[kKmMbB]? used))?\s*$/u;
-// goal badges share the auxiliary row with queue hints and optional warnings
-const composerGoalLine = /^ {2,}(?:(?:\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode) {2,})?(?:Pursuing goal \(\d+[dhms](?: \d+[dhms])*\)|Goal (?:paused|stalled) \(\/goal resume\))(?: · ⚠ \d+(?: warnings? · \S+ to view| · \S+)?)?\s*$/u;
+// goal badges can share the right side with context or warnings
+const composerGoalBadge = /(?:Pursuing goal \(\d+[dhms](?: \d+[dhms])*\)|(?<resume>Goal (?:paused|stalled) \(\/goal resume\)))(?: · IDE(?: context)?)?(?: · (?:\d+% context left|[\d.,]+[kKmMbB]? used))?(?: · ⚠ \d+(?: warnings? · \S+ to view| · \S+)?)?\s*$/u;
+// native left hints can leave a one-column gap before the badge
+const composerGoalLine = new RegExp(String.raw`^ {2,}(?:(?:(?:← for agents · )?\S+ for shortcuts|← for agents|\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode) +)?${composerGoalBadge.source}`, 'u');
+// a badge can also sit to the right of the workspace status on the same row
+const composerInlineGoalBadge = new RegExp(` +${composerGoalBadge.source}`, 'u');
+// codex paints the goal label magenta even without a workspace status row
+const styledComposerGoalBadge = /\x1b\[(?:35|38;5;5)m(?:Goal (?:paused|stalled) \(\/goal resume\)|Pursuing goal \()/u;
 // narrow panes wrap the native agent label below the workspace status
 const composerAgentLabelContinuation = /^ {2}\[default\]\s*$/u;
 // choice editors can replace the composer and paint their own keyboard footer
@@ -168,18 +174,23 @@ function footerChoiceGroup(rows: readonly string[], plain: readonly string[], fi
 }
 
 // locate the live prompt or shell composer, excluding matching scrollback
-function activeComposer(lines: string[]): { index: number; draft: string } | undefined {
+function activeComposer(lines: string[], styledRows?: readonly string[]): { index: number; draft: string } | undefined {
   let finalVisibleRow = lines.length - 1;
   // locate the terminal footer row above trailing space
   while (finalVisibleRow >= 0 && !lines[finalVisibleRow]!.trim()) finalVisibleRow -= 1;
   let footerStart = finalVisibleRow;
   const auxiliary = lines[footerStart] ?? '';
-  const statusEnd = composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) || composerGoalLine.test(auxiliary) ? footerStart - 1 : footerStart;
+  const goalAuxiliary = composerGoalLine.test(auxiliary);
+  const statusEnd = composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) || goalAuxiliary ? footerStart - 1 : footerStart;
   const statusStart = composerAgentLabelContinuation.test(lines[statusEnd] ?? '') ? statusEnd - 1 : statusEnd;
   // require the native workspace and blank separator before excluding auxiliary or wrapped rows
   if (composerWorkspaceStatusLine.test(lines[statusStart] ?? '') && lines[statusStart - 1]?.trim() === '') footerStart = statusStart;
+  // a lone goal row needs native styling and separation before it can affect draft ownership
+  else if (goalAuxiliary) {
+    footerStart = lines[finalVisibleRow - 1]?.trim() === '' && styledComposerGoalBadge.test(styledRows?.[finalVisibleRow] ?? '') ? finalVisibleRow : lines.length;
+  }
   // absent native chrome must not hide an authored shortcuts row
-  if (!composerStatusLine.test(lines[footerStart] ?? '')) footerStart = lines.length;
+  else if (!composerStatusLine.test(auxiliary)) footerStart = lines.length;
   // inspect composer markers newest first
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const match = /^([›!])(?:\s(.*))?$/u.exec(lines[index]!);
@@ -213,8 +224,27 @@ const activeComposerFromCapture = (value: string): string | undefined => {
   const rows = withoutComposerSparkles(value).split('\n');
   // only a recent inverse-styled native selector may hide a background composer
   if (inverseStyledChoiceLayout(rows.slice(-questionLayoutLookbehindRows))) return undefined;
-  return activeComposer(rows.map(plainTerminalText))?.draft;
+  return activeComposer(rows.map(plainTerminalText), rows)?.draft;
 };
+
+// detect the command in live composer chrome rather than in captured replies
+export function codexGoalResumeAvailable(value: string): boolean {
+  const lines = withoutComposerSparkles(value).split('\n').map(plainTerminalText);
+  let last = lines.length - 1;
+  // ignore terminal padding below the footer
+  while (last >= 0 && !lines[last]!.trim()) last -= 1;
+  const footer = lines[last] ?? '';
+  // require the complete native badge at the end of the pane
+  if (composerInlineGoalBadge.exec(footer)?.groups?.resume === undefined) return false;
+  const auxiliary = composerGoalLine.test(footer);
+  const statusEnd = auxiliary ? last - 1 : last;
+  const statusStart = composerAgentLabelContinuation.test(lines[statusEnd] ?? '') ? statusEnd - 1 : statusEnd;
+  // confirm the native status row or a lone auxiliary row above the pane edge
+  const hasWorkspaceFooter = composerWorkspaceStatusLine.test(lines[statusStart] ?? '') && lines[statusStart - 1]?.trim() === '';
+  const separator = hasWorkspaceFooter ? statusStart - 1 : auxiliary ? last - 1 : -1;
+  // exclude the footer before checking the live composer and its wrapped draft
+  return lines[separator]?.trim() === '' && activeComposer(lines.slice(0, separator)) !== undefined;
+}
 
 // identify composer chrome with plain text but retain rendition data on its preceding rows
 export function codexOutputFromCapture(value: string): string | undefined {

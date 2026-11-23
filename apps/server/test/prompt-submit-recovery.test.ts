@@ -48,15 +48,19 @@ describe('failed queue submission recovery', () => {
   afterEach(() => vi.useRealTimers());
 
   // goal chrome must not veto either initial submission or a swallowed-key retry
-  it.each(codexGoalFooters)('submits and retries drafts above the goal footer %s', async auxiliary => {
-    const { agent, queue, history, scope, notes, drain, cleanup } = await fixture();
-    const prompt = 'retry the goal draft';
+  it.each([...codexGoalFooters, 'standalone'])('submits and retries drafts above the goal footer %s', async auxiliary => {
+    const standalone = auxiliary === 'standalone';
+    const { agent, queue, history, scope, notes, drain, cleanup } = await fixture(standalone ? 'omx' : 'codex');
+    const prompt = standalone ? '/goal resume' : 'retry the goal draft';
     let composer = prompt;
     const sent: string[][] = [];
     const discovery = { worktreesNow: () => [], target: async () => ({ agent, socket }) };
     const tmux = {
       pastePrompt: async () => true,
-      capture: async () => codexComposerWithAuxiliary(composer, auxiliary, true),
+      // reproduce a standalone native goal badge without a workspace row
+      capture: async () => standalone
+        ? `› ${composer || 'Ask Codex to do anything'}\n\n        \x1b[38;5;5m${composer ? 'Goal paused (/goal resume)' : 'Pursuing goal (1s)'}\x1b[0m`
+        : codexComposerWithAuxiliary(composer, auxiliary, true),
       // swallow the first key and acknowledge the next submit exactly once
       sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => {
         sent.push(keys);

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { installPaneMock, paneInputCount, pushQuestion, seedPaneSize } from './pane-stream-mock.js';
+import { dropPaneSocket, installPaneMock, paneInputCount, pushMetadata, pushQuestion, seedPaneSize } from './pane-stream-mock.js';
 
 type ReplySuggestion = { label: string; text: string };
 type MockAgent = {
@@ -133,6 +133,89 @@ function deferred() {
   const wait = new Promise<void>(resolve => { release = resolve; });
   return { wait, release };
 }
+
+// a paused OMX goal does not need an assistant question or model generation
+test('paused OMX goals offer a standalone command without requesting AI suggestions', async ({ page }) => {
+  const state: ConsoleState = { generation: 1, agents: [
+    { id: 'agent-1', kind: 'omx', panel: 'terminal', attention: 'finished' },
+    { id: 'agent-2', kind: 'codex', panel: 'terminal', attention: 'finished' }
+  ], promptPosts: [] };
+  await mockConsole(page, state);
+  await page.goto('/#agent=agent-1');
+  await seedPaneSize(page, 'agent-1');
+  const resume = page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: '/goal resume', exact: true });
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect(resume).toHaveCount(0);
+  await pushMetadata(page, 'agent-1', '', false, true);
+  await expect(resume).toBeVisible();
+  await prompt.fill('Keep this draft.');
+  await expect(resume).toBeDisabled();
+  await prompt.clear();
+
+  // an attachment-only draft is still occupied
+  await page.locator('.prompt input[type="file"]').setInputFiles({ name: 'keep.txt', mimeType: 'text/plain', buffer: Buffer.from('Keep this attachment.') });
+  const removeAttachment = page.getByRole('button', { name: 'Remove keep.txt', exact: true });
+  await expect(removeAttachment).toBeVisible();
+  await expect(resume).toBeDisabled();
+  await removeAttachment.click();
+
+  // permission mode retains its explicit controls even if footer metadata is present
+  await pushQuestion(page, 'agent-1', { id: 'permission-question', text: 'Allow this action?', permission: true, field: { kind: 'choice', choices: ['Allow', 'Deny'] }, source: 'parsed' });
+  await expect(page.getByText('Permission request', { exact: true })).toBeVisible();
+  await expect(resume).toHaveCount(0);
+  await pushQuestion(page, 'agent-1', null);
+  await expect(resume).toBeEnabled();
+
+  await resume.click();
+  await expect(prompt).toHaveValue('/goal resume');
+  await expect(prompt).toBeFocused();
+  expect(state.promptPosts).toEqual([]);
+  expect(await paneInputCount(page, 'agent-1')).toBe(0);
+
+  await page.getByRole('button', { name: 'Queue', exact: true }).click();
+  await expect.poll(() => state.promptPosts).toEqual([{ agentId: 'agent-1', prompt: '/goal resume', attachments: [] }]);
+  await pushMetadata(page, 'agent-1', '');
+  await expect(resume).toHaveCount(0);
+
+  // a disconnect retires the shortcut until new live metadata arrives
+  await pushMetadata(page, 'agent-1', '', false, true);
+  await expect(resume).toBeVisible();
+  await dropPaneSocket(page);
+  await expect(resume).toHaveCount(0);
+
+  await page.getByRole('button', { name: /^Switch Agent at Cora/u }).click();
+  await page.getByRole('menu', { name: 'Agents at Cora' }).getByRole('menuitemradio', { name: /agent-2/u }).click();
+  await seedPaneSize(page, 'agent-2');
+  await pushMetadata(page, 'agent-2', '', false, true);
+  await expect(resume).toHaveCount(0);
+  expect(state.suggestionPosts ?? []).toEqual([]);
+});
+
+// a current provider failure cannot remove the footer command
+test('paused OMX goals keep the command alongside AI replies and through provider failure', async ({ page }) => {
+  const state: ConsoleState = {
+    generation: 1,
+    agents: [{ id: 'agent-1', kind: 'omx', panel: 'terminal', attention: 'finished', hasMessageQuestion: true, messageReplySuggestionKey: 'ready-source' }],
+    promptPosts: [],
+    suggestionResponses: {
+      'ready-source': { suggestions: [...suggestions, { label: 'Duplicate command', text: '/goal resume' }] },
+      'failed-source': { status: 503 }
+    }
+  };
+  await mockConsole(page, state);
+  await page.goto('/#agent=agent-1');
+  await seedPaneSize(page, 'agent-1');
+  await expect(page.getByRole('button', { name: 'Duplicate command' })).toBeVisible();
+  await pushMetadata(page, 'agent-1', '', false, true);
+
+  const group = page.getByRole('group', { name: 'Suggested replies' });
+  await expect(group.getByRole('button')).toHaveText(['/goal resume', 'Use PostgreSQL', 'Explain tradeoffs']);
+  state.agents[0] = { ...state.agents[0]!, messageReplySuggestionKey: 'failed-source' };
+  await refreshDashboard(page, state);
+  await expect.poll(() => state.suggestionPosts?.at(-1)?.body).toEqual({ sourceKey: 'failed-source' });
+  await expect(group.getByRole('button')).toHaveText(['/goal resume']);
+  expect(state.promptPosts).toEqual([]);
+});
 
 // verify draft-only selection and explicit submission
 test('suggested replies populate and focus the draft without submitting it', async ({ page }) => {

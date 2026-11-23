@@ -138,7 +138,8 @@ export function installPaneStreamMock(): void {
       bytes: (id: string, text: string) => deliverBytes(id, new TextEncoder().encode(text)),
       frame: (id: string, frame: Record<string, unknown>) => deliverFrame(id, frame),
       question: (id: string, question: unknown) => deliverFrame(id, { type: 'question', question }),
-      metadata: (id: string, message: string, overflow: boolean) => deliverFrame(id, { type: 'metadata', metadata: { message, overflow } }),
+      // include the footer flag only while the live pane advertises the command
+      metadata: (id: string, message: string, overflow: boolean, goalResumeAvailable?: true) => deliverFrame(id, { type: 'metadata', metadata: { message, overflow, goalResumeAvailable } }),
       reseed: (id: string) => deliverFrame(id, { type: 'reseed' }),
       exit: (id: string, reason: string) => deliverFrame(id, { type: 'exit', reason }),
       // end this pane's stream with a close code; the shared socket stays up
@@ -168,7 +169,7 @@ interface PaneApi {
   bytes: (id: string, text: string) => void;
   frame: (id: string, frame: unknown) => void;
   question: (id: string, question: unknown) => void;
-  metadata: (id: string, message: string, overflow: boolean) => void;
+  metadata: (id: string, message: string, overflow: boolean, goalResumeAvailable?: true) => void;
   reseed: (id: string) => void;
   exit: (id: string, reason: string) => void;
   drop: (id: string, code: number) => void;
@@ -206,7 +207,8 @@ export const seedPaneSize = async (page: Page, id: string, cols = 80, rows = 24)
 
 export const pushBytes = (page: Page, id: string, text: string) => page.evaluate(({ id, text }) => (window as unknown as PaneWindow).__pane.bytes(id, text), { id, text });
 export const pushQuestion = (page: Page, id: string, question: unknown) => page.evaluate(({ id, question }) => (window as unknown as PaneWindow).__pane.question(id, question), { id, question });
-export const pushMetadata = (page: Page, id: string, message: string, overflow = false) => page.evaluate(({ id, message, overflow }) => (window as unknown as PaneWindow).__pane.metadata(id, message, overflow), { id, message, overflow });
+// deliver turn metadata with an optional live footer flag
+export const pushMetadata = (page: Page, id: string, message: string, overflow = false, goalResumeAvailable?: true) => page.evaluate(({ id, message, overflow, goalResumeAvailable }) => (window as unknown as PaneWindow).__pane.metadata(id, message, overflow, goalResumeAvailable), { id, message, overflow, goalResumeAvailable });
 export const pushExit = (page: Page, id: string, reason: string) => page.evaluate(({ id, reason }) => (window as unknown as PaneWindow).__pane.exit(id, reason), { id, reason });
 export const dropPane = (page: Page, id: string, code = 1006) => page.evaluate(({ id, code }) => (window as unknown as PaneWindow).__pane.drop(id, code), { id, code });
 export const dropPaneSocket = (page: Page, code = 1006, reason = 'lost') => page.evaluate(({ code, reason }) => (window as unknown as PaneWindow).__pane.dropSocket(code, reason), { code, reason });
