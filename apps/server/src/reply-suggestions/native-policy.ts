@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { gte, valid } from 'semver';
 import type { NativeReplySuggestionSource, ReplySuggestionMessage } from './types.js';
 import { replySuggestionPrompt } from './prompt.js';
 import { replySuggestionSchema } from './validation.js';
@@ -8,14 +9,29 @@ export const nativeFinalOutputBytes = 8 * 1_024;
 export const nativeProtocolOutputBytes = 1024 * 1024;
 export const nativeStderrBytes = 64 * 1024;
 export const nativeRequestBytes = 128 * 1024;
-export const expectedCodexVersion = 'codex-cli 0.169.0';
+const minimumCodexReplyVersion = '0.169.0';
+// the oldest supported binary reports this many feature keys
+const minimumCodexReplyFeatures = 215;
 export const expectedClaudeVersion = '2.1.311 (Claude Code)';
 
 // hash stable policy material for stale-route fences
 export const nativePolicyGeneration = createHash('sha256').update(JSON.stringify([
   replySuggestionPrompt, replySuggestionSchema, nativeTimeoutMs, nativeFinalOutputBytes,
-  expectedCodexVersion, expectedClaudeVersion, 'native-reply-policy-v1'
+  minimumCodexReplyVersion, minimumCodexReplyFeatures, expectedClaudeVersion, 'native-reply-policy-v2'
 ])).digest('hex');
+
+// accept newer native versions while retaining the minimum protocol floor
+export function supportsCodexReplyVersion(banner: string): boolean {
+  const reported = /^codex-cli (\d\S*)$/u.exec(banner)?.[1];
+  const version = reported === undefined ? null : valid(reported);
+  return version !== null && gte(version, minimumCodexReplyVersion);
+}
+
+// reject short or ambiguous inventories without pinning later releases to one count
+export function validCodexReplyFeatures(features: readonly string[]): boolean {
+  return features.length >= minimumCodexReplyFeatures && new Set(features).size === features.length
+    && features.every(feature => /* accept literal dotted keys without empty segments */ feature.length <= 128 && /^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$/u.test(feature));
+}
 
 // quote one trusted string for generated toml
 function tomlString(value: string): string {
@@ -32,7 +48,7 @@ export function nativeConversation(messages: readonly ReplySuggestionMessage[]):
 export function codexConfig(source: NativeReplySuggestionSource, catalog: string, features: readonly string[]): string | undefined {
   const effort = source.model.effort;
   // exact model and effort are mandatory
-  if (source.nativeModel.provider !== 'openai' || source.nativeModel.id !== source.model.model || effort === undefined || !/^[A-Za-z0-9._-]{1,100}$/u.test(source.nativeModel.id) || !/^[A-Za-z0-9_-]{1,32}$/u.test(effort) || features.length !== 215 || new Set(features).size !== features.length) return undefined;
+  if (source.nativeModel.provider !== 'openai' || source.nativeModel.id !== source.model.model || effort === undefined || !/^[A-Za-z0-9._-]{1,100}$/u.test(source.nativeModel.id) || !/^[A-Za-z0-9_-]{1,32}$/u.test(effort) || !validCodexReplyFeatures(features)) return undefined;
   return `model = ${tomlString(source.nativeModel.id)}
 model_provider = "openai"
 model_reasoning_effort = ${tomlString(effort)}
@@ -54,6 +70,9 @@ cli_auth_credentials_store = "file"
 enabled = false
 
 [feedback]
+enabled = false
+
+[agents]
 enabled = false
 
 [features]

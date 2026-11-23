@@ -185,6 +185,9 @@ or stored credential; unverified routes remain unavailable rather than borrowing
 Agent's account. Dashboard polling never starts inference, and typing/Send remain
 available while suggestions are pending or unavailable.
 Native model discovery uses a vendor-scoped environment and inert startup controls.
+The Codex/OMX reply helper accepts Codex CLI 0.169.0 and newer. It rejects
+feature lists shorter than the baseline and disables every listed feature.
+Unverified accounts, model selections, or protocol behavior still fail closed.
 Unreviewed Claude account routes stay unavailable rather than selecting a fallback.
 
 When the live OMX footer advertises `/goal resume`, show that command first in

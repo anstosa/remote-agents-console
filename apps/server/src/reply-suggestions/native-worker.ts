@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { NativeAccountObservation, NativeGenerationResult, NativeWorkerRequest, NativeWorkerResponse } from './native-process.js';
-import { claudeArguments, codexCachedCatalog, codexConfig, expectedClaudeVersion, expectedCodexVersion, nativeConversation, nativeFinalOutputBytes, nativePolicyGeneration, nativeProtocolOutputBytes, nativeRequestBytes, nativeStderrBytes, nativeTimeoutMs } from './native-policy.js';
+import { claudeArguments, codexCachedCatalog, codexConfig, expectedClaudeVersion, nativeConversation, nativeFinalOutputBytes, nativePolicyGeneration, nativeProtocolOutputBytes, nativeRequestBytes, nativeStderrBytes, nativeTimeoutMs, supportsCodexReplyVersion, validCodexReplyFeatures } from './native-policy.js';
 import { nativeReplyScope } from './native-scope.js';
 import type { NativeReplySuggestionSource, NativeReplyScope } from './types.js';
 import { replySuggestionPrompt } from './prompt.js';
@@ -111,9 +111,9 @@ async function programVersion(scope: NativeReplyScope, signal: AbortSignal, conf
   const result = await boundedCommand(nativeProgram(scope), ['--version'], { cwd: scope.home, env: cleanEnvironment(scope, configHome), signal, stdoutBytes: 4_096, stderrBytes: 4_096 });
   const stderrAccepted = configHome === undefined ? result.stderr.length === 0 : codexMetadataStderr(result.stderr, configHome);
   const version = result.code === 0 && stderrAccepted ? result.stdout.toString('utf8').trim() : '';
-  const expected = scope.kind === 'codex' ? expectedCodexVersion : expectedClaudeVersion;
-  // pin the proven native protocol version
-  if (version !== expected) throw new NativeWorkerError('native_version_mismatch');
+  const supported = scope.kind === 'codex' ? supportsCodexReplyVersion(version) : version === expectedClaudeVersion;
+  // accept later codex releases without changing the claude protocol pin
+  if (!supported) throw new NativeWorkerError('native_version_mismatch');
   return version;
 }
 
@@ -292,10 +292,17 @@ function codexAccount(value: unknown): string | undefined {
   return hash(identity);
 }
 
-// parse the exact installed feature names
+// parse the installed feature table without assuming a release-specific count
 function codexFeatures(value: string): string[] | undefined {
-  const features = value.split(/\r?\n/u).filter(Boolean).map(line => line.trim().split(/\s+/u)[0]!).filter(Boolean);
-  return features.length === 215 && new Set(features).size === 215 ? features : undefined;
+  const features: string[] = [];
+  // reject malformed rows instead of silently leaving features enabled
+  for (const line of value.trim().split(/\r?\n/u)) {
+    const name = /^(\S+)[ \t]+[a-z]+(?: [a-z]+)*[ \t]+(?:true|false)$/u.exec(line.trim())?.[1];
+    // require the native name, stage and boolean columns
+    if (name === undefined) return undefined;
+    features.push(name);
+  }
+  return validCodexReplyFeatures(features) ? features : undefined;
 }
 
 // native 0.169 refuses optional path aliases in our intentionally temporary home
@@ -331,11 +338,11 @@ async function codexCachedModel(scope: NativeReplyScope, source: NativeReplySugg
 export function codexGenerationPolicy(source: NativeReplySuggestionSource, cached: Record<string, unknown> | undefined, featureStdout: string, featureStderr: Buffer, helperRoot: string): CodexGenerationPolicy | undefined {
   const features = codexMetadataStderr(featureStderr, helperRoot) ? codexFeatures(featureStdout) : undefined;
   const catalog = cached === undefined ? undefined : codexCachedCatalog(source, cached);
-  // both pinned feature inventory and exact sanitized cache entry are mandatory
+  // both the discovered feature inventory and exact sanitized cache entry are mandatory
   return features === undefined || catalog === undefined ? undefined : { features, catalog };
 }
 
-// prepare the billed turn from local pinned metadata only
+// prepare the billed turn from local verified metadata only
 async function prepareCodexGeneration(scope: NativeReplyScope, source: NativeReplySuggestionSource, signal: AbortSignal, helper: { root: string; cwd: string }): Promise<CodexGenerationPolicy> {
   await programVersion(scope, signal, helper.root);
   const env = cleanEnvironment(scope, helper.root);
@@ -359,7 +366,7 @@ async function inspectCodex(scope: NativeReplyScope, source: NativeReplySuggesti
     const env = cleanEnvironment(scope, helper.root);
     const featureResult = await boundedCommand(nativeProgram(scope), ['features', 'list'], { cwd: helper.cwd, env, signal, stdoutBytes: 256 * 1024, stderrBytes: 16 * 1024 });
     const features = featureResult.code === 0 && codexMetadataStderr(featureResult.stderr, helper.root) ? codexFeatures(featureResult.stdout.toString('utf8')) : undefined;
-    // require the exact pinned feature inventory
+    // require a valid inventory from this exact binary
     if (features === undefined) throw new NativeWorkerError('codex_feature_inventory_mismatch');
     const server = new CodexAppServer(nativeProgram(scope), helper.cwd, env, signal);
     try {

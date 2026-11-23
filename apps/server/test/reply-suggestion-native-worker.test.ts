@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { claudeArguments, codexCachedCatalog, codexConfig, nativeConversation } from '../src/reply-suggestions/native-policy.js';
+import { claudeArguments, codexCachedCatalog, codexConfig, nativeConversation, supportsCodexReplyVersion } from '../src/reply-suggestions/native-policy.js';
 import type { NativeReplySuggestionSource, NativeReplyScope } from '../src/reply-suggestions/types.js';
 import { claudeSessionPersistence, claudeSessionPostflight, CodexAudit, codexGenerationPolicy, codexMetadataStderr, codexStartupStderr, parseClaudeStream } from '../src/reply-suggestions/native-worker.js';
 import { tmpdir } from 'node:os';
@@ -35,7 +35,7 @@ function codexSource(): NativeReplySuggestionSource {
   };
 }
 
-// build the pinned local feature inventory
+// build a local feature inventory of the requested size
 function codexFeatureOutput(count = 215): string {
   return `${Array.from({ length: count }, (_, index) => `feature_${index} stable false`).join('\n')}\n`;
 }
@@ -64,16 +64,31 @@ function validStream(overrides: { model?: string; result?: string; assistantCont
 }
 
 describe('native worker policies', () => {
-  // generation derives its policy entirely from local pinned metadata
-  it('prepares an exact local-only Codex generation policy', () => {
-    const policy = codexGenerationPolicy(codexSource(), cachedCodexModel, codexFeatureOutput(), Buffer.alloc(0), '/tmp/helper');
-    expect(policy?.features).toHaveLength(215);
+  // admit the minimum release and newer native versions without requiring an exact pin
+  it.each(['0.169.0', '0.171.0', '0.171.0+build.1', '0.172.0-beta.1', '1.0.0'])('supports Codex %s', version => {
+    expect(supportsCodexReplyVersion(`codex-cli ${version}`)).toBe(true);
+  });
+
+  // require a valid native version at or above the floor
+  it.each(['codex-cli 0.168.99', 'codex-cli 0.169.0-beta.1', 'codex-cli 0.171', 'codex-cli 0.171.0 extra', 'other-cli 0.171.0', ''])('rejects unsupported banner %j', banner => {
+    expect(supportsCodexReplyVersion(banner)).toBe(false);
+  });
+
+  // generation derives its policy from local metadata as the inventory grows
+  it.each([215, 224, 230])('prepares a local-only Codex policy from %i discovered features', count => {
+    const output = codexFeatureOutput(count).replace('feature_0 stable false', 'guardianv2.thread_context  under development  true');
+    const policy = codexGenerationPolicy(codexSource(), cachedCodexModel, output, Buffer.alloc(0), '/tmp/helper');
+    expect(policy?.features).toHaveLength(count);
+    expect(policy?.features).toContain('guardianv2.thread_context');
     expect(policy?.catalog).toMatchObject({ models: [{ slug: 'gpt-native', shell_type: 'disabled', experimental_supported_tools: [], supports_search_tool: false }] });
   });
 
   // no remote fallback repairs an invalid local feature or catalog gate
   it('rejects incomplete Codex generation metadata locally', () => {
     expect(codexGenerationPolicy(codexSource(), cachedCodexModel, codexFeatureOutput(214), Buffer.alloc(0), '/tmp/helper')).toBeUndefined();
+    expect(codexGenerationPolicy(codexSource(), cachedCodexModel, '', Buffer.alloc(0), '/tmp/helper')).toBeUndefined();
+    expect(codexGenerationPolicy(codexSource(), cachedCodexModel, `${codexFeatureOutput()}feature_0 stable true\n`, Buffer.alloc(0), '/tmp/helper')).toBeUndefined();
+    expect(codexGenerationPolicy(codexSource(), cachedCodexModel, `${codexFeatureOutput()}new_feature stable\n`, Buffer.alloc(0), '/tmp/helper')).toBeUndefined();
     expect(codexGenerationPolicy(codexSource(), { ...cachedCodexModel, slug: 'fallback' }, codexFeatureOutput(), Buffer.alloc(0), '/tmp/helper')).toBeUndefined();
     expect(codexGenerationPolicy(codexSource(), cachedCodexModel, codexFeatureOutput(), Buffer.from('unexpected stderr'), '/tmp/helper')).toBeUndefined();
   });
@@ -148,17 +163,31 @@ describe('native worker policies', () => {
     expect(args).not.toContain('Use staging or production?');
   });
 
-  it('builds a 215-feature false Codex policy with no provider override', () => {
+  // force every discovered feature off without pinning the inventory size
+  it.each([215, 224, 230])('builds a %i-feature false Codex policy with no provider override', count => {
     const codex = codexSource();
-    const features = Array.from({ length: 215 }, (_, index) => `feature_${index}`);
+    const features = ['guardianv2.thread_context', ...Array.from({ length: count - 1 }, (_, index) => `feature_${index}`)];
     const config = codexConfig(codex, '/private/catalog.json', features);
     expect(config).toContain('model_provider = "openai"');
+    expect(config).toContain('[agents]\nenabled = false');
     expect(config).not.toContain('base_url');
     expect(config).not.toContain('env_key');
     const featureSection = config?.split('[features]\n')[1]?.split('\n\n[tools.')[0]?.split('\n').filter(Boolean);
-    expect(featureSection).toHaveLength(215);
+    expect(featureSection).toHaveLength(count);
     // require every discovered feature to be disabled
     for (const feature of features) expect(featureSection).toContain(`"${feature}" = false`);
+  });
+
+  // a short inventory cannot generate a supposedly capability-neutral config
+  it('rejects a well-formed feature inventory below the baseline', () => {
+    const features = Array.from({ length: 214 }, (_, index) => `feature_${index}`);
+    expect(codexConfig(codexSource(), '/private/catalog.json', features)).toBeUndefined();
+  });
+
+  // meet the size floor so each invalid key exercises its own validation
+  it.each(['feature_0', 'not a name', 'guardianv2..thread_context'])('rejects invalid feature key %s in a full inventory', key => {
+    const features = [...Array.from({ length: 215 }, (_, index) => `feature_${index}`), key];
+    expect(codexConfig(codexSource(), '/private/catalog.json', features)).toBeUndefined();
   });
 
   it('sanitizes every Codex model capability while preserving metadata', () => {
