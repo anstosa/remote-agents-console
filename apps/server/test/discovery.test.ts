@@ -587,14 +587,14 @@ describe('DiscoveryService dashboard', () => {
   it('keeps an update advisor separate from its configured repository worktree', async () => {
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const finder = { find: async () => [socket] };
-    const tmux = { markSessionPlace: async () => true, listPanes: async () => [{ paneId: '%2', sessionId: '$1', pid: 456, path: '/host/remoteagents', title: 'Ready', displayLabel: 'Update Advisor Starting v4 2222222' }] };
+    const tmux = { markSessionPlace: async () => true, listPanes: async () => [{ paneId: '%2', sessionId: '$1', pid: 456, path: '/host/remoteagents', title: 'Ready', displayLabel: `Update Advisor Starting v5 ${'2'.repeat(40)}` }] };
     const processes = { recognizeAgent: async (pid: number) => ({ kind: 'codex' as const, pid, wrapped: false }) };
     const project = testProject({ id: 'remoteagents', label: 'Remote Agents', path: '/workspace', hostPath: '/host/remoteagents' });
     const service = new DiscoveryService(finder, tmux as never, processes, undefined, undefined, [project], undefined, listImpl({ '/workspace': [entry('/workspace', 'main')] }));
 
     const dashboard = await service.dashboard();
 
-    expect(dashboard.agents).toEqual([expect.objectContaining({ pane: expect.objectContaining({ paneId: '%2' }), home: '/host/remoteagents', displayLabel: 'Update Advisor Starting v4 2222222' })]);
+    expect(dashboard.agents).toEqual([expect.objectContaining({ pane: expect.objectContaining({ paneId: '%2' }), home: '/host/remoteagents', displayLabel: `Update Advisor Starting v5 ${'2'.repeat(40)}` })]);
     // a modal advisor never claims the Project's Main worktree, which stays idle in projects[]
     expect(dashboard.agents[0]).not.toHaveProperty('worktreeId');
     expect(dashboard.projects[0]?.worktrees).toEqual([expect.objectContaining({ id: 'remoteagents:/workspace' })]);

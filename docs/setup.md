@@ -373,6 +373,12 @@ With neither applicable value set, the Codex-only feature reports unavailable
 rather than spawning a bare `codex` from `PATH`. The **Global settings** flyout
 shows the ChatGPT accounts section only when `adapters.codex` is configured.
 
+The advisor is shared by every browser that takes control of the same RAC server.
+Closing **Review update** leaves the advisor running. Reopen the review to
+resume the same conversation for that revision. The browser starting the update
+must still explicitly acknowledge the guidance. Advisor panes created by older
+versions with abbreviated revision labels aren't reused for new reviews.
+
 If the installed Codex supports `--no-daemon`, add it to `adapters.codex.args`
 to keep normal Codex launches and the advisor off the shared background server.
 This is useful after switching accounts when that server still holds the

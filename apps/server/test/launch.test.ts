@@ -440,7 +440,7 @@ describe('LaunchService', () => {
     expect(command).not.toContain("export HOME='/home/ubuntu/remoteagents'");
     expect(command).not.toContain('--sandbox read-only');
     expect(command).not.toContain('--ask-for-approval never');
-    expect(run).toHaveBeenLastCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%5', '@rac_display_label', 'Update Advisor Starting v4 2222222']);
+    expect(run).toHaveBeenLastCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%5', '@rac_display_label', `Update Advisor Starting v5 ${'2'.repeat(40)}`]);
   });
 
   // closes the fresh advisor pane when its required label fails

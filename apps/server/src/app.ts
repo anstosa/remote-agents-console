@@ -149,7 +149,7 @@ import { ApiKeySpendService } from './accounts/spend.js';
 import { readClaudeAccount } from './accounts/claude.js';
 import { CodexAccountService, normalizeAccountLabel, normalizeApiKey, safeAccountId, UnsupportedAccountOperationError, type AccountRateLimitWindow, type AccountSummary } from './accounts/index.js';
 import { ConsoleNamedConversationService, type ConsoleNamedConversation } from './conversations/console-named-service.js';
-import { isUpdateAdvisorForTarget, isUpdateAdvisorLabel, updateAdvisorLabel, updateAdvisorPendingLabel } from './update-advisor.js';
+import { isLegacyUpdateAdvisorForTarget, isUpdateAdvisorForTarget, isUpdateAdvisorLabel, updateAdvisorLabel, updateAdvisorPendingLabel } from './update-advisor.js';
 import { isFullGitSha } from './git/revision.js';
 import { AgentUpdateService, type AgentUpdateServiceLike } from './agent-updates/service.js';
 import { parsePiUpdatePromptInput, piUpdateAgent, PiUpdatePromptCoordinator, type PiUpdatePromptCoordinatorLike, piUpdateWorktree } from './agent-updates/pi-update-prompt.js';
@@ -394,21 +394,17 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // event-driven log frames (ADR 0008)
   const paneStream: PaneStreamProvider = deps.paneStream ?? new PaneStreamRegistry();
   const updateAdvisors = new Map<string, string>();
-  const updateAdvisorLifecycles = new Map<string, Promise<void>>();
-  // serialize launch and stop operations for one reviewed target
-  const withUpdateAdvisorLifecycle = async <T>(targetSha: string, operation: () => Promise<T>): Promise<T> => {
-    const previous = updateAdvisorLifecycles.get(targetSha) ?? Promise.resolve();
-    let release = () => {};
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const tail = previous.catch(() => undefined).then(async () => await gate);
-    updateAdvisorLifecycles.set(targetSha, tail);
-    await previous.catch(() => undefined);
+  let updateAdvisorLifecycle = Promise.resolve();
+  // serialize across targets because each open can prune another target's pane
+  const withUpdateAdvisorLifecycle = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const previous = updateAdvisorLifecycle;
+    let release!: () => void;
+    updateAdvisorLifecycle = new Promise<void>(resolve => { release = resolve; });
+    await previous;
     try {
       return await operation();
     } finally {
       release();
-      // discard only the final queued lifecycle
-      if (updateAdvisorLifecycles.get(targetSha) === tail) updateAdvisorLifecycles.delete(targetSha);
     }
   };
   let accountSwitching = false;
@@ -1282,8 +1278,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     integrationConfig.realtime = { ...integrationConfig.realtime, ...saved };
     return { davo: publicDavoSettings() };
   });
-  // stop every advisor tied to one reviewed target
-  const stopUpdateAdvisors = async (targetSha: string): Promise<boolean> => {
+  // stop every advisor tied to a completed update
+  const stopUpdateAdvisors = async (targetSha: string): Promise<void> => {
+    const activeTarget = await serverAdmin.activeUpdateTarget();
+    // an older completion must not stop a live operation for the same revision
+    if (activeTarget === targetSha) return;
+    // defer ambiguous legacy cleanup while an active target shares the prefix
+    const matches = (label: string | undefined) => isUpdateAdvisorForTarget(label, targetSha) || (isLegacyUpdateAdvisorForTarget(label, targetSha)
+      && (activeTarget === undefined || !isLegacyUpdateAdvisorForTarget(label, activeTarget)));
     const advisorIds = new Set<string>();
     const mappedId = updateAdvisors.get(targetSha);
     // include the in-memory target after an uninterrupted launch
@@ -1292,11 +1294,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     try {
       dashboard = await discovery.dashboard();
     } catch {
-      // never claim cleanup when pane discovery failed
-      return false;
+      // leave cleanup for a later status read
+      return;
     }
     // recover every target-pinned advisor after a server restart
-    for (const agent of dashboard?.agents ?? []) if (isUpdateAdvisorForTarget(agent.displayLabel, targetSha)) advisorIds.add(agent.id);
+    for (const agent of dashboard?.agents ?? []) {
+      // only select the completed revision and unambiguous legacy leftovers
+      if (matches(agent.displayLabel)) advisorIds.add(agent.id);
+    }
     let allClosed = true;
     // close only live server-owned advisors for this target
     for (const advisorId of advisorIds) {
@@ -1311,11 +1316,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // treat already-vanished panes as stopped
       if (target === undefined) continue;
       // fail closed if an identifier no longer names the expected advisor
-      if (!isUpdateAdvisorForTarget(target.agent.displayLabel, targetSha) || !await prompts.close(advisorId).catch(() => false)) allClosed = false;
+      if (!matches(target.agent.displayLabel) || !await prompts.close(advisorId).catch(() => false)) allClosed = false;
     }
     // forget only targets with no surviving advisor
     if (allClosed) updateAdvisors.delete(targetSha);
-    return allClosed;
   };
   // pull and rebuild this server on its host
   app.post('/api/server/update', { config: { rateLimit: { max: 2, timeWindow: '1 hour' } } }, async (request, reply) => {
@@ -1348,8 +1352,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.get('/api/server/update/:id', async (request, reply) => {
     controlled(request);
     const status = await serverAdmin.updateStatus((request.params as { id: string }).id);
-    // retain advice through the update, then close every target pane
-    if (status?.state === 'complete') await stopUpdateAdvisors(status.targetSha);
+    // retain shared advice through the update and serialize its cleanup with concurrent opens
+    if (status?.state === 'complete') await withUpdateAdvisorLifecycle(() => stopUpdateAdvisors(status.targetSha));
     return status === undefined ? reply.code(404).send({ error: 'Server update unavailable.' }) : status;
   });
   // check whether origin main is ahead of local main
@@ -3870,6 +3874,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     for (const candidate of dashboard.agents) {
       // retain ordinary agents and one pane for each protected target
       if (!isUpdateAdvisorLabel(candidate.displayLabel) || protectedIds.has(candidate.id) || prunedIds.has(candidate.id)) continue;
+      // a legacy prefix may belong to the actively updating revision
+      if (activeTarget !== undefined && isLegacyUpdateAdvisorForTarget(candidate.displayLabel, activeTarget)) continue;
       const closed = await prompts.close(candidate.id).catch(() => false);
       // remove recovered mappings only after confirmed cleanup
       if (closed) {
@@ -3880,7 +3886,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const currentLabel = updateAdvisorLabel(targetSha);
     const existingId = [...protectedIds].find(candidateId => dashboard.agents.some(candidate => candidate.id === candidateId && candidate.displayLabel === currentLabel));
     // reuse one surviving advisor for the reviewed target
-    if (existingId !== undefined && await discovery.target(existingId) !== undefined) {
+    if (existingId !== undefined && (await discovery.target(existingId))?.agent.displayLabel === currentLabel) {
       updateAdvisors.set(targetSha, existingId);
       return existingId;
     }
@@ -3903,28 +3909,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     updateAdvisors.set(targetSha, agentId);
     return agentId;
   };
-  // start or reuse a fixed update advisor
+  // start or reuse the server's shared advisor for this target
   app.post('/api/server/update-advisor', async (request, reply) => {
     controlled(request, true);
     const targetSha = body(request).targetSha;
     // require one reviewed target
     if (!isFullGitSha(targetSha)) return reply.code(400).send({ error: 'Invalid update advisor target.' });
-    const agentId = await withUpdateAdvisorLifecycle(targetSha, async () => await launchUpdateAdvisor(targetSha));
+    const agentId = await withUpdateAdvisorLifecycle(() => launchUpdateAdvisor(targetSha));
     return agentId === undefined ? reply.code(503).send({ error: 'Unable to start the update advisor.' }) : reply.code(201).send({ agentId, targetSha });
-  });
-  // stop the advisor when its owning update modal closes
-  app.delete('/api/server/update-advisor', async (request, reply) => {
-    controlled(request, true);
-    const targetSha = body(request).targetSha;
-    // require one reviewed target
-    if (!isFullGitSha(targetSha)) return reply.code(400).send({ error: 'Invalid update advisor target.' });
-    const result = await withUpdateAdvisorLifecycle(targetSha, async () => {
-      // preserve advice throughout an active host update
-      if (await serverAdmin.activeUpdateTarget() === targetSha) return 'active' as const;
-      return await stopUpdateAdvisors(targetSha) ? 'stopped' as const : 'failed' as const;
-    });
-    if (result === 'active') return reply.code(409).send({ error: 'The update advisor is retained while its host update is active.' });
-    return result === 'stopped' ? reply.code(204).send() : reply.code(503).send({ error: 'Unable to stop the update advisor.' });
   });
   type IdleRestartResult = { status: 'restarted'; worktreeId: string; agentId: string } | { status: 'skipped'|'failed'; worktreeId: string; reason: 'unavailable'|'not-idle'|'launch-failed'|'timed-out'; error: string; agentId?: string };
   // restart one still-idle configured agent

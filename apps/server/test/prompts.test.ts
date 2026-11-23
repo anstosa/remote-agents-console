@@ -211,7 +211,7 @@ it.each(['ordinary', 'unicode'] as const)('isolates %s update advisor prompts fr
   const directory = await mkdtemp(join(tmpdir(), 'rac-advisor-scope-'));
   const queue = new QueuedPromptService(join(directory, 'queue.json'));
   const normalAgent = { ...agent, id: 'socket:%1', pane: { ...agent.pane, paneId: '%1' }, home: '/tmp' };
-  const advisorAgent = { ...agent, id: 'socket:%2', pane: { ...agent.pane, paneId: '%2' }, home: '/tmp', displayLabel: 'Update Advisor Starting v4 2222222' };
+  const advisorAgent = { ...agent, id: 'socket:%2', pane: { ...agent.pane, paneId: '%2' }, home: '/tmp', displayLabel: `Update Advisor Starting v5 ${'2'.repeat(40)}` };
   const pasted: string[][] = [];
   const entered: string[] = [];
   const queued: string[] = [];

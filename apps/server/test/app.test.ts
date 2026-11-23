@@ -26,6 +26,7 @@ import { ReviewTourError, type ReviewTour } from '../src/review-tour/contracts.j
 import { GithubRequestError } from '../src/github/github.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from '../src/dashboard/updates.js';
 import { EventEmitter } from 'node:events';
+import { updateAdvisorLabel, updateAdvisorPendingLabel } from '../src/update-advisor.js';
 const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen:{host:'127.0.0.1',port:8787},publicOrigin:new URL('https://agents.example.com'),trustedProxyIps:new Set(['127.0.0.1']),pollIntervalMs:500,adapters:{},projects:[] };
 const launchAdapters = { codex: { program: '/bin/false', args: [], env: {}, launchable: true }, claude: { program: '/bin/false', args: [], env: {}, launchable: true } };
 
@@ -399,25 +400,22 @@ describe('server administration API', () => {
     } finally { await adminApp.close(); }
   }, 15_000);
 
-  it('launches, reuses, and cleans one target-pinned update advisor', async () => {
+  // a browser handoff keeps the advisor until the host update completes
+  it('shares one target-pinned update advisor across controllers', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const directory = await mkdtemp(join(tmpdir(), 'rac-update-advisor-api-'));
     const targetSha = '2'.repeat(40);
     const advisorId = 'update-advisor';
     const socket = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
-    const pendingAgent = stated({ id: advisorId, pane: { paneId: '%8', sessionId: 'socket:$8', socketFingerprint: 'socket' }, home: '/host/repo', displayLabel: 'Update Advisor Starting v4 2222222', title: 'Ready' });
-    const readyAgent = { ...pendingAgent, displayLabel: 'Update Advisor v4 2222222' };
+    const pendingAgent = stated({ id: advisorId, pane: { paneId: '%8', sessionId: 'socket:$8', socketFingerprint: 'socket' }, home: '/host/repo', displayLabel: updateAdvisorPendingLabel(targetSha), title: 'Ready' });
+    const readyAgent = { ...pendingAgent, displayLabel: updateAdvisorLabel(targetSha) };
     const oldAgent = { ...pendingAgent, id: 'old-update-advisor', pane: { ...pendingAgent.pane, paneId: '%7', sessionId: 'socket:$7' } };
     const preview = { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha, fastForwardable: true, commitCount: 1, commits: [], commitsTruncated: false, filesTruncated: false, advisory: { required: true, reasons: [{ kind: 'config', paths: ['.env.example'] }] } };
-    let activeTarget: string | undefined;
     let launched = false;
     let advisorReady = false;
     let advisorStarted = false;
     let advisorClosed = false;
     let oldAdvisorClosed = false;
-    let blockAdvisorClose = false;
-    let signalAdvisorCloseStarted = () => {};
-    let advisorCloseGate = Promise.resolve();
     const discovery = { worktreesNow: () => [],
       dashboard: async () => ({ generation: launched ? 2 : 1, places: [], agents: [...(oldAdvisorClosed ? [] : [oldAgent]), ...(launched && !advisorClosed ? [stated({ ...(advisorReady ? readyAgent : pendingAgent), title: advisorStarted ? '⠋ Reviewing' : 'Ready' })] : [])], projects: [] }),
       target: async (id: string) => launched && !advisorClosed && id === advisorId ? { agent: stated({ ...(advisorReady ? readyAgent : pendingAgent), title: advisorStarted ? '⠋ Reviewing' : 'Ready' }), socket } : !oldAdvisorClosed && id === oldAgent.id ? { agent: oldAgent, socket } : undefined
@@ -426,19 +424,15 @@ describe('server administration API', () => {
     const tmux = { pastePrompt: vi.fn(async () => true), capture: vi.fn(async () => '› Inspect the fixed committed range without changing it. '), sendKeys: vi.fn(async (_socket: unknown, _pane: string, keys: string[]) => { if (keys.includes('Enter')) advisorStarted = true; return true; }), label: vi.fn(async () => { advisorReady = true; return true; }), close: vi.fn(async (_socket: unknown, paneId: string) => {
       // close interrupted launches immediately
       if (paneId === oldAgent.pane.paneId) oldAdvisorClosed = true;
-      // optionally hold one modal-close race
-      if (paneId === readyAgent.pane.paneId) {
-        signalAdvisorCloseStarted();
-        if (blockAdvisorClose) await advisorCloseGate;
-        advisorClosed = true;
-      }
+      // track cleanup of the shared pane
+      if (paneId === readyAgent.pane.paneId) advisorClosed = true;
       return true;
     }) };
     const serverAdmin = {
       updatePreview: async () => preview,
       updateAdvisor: () => ({ repository: '/host/repo', prompt: 'Inspect the fixed committed range without changing it.' }),
       updateAvailable: async () => true,
-      activeUpdateTarget: async () => activeTarget,
+      activeUpdateTarget: async () => undefined,
       startUpdate: async () => ({ id: 'server_update_advisor_1234', kind: 'update' as const, state: 'queued' as const, targetSha }),
       updateStatus: async () => ({ id: 'server_update_advisor_1234', kind: 'update' as const, state: 'complete' as const, targetSha }),
       revision: async () => undefined
@@ -449,44 +443,40 @@ describe('server administration API', () => {
       const login = await adminApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
       const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
 
-      // reopen the modal beyond the former route limit
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        const advisor = await adminApp.inject({ method: 'POST', url: '/api/server/update-advisor', headers, payload: { targetSha } });
+      // overlapping opens must submit the advisor prompt only once
+      const opened = await Promise.all(Array.from({ length: 5 }, () => adminApp.inject({ method: 'POST', url: '/api/server/update-advisor', headers, payload: { targetSha } })));
+      for (const advisor of opened) {
         expect(advisor.statusCode).toBe(201);
         expect(advisor.json()).toEqual({ agentId: advisorId, targetSha });
       }
       expect(tmux.close).toHaveBeenCalledWith(socket, oldAgent.pane.paneId);
       expect(tmux.close).not.toHaveBeenCalledWith(socket, readyAgent.pane.paneId);
-      let releaseAdvisorClose = () => {};
-      const advisorCloseStarted = new Promise<void>(resolve => { signalAdvisorCloseStarted = resolve; });
-      advisorCloseGate = new Promise<void>(resolve => { releaseAdvisorClose = resolve; });
-      blockAdvisorClose = true;
-      const racingClose = adminApp.inject({ method: 'DELETE', url: '/api/server/update-advisor', headers, payload: { targetSha } });
-      await advisorCloseStarted;
-      const racingReopen = adminApp.inject({ method: 'POST', url: '/api/server/update-advisor', headers, payload: { targetSha } });
-      blockAdvisorClose = false;
-      releaseAdvisorClose();
-      expect((await racingClose).statusCode).toBe(204);
-      expect((await racingReopen).statusCode).toBe(201);
-      expect(advisorClosed).toBe(false);
-      expect(launch.launchUpdateAdvisor).toHaveBeenCalledTimes(2);
-      activeTarget = targetSha;
-      const activeClose = await adminApp.inject({ method: 'DELETE', url: '/api/server/update-advisor', headers, payload: { targetSha } });
-      expect(activeClose.statusCode).toBe(409);
-      expect(advisorClosed).toBe(false);
-      activeTarget = undefined;
+
+      // stale browser code cannot dismiss the shared pane
       const closeAdvisor = await adminApp.inject({ method: 'DELETE', url: '/api/server/update-advisor', headers, payload: { targetSha } });
-      expect(closeAdvisor.statusCode).toBe(204);
-      expect(tmux.close).toHaveBeenCalledWith(socket, readyAgent.pane.paneId);
-      const update = await adminApp.inject({ method: 'POST', url: '/api/server/update', headers, payload: { expectedTargetSha: targetSha, advisoryAcknowledged: true } });
+      expect(closeAdvisor.statusCode).toBe(404);
+      expect(advisorClosed).toBe(false);
+
+      const secondBoot = await adminApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: headers.host } });
+      const secondLogin = await adminApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: headers.host, origin: headers.origin, 'x-csrf-token': secondBoot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+      const secondHeaders = { ...headers, cookie: String(secondLogin.headers['set-cookie']).split(';')[0], 'x-csrf-token': secondLogin.json().csrfToken };
+      const inactiveOpen = await adminApp.inject({ method: 'POST', url: '/api/server/update-advisor', headers: secondHeaders, payload: { targetSha } });
+      expect(inactiveOpen.statusCode).toBe(423);
+      await adminApp.inject({ method: 'POST', url: '/api/auth/take-control', headers: secondHeaders, payload: { deviceName: 'Second browser' } });
+      const resumed = await adminApp.inject({ method: 'POST', url: '/api/server/update-advisor', headers: secondHeaders, payload: { targetSha } });
+      expect(resumed.statusCode).toBe(201);
+      expect(resumed.json()).toEqual({ agentId: advisorId, targetSha });
+
+      const update = await adminApp.inject({ method: 'POST', url: '/api/server/update', headers: secondHeaders, payload: { expectedTargetSha: targetSha, advisoryAcknowledged: true } });
       expect(update.statusCode).toBe(202);
-      const status = await adminApp.inject({ method: 'GET', url: '/api/server/update/server_update_advisor_1234', headers: { host: headers.host, cookie: headers.cookie } });
+      expect(advisorClosed).toBe(false);
+      const status = await adminApp.inject({ method: 'GET', url: '/api/server/update/server_update_advisor_1234', headers: secondHeaders });
 
       expect(status.statusCode).toBe(200);
-      expect(launch.launchUpdateAdvisor).toHaveBeenCalledTimes(2);
+      expect(launch.launchUpdateAdvisor).toHaveBeenCalledTimes(1);
       expect(launch.launchUpdateAdvisor).toHaveBeenCalledWith('/host/repo', targetSha);
-      expect(tmux.pastePrompt).toHaveBeenCalledTimes(2);
-      expect(tmux.sendKeys).toHaveBeenCalledTimes(2);
+      expect(tmux.pastePrompt).toHaveBeenCalledTimes(1);
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
       expect(tmux.sendKeys).toHaveBeenCalledWith(socket, pendingAgent.pane.paneId, ['Enter']);
       // the advisor is submitted with Enter, never Codex's Tab queue key
       expect(tmux.sendKeys.mock.calls.every(call => !(call[2] as string[]).includes('Tab'))).toBe(true);
@@ -495,50 +485,75 @@ describe('server administration API', () => {
     } finally { await adminApp.close(); await rm(directory, { recursive: true, force: true }); }
   }, 15_000);
 
-  it('closes a legacy advisor recovered after an update restart', async () => {
+  // a completed status can clean up recovered panes without touching a colliding active target
+  it('cleans the exact completed advisor and defers ambiguous legacy cleanup', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const targetSha = '2'.repeat(40);
+    const collidingSha = `${targetSha.slice(0, 7)}${'3'.repeat(33)}`;
     const socket = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const legacy = stated({ id: 'legacy-advisor', pane: { paneId: '%7', sessionId: 'socket:$7', socketFingerprint: 'socket' }, home: '/host/repo', displayLabel: 'Update Advisor 2222222', title: 'Ready' });
-    let closed = false;
+    const completed = { ...legacy, id: 'complete-advisor', pane: { ...legacy.pane, paneId: '%8' }, displayLabel: updateAdvisorLabel(targetSha) };
+    const active = { ...legacy, id: 'active-advisor', pane: { ...legacy.pane, paneId: '%9' }, displayLabel: updateAdvisorLabel(collidingSha) };
+    const agents = new Map([legacy, completed, active].map(agent => [agent.id, agent]));
+    let activeTarget: string | undefined = collidingSha;
     let dashboardFails = false;
     const discovery = { worktreesNow: () => [],
-      dashboard: async () => { if (dashboardFails) throw new Error('tmux unavailable'); return { generation: 1, places: [], agents: closed ? [] : [legacy], projects: [] }; },
-      target: async (id: string) => !closed && id === legacy.id ? { agent: legacy, socket } : undefined
+      // preserve the cleanup retry path after a discovery failure
+      dashboard: async () => {
+        if (dashboardFails) throw new Error('tmux unavailable');
+        return { generation: 1, places: [], agents: [...agents.values()], projects: [] };
+      },
+      // resolve only a pane that has not been closed
+      target: async (id: string) => agents.has(id) ? { agent: agents.get(id), socket } : undefined
     };
-    const tmux = { close: vi.fn(async () => { closed = true; return true; }) };
-    const serverAdmin = { updateStatus: async () => ({ id: 'server_update_advisor_1234', kind: 'update' as const, state: 'complete' as const, targetSha }), updateAvailable: async () => false, activeUpdateTarget: async () => undefined, revision: async () => undefined };
+    // remove only the pane selected by the live server cleanup
+    const tmux = { close: vi.fn(async (_socket: unknown, paneId: string) => agents.delete([...agents.values()].find(agent => agent.pane.paneId === paneId)?.id ?? '')) };
+    const serverAdmin = { updateStatus: async () => ({ id: 'server_update_advisor_1234', kind: 'update' as const, state: 'complete' as const, targetSha }), updateAvailable: async () => false, activeUpdateTarget: async () => activeTarget, revision: async () => undefined };
     const adminApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 25).toString('base64url')), discovery: discovery as never, tmux: tmux as never, serverAdmin: serverAdmin as never });
     try {
       const boot = await adminApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await adminApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
       const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
 
-      const status = await adminApp.inject({ method: 'GET', url: '/api/server/update/server_update_advisor_1234', headers });
-
-      expect(status.statusCode).toBe(200);
-      expect(tmux.close).toHaveBeenCalledWith(socket, legacy.pane.paneId);
+      // leave a discovered pane alone while discovery is unavailable
       dashboardFails = true;
-      const failedCleanup = await adminApp.inject({ method: 'DELETE', url: '/api/server/update-advisor', headers, payload: { targetSha } });
-      expect(failedCleanup.statusCode).toBe(503);
+      const status = await adminApp.inject({ method: 'GET', url: '/api/server/update/server_update_advisor_1234', headers });
+      expect(status.statusCode).toBe(200);
+      expect(tmux.close).not.toHaveBeenCalled();
+      dashboardFails = false;
+      const retried = await adminApp.inject({ method: 'GET', url: '/api/server/update/server_update_advisor_1234', headers });
+      expect(retried.statusCode).toBe(200);
+      expect(tmux.close).toHaveBeenCalledExactlyOnceWith(socket, completed.pane.paneId);
+      activeTarget = undefined;
+      await adminApp.inject({ method: 'GET', url: '/api/server/update/server_update_advisor_1234', headers });
+      expect(tmux.close).toHaveBeenCalledWith(socket, legacy.pane.paneId);
+      expect(tmux.close).not.toHaveBeenCalledWith(socket, active.pane.paneId);
     } finally { await adminApp.close(); }
   }, 15_000);
 
-  it('keeps only the newest same-target update advisor', async () => {
+  // deduplicate only exact matches and leave an actively updating revision alone
+  it('reuses the newest exact advisor without reusing a colliding active or legacy pane', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const targetSha = '2'.repeat(40);
+    const activeSha = `${targetSha.slice(0, 7)}${'3'.repeat(33)}`;
     const socket = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
-    const older = stated({ id: 'older-advisor', pane: { paneId: '%8', sessionId: 'socket:$8', socketFingerprint: 'socket' }, home: '/host/repo', displayLabel: 'Update Advisor v4 2222222', title: 'Framework' });
+    const older = stated({ id: 'older-advisor', pane: { paneId: '%8', sessionId: 'socket:$8', socketFingerprint: 'socket' }, home: '/host/repo', displayLabel: updateAdvisorLabel(targetSha), title: 'Framework' });
     const newer = { ...older, id: 'newer-advisor', pane: { ...older.pane, paneId: '%9', sessionId: 'socket:$9' }, title: 'remoteagents' };
+    const active = { ...older, id: 'active-advisor', pane: { ...older.pane, paneId: '%10' }, displayLabel: updateAdvisorLabel(activeSha) };
+    const legacy = { ...older, id: 'legacy-advisor', pane: { ...older.pane, paneId: '%11' }, displayLabel: 'Update Advisor v4 2222222' };
     let olderClosed = false;
     const discovery = { worktreesNow: () => [],
-      dashboard: async () => ({ generation: 1, places: [], agents: [...(olderClosed ? [] : [older]), newer], projects: [] }),
-      target: async (id: string) => id === newer.id ? { agent: newer, socket } : !olderClosed && id === older.id ? { agent: older, socket } : undefined
+      dashboard: async () => ({ generation: 1, places: [], agents: [...(olderClosed ? [] : [older]), newer, active, legacy], projects: [] }),
+      // let the route see the same candidates as its inventory
+      target: async (id: string) => {
+        const agent = [...(olderClosed ? [] : [older]), newer, active, legacy].find(candidate => candidate.id === id);
+        return agent === undefined ? undefined : { agent, socket };
+      }
     };
     const launch = { launchUpdateAdvisor: vi.fn(async () => true) };
     const tmux = { pastePrompt: vi.fn(async () => true), queue: vi.fn(async () => true), close: vi.fn(async (_socket: unknown, paneId: string) => { if (paneId === older.pane.paneId) olderClosed = true; return true; }) };
     const preview = { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha, fastForwardable: true, commitCount: 1, commits: [], commitsTruncated: false, filesTruncated: false, advisory: { required: true, reasons: [{ kind: 'config', paths: ['.env.example'] }] } };
-    const serverAdmin = { updatePreview: async () => preview, updateAdvisor: () => ({ repository: '/host/repo', prompt: 'Inspect the fixed committed range without changing it.' }), updateAvailable: async () => true, activeUpdateTarget: async () => undefined, revision: async () => undefined };
+    const serverAdmin = { updatePreview: async () => preview, updateAdvisor: () => ({ repository: '/host/repo', prompt: 'Inspect the fixed committed range without changing it.' }), updateAvailable: async () => true, activeUpdateTarget: async () => activeSha, revision: async () => undefined };
     const adminApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 24).toString('base64url')), discovery: discovery as never, launch: launch as never, tmux: tmux as never, serverAdmin: serverAdmin as never });
     try {
       const boot = await adminApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
@@ -549,11 +564,113 @@ describe('server administration API', () => {
 
       expect(advisor.statusCode).toBe(201);
       expect(advisor.json()).toEqual({ agentId: newer.id, targetSha });
-      expect(tmux.close).toHaveBeenCalledWith(socket, older.pane.paneId);
-      expect(tmux.close).not.toHaveBeenCalledWith(socket, newer.pane.paneId);
+      expect(tmux.close).toHaveBeenCalledExactlyOnceWith(socket, older.pane.paneId);
       expect(launch.launchUpdateAdvisor).not.toHaveBeenCalled();
       expect(tmux.pastePrompt).not.toHaveBeenCalled();
     } finally { await adminApp.close(); }
+  }, 15_000);
+
+  // hold a launch across an upstream change and a later cleanup across another open
+  it('serializes different targets through launch, supersession and completion cleanup', async () => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const firstSha = '2'.repeat(40);
+    const secondSha = '3'.repeat(40);
+    const activeSha = '4'.repeat(40);
+    const socket = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
+    const prompt = 'Inspect the fixed committed range without changing it.';
+    // give every target a different pane
+    const pane = (sha: string, paneId: string, displayLabel: string) => stated({ id: sha, pane: { paneId, sessionId: `socket:${paneId}`, socketFingerprint: 'socket' }, home: '/host/repo', displayLabel, title: 'Ready' });
+    const agents = new Map([[activeSha, pane(activeSha, '%7', updateAdvisorLabel(activeSha))]]);
+    let targetSha = firstSha;
+    const launchStarted = Promise.withResolvers<void>();
+    const allowLaunch = Promise.withResolvers<void>();
+    const cleanupStarted = Promise.withResolvers<void>();
+    const allowCleanup = Promise.withResolvers<void>();
+    const overlappingRequest = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    let previewChecks = 0;
+    const discovery = { worktreesNow: () => [],
+      dashboard: async () => ({ generation: 1, places: [], agents: [...agents.values()], projects: [] }),
+      target: async (id: string) => agents.has(id) ? { agent: agents.get(id), socket } : undefined
+    };
+    const launch = {
+      // keep the older launch between its inventory and pane creation
+      launchUpdateAdvisor: async (_repository: string, sha: string) => {
+        if (sha === firstSha) { launchStarted.resolve(); await allowLaunch.promise; }
+        agents.set(sha, pane(sha, sha === firstSha ? '%8' : '%9', updateAdvisorPendingLabel(sha)));
+        return true;
+      }
+    };
+    // update only a still-live fixture pane
+    const changePane = (paneId: string, change: (agent: ReturnType<typeof pane>) => void): boolean => {
+      const agent = [...agents.values()].find(candidate => candidate.pane.paneId === paneId);
+      if (agent === undefined) return false;
+      change(agent);
+      return true;
+    };
+    const tmux = {
+      pastePrompt: async () => true, capture: async () => `› ${prompt} `,
+      // show the composer has submitted
+      sendKeys: async (_socket: unknown, paneId: string) => changePane(paneId, agent => { agent.title = '⠋ Reviewing'; }),
+      // persist the transition to a reusable advisor
+      label: async (_socket: unknown, paneId: string, label: string) => changePane(paneId, agent => { agent.displayLabel = label; }),
+      // hold completion cleanup while a separate browser open is admitted
+      close: async (_socket: unknown, paneId: string) => {
+        if (paneId === '%9') { cleanupStarted.resolve(); await allowCleanup.promise; }
+        return changePane(paneId, agent => { agents.delete(agent.id); });
+      }
+    };
+    const serverAdmin = {
+      // count preview reads when the request actually enters the advisor lifecycle
+      updatePreview: async () => {
+        previewChecks += 1;
+        return { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha, fastForwardable: true, commitCount: 1, commits: [], commitsTruncated: false, filesTruncated: false, advisory: { required: true, reasons: [] } };
+      },
+      updateAdvisor: () => ({ repository: '/host/repo', prompt }),
+      activeUpdateTarget: async () => activeSha,
+      updateStatus: async () => ({ id: 'server_update_advisor_1234', kind: 'update' as const, state: 'complete' as const, targetSha: secondSha }),
+      revision: async () => undefined
+    };
+    const adminApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 26).toString('base64url')), discovery: discovery as never, launch: launch as never, tmux: tmux as never, serverAdmin: serverAdmin as never });
+    // wait until the competing handler has reached its first async boundary
+    adminApp.addHook('preHandler', async request => {
+      const admitted = overlappingRequest[Number(request.headers['x-test-overlap'])];
+      if (admitted !== undefined) setImmediate(() => admitted.resolve());
+    });
+    try {
+      const boot = await adminApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
+      const login = await adminApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+      const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
+      // open the pinned target and optionally signal competing admission
+      const open = (sha: string, overlap?: string) => adminApp.inject({ method: 'POST', url: '/api/server/update-advisor', headers: { ...headers, ...(overlap === undefined ? {} : { 'x-test-overlap': overlap }) }, payload: { targetSha: sha } });
+
+      const first = open(firstSha);
+      await launchStarted.promise;
+      targetSha = secondSha;
+      const second = open(secondSha, '0');
+      await overlappingRequest[0]!.promise;
+      const checksWhileLaunching = previewChecks;
+      allowLaunch.resolve();
+      expect((await first).statusCode).toBe(201);
+      expect((await second).statusCode).toBe(201);
+      expect(checksWhileLaunching).toBe(1);
+      expect([...agents.keys()]).toEqual([activeSha, secondSha]);
+
+      const complete = adminApp.inject({ method: 'GET', url: '/api/server/update/server_update_advisor_1234', headers });
+      await cleanupStarted.promise;
+      targetSha = activeSha;
+      const resumed = open(activeSha, '1');
+      await overlappingRequest[1]!.promise;
+      const checksWhileCleaning = previewChecks;
+      allowCleanup.resolve();
+      expect((await complete).statusCode).toBe(200);
+      expect((await resumed).json()).toEqual({ agentId: activeSha, targetSha: activeSha });
+      expect(checksWhileCleaning).toBe(2);
+      expect([...agents.keys()]).toEqual([activeSha]);
+    } finally {
+      allowLaunch.resolve();
+      allowCleanup.resolve();
+      await adminApp.close();
+    }
   }, 15_000);
 });
 

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { latestCompletedAssistantMessage } from '../../server/src/adapters/codex-turns.js';
-import { installPaneMock, paneInputList, pushBytes, pushMetadata, pushQuestion } from './pane-stream-mock';
+import { installPaneMock, paneInputList, paneLastViewport, pushBytes, pushMetadata, pushQuestion } from './pane-stream-mock';
 
 // open the reviewed host update from the current server submenu
 const openUpstreamUpdate = async (page: Page) => {
@@ -456,7 +456,6 @@ test('opens an advisor for flagged update paths before enabling Update', async (
   // parse the current Codex completion footer through the production handoff
   const completedResponse = latestCompletedAssistantMessage(`• No host migration is required for this update.\n\n\x1b[2m  Worked for 5m 29s • 08:01\x1b[0m`)?.text ?? '';
   let advisorLaunched = false;
-  let advisorStops = 0;
   const advisorAnswers: Array<{ questionId?: string; index?: number }> = [];
   await page.setViewportSize({ width: 430, height: 932 });
   await installPaneMock(page);
@@ -466,7 +465,7 @@ test('opens an advisor for flagged update paths before enabling Update', async (
     // restore one controlling session
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // reveal the dedicated advisor after launch
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: advisorLaunched ? 2 : 1, agents: advisorLaunched ? [{ id: 'update-advisor', sessionId: 'socket:$2', home: '/workspace', displayLabel: `Update Advisor v4 ${targetSha.slice(0, 7)}`, title: 'Ready', queuedPromptCount: 0 }] : [], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: advisorLaunched ? 2 : 1, agents: advisorLaunched ? [{ id: 'update-advisor', sessionId: 'socket:$2', home: '/workspace', displayLabel: `Update Advisor v5 ${targetSha}`, title: 'Ready', queuedPromptCount: 0 }] : [], projects: [] } });
     // report remote commits on main
     if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: true } });
     // preview one flagged configuration change
@@ -475,12 +474,6 @@ test('opens an advisor for flagged update paths before enabling Update', async (
     if (url.pathname === '/api/server/update-advisor' && request.method() === 'POST') {
       advisorLaunched = true;
       return route.fulfill({ status: 201, json: { agentId: 'update-advisor', targetSha } });
-    }
-    // stop the modal-owned advisor
-    if (url.pathname === '/api/server/update-advisor' && request.method() === 'DELETE') {
-      advisorStops += 1;
-      advisorLaunched = false;
-      return route.fulfill({ status: 204 });
     }
     // authorize advisor output
     if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
@@ -618,7 +611,68 @@ test('opens an advisor for flagged update paths before enabling Update', async (
   await dialog.getByRole('button', { name: 'Close server update' }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole('button', { name: /^Switch server/u })).toBeFocused();
-  await expect.poll(() => advisorStops).toBe(1);
+});
+
+// closing one browser's review must leave the same pane available to the next controller
+test('resumes the shared update advisor from another browser', async ({ baseURL, browser, page }) => {
+  const targetSha = '4'.repeat(40);
+  const advisor = { id: 'shared-advisor', sessionId: 'socket:$2', home: '/workspace', displayLabel: `Update Advisor v5 ${targetSha}`, title: 'Ready', queuedPromptCount: 0 };
+  const guidance = 'No host migration is required.';
+  let launches = 0;
+  let advisorRunning = false;
+  // share server state across two isolated browser contexts
+  const review = async (client: Page) => {
+    await installPaneMock(client);
+    // present the same pending update and server pane to both browsers
+    await client.route('**/api/**', async route => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      // restore the controller for this fixture phase
+      if (pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+      // report the live pane once opened
+      if (pathname === '/api/dashboard') return route.fulfill({ json: { generation: advisorRunning ? 2 : 1, agents: advisorRunning ? [advisor] : [], projects: [] } });
+      // expose the upstream entry in the server menu
+      if (pathname === '/api/server/update-available') return route.fulfill({ json: { available: true } });
+      // flag one configuration change for review
+      if (pathname === '/api/server/update-preview') return route.fulfill({ json: { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha, fastForwardable: true, commitCount: 1, commits: [], commitsTruncated: false, filesTruncated: false, advisory: { required: true, reasons: [{ kind: 'config', paths: ['.env.example'] }] } } });
+      // emulate the host starting or reusing its pane
+      if (pathname === '/api/server/update-advisor' && request.method() === 'POST') {
+        // count a launch only when there is no surviving pane
+        if (!advisorRunning) launches += 1;
+        advisorRunning = true;
+        return route.fulfill({ status: 201, json: { agentId: advisor.id, targetSha } });
+      }
+      // emulate the former modal cleanup to catch stale close requests
+      if (pathname === '/api/server/update-advisor' && request.method() === 'DELETE') {
+        advisorRunning = false;
+        return route.fulfill({ status: 204 });
+      }
+      // authorize pane replay
+      if (pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
+      return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+    });
+    await client.goto('/');
+    await openUpstreamUpdate(client);
+    await expect.poll(() => paneLastViewport(client, advisor.id)).toBeDefined();
+    // replay the server pane's completed guidance on attach
+    await pushMetadata(client, advisor.id, guidance);
+    const dialog = client.getByRole('dialog', { name: 'Review update' });
+    await expect(dialog.getByRole('checkbox')).toBeVisible();
+    return dialog;
+  };
+  const first = await review(page);
+  await first.getByRole('checkbox').check();
+  await first.getByRole('button', { name: 'Close server update' }).click();
+  await expect(first).toHaveCount(0);
+  const other = await browser.newContext({ baseURL });
+  try {
+    const second = await review(await other.newPage());
+    expect(launches).toBe(1);
+    await expect(second.getByRole('checkbox')).not.toBeChecked();
+    await expect(second.getByRole('button', { name: 'Update', exact: true })).toBeDisabled();
+  } finally {
+    await other.close();
+  }
 });
 
 // keep approval questions interactive before the advisor publishes a completed response
@@ -641,7 +695,7 @@ test('shows and answers advisor questions while completed guidance is pending', 
     // publish current advisor state and any server-derived question
     if (url.pathname === '/api/dashboard') {
       dashboardRequests += 1;
-      const agents = advisorLaunched ? [{ id: 'update-advisor', sessionId: 'socket:$2', home: '/workspace', displayLabel: `Update Advisor v4 ${targetSha.slice(0, 7)}`, title: dashboardQuestion === undefined ? 'Ready' : 'Question', attention: dashboardQuestion === undefined ? undefined : 'question', question: dashboardQuestion, queuedPromptCount: 0 }] : [];
+      const agents = advisorLaunched ? [{ id: 'update-advisor', sessionId: 'socket:$2', home: '/workspace', displayLabel: `Update Advisor v5 ${targetSha}`, title: dashboardQuestion === undefined ? 'Ready' : 'Question', attention: dashboardQuestion === undefined ? undefined : 'question', question: dashboardQuestion, queuedPromptCount: 0 }] : [];
       return route.fulfill({ json: { generation: 1, agents, projects: [] } });
     }
     // report remote commits on main
@@ -778,7 +832,7 @@ for (const requestKind of ['question', 'prompt'] as const) {
       // publish current advisor state and its optional approval
       if (url.pathname === '/api/dashboard') {
         dashboardRequests += 1;
-        const agents = advisorLaunched ? [{ id: 'update-advisor', sessionId: 'socket:$2', home: '/workspace', displayLabel: `Update Advisor v4 ${targetSha.slice(0, 7)}`, title: dashboardQuestion === undefined ? 'Ready' : 'Question', attention: dashboardQuestion === undefined ? undefined : 'question', question: dashboardQuestion, queuedPromptCount: 0 }] : [];
+        const agents = advisorLaunched ? [{ id: 'update-advisor', sessionId: 'socket:$2', home: '/workspace', displayLabel: `Update Advisor v5 ${targetSha}`, title: dashboardQuestion === undefined ? 'Ready' : 'Question', attention: dashboardQuestion === undefined ? undefined : 'question', question: dashboardQuestion, queuedPromptCount: 0 }] : [];
         return route.fulfill({ json: { generation: dashboardRequests, agents, projects: [] } });
       }
       // report remote commits on main
