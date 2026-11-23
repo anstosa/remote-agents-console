@@ -1,5 +1,6 @@
 import { inlineQuestionId } from './inline-questions.js';
 import { normalizedLines } from './capture-text.js';
+import { codexModelPickerLayout } from './codex-model-picker.js';
 import type { InlineQuestion, TmuxKey } from './types.js';
 
 // admit text only in native question editors, never in arbitrary numbered menus
@@ -129,6 +130,19 @@ function choiceQuestionText(lines: string[], start: number, interactive: boolean
  */
 export function parseChoiceQuestion(message: string): InlineQuestion | undefined {
   const lines = agentMessageLines(message);
+  const picker = codexModelPickerLayout(lines);
+  // parse the live scrolled model picker as one list of visible choices
+  if (picker !== undefined) {
+    // discard the select and back hints only from the verified picker
+    lines.length = picker.footer;
+    // the leading scroll arrow is not part of the question or a preceding menu boundary
+    if (picker.earlierArrow !== undefined) lines[picker.earlierArrow] = '';
+    // restore synthetic positions beyond nine without shifting the text columns
+    for (const [index, row] of picker.unnumbered.entries()) {
+      const line = lines[row]!;
+      lines[row] = `${line[0]} ${index + 10}. ${line.slice(6)}`;
+    }
+  }
   let lastContent = lines.length - 1;
   // find the live content boundary once rather than rescanning every rejected suffix
   while (lastContent >= 0 && (!lines[lastContent]!.trim() || questionFooter.test(lines[lastContent]!.trim()))) lastContent -= 1;

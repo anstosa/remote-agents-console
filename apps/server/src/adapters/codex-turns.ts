@@ -11,6 +11,7 @@
  */
 
 import type { SubmissionDraftState } from './types.js';
+import { codexModelPickerLayout } from './codex-model-picker.js';
 
 const selectedChoice = /^›\s+(?:\[[ xX]\]\s*)?\d+[.)]\s/u;
 // identify codex's model/worktree status row
@@ -474,11 +475,12 @@ export function latestCompletedAssistantMessage(value: string): { text: string; 
 // capture the complete response after the latest prompt
 export function latestAgentMessageFromHistory(value: string): string | undefined {
   const lines = plainTerminalText(value).split('\n');
+  const unnumberedChoices = codexModelPickerLayout(lines)?.unnumbered;
   let promptAt = -1;
   // find the latest prompt boundary
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    // ignore selected numbered choices
-    if (/^›\s+\S/u.test(lines[index]!) && !selectedChoice.test(lines[index]!)) { promptAt = index; break; }
+    // ignore both numbered and native unnumbered choice highlights
+    if (/^›\s+\S/u.test(lines[index]!) && !selectedChoice.test(lines[index]!) && !unnumberedChoices?.includes(index)) { promptAt = index; break; }
   }
   if (promptAt < 0) return undefined;
   let start = promptAt + 1;

@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { TicketStore } from '../src/auth/tickets.js';
 import { codexAdapter } from '../src/adapters/codex.js';
+import { TmuxAdapter } from '../src/tmux/adapter.js';
 import type { PaneActivitySubscriber, PaneClient, PaneStreamProvider } from '../src/tmux/control.js';
 import { testConfig, testProject } from './helpers/config.js';
 import { openPaneSocket } from './helpers/pane-socket.js';
@@ -722,6 +723,28 @@ describe('pane stream flow control', () => {
 
 describe('pane stream derive', () => {
   const question = { id: 'q', text: 'Pick one', choices: ['1. keep', '2. drop'], source: 'parsed' as const };
+
+  // the native picker must drive answer mode without sending terminal input
+  it.each(['codex', 'omx'])('frames the current %s model picker and clears it when closed', async kind => {
+    const stream = fakePaneStream();
+    const adapter = new TmuxAdapter();
+    const { tmux } = fakeTmux(stream, { captureWindow: adapter.captureWindow.bind(adapter) });
+    const conn = await connect(stream.provider, { kind, tmux });
+    await waitFor(() => conn.frames.some(frame => frame.type === 'question' && frame.question === null));
+
+    stream.setCapture('› /model\n\n  Select Model and Effort\n\n↑\n  9. Ninth model\n›     Tenth model (current)\n  enter select · esc back');
+    stream.activity();
+    // wait for the real parser's answer frame, not a shaped browser fixture
+    const isModelQuestion = (frame: { type?: unknown; question?: unknown }) => frame.type === 'question' && (frame.question as { text?: string } | null)?.text === 'Select Model and Effort';
+    await waitFor(() => conn.frames.some(isModelQuestion));
+    expect(conn.frames.find(isModelQuestion)?.question).toMatchObject({ field: { kind: 'choice', choices: ['Ninth model', 'Tenth model (current)'] }, pane: { selectedIndex: 1 } });
+
+    const previous = conn.frames.length;
+    stream.setCapture('› Ask Codex to do anything\n  ? for shortcuts');
+    stream.activity();
+    await waitFor(() => conn.frames.slice(previous).some(frame => frame.type === 'question' && frame.question === null));
+    expect(stream.inputs).toHaveLength(0);
+  });
 
   // open native follow-up chrome before the existing question frame enters answer mode
   it.each(['codex', 'omx'])('opens a queued %s question once and frames its choices', async kind => {

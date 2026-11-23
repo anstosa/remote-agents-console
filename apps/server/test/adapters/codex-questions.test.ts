@@ -214,6 +214,48 @@ describe('queued Codex questions', () => {
 
 // lock cursor-aware parsing without changing question identity
 describe('Codex menu highlight', () => {
+  // codex 0.171 puts its overflow arrow and current shortcuts after the choices
+  it.each(['enter select · esc back', 'enter select ·\n  esc back'])('parses the current model picker with footer %j', footer => {
+    const capture = menu(1).replace('Press enter to confirm or esc to go back', `↓\n  ${footer}`);
+    const question = parseCodexQuestion(capture);
+
+    expect(question).toEqual(parseCodexQuestion(menu(1)));
+    expect(question).toMatchObject({ text: 'Select Model and Effort', pane: { selectedIndex: 1 } });
+    expect(parseCodexQuestion(`${capture}\n\n› Ask Codex to do anything\n  ? for shortcuts`)).toBeUndefined();
+  });
+
+  // ordinary text and other selectors must not acquire the model picker's footer rules
+  it.each([
+    'enter select the deployment target',
+    '  enter select · esc back',
+    '  enter select ·\n  esc back'
+  ])('does not classify %j as a model-picker footer on another list', footer => {
+    const capture = `Select deployment target\n› 1. Staging\n  2. Production\n\n${footer}`;
+    expect(parseCodexQuestion(capture)).toBeUndefined();
+  });
+
+  // scrolled model lists show an up arrow and omit numeric shortcuts after nine
+  it('keeps the highlighted model and wrapped descriptions on a scrolled page', () => {
+    const capture = [
+      '› /model', '', '  Select Model and Effort', '', '↑',
+      '  7. Seventh model          For quick work.',
+      '  8. Eighth model           For everyday work.',
+      '  9. Ninth model            For fast work.',
+      '      Tenth model           For complex coding',
+      '                            and professional work.',
+      '      Eleventh model        For simple tasks.',
+      '›     Twelfth model         For visual tasks.',
+      '  enter select · esc back', ''
+    ].join('\n');
+    const question = parseCodexQuestion(capture);
+    expect(question).toMatchObject({
+      text: 'Select Model and Effort',
+      choices: ['Seventh model For quick work.', 'Eighth model For everyday work.', 'Ninth model For fast work.', 'Tenth model For complex coding and professional work.', 'Eleventh model For simple tasks.', 'Twelfth model For visual tasks.'],
+      pane: { selectedIndex: 5 }
+    });
+    expect(codexSubmission.selectOption(2, question?.pane?.selectedIndex)).toEqual(['Up', 'Up', 'Up', 'Enter']);
+  });
+
   // keep the displayed cursor position separate from the choice labels
   it('retains the highlighted choice and keeps the id stable when it moves', () => {
     const first = parseChoiceQuestion(menu(0));
