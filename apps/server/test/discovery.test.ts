@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { renameSync } from 'node:fs';
+import { lstat, mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { createConnection, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DiscoveryService, gitUpstreamSummary, ProcSocketFinder } from '../src/discovery/service.js';
@@ -15,6 +16,24 @@ import type { WorktreeEntry } from '../src/git/worktrees.js';
 import { AgentNotificationCoordinator } from '../src/notifications.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
 import { testProject } from './helpers/config.js';
+
+// use real unix connections except when a test needs to time a replacement
+vi.mock('node:net', async importOriginal => {
+  const net = await importOriginal<typeof import('node:net')>();
+  return { ...net, createConnection: vi.fn(net.createConnection) };
+});
+
+// wait for the kernel to bind the socket file
+const listen = (server: Server, path: string) => new Promise<void>((resolve, reject) => server.once('error', reject).listen(path, resolve));
+// wait for the listener to release the endpoint
+const close = (server: Server) => new Promise<void>(resolve => server.close(() => resolve()));
+// move the socket file so closing the listener cannot unlink it
+const abandon = async (path: string) => {
+  const server = createServer();
+  const bound = `${path}.bound`;
+  await listen(server, bound);
+  try { await rename(bound, path); } finally { await close(server); }
+};
 
 // one `git worktree list --porcelain` entry; omit `branch` for a detached checkout
 const entry = (path: string, branch?: string, extra: Partial<WorktreeEntry> = {}): WorktreeEntry => ({ path, head: 'abcdef1234567', detached: branch === undefined, bare: false, locked: false, prunable: false, ...(branch === undefined ? {} : { branch }), ...extra });
@@ -175,19 +194,119 @@ describe('DiscoveryService dashboard', () => {
     expect(command).toHaveBeenCalledTimes(1);
   });
 
-  it('discovers tmux sockets directly from the mounted socket directory', async () => {
+  // cover a mounted socket file left behind without a listening process
+  it.each([[true, true], [false, true], [true, false]])('ignores an orphaned named socket (default responds: %s, named responds: %s)', async (hostListening, namedResponds) => {
     const directory = await mkdtemp(join(tmpdir(), 'rac-tmux-'));
-    const socketPath = join(directory, 'default');
-    const server = createServer();
+    const hostSocket = join(directory, 'default');
+    const namedSocket = join(directory, 'named');
+    const orphan = join(directory, 'orphan');
+    const servers = [createServer(), ...(hostListening ? [createServer()] : [])];
     const previous = process.env.RAC_HOST_TMUX_DIR;
     process.env.RAC_HOST_TMUX_DIR = directory;
     try {
-      await new Promise<void>((resolve, reject) => server.once('error', reject).listen(socketPath, resolve));
-      await expect(new ProcSocketFinder().find()).resolves.toEqual([expect.objectContaining({ path: socketPath })]);
+      await abandon(orphan);
+      // the host socket is expected even when its listener is gone
+      if (!hostListening) await abandon(hostSocket);
+      await Promise.all(servers.map((server, index) => { /* bind only the fixture's live endpoints */ return listen(server, index === 0 ? namedSocket : hostSocket); }));
+
+      // let the real finder feed socket identities to dashboard discovery
+      const listPaneInventory = vi.fn(async ({ path }: SocketRef) => (path === namedSocket && namedResponds) || (path === hostSocket && hostListening)
+        ? { status: 'available' as const, panes: [] }
+        : { status: 'unavailable' as const });
+      const service = new DiscoveryService(new ProcSocketFinder(), { listPaneInventory } as never, processInspector());
+      const dashboard = await service.dashboard();
+
+      expect(listPaneInventory.mock.calls.map(([socket]) => socket.path).sort()).toEqual([hostSocket, namedSocket]);
+      expect(dashboard.tmuxOutage?.unavailableSockets).toBe(hostListening && namedResponds ? undefined : 1);
+      expect((await lstat(orphan)).isSocket()).toBe(true);
     } finally {
-      await new Promise<void>(resolve => server.close(() => resolve()));
+      await Promise.all(servers.map(close));
+      // restore the socket mount selector before removing the fixture
       if (previous === undefined) delete process.env.RAC_HOST_TMUX_DIR; else process.env.RAC_HOST_TMUX_DIR = previous;
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // replace the same pathname before accepting or immediately after refusing
+  it.each([true, false])('probes the replacement rather than trusting the first identity (first probe accepts: %s)', async accepts => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-tmux-replace-'));
+    const mount = join(directory, 'mount');
+    const path = join(mount, 'named');
+    const alternate = join(directory, 'replacement');
+    const live = createServer();
+    try {
+      await mkdir(mount);
+      vi.stubEnv('RAC_HOST_TMUX_DIR', mount);
+      await abandon(path);
+      await listen(live, alternate);
+      const original = await lstat(path);
+      const { createConnection: connect } = await vi.importActual<typeof import('node:net')>('node:net');
+      vi.mocked(createConnection).mockClear();
+      // deterministically control which endpoint supplied the first result
+      vi.mocked(createConnection).mockImplementationOnce(() => {
+        // let a successful first probe connect to the new inode
+        if (accepts) renameSync(alternate, path);
+        const probe = connect({ path });
+        // install the live replacement before discovery handles a refusal
+        if (!accepts) probe.once('error', () => { /* replace the refused socket */ renameSync(alternate, path); });
+        return probe;
+      });
+      const found = await new ProcSocketFinder().find();
+      const replacement = await lstat(path);
+      expect(replacement.ino).not.toBe(original.ino);
+      expect(found).toEqual([expect.objectContaining({ path, inode: replacement.ino })]);
+      expect(vi.mocked(createConnection).mock.calls).toEqual([[{ path }], [{ path }]]);
+    } finally {
+      vi.mocked(createConnection).mockReset();
+      vi.unstubAllEnvs();
+      await close(live);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // a long path must reach ordinary health checks instead of being probed at a truncated address
+  it('retains a live socket exposed at an overlong canonical mount path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-tmux-long-'));
+    const live = createServer();
+    try {
+      const mount = join(root, 'é'.repeat(60));
+      await mkdir(mount);
+      const alias = join(root, 'alias');
+      await symlink(mount, alias);
+      const bound = join(root, 'short');
+      const path = join(mount, 'named');
+      await listen(live, bound);
+      await rename(bound, path);
+      vi.stubEnv('RAC_HOST_TMUX_DIR', alias);
+      vi.mocked(createConnection).mockClear();
+      const listPaneInventory = vi.fn().mockResolvedValue({ status: 'unavailable' });
+      const service = new DiscoveryService(new ProcSocketFinder(), { listPaneInventory } as never, processInspector());
+      expect((await service.dashboard()).tmuxOutage?.unavailableSockets).toBe(1);
+      expect(listPaneInventory).toHaveBeenCalledWith(expect.objectContaining({ path }));
+      expect(createConnection).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      await close(live);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // a filtered-to-empty mount does not depend on host procfs
+  it('ignores an orphan-only mount without a host socket table', async () => {
+    const mount = await mkdtemp(join(tmpdir(), 'rac-tmux-orphans-'));
+    const path = join(mount, 'orphan');
+    try {
+      await abandon(path);
+      await symlink(path, join(mount, 'alias'));
+      vi.stubEnv('RAC_HOST_TMUX_DIR', mount);
+      vi.stubEnv('RAC_HOST_UNIX_SOCKETS', join(mount, 'missing'));
+      vi.mocked(createConnection).mockClear();
+      await expect(new ProcSocketFinder().find()).resolves.toEqual([]);
+      expect(createConnection).toHaveBeenCalledExactlyOnceWith({ path });
+      expect((await lstat(path)).isSocket()).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(mount, { recursive: true, force: true });
     }
   });
 

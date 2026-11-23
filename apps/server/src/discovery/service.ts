@@ -1,7 +1,8 @@
 import { lstat, realpath, readFile, readdir } from 'node:fs/promises';
+import { createConnection } from 'node:net';
 import { getuid } from 'node:process';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { run } from '../tmux/command.js';
 import { TmuxAdapter } from '../tmux/adapter.js';
 import { ProcInspector, type ProcessInspector } from './processes.js';
@@ -43,15 +44,52 @@ export type TmuxReplySuggestionTarget = {
   process: { pid: number; startTime: string };
   generation: number;
 };
+
+// a socket file can disappear or outlive its listener
+function socketIsAbandoned(path: string): Promise<boolean> {
+  // older node runtimes can truncate paths past linux's unix address limit
+  if (Buffer.byteLength(path) > 107) return Promise.resolve(false);
+  // keep the path if the probe cannot establish whether a listener exists
+  return new Promise(resolve => {
+    const connection = createConnection({ path });
+    // close the probe without sending a tmux command
+    const finish = (refused: boolean) => { connection.destroy(); resolve(refused); };
+    connection.once('connect', () => { /* listening does not imply tmux is responsive */ finish(false); });
+    connection.once('error', (error: NodeJS.ErrnoException) => {
+      // do not mistake permission or resource errors for a missing listener
+      finish(error.code === 'ECONNREFUSED' || error.code === 'ENOENT');
+    });
+    connection.setTimeout(500, () => { /* leave timeouts to normal tmux health checks */ finish(false); });
+  });
+}
+
 export class ProcSocketFinder implements SocketFinder {
-  private async socket(path: string, uid: number): Promise<SocketRef | undefined> {
+  private async socket(path: string, uid: number, resolveEntry = true): Promise<SocketRef | undefined> {
     try {
       const info = await lstat(path);
       if (!info.isSocket() || info.uid !== uid) return undefined;
-      const canonical = await realpath(path).catch(() => path);
+      const canonical = resolveEntry ? await realpath(path).catch(() => path) : path;
       const key = `${canonical}:${info.dev}:${info.ino}`;
       return { fingerprint: createHash('sha256').update(key).digest('base64url').slice(0, 22), path: canonical, device: Number(info.dev), inode: Number(info.ino) };
     } catch { return undefined; }
+  }
+
+  // check a mounted name without attributing its probe to a replacement inode
+  private async mountedSocket(socket: SocketRef, uid: number): Promise<SocketRef | undefined> {
+    // keep the configured default in recovery even without a listener
+    if (basename(socket.path) === 'default') return socket;
+    let candidate = socket;
+    // retry one verified replacement without chasing a rapidly changing name
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const abandoned = await socketIsAbandoned(candidate.path);
+      const current = await this.socket(candidate.path, uid, false);
+      // a vanished or ineligible entry no longer identifies a tmux server
+      if (current === undefined) return undefined;
+      // apply the result only to the inode that was checked
+      if (current.fingerprint === candidate.fingerprint) return abandoned ? undefined : current;
+      candidate = current;
+    }
+    return undefined;
   }
 
   async find(): Promise<SocketRef[]> {
@@ -59,9 +97,15 @@ export class ProcSocketFinder implements SocketFinder {
     if (uid === undefined) throw new Error('Linux UID is required');
     const mountedSocketRoot = process.env.RAC_HOST_TMUX_DIR;
     if (mountedSocketRoot !== undefined) {
-      const entries = await readdir(mountedSocketRoot, { withFileTypes: true }).catch(() => []);
-      const sockets = (await Promise.all(entries.map(entry => this.socket(join(mountedSocketRoot, entry.name), uid)))).filter((socket): socket is SocketRef => socket !== undefined);
-      if (sockets.length > 0) return sockets;
+      // canonicalize only the directory and never resolve a mounted child as a symlink
+      const mount = await realpath(mountedSocketRoot).catch(() => mountedSocketRoot);
+      const entries = await readdir(mount, { withFileTypes: true }).catch(() => []);
+      const sockets = (await Promise.all(entries.map(entry => { /* check the final component directly */ return this.socket(join(mount, entry.name), uid, false); }))).filter((socket): socket is SocketRef => socket !== undefined);
+      // probe the mount directly because the host's socket table need not be readable
+      if (sockets.length > 0) {
+        const admitted = await Promise.all(sockets.map(socket => { /* probe only mounted candidates */ return this.mountedSocket(socket, uid); }));
+        return admitted.filter((socket): socket is SocketRef => socket !== undefined);
+      }
     }
 
     const procRoot = process.env.RAC_HOST_PROC ?? '/proc';
