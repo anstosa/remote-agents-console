@@ -113,8 +113,14 @@ test('the tab rolls up the most urgent state and viewing an Agent through the sw
   await switcher(page).click();
   const menu = page.getByRole('menu', { name: 'Agents at Cora' });
   const done = menu.getByRole('menuitemradio', { name: /Conversation agent-2/u });
+  const working = menu.getByRole('menuitemradio', { name: /Conversation agent-1/u });
   await expectStationaryStatus(done);
-  await expectProgressBorder(menu.getByRole('menuitemradio', { name: /Conversation agent-1/u }), 'peach');
+  await expectProgressBorder(working, 'peach');
+  // cap both persistent status surfaces in the picker and panel header
+  await expect(working.locator(':scope > .update-progress-ring')).toHaveCSS('--progress-indicator-iterations', '3');
+  const workingStatus = agentPanel(page).locator('.panel-header-title > .agent-state-pill');
+  await expect(workingStatus).toHaveAttribute('aria-busy', 'true');
+  await expect(workingStatus.locator(':scope > .update-progress-ring')).toHaveCSS('--progress-indicator-iterations', '3');
   await done.click();
   await expect(cora).not.toHaveClass(/unread/u);
   await expect(cora).toHaveClass(/status-working/u);

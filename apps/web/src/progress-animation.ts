@@ -2,7 +2,7 @@ export type ProgressKind = 'working' | 'loading';
 
 const progressAnimations = new Set(['update-border-orbit', 'loading-border-orbit', 'progress-spinner']);
 
-// align only active infinite progress animations to the document clock
+// align active progress animations to the document clock
 function synchronizeRing(ring: Element): void {
   // include the border and compact-spinner pseudo elements
   for (const animation of ring.getAnimations({ subtree: true })) {
@@ -11,9 +11,11 @@ function synchronizeRing(ring: Element): void {
     const effect = animation.effect;
     // preserve paused animations and non-document timelines
     if (!(effect instanceof KeyframeEffect) || effect.target !== ring || animation.timeline !== document.timeline || animation.playState !== 'running') continue;
-    // never seek a finite animation past its final frame
-    if (effect.getTiming().iterations !== Infinity) continue;
-    animation.startTime = 0;
+    const { duration, iterations } = effect.getTiming();
+    const start = animation.startTime;
+    // snap finite runs to the previous cycle without skipping their motion
+    if (typeof start !== 'number' || typeof duration !== 'number' || duration <= 0) continue;
+    animation.startTime = iterations === Infinity ? 0 : start - start % duration;
   }
 }
 

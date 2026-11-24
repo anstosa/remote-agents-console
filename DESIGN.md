@@ -274,8 +274,11 @@ Fresh stream seeds clear the skeleton; explicit failure reasons remain readable.
 Startup/auth and fullscreen connection loaders retain a constant-speed turn.
 Each border type shares the document timeline, including late mounts and portals.
 Reduced motion makes skeletons static and replaces retained travelling borders with
-compact synchronized one-second spinners. Do not animate status dots or run a
-continuous JavaScript animation clock.
+compact synchronized one-second spinners. Working indicators in tabs, workspace
+and agent pickers, and agent state pills settle within three turns, leaving their
+colored border or compact glyph visible. Update and unread-note glows also settle
+after two pulses. In-flight loaders keep moving; status dots stay still. Do not
+run a continuous JavaScript animation clock.
 Conversations opens immediately into one flyout with search first and a scrollable
 four-and-a-half-row maximum viewport, clamped to short screens. Size short lists
 to their content instead of reserving empty rows. A starter list with fewer than

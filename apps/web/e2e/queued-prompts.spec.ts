@@ -148,6 +148,8 @@ test('manages waiting prompts from the queue-add control connected to Queue', as
   const notesButton = page.getByRole('button', { name: /^Notes \(/u });
   const notesBadge = notesButton.locator('.notes-count-other');
   await expect(notesButton).toHaveClass(/unread-queued-prompts/u);
+  // unread notes stay highlighted without pulsing until opened
+  await expect(notesButton).toHaveCSS('animation-iteration-count', '2');
   await expect(notesButton).toHaveCSS('color', 'rgb(243, 139, 168)');
   await expect(notesBadge).toHaveCSS('background-color', 'rgb(203, 166, 247)');
   await notesButton.click();

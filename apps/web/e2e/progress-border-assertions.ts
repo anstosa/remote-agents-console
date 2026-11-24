@@ -7,6 +7,10 @@ type ProgressKind = 'loading' | 'working';
 // map semantic motion to its public keyframe contract
 const animationName = (kind: ProgressKind) => kind === 'loading' ? 'loading-border-orbit' : 'update-border-orbit';
 
+// finite runs share the same phase without starting at the document's origin
+const cycleAligned = (start: unknown, duration: number, iterations: number) =>
+  typeof start === 'number' && (iterations === Infinity ? start === 0 : start % duration === 0);
+
 // require the semantic owner marker without coupling tests to component internals
 async function expectProgressKind(control: Locator, kind: ProgressKind) {
   // require the explicit loading override
@@ -69,7 +73,13 @@ export async function expectReducedMotionSpinner(control: Locator, color: Progre
   const spinner = control.locator(':scope > .update-progress-ring');
   await expect(spinner).toBeVisible();
   // allow the animationstart synchronizer one rendered frame
-  await expect.poll(() => spinner.evaluate(element => element.getAnimations({ subtree: true })[0]?.startTime)).toBe(0);
+  await expect.poll(async () => {
+    const timing = await spinner.evaluate(element => {
+      const animation = element.getAnimations({ subtree: true })[0];
+      return [animation?.startTime, animation?.effect?.getTiming().iterations] as const;
+    });
+    return cycleAligned(timing[0], 1_000, timing[1] ?? Infinity);
+  }).toBe(true);
   const treatment = await control.evaluate((element, name) => {
     const spinner = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
     // expose a missing direct spinner to the assertion
@@ -118,7 +128,6 @@ export async function expectReducedMotionSpinner(control: Locator, color: Progre
       animationDuration: animation?.effect?.getComputedTiming().duration,
       animationEasing: animation?.effect?.getTiming().easing,
       animationName: animation instanceof CSSAnimation ? animation.animationName : '',
-      animationStartTime: originalStartTime,
       backgroundImage: indicatorStyle.backgroundImage,
       borderLeftColor: indicatorStyle.borderLeftColor,
       borderRadius: indicatorStyle.borderRadius,
@@ -143,7 +152,6 @@ export async function expectReducedMotionSpinner(control: Locator, color: Progre
   expect(treatment.animationDuration).toBe(1_000);
   expect(treatment.animationEasing).toBe('linear');
   expect(treatment.animationName).toBe('progress-spinner');
-  expect(treatment.animationStartTime).toBe(0);
   expect(treatment.backgroundImage).toBe('none');
   expect(treatment.borderLeftColor).toBe('rgba(0, 0, 0, 0)');
   expect(treatment.borderRadius).toBe('50%');
@@ -184,11 +192,14 @@ export async function expectClockwiseProgressBorder(control: Locator, expectedKi
   const kind: ProgressKind = expectedKind ?? await control.evaluate(element => element.classList.contains('progress-loading') ? 'loading' : 'working');
   await expectProgressKind(control, kind);
   // allow a replacement animationstart event one rendered frame
-  await expect.poll(() => control.evaluate((element, name) => {
-    const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
-    const animation = ring?.getAnimations({ subtree: true }).find(candidate => candidate instanceof CSSAnimation && candidate.animationName === name);
-    return animation?.startTime ?? null;
-  }, animationName(kind))).toBe(0);
+  await expect.poll(async () => {
+    const timing = await control.evaluate((element, name) => {
+      const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
+      const animation = ring?.getAnimations({ subtree: true }).find(candidate => candidate instanceof CSSAnimation && candidate.animationName === name);
+      return [animation?.startTime, animation?.effect?.getTiming().iterations] as const;
+    }, animationName(kind));
+    return cycleAligned(timing[0], 2_000, timing[1] ?? Infinity);
+  }).toBe(true);
   // isolate sampling so polling does not discard the observed treatment
   const inspect = () => control.evaluate(element => {
     const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
@@ -224,13 +235,11 @@ export async function expectClockwiseProgressBorder(control: Locator, expectedKi
       duration,
       direction: effect.getTiming().direction,
       easing: effect.getTiming().easing,
-      iterations: effect.getTiming().iterations,
       name: animation instanceof CSSAnimation ? animation.animationName : '',
       ownerTransform: getComputedStyle(element).transform,
       pseudo: effect.pseudoElement,
       ringTarget: effect.target === ring,
-      samples,
-      startTime: originalStartTime
+      samples
     };
   });
   const treatment = await inspect();
@@ -240,12 +249,10 @@ export async function expectClockwiseProgressBorder(control: Locator, expectedKi
     duration: 2_000,
     direction: 'normal',
     easing: 'linear',
-    iterations: Infinity,
     name: animationName(kind),
     ownerTransform: 'none',
     pseudo: '::before',
-    ringTarget: true,
-    startTime: 0
+    ringTarget: true
   });
   const samples = treatment!.samples;
   expect(samples[0]).toBeCloseTo(0, 0);
@@ -284,7 +291,8 @@ export async function expectSynchronizedProgressBorders(controls: Locator, count
         kind: element.classList.contains('progress-loading') ? 'loading' : 'working',
         name: animation instanceof CSSAnimation ? animation.animationName : '',
         phase: typeof animation?.currentTime === 'number' && typeof duration === 'number' ? ((animation.currentTime % duration) + duration) % duration : null,
-        startTime: animation?.startTime
+        startTime: animation?.startTime,
+        iterations: animation?.effect?.getTiming().iterations
       };
     });
     // compare phases across the cycle boundary
@@ -307,7 +315,8 @@ export async function expectSynchronizedProgressBorders(controls: Locator, count
       duration: observations.every(observation => observation.duration === expected.duration),
       name: observations.every(observation => observation.name === expected.name),
       phase: maximumPhaseDelta <= 34,
-      start: observations.every(observation => observation.startTime === 0)
+      // finite runs can start on different cycles while retaining a shared phase
+      start: observations.every(({ startTime, iterations }) => typeof startTime === 'number' && (iterations === Infinity ? startTime === 0 : startTime % expected.duration === 0))
     };
   }, { duration: expectedDuration, kind, name: expectedName })).toEqual({ classified: true, duration: true, name: true, phase: true, start: true });
 }

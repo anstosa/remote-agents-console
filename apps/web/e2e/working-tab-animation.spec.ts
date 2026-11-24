@@ -87,9 +87,17 @@ test('synchronizes nonlinear working borders across late tabs and motion restart
   await page.goto('/');
   const workingTabs = page.locator('.tabs [role="tab"][aria-busy="true"]');
   await expectSynchronizedProgressBorders(workingTabs, 2, 'working');
-  await expectClockwiseProgressBorder(workingTabs.first(), 'working');
+  // join the late tab before the original animations settle
+  const requestsBeforeLateTab = dashboardRequests;
+  includeLateTab = true;
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(() => dashboardRequests).toBeGreaterThan(requestsBeforeLateTab);
+  await expectSynchronizedProgressBorders(workingTabs, 3, 'working');
+  const lateTab = page.getByRole('tab', { name: 'Echo — Working' });
+  await expectProgressBorder(lateTab, 'peach', 'working');
+  await expectClockwiseProgressBorder(lateTab, 'working');
   // sample the rendered orbit through both slow points and the loop seam
-  const motion = await workingTabs.first().evaluate(element => {
+  const motion = await lateTab.evaluate(element => {
     const ring = element.querySelector(':scope > .update-progress-ring')!;
     const animation = ring.getAnimations({ subtree: true }).find(candidate => candidate instanceof CSSAnimation && candidate.animationName === 'update-border-orbit')!;
     const duration = Number(animation.effect!.getComputedTiming().duration);
@@ -120,13 +128,6 @@ test('synchronizes nonlinear working borders across late tabs and motion restart
   // slow visibly without stopping or flattening the motion to constant speed
   expect(motion.minimum).toBeGreaterThan(motion.average * .25);
   expect(motion.maximum).toBeGreaterThan(motion.average * 1.2);
-  const requestsBeforeLateTab = dashboardRequests;
-  includeLateTab = true;
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-  await expect.poll(() => dashboardRequests).toBeGreaterThan(requestsBeforeLateTab);
-  await expectSynchronizedProgressBorders(workingTabs, 3, 'working');
-  await expectProgressBorder(page.getByRole('tab', { name: 'Echo — Working' }), 'peach', 'working');
-
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await expectSynchronizedProgressBorders(workingTabs, 3, 'working', true);
   await expectReducedMotionSpinner(workingTabs.last(), 'peach', 'working');

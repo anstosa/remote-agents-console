@@ -352,6 +352,8 @@ test('opens the commit review before starting and retains update failures in the
   await expect(selector).toHaveAccessibleName(/update available$/u);
   await expect(selector.locator(':scope > .update-progress-ring')).toHaveCount(0);
   expect(await updateAttention(selector)).toEqual({ name: 'settings-update-glow', duration: '1.4s' });
+  // an uninstalled update keeps its outline but does not request frames indefinitely
+  await expect(selector).toHaveCSS('animation-iteration-count', '2');
   await selector.click();
   const serverMenu = page.getByRole('group', { name: 'Current server details' });
   const viewUpdate = serverMenu.getByRole('button', { name: 'View upstream update' });

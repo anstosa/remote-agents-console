@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
 import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
 import { mockAccountSocket, openCodexAccounts } from './account-fixture';
 import { dropPane, installPaneMock, paneConnectCount, pushBytes, seedPaneSize } from './pane-stream-mock';
@@ -59,6 +59,10 @@ async function mountRestartFixture(page: Page, fixture: RestartFixture, restart:
   await page.goto('/');
 }
 
+// read the lifetime of the rendered indicator, not the owning control
+const progressIterations = (control: Locator) => control.locator(':scope > .update-progress-ring').evaluate(ring =>
+  ring.getAnimations({ subtree: true }).map(animation => animation.effect?.getTiming().iterations));
+
 // swap the startup border for a compact spinner under either reduced-motion preference
 test('frames startup with a clockwise border or reduced-motion spinner', async ({ page }) => {
   const sessionGate = createGate();
@@ -77,10 +81,12 @@ test('frames startup with a clockwise border or reduced-motion spinner', async (
     await expect(loader.locator('.loading-bars')).toHaveCount(0);
     await expectProgressBorder(loader, 'mauve', 'loading');
     await expectClockwiseProgressBorder(loader, 'loading');
+    expect(await progressIterations(loader)).toEqual([Infinity]);
     await expect.poll(() => loader.locator('.loading-line').evaluate(element => ({ animations: element.getAnimations().length, transform: getComputedStyle(element).transform }))).toEqual({ animations: 0, transform: 'none' });
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await expectReducedMotionSpinner(loader, 'mauve', 'loading');
+    expect(await progressIterations(loader)).toEqual([Infinity]);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await expectProgressBorder(loader, 'mauve', 'loading');
     await expectClockwiseProgressBorder(loader, 'loading');
@@ -399,6 +405,10 @@ test('uses skeleton rows for cleanup reads and working motion only for cleanup s
     await expect.poll(() => cleanupSubmissions).toBe(1);
     await expectProgressBorder(footerProgress, 'red', 'working');
     await expectClockwiseProgressBorder(footerProgress, 'working');
+    expect(await progressIterations(footerProgress)).toEqual([Infinity]);
+    // keep the mutation feedback moving until the held request settles
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    expect(await progressIterations(footerProgress)).toEqual([Infinity]);
   } finally {
     // release the mutation during failed assertions too
     submissionGate.release();
