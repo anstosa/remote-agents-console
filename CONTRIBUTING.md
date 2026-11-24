@@ -36,6 +36,8 @@ pnpm --filter @rac/web exec playwright install --with-deps chromium
 pnpm --filter @rac/web test:e2e
 ```
 
+Before promoting an agent CLI upgrade, run the [agent upgrade smoke](docs/agent-upgrade-smoke.md).
+
 To exercise the editor's production page and worker security policies, build the
 web app first, then run its browser tests against the preview server:
 

@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { claudeArguments, codexCachedCatalog, codexConfig, nativeConversation, supportsCodexReplyVersion } from '../src/reply-suggestions/native-policy.js';
+import { claudeArguments, codexCachedCatalog, codexConfig, nativeConversation, supportsClaudeReplyVersion, supportsCodexReplyVersion } from '../src/reply-suggestions/native-policy.js';
 import type { NativeReplySuggestionSource, NativeReplyScope } from '../src/reply-suggestions/types.js';
 import { claudeSessionPersistence, claudeSessionPostflight, CodexAudit, codexGenerationPolicy, codexMetadataStderr, codexStartupStderr, parseClaudeStream } from '../src/reply-suggestions/native-worker.js';
 import { tmpdir } from 'node:os';
@@ -72,6 +72,16 @@ describe('native worker policies', () => {
   // require a valid native version at or above the floor
   it.each(['codex-cli 0.168.99', 'codex-cli 0.169.0-beta.1', 'codex-cli 0.171', 'codex-cli 0.171.0 extra', 'other-cli 0.171.0', ''])('rejects unsupported banner %j', banner => {
     expect(supportsCodexReplyVersion(banner)).toBe(false);
+  });
+
+  // admit newer claude releases without relaxing the native banner check
+  it.each(['2.1.311', '2.1.319', '2.1.319+build.1', '2.2.0-beta.1', '3.0.0'])('supports Claude Code %s', version => {
+    expect(supportsClaudeReplyVersion(`${version} (Claude Code)`)).toBe(true);
+  });
+
+  // reject older releases and banners without an exact claude identity
+  it.each(['2.1.310 (Claude Code)', '2.1.311-beta.1 (Claude Code)', '2.1 (Claude Code)', '2.1.319', '2.1.319 (Other Code)', '2.1.319 (Claude Code) extra', ''])('rejects unsupported Claude banner %j', banner => {
+    expect(supportsClaudeReplyVersion(banner)).toBe(false);
   });
 
   // generation derives its policy from local metadata as the inventory grows

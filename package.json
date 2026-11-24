@@ -10,6 +10,7 @@
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm --filter @rac/server test",
+    "test:agent-upgrade": "pnpm --filter @rac/server exec vitest run test/adapters test/adapter-capabilities.test.ts test/transport-contract.test.ts test/launch.test.ts test/conversations-switch-api.test.ts test/prompt-submit-recovery.test.ts test/prompt-clear-queue.test.ts test/queued- test/question-text test/claude-client.test.ts test/pi-client.test.ts test/reply-suggestion",
     "test:scripts": "node --test --test-concurrency=1 scripts/settings/*.test.mjs",
     "test:coverage": "pnpm --filter @rac/server test:coverage",
     "preview:share": "node scripts/share-preview.mjs",

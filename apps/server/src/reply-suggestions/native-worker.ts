@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { NativeAccountObservation, NativeGenerationResult, NativeWorkerRequest, NativeWorkerResponse } from './native-process.js';
-import { claudeArguments, codexCachedCatalog, codexConfig, expectedClaudeVersion, nativeConversation, nativeFinalOutputBytes, nativePolicyGeneration, nativeProtocolOutputBytes, nativeRequestBytes, nativeStderrBytes, nativeTimeoutMs, supportsCodexReplyVersion, validCodexReplyFeatures } from './native-policy.js';
+import { claudeArguments, codexCachedCatalog, codexConfig, nativeConversation, nativeFinalOutputBytes, nativePolicyGeneration, nativeProtocolOutputBytes, nativeRequestBytes, nativeStderrBytes, nativeTimeoutMs, supportsClaudeReplyVersion, supportsCodexReplyVersion, validCodexReplyFeatures } from './native-policy.js';
 import { nativeReplyScope } from './native-scope.js';
 import type { NativeReplySuggestionSource, NativeReplyScope } from './types.js';
 import { replySuggestionPrompt } from './prompt.js';
@@ -106,13 +106,13 @@ function nativeProgram(scope: NativeReplyScope): string {
   return join(process.env.RAC_HOST_PROC ?? '/proc', String(scope.process.pid), 'exe');
 }
 
-// verify the exact native binary version
+// verify the observed binary meets its native protocol floor
 async function programVersion(scope: NativeReplyScope, signal: AbortSignal, configHome?: string): Promise<string> {
   const result = await boundedCommand(nativeProgram(scope), ['--version'], { cwd: scope.home, env: cleanEnvironment(scope, configHome), signal, stdoutBytes: 4_096, stderrBytes: 4_096 });
   const stderrAccepted = configHome === undefined ? result.stderr.length === 0 : codexMetadataStderr(result.stderr, configHome);
   const version = result.code === 0 && stderrAccepted ? result.stdout.toString('utf8').trim() : '';
-  const supported = scope.kind === 'codex' ? supportsCodexReplyVersion(version) : version === expectedClaudeVersion;
-  // accept later codex releases without changing the claude protocol pin
+  const supported = scope.kind === 'codex' ? supportsCodexReplyVersion(version) : supportsClaudeReplyVersion(version);
+  // a supported version still needs the account and protocol checks
   if (!supported) throw new NativeWorkerError('native_version_mismatch');
   return version;
 }

@@ -188,7 +188,8 @@ Native model discovery uses a vendor-scoped environment and inert startup contro
 The Codex/OMX reply helper accepts Codex CLI 0.169.0 and newer. It rejects
 feature lists shorter than the baseline and disables every listed feature.
 Unverified accounts, model selections, or protocol behavior still fail closed.
-Unreviewed Claude account routes stay unavailable rather than selecting a fallback.
+The Claude reply helper accepts Claude Code 2.1.311 and newer. Unverified
+Claude account routes stay unavailable rather than selecting a fallback.
 
 When the live OMX footer advertises `/goal resume`, show that command first in
 the suggestion row independently of the Reply suggestions toggle, assistant

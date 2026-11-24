@@ -12,19 +12,28 @@ export const nativeRequestBytes = 128 * 1024;
 const minimumCodexReplyVersion = '0.169.0';
 // the oldest supported binary reports this many feature keys
 const minimumCodexReplyFeatures = 215;
-export const expectedClaudeVersion = '2.1.311 (Claude Code)';
+const minimumClaudeReplyVersion = '2.1.311';
 
 // hash stable policy material for stale-route fences
 export const nativePolicyGeneration = createHash('sha256').update(JSON.stringify([
   replySuggestionPrompt, replySuggestionSchema, nativeTimeoutMs, nativeFinalOutputBytes,
-  minimumCodexReplyVersion, minimumCodexReplyFeatures, expectedClaudeVersion, 'native-reply-policy-v2'
+  minimumCodexReplyVersion, minimumCodexReplyFeatures, minimumClaudeReplyVersion, 'native-reply-policy-v3'
 ])).digest('hex');
 
-// accept newer native versions while retaining the minimum protocol floor
-export function supportsCodexReplyVersion(banner: string): boolean {
-  const reported = /^codex-cli (\d\S*)$/u.exec(banner)?.[1];
+// compare a parsed native release against its adapter floor
+function supportsRelease(reported: string | undefined, minimum: string): boolean {
   const version = reported === undefined ? null : valid(reported);
-  return version !== null && gte(version, minimumCodexReplyVersion);
+  return version !== null && gte(version, minimum);
+}
+
+// require codex's native version banner
+export function supportsCodexReplyVersion(banner: string): boolean {
+  return supportsRelease(/^codex-cli (\d\S*)$/u.exec(banner)?.[1], minimumCodexReplyVersion);
+}
+
+// require claude's native version banner
+export function supportsClaudeReplyVersion(banner: string): boolean {
+  return supportsRelease(/^(\d\S*) \(Claude Code\)$/u.exec(banner)?.[1], minimumClaudeReplyVersion);
 }
 
 // reject short or ambiguous inventories without pinning later releases to one count
