@@ -1474,8 +1474,17 @@ test("native Cloudflare applies before the RAC watchdog arms", async () => {
   assert.equal(recoveryProofs, 0);
 });
 
-// cover preparation failures and edits before the bounded replacement window
-for (const buildResult of ["success", "compose-edit", "app-edit", "build-failure", "recovery-edit", "adopted-source-recovery"]) test(`compose build ${buildResult} stays outside the RAC replacement boundary`, async () => {
+// cover preparation failures and keep update timeouts isolated from rollback
+for (const [caseName, buildResult, timeoutOptions = {}, forwardBuildMs = 600_000, replaceMs = 600_000] of [
+  ["success", "success"],
+  ["compose-edit", "compose-edit"],
+  ["app-edit", "app-edit"],
+  ["build-failure", "build-failure"],
+  ["recovery-edit", "recovery-edit"],
+  ["adopted-source-recovery", "adopted-source-recovery"],
+  ["reviewed update and rollback", "adopted-source-recovery", { forwardComposeBuildTimeoutMs: 900_000 }, 900_000],
+  ["explicit timeout override", "success", { forwardComposeBuildTimeoutMs: 900_000, applyTimeoutMs: 60_000 }, 60_000, 60_000]
+]) test(`compose build ${caseName} stays outside the RAC replacement boundary`, async () => {
   const current = fixture({ baseline: false });
   const cloud = addNativeCloudBaseline(current);
   const clock = restartClock();
@@ -1550,6 +1559,7 @@ for (const buildResult of ["success", "compose-edit", "app-edit", "build-failure
     sources,
     targets: ["rac", "cloudflared"]
   }, {
+    ...timeoutOptions,
     restartWatchdogClock: clock,
     expectedEnvironmentHashes: {},
     // capture the Compose baseline rather than the fixture's former native service
@@ -1575,7 +1585,7 @@ for (const buildResult of ["success", "compose-edit", "app-edit", "build-failure
       if ((args.includes("build") || args.includes("--build")) && args.at(-1) === "remote-agent-console") {
         builds += 1;
         assert.equal(clock.pending(), false);
-        assert.equal(commandOptions.timeoutMs, 10 * 60_000);
+        assert.equal(commandOptions.timeoutMs, builds === 1 ? forwardBuildMs : 600_000);
         clock.advance(RESTART_WATCHDOG_TIMEOUT_MS * 2);
         assert.notEqual(commandOptions.signal?.aborted, true);
         racBuilt = true;
@@ -1598,6 +1608,7 @@ for (const buildResult of ["success", "compose-edit", "app-edit", "build-failure
       // publish the fresh boot from the replacement Compose service
       if (args.includes("up") && args.at(-1) === "remote-agent-console") {
         replacements += 1;
+        assert.equal(commandOptions.timeoutMs, replaceMs);
         assert.equal(racBuilt, true);
         assert.equal(args.includes("--no-build"), true);
         assert.equal(args.includes("--build"), false);

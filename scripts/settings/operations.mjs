@@ -584,8 +584,8 @@ export function currentSourceManifest(descriptor) {
   return descriptorSourceManifest(loadDesiredDescriptor(descriptor));
 }
 
-// apply fixed targets and prove a replacement boot
-async function restartRequest(descriptor, request, options) {
+// apply fixed targets and keep the forward build allowance out of recovery
+async function restartRequest(descriptor, request, { forwardComposeBuildTimeoutMs, ...options }) {
   const activeDescriptor = descriptor;
   const desiredDescriptor = loadDesiredDescriptor(descriptor);
   // revalidate checkout compatibility before any deployment mutation
@@ -649,6 +649,7 @@ async function restartRequest(descriptor, request, options) {
         const restartBoundary = new Promise((resolvePromise) => { reachRestartBoundary = resolvePromise; });
         const guardedOptions = {
           ...deploymentOptions,
+          buildTimeoutMs: forwardComposeBuildTimeoutMs,
           runner: watchdogRunner(deploymentOptions.runner ?? runBounded, forwardSignal),
           signal: forwardSignal,
           proofClock: watchdog.clock,
@@ -814,7 +815,7 @@ export async function applyTargets(descriptor, targets, options = {}) {
       await requireSuccess(await runner("docker", [...prefix, "build", "remote-agent-console"], {
         cwd: descriptor.compose.projectDirectory,
         maxBytes: MAX_SOURCE_BYTES,
-        timeoutMs: options.applyTimeoutMs ?? 10 * 60_000
+        timeoutMs: options.applyTimeoutMs ?? options.buildTimeoutMs ?? 10 * 60_000
       }), "apply-failed");
       // bind-mounted config changes still require an actual replacement boot
       options.beforeRacRestart?.();

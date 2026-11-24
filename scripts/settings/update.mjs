@@ -27,6 +27,7 @@ if (mode === "--verify-only") {
 }
 await prepareHostPiRuntime(effectiveDescriptor);
 const sources = currentSourceManifest(descriptor);
+// allow more time for the reviewed image build without widening rollback limits
 await processOperation(descriptor, {
   version: 1,
   id: operationId,
@@ -34,4 +35,4 @@ await processOperation(descriptor, {
   generation: descriptor.generation,
   sources,
   targets: ["rac"]
-});
+}, { forwardComposeBuildTimeoutMs: 15 * 60_000 });
