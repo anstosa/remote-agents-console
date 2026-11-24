@@ -1557,7 +1557,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (place.adhoc === true) return undefined;
       let found: Agent | undefined;
       const outcome = await launchFresh({
-        // preserve remembered Worktree, Project and Scratch launch profiles
+        // follow the worktree or project profile, or the configured scratch default
         launch: async () => await launchAgent(atPlace(place.id), () => launch.launchAt(place)),
         waitForReadiness,
         close: async agentId => await prompts.close(agentId),

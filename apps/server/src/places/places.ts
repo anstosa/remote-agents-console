@@ -3,6 +3,7 @@ import { realpath } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { Project, Worktree } from '../domain/models.js';
 import { projectIdOf, worktreePathOf, worktreeWireId } from '../workspaces/resolver.js';
+import { scratchLaunchKey } from '../worktrees/store.js';
 
 // the reserved Project id every Scratch Place id carries (`scratch:<realpath>`); config
 // refuses a Project with this id, so a Scratch Place id never collides with a Project's
@@ -107,9 +108,10 @@ export function placeNoteKey(place: Pick<Place, 'kind' | 'projectId' | 'home' | 
   return place.kind === 'worktree' ? place.projectId : folderNoteKey(placeHostRoot(place));
 }
 
-// the launch-profile store key a Place's last-used kind lives under: a Worktree's own id, a
-// directory Project's Project id (as its launches remember it), a Scratch Place's own id
-export function placeLaunchScope(place: Pick<Place, 'id' | 'kind' | 'projectId'>): string {
+// resolve the same launch scope for a place as for its launcher row
+export function placeLaunchScope(place: Pick<Place, 'id' | 'kind' | 'projectId' | 'adhoc'>): string {
+  // only ad-hoc scratch folders keep a folder-specific choice
+  if (place.kind === 'scratch' && place.adhoc !== true) return scratchLaunchKey;
   return place.kind === 'directory' ? place.projectId : place.id;
 }
 

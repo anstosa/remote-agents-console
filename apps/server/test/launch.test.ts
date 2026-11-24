@@ -320,6 +320,34 @@ describe('LaunchService', () => {
     expect(run.mock.calls.some(call => (call[1] as string[]).some(arg => arg.includes('pane_title') || arg === 'select-pane'))).toBe(false);
   });
 
+  // honor an explicit alternative without making it the next Scratch default
+  it('launches the favorite in Scratch after an explicit alternative', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    // capture the bootstrap for each fresh Scratch session
+    run.mockImplementation(async (_bin: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%5' : '', stderr: '' }));
+    const config = {
+      scratchDirectory: '/srv/scratch', projects: [], defaultAgent: 'omx',
+      adapters: {
+        codex: { program: codexProgram, args: [], env: {}, launchable: true },
+        omx: { program: '/abs/omx', args: [], env: {}, launchable: true }
+      }
+    };
+    const stored = { scratch: 'codex' };
+    // simulate legacy history without writing to disk
+    const rememberLaunchProfile = vi.fn(async () => {});
+    const service = new LaunchService(config as never, { find: async () => [] }, undefined, undefined, {
+      launchProfiles: async () => stored, rememberLaunchProfile
+    } as never);
+
+    await expect(service.launchHome('codex')).resolves.toBe(true);
+    await expect(service.launchHome()).resolves.toBe(true);
+
+    const launches = run.mock.calls.map(([, args]) => args as string[]).filter(args => args.includes('new-session'));
+    expect(launches[0]?.at(-1)).toContain(codexProgram);
+    expect(launches[1]?.at(-1)).toContain('/abs/omx --direct');
+    expect(rememberLaunchProfile).not.toHaveBeenCalled();
+  });
+
   it('launches in place in an ad-hoc Scratch folder, marked and labelled as that folder, remembering the kind under it', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
     run.mockImplementation(async (_bin: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%5' : '', stderr: '' }));

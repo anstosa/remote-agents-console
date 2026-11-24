@@ -385,22 +385,19 @@ export class LaunchService implements HolderWindows {
     return resolveLaunchProfile(kinds, this.rememberedChain(scopeKey, remembered), adapterCapabilities(this.config.adapters), this.defaultAgent()).kind;
   }
 
-  // the remembered-kind precedence for one scope: a Worktree's own last-used kind, then
-  // its Project's (which seeds a fresh Worktree), then registry order; Scratch stands alone,
-  // and a Scratch Place (`scratch:<root>`) falls back to the Scratch group, both in the scratch scope
+  // worktrees inherit their project's last choice; ad-hoc scratch folders remember only their own
   private rememberedChain(key: string, remembered: Record<string, AgentKind | undefined>): Array<{ origin: LaunchScope; kind?: AgentKind }> {
-    if (key === scratchLaunchKey) return [{ origin: 'scratch', kind: remembered[key] }];
+    // configured scratch always follows the server default
+    if (key === scratchLaunchKey) return [];
     const projectId = projectIdOf(key);
-    if (projectId === scratchProjectId) return [{ origin: 'scratch', kind: remembered[key] }, { origin: 'scratch', kind: remembered[scratchLaunchKey] }];
+    // never inherit a legacy scratch group record
+    if (projectId === scratchProjectId) return [{ origin: 'scratch', kind: remembered[key] }];
     // a bare `<projectId>` key resolves in the project scope; a worktree key falls back to it
     if (projectId === key) return [{ origin: 'project', kind: remembered[key] }];
     return [{ origin: 'worktree', kind: remembered[key] }, { origin: 'project', kind: remembered[projectId] }];
   }
 
-  // The Launch profile resolution the dashboard publishes for each scope so the web
-  // renders the Launch menu without re-deriving it. Reads the whole launch-profile
-  // store once; `scratchLaunchKey` resolves in the scratch scope, every other key in
-  // the worktree scope (chunk 3 adds the project scope). Missing scopes are omitted.
+  // publish the launch resolutions from one store read so the web does not rederive them
   async launchResolutions(scopeKeys: Iterable<string>): Promise<Map<string, LaunchResolution>> {
     const launchable = this.launchableKinds();
     const capabilities = adapterCapabilities(this.config.adapters);
@@ -592,15 +589,14 @@ export class LaunchService implements HolderWindows {
     return place.adhoc === true ? await this.launchRemembering(place, place.id, kind, model, sandboxed, prepared, spawnedBy) : await this.launchHome(kind, model, sandboxed, prepared, spawnedBy);
   }
 
-  // launch in place at a directory-Project or Scratch Place with the resolved (or requested) kind,
-  // remembering it under `scope` unless the Conductor chose it for a worker; a storage failure
-  // never fails a live launch
+  // launch in place with the resolved or requested kind; storage failures never fail a launch
   private async launchRemembering(place: Place, scope: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, prepared?: PreparedLaunchChoice, spawnedBy?: string): Promise<boolean> {
     const resolved = await this.resolveLaunchKind(scope, kind);
     // refuse an unconfigured or unlaunchable kind
     if (resolved === undefined) return false;
     const launched = await this.launchInPlace(place, resolved, model, sandboxed, prepared, spawnedBy);
-    if (launched && spawnedBy === undefined) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
+    // a one-off scratch choice or a conductor worker does not change later launches
+    if (launched && scope !== scratchLaunchKey && spawnedBy === undefined) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
     return launched;
   }
 

@@ -122,13 +122,21 @@ describe('resolveLaunchProfile (pure)', () => {
 });
 
 describe('launchResolutions', () => {
-  it('resolves worktree scopes and the scratch scope from one store read', async () => {
+  // keep saved worktree choices without inheriting a legacy scratch choice
+  it('publishes the favorite for Scratch and preserves the Worktree choice', async () => {
     const profiles: Record<string, string> = { [cora]: 'claude', scratch: 'codex' };
-    const service = new LaunchService(twoKinds(), undefined, undefined, undefined, { launchProfiles: async () => profiles } as never);
+    const service = new LaunchService(twoKinds(true, 'claude'), undefined, undefined, undefined, { launchProfiles: async () => profiles } as never);
     const resolutions = await service.launchResolutions([cora, 'proj:/repo/dana', 'scratch']);
     expect(resolutions.get(cora)).toEqual({ kind: 'claude', origin: 'worktree' });
-    expect(resolutions.get('proj:/repo/dana')).toEqual({ kind: 'codex', origin: 'default' });
-    expect(resolutions.get('scratch')).toEqual({ kind: 'codex', origin: 'scratch' });
+    expect(resolutions.get('proj:/repo/dana')).toEqual({ kind: 'claude', origin: 'default' });
+    expect(resolutions.get('scratch')).toEqual({ kind: 'claude', origin: 'default' });
+  });
+
+  // automatic and unavailable favorites fall back to the first launchable agent
+  it.each([undefined, 'claude'] as const)('uses the automatic Scratch default with favorite %s', async favorite => {
+    const service = new LaunchService(twoKinds(favorite === undefined, favorite), undefined, undefined, undefined, { launchProfiles: async () => ({ scratch: 'claude' }) } as never);
+    expect((await service.launchResolutions(['scratch'])).get('scratch')).toEqual({ kind: 'codex', origin: 'default' });
+    await expect(service.resolveLaunchKind('scratch')).resolves.toBe('codex');
   });
 
   it('falls back to the Project last-used kind when the Worktree has none', async () => {
@@ -137,12 +145,12 @@ describe('launchResolutions', () => {
     expect(resolution.get(cora)).toEqual({ kind: 'claude', origin: 'project' });
   });
 
-  it('resolves a Scratch Place in the scratch scope, from its own last-used kind then the Scratch group', async () => {
-    const service = new LaunchService(twoKinds(), undefined, undefined, undefined, { launchProfiles: async () => ({ scratch: 'claude', 'scratch:/srv/tools': 'codex' }) } as never);
+  // remember only a choice made in that ad-hoc folder
+  it('uses the ad-hoc Scratch folder choice or the favorite if none exists', async () => {
+    const service = new LaunchService(twoKinds(true, 'claude'), undefined, undefined, undefined, { launchProfiles: async () => ({ scratch: 'codex', 'scratch:/srv/tools': 'codex' }) } as never);
     const resolutions = await service.launchResolutions(['scratch:/srv/tools', 'scratch:/srv/other']);
     expect(resolutions.get('scratch:/srv/tools')).toEqual({ kind: 'codex', origin: 'scratch' });
-    // never the `scratch` group record read as if it were a Project's
-    expect(resolutions.get('scratch:/srv/other')).toEqual({ kind: 'claude', origin: 'scratch' });
+    expect(resolutions.get('scratch:/srv/other')).toEqual({ kind: 'claude', origin: 'default' });
   });
 
   it('surfaces a skipped remembered kind that is no longer launchable', async () => {

@@ -1245,17 +1245,19 @@ describe('dashboard launch resolution', () => {
 describe('dashboard Place launch resolution', () => {
   it("publishes each directory-Project and Scratch Place's launch profile and resolves a placed Agent's from its Place", async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    // tie each running agent to its dashboard place
     const placedAgent = (id: string, placeId: string, home: string) => ({ id, sessionId: 'socket:$1', home, placeId, title: 'Ready', kind: 'codex', attention: 'finished' });
     const discovery = {
       worktreesNow: () => [],
       dashboard: async () => ({
         generation: 1,
         adapters: {},
-        agents: [placedAgent('agent-notes', 'notes:/data/notes', '/data/notes'), placedAgent('agent-tools', 'scratch:/srv/tools', '/srv/tools')],
+        agents: [placedAgent('agent-notes', 'notes:/data/notes', '/data/notes'), placedAgent('agent-tools', 'scratch:/srv/tools', '/srv/tools'), placedAgent('agent-scratch', 'scratch:/home/me/scratch', '/home/me/scratch')],
         projects: [{ id: 'notes', label: 'Notes', mode: 'directory', available: true, worktrees: [] }],
         places: [
           { id: 'notes:/data/notes', kind: 'directory', projectId: 'notes', label: 'Notes', home: '/data/notes', pinned: false },
-          { id: 'scratch:/srv/tools', kind: 'scratch', projectId: 'scratch', label: 'tools', home: '/srv/tools', pinned: false }
+          { id: 'scratch:/srv/tools', kind: 'scratch', projectId: 'scratch', label: 'tools', home: '/srv/tools', pinned: false, adhoc: true },
+          { id: 'scratch:/home/me/scratch', kind: 'scratch', projectId: 'scratch', label: '~ Scratch', home: '/home/me/scratch', pinned: false }
         ]
       }),
       target: async () => undefined
@@ -1268,14 +1270,16 @@ describe('dashboard Place launch resolution', () => {
       const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
       const cookie = String(login.headers['set-cookie']).split(';')[0];
       const body = (await app.inject({ method: 'GET', url: '/api/dashboard', headers: { host: 'agents.example.com', cookie } })).json();
-      // a directory Project launches under its Project id; a Scratch Place under its own id
+      // configured scratch uses the same resolution as the top-level launcher
       expect(body.places.map((place: { id: string; launch: unknown }) => [place.id, place.launch])).toEqual([
         ['notes:/data/notes', { kind: 'claude', origin: 'notes' }],
-        ['scratch:/srv/tools', { kind: 'claude', origin: 'scratch:/srv/tools' }]
+        ['scratch:/srv/tools', { kind: 'claude', origin: 'scratch:/srv/tools' }],
+        ['scratch:/home/me/scratch', body.scratchLaunch]
       ]);
       expect(body.agents.map((agent: { id: string; launch: unknown }) => [agent.id, agent.launch])).toEqual([
         ['agent-notes', { kind: 'claude', origin: 'notes' }],
-        ['agent-tools', { kind: 'claude', origin: 'scratch:/srv/tools' }]
+        ['agent-tools', { kind: 'claude', origin: 'scratch:/srv/tools' }],
+        ['agent-scratch', body.scratchLaunch]
       ]);
     } finally {
       await app.close();

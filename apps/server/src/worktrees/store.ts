@@ -7,7 +7,8 @@ import { serverCheckout } from '../workspaces/server-checkout.js';
  * per-scope launch, pin and label state persisted outside the config file (ADR 0003).
  * keyed by the Worktree wire id `<projectId>:<realpath>` for a Worktree's pin, custom
  * `label` and last-used `launchProfile`, by `<projectId>` for a Project's last-used
- * profile, and by the reserved `scratch` key for the Scratch group. `pinned` is an
+ * profile, and by Place id for an ad-hoc Scratch folder. Legacy `scratch` records
+ * stay readable but no longer affect launch resolution. `pinned` is an
  * explicit operator override; its absence means the default (a Main worktree pinned,
  * a Linked worktree not), which discovery applies. Sandboxed is never stored. `issue` is the
  * number of the GitHub Issue (in the Project's repository) a Worktree was created for.

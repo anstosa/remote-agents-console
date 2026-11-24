@@ -384,9 +384,10 @@ to keep normal Codex launches and the advisor off the shared background server.
 This is useful after switching accounts when that server still holds the
 previous login. Existing agents are not restarted by this setting.
 
-The console remembers the last kind launched in each worktree (and in Scratch)
-and offers it first next time; with a single configured kind that is simply that
-kind.
+Scratch defaults to the starred agent, or the first available agent when none
+is starred or the starred agent is unavailable. Choosing another agent for a
+Scratch launch does not change that default. Worktrees, directory Projects, and
+ad-hoc folders still offer their last-used agent first.
 
 ### Claude Code
 

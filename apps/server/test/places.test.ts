@@ -93,10 +93,12 @@ describe('placeForRoot', () => {
 });
 
 describe('placeLaunchScope', () => {
-  it('keys a Worktree by its id, a directory Project by its Project id and a Scratch Place by its id', () => {
+  // share the launcher scope for configured Scratch only
+  it('keys configured Scratch by the group and ad-hoc Scratch by the folder', () => {
     expect(placeLaunchScope({ id: 'ferry:/code/ferry', kind: 'worktree', projectId: 'ferry' })).toBe('ferry:/code/ferry');
     expect(placeLaunchScope({ id: 'notes:/data/notes', kind: 'directory', projectId: 'notes' })).toBe('notes');
-    expect(placeLaunchScope({ id: 'scratch:/srv/tools', kind: 'scratch', projectId: 'scratch' })).toBe('scratch:/srv/tools');
+    expect(placeLaunchScope({ id: 'scratch:/home/me/scratch', kind: 'scratch', projectId: 'scratch' })).toBe('scratch');
+    expect(placeLaunchScope({ id: 'scratch:/srv/tools', kind: 'scratch', projectId: 'scratch', adhoc: true })).toBe('scratch:/srv/tools');
   });
 });
 

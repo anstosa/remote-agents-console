@@ -17,17 +17,16 @@ import type { NotificationEvent, NotificationState } from '../notification-event
 // its stack controls and its resolved Launch profile
 export type PayloadWorktree = DashboardWorktree & { stack?: StackState; launch?: LaunchResolution };
 export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'> & {
-  // `launch` carries each scope's resolved Launch profile so the web renders the Launch
-  // menu without re-deriving it (a running agent's is its worktree's; a scratch agent's
-  // is `scratchLaunch`); `scratchLaunch` is the Scratch group's resolution.
+  // `launch` carries the agent's Worktree or Place resolution so the web does not rederive it.
+  // `scratchLaunch` is the configured Scratch resolution and the fallback for unplaced agents.
   // completionId stays stable from pending detection through unread publication
   // `watches`: the Watches the Agent set (ADR 0019)
   agents: Array<Agent & { unread: boolean; completionId?: string; notificationEvent?: NotificationEvent; notificationState?: NotificationState; queuedPromptCount: number; stack?: StackState; launch?: LaunchResolution; watches?: WatchSummary[] }>;
   // a non-git `directory` Project carries its own resolved Launch profile so the web renders
   // a Project-level Launch button (it has no Worktrees to launch through); omitted otherwise
   projects: Array<Omit<DashboardProject, 'worktrees'> & { worktrees: PayloadWorktree[]; launch?: LaunchResolution }>;
-  // each directory-Project and Scratch Place carries the Launch profile of its scope (its
-  // Project's, or the Scratch Place's own falling back to the Scratch group's)
+  // a directory Place uses its Project profile; configured Scratch shares `scratchLaunch`,
+  // while an ad-hoc folder remembers only its own choice
   places: Array<DashboardPlace & { launch?: LaunchResolution }>;
   cleanupPending: number;
   cleanupTargets?: CleanupTarget[];
