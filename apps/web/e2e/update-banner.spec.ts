@@ -141,41 +141,117 @@ test('coalesces agent-version polling without publishing stale or failed snapsho
   await expect(codex.locator('.launch-agent-version')).toHaveText('v0.154.0 → v0.155.0');
 });
 
-// reserve commit cards while the reviewed host update range is loading
-test('shows commit skeleton cards while loading an update preview', async ({ page }) => {
-  let releasePreview!: () => void;
-  const previewFinished = new Promise<void>(resolve => { releasePreview = resolve; });
-  const targetSha = '2'.repeat(40);
-  await page.route('**/api/**', async route => {
-    const url = new URL(route.request().url());
-    // restore one controlling session and named server
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', server: { name: 'Test server', url: 'https://agents.example.com', remotes: [] } } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [], projects: [] } });
-    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: true } });
-    if (url.pathname === '/api/server/revision') return route.fulfill({ json: { sha: '1'.repeat(40), committedAt: '2026-09-06T14:22:31-07:00' } });
-    // hold the exact update range read
-    if (url.pathname === '/api/server/update-preview') {
-      await previewFinished;
-      return route.fulfill({ json: { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha, fastForwardable: true, commitCount: 1, commits: [{ sha: targetSha, subject: 'Add safer update review', author: 'Ansel', authoredAt: '2026-08-27T12:00:00-07:00' }], commitsTruncated: false, filesTruncated: false, advisory: { required: false, reasons: [] } } });
-    }
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
-  });
-
-  await page.goto('/');
-  await openUpstreamUpdate(page);
-  const dialog = page.getByRole('dialog', { name: 'Review update' });
-  try {
-    await expect(dialog.getByRole('status', { name: 'Loading commits' })).toBeVisible();
-    await expect(dialog.locator('.commit-skeleton')).toHaveCount(3);
-    await expect(dialog.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
-  } finally {
-    // release the preview read during failed assertions too
-    releasePreview();
-  }
-  await expect(dialog.getByText('Add safer update review')).toBeVisible();
-  await expect(dialog.locator('.commit-skeleton')).toHaveCount(0);
+// measure update geometry relative to the scrolling body
+const updatePreviewLayout = (dialog: import('@playwright/test').Locator) => dialog.locator('.update-review-body').evaluate(body => {
+  const bounds = body.getBoundingClientRect();
+  // compare the same surfaces before and after their data arrives
+  const measure = (element: Element) => {
+    const rect = element.getBoundingClientRect();
+    return { x: rect.x - bounds.x, y: rect.y - bounds.y + body.scrollTop, width: rect.width, height: rect.height };
+  };
+  return {
+    // include the two columns so full-width stacked placeholders cannot pass
+    commits: Array.from(body.querySelectorAll('.update-commit-list > li'), row => ({
+      ...measure(row),
+      subjectColumn: measure(row.lastElementChild!).x,
+      shaWidth: measure(row.firstElementChild!).width
+    })),
+    advisor: measure(body.querySelector('.update-advisor')!),
+    output: measure(body.querySelector('.update-advisor-output')!)
+  };
 });
+
+// compare the pending preview to typical loaded rows at both layout widths
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+  // hold each request separately so loading layouts can be measured
+  test(`matches the loaded update preview layout at ${viewport.width}px`, async ({ page }) => {
+    let releasePreview!: () => void;
+    let releaseAdvisor!: () => void;
+    let advisorLaunched = false;
+    const previewFinished = new Promise<void>(resolve => { releasePreview = resolve; });
+    const advisorFinished = new Promise<void>(resolve => { releaseAdvisor = resolve; });
+    const targetSha = '2'.repeat(40);
+    const commits = ['Add safer update review', 'Improve host startup', 'Update dependencies'].map((subject, index) => ({
+      sha: String(index + 2).repeat(40), subject, author: 'Ansel', authoredAt: '2026-08-27T12:00:00-07:00'
+    }));
+    await page.setViewportSize(viewport);
+    await installPaneMock(page);
+    // serve a typical three-commit preview with an advisor
+    await page.route('**/api/**', async route => {
+      const url = new URL(route.request().url());
+      // restore one controlling session and named server
+      if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', server: { name: 'Test server', url: 'https://agents.example.com', remotes: [] } } });
+      // publish the advisor only once its launch has finished
+      if (url.pathname === '/api/dashboard') {
+        const agents = advisorLaunched ? [{ id: 'update-advisor', panel: 'terminal', pane: { paneId: '%2', sessionId: 'socket:$2', socketFingerprint: 'socket' }, home: '/workspace', displayLabel: 'Update Advisor v4 2222222', title: 'Ready', queuedPromptCount: 0 }] : [];
+        return route.fulfill({ json: { generation: advisorLaunched ? 2 : 1, agents, projects: [] } });
+      }
+      // expose an upstream update
+      if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: true } });
+      // show the installed revision
+      if (url.pathname === '/api/server/revision') return route.fulfill({ json: { sha: '1'.repeat(40), committedAt: '2026-09-06T14:22:31-07:00' } });
+      // hold the exact update range read
+      if (url.pathname === '/api/server/update-preview') {
+        await previewFinished;
+        return route.fulfill({ json: { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha, fastForwardable: true, commitCount: commits.length, commits, commitsTruncated: false, filesTruncated: false, advisory: { required: true, reasons: [{ kind: 'config', paths: ['compose.yaml', '.env.example'] }] } } });
+      }
+      // keep the advisor loading after the preview resolves
+      if (url.pathname === '/api/server/update-advisor' && route.request().method() === 'POST') {
+        await advisorFinished;
+        advisorLaunched = true;
+        return route.fulfill({ status: 201, json: { agentId: 'update-advisor', targetSha } });
+      }
+      // authorize the mocked pane stream
+      if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'advisor-ticket' } });
+      // disable push enrollment
+      if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+      return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+    });
+
+    await page.goto('/');
+    await openUpstreamUpdate(page);
+    const dialog = page.getByRole('dialog', { name: 'Review update' });
+    const previewStatus = dialog.getByRole('status', { name: 'Loading update preview' });
+    try {
+      await expect(previewStatus).toBeVisible();
+      await expect(previewStatus.locator('.update-commit-list > li')).toHaveCount(3);
+      await expect(previewStatus.locator('.update-advisor[aria-hidden="true"] .update-advisor-output')).toBeVisible();
+      await expect(dialog.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+      await expect(dialog.getByRole('button', { name: 'Update', exact: true })).toBeDisabled();
+      // measure after web fonts settle
+      await page.evaluate(async () => { await document.fonts.ready; });
+      const pending = await updatePreviewLayout(dialog);
+
+      releasePreview();
+      await expect(dialog.getByText(commits[0].subject)).toBeVisible();
+      await expect(previewStatus).toHaveCount(0);
+      await expect(dialog.getByRole('list', { name: 'Pending commits' }).getByRole('listitem')).toHaveCount(commits.length);
+      await expect(dialog.getByRole('status', { name: 'Connecting to the shared advisor' })).toBeVisible();
+      const connecting = await updatePreviewLayout(dialog);
+
+      releaseAdvisor();
+      await expect(dialog.getByLabel('Update advisor output')).toBeVisible();
+      const ready = await updatePreviewLayout(dialog);
+      // match every row within subpixel rounding
+      for (const [index, row] of ready.commits.entries()) {
+        expect(pending.commits[index].x).toBeCloseTo(row.x, 0);
+        expect(pending.commits[index].y).toBeCloseTo(row.y, 0);
+        expect(pending.commits[index].width).toBeCloseTo(row.width, 0);
+        expect(pending.commits[index].height).toBeCloseTo(row.height, 0);
+        expect(pending.commits[index].subjectColumn).toBeCloseTo(row.subjectColumn, 0);
+        expect(pending.commits[index].shaWidth).toBeCloseTo(row.shaWidth, 0);
+      }
+      expect(pending.advisor.y).toBeCloseTo(ready.advisor.y, 0);
+      expect(pending.output.width).toBeCloseTo(ready.output.width, 0);
+      expect(pending.output.height).toBeCloseTo(ready.output.height, 0);
+      expect(connecting.output).toEqual(ready.output);
+    } finally {
+      // release both held requests during failed assertions too
+      releasePreview();
+      releaseAdvisor();
+    }
+  });
+}
 
 test('keeps the embedded update advisor out of the main agent tabs', async ({ page }) => {
   await page.route('**/api/**', async route => {

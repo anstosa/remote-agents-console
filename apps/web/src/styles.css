@@ -2289,17 +2289,17 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .update-advisor-output .log-canvas { padding-left: 0; }
 .update-advisor-output .log-status { top: .45rem; left: .45rem; }
 .update-advisor-output > .mobile-terminal-keys { min-width: 0; max-width: 100%; }
-.update-advisor-launching, .update-advisor-error { display: flex; min-height: 7rem; align-items: center; justify-content: center; gap: .5rem; border: 1px dashed var(--surface-2); border-radius: var(--control-radius); color: var(--subtext-0); font-size: .72rem; }
-.update-advisor-error { color: var(--red); }
+.update-advisor-error { display: flex; min-height: 7rem; align-items: center; justify-content: center; gap: .5rem; border: 1px dashed var(--surface-2); border-radius: var(--control-radius); color: var(--red); font-size: .72rem; }
 .update-advisor-question { display: grid; gap: .5rem; padding: .65rem; border: 1px solid color-mix(in srgb, var(--yellow) 55%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--yellow) 7%, var(--surface-0)); }
 .update-advisor-question > strong { color: var(--text); font-size: .75rem; }
 .update-advisor-question > div { display: flex; flex-wrap: wrap; gap: .4rem; }
 .update-advisor-question button { display: inline-flex; min-width: 0; align-items: center; gap: .35rem; padding: .35rem .5rem; border-color: var(--surface-2); background: var(--mantle); color: var(--text); box-shadow: none; font-size: .68rem; }
 .update-advisor-question button b { color: var(--yellow); font: 800 .62rem var(--font-mono); }
 .update-advisor-feedback { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .45rem; }
-.update-advisor-feedback label { display: grid; gap: .3rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
-.update-advisor-feedback textarea { width: 100%; min-height: 4rem; max-height: 10rem; resize: vertical; }
-.update-advisor-feedback button { min-width: 5rem; justify-content: center; }
+.update-advisor-feedback :is(label, .update-advisor-feedback-label) { display: grid; gap: .3rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.update-advisor-feedback :is(textarea, .update-advisor-feedback-input) { width: 100%; min-height: 4rem; }
+.update-advisor-feedback textarea { max-height: 10rem; resize: vertical; }
+.update-advisor-feedback :is(button, .update-advisor-feedback-send) { min-width: 5rem; justify-content: center; }
 .update-advisor-feedback-status { color: var(--green); font: 650 .62rem var(--font-mono); }
 .update-advisor-acknowledgement { display: flex; align-items: start; gap: .5rem; padding: .55rem; border: 1px solid color-mix(in srgb, var(--green) 42%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--green) 6%, var(--mantle)); color: var(--text); font-size: .7rem; line-height: 1.35; cursor: pointer; }
 .update-advisor-acknowledgement input { flex: 0 0 auto; margin-top: .1rem; accent-color: var(--green); }
@@ -2311,7 +2311,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .server-update-dialog > div > footer { display: flex; align-items: center; gap: .75rem; padding: .75rem 1rem; border-top: 1px solid var(--surface-1); }
 .server-update-dialog > div > footer > span { color: var(--overlay-1); font: 600 .62rem var(--font-mono); }
 .server-update-dialog > div > footer > button { min-width: 7rem; justify-content: center; margin-left: auto; border-color: var(--blue); background: var(--blue); color: var(--crust); }
-@media (max-width: 600px) { .server-update-dialog { padding: 0; }.server-update-dialog > div { width: 100vw; height: var(--app-height, 100dvh); min-height: 0; max-height: none; border: 0; border-radius: 0; }.update-review-summary { align-items: start; flex-direction: column; }.update-commit-list { max-height: 14rem; }.update-advisor-output { height: 15rem; }.update-advisor-output:has(.log-output.input-active) { height: 20rem; }.update-advisor-output:has(.log-output.input-active) > .mobile-terminal-keys { display: grid; grid-template-columns: 3.15rem auto auto; align-items: start; justify-content: center; gap: .45rem .7rem; padding: .45rem; border-top: 1px solid var(--surface-1); background: color-mix(in srgb, var(--mantle) 92%, transparent); }.update-advisor-feedback { grid-template-columns: minmax(0, 1fr); }.update-advisor-feedback button { justify-self: end; }.server-update-dialog > div > footer > span { display: none; } }
+@media (max-width: 600px) { .server-update-dialog { padding: 0; }.server-update-dialog > div { width: 100vw; height: var(--app-height, 100dvh); min-height: 0; max-height: none; border: 0; border-radius: 0; }.update-review-summary { align-items: start; flex-direction: column; }.update-commit-list { max-height: 14rem; }.update-advisor-output { height: 15rem; }.update-advisor-output:has(.log-output.input-active) { height: 20rem; }.update-advisor-output:has(.log-output.input-active) > .mobile-terminal-keys { display: grid; grid-template-columns: 3.15rem auto auto; align-items: start; justify-content: center; gap: .45rem .7rem; padding: .45rem; border-top: 1px solid var(--surface-1); background: color-mix(in srgb, var(--mantle) 92%, transparent); }.update-advisor-feedback { grid-template-columns: minmax(0, 1fr); }.update-advisor-feedback :is(button, .update-advisor-feedback-send) { justify-self: end; }.server-update-dialog > div > footer > span { display: none; } }
 .chatgpt-account-login { display: flex; min-height: 9rem; flex-direction: column; align-items: center; justify-content: center; gap: .7rem; padding: 1rem; color: var(--subtext-0); text-align: center; }
 .chatgpt-account-login strong { color: var(--green); }
 .chatgpt-account-login > a { min-width: 10rem; border: 1px solid var(--blue); border-radius: var(--control-radius); padding: .6rem .9rem; background: color-mix(in srgb, var(--blue) 14%, var(--surface-0)); color: var(--blue); font: 700 .72rem var(--font-mono); text-decoration: none; }
@@ -3102,6 +3102,17 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .commit-skeleton { display: grid; gap: .55rem; padding: .65rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); }
 .skeleton-commit-subject { width: 80%; height: .85rem; }
 .skeleton-commit-meta { width: 45%; }
+/* inherit the loaded font's line box without painting over its full height */
+.skeleton.skeleton-update-line { height: 1lh; padding-block: .19em; background-clip: content-box; }
+.update-advisor-skeleton-heading { width: min(13rem, 70%); min-width: 0; }
+.update-advisor-skeleton-heading small .skeleton { display: inline-block; vertical-align: middle; }
+.update-advisor-skeleton-description > .skeleton:nth-child(n+2) { display: none; }
+/* follow the typical advisor copy as it wraps at narrower widths */
+@media (max-width: 980px) { .update-advisor-skeleton-description > .skeleton:nth-child(2) { display: block; } }
+@media (max-width: 525px) { .update-advisor-skeleton-description > .skeleton:nth-child(3) { display: block; } }
+.update-advisor-output-lines { display: grid; align-content: start; gap: .45rem; padding: .65rem; }
+.update-advisor-feedback .skeleton:is(.update-advisor-feedback-input, .update-advisor-feedback-send) { border-radius: var(--control-radius); }
+.update-advisor-feedback .skeleton.update-advisor-feedback-send { height: calc(1lh + 1.3rem + 2px); }
 /* cleanup placeholders cannot be confused with live consent inputs */
 .cleanup-skeletons { display: grid; gap: .7rem; padding: .6rem 0; }
 .cleanup-skeleton { display: grid; grid-template-columns: 1rem minmax(0, 1fr); gap: .65rem; padding: .6rem; }
