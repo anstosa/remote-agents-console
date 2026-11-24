@@ -19,12 +19,14 @@ function procStat(pid: number, startTime: string): string {
 }
 
 // create one fake executable and process identity
-async function fakeProcess(root: string, input: { pid: number; startTime: string; name: 'codex' | 'omx' | 'claude'; argv?: string[]; environment: Record<string, string>; children?: number[]; conversationId?: string; cwd?: string }) {
+async function fakeProcess(root: string, input: { pid: number; startTime: string; name: 'codex' | 'omx' | 'claude'; argv?: string[]; environment: Record<string, string>; children?: number[]; conversationId?: string; cwd?: string; unlinkedExecutable?: boolean }) {
   const processRoot = join(root, 'proc', String(input.pid));
   const program = join(root, 'bin', `${input.name}-${input.pid}`, input.name);
+  // mirror the kernel link label while keeping the old executable inspectable
+  const executable = input.unlinkedExecutable ? `${program} (deleted)` : program;
   await mkdir(join(program, '..'), { recursive: true, mode: 0o700 });
-  await writeFile(program, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
-  await chmod(program, 0o700);
+  await writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  await chmod(executable, 0o700);
   await mkdir(join(processRoot, 'task', String(input.pid)), { recursive: true, mode: 0o700 });
   await mkdir(join(processRoot, 'fd'), { mode: 0o700 });
   await writeFile(join(processRoot, 'stat'), procStat(input.pid, input.startTime));
@@ -32,12 +34,12 @@ async function fakeProcess(root: string, input: { pid: number; startTime: string
   await writeFile(join(processRoot, 'cmdline'), `${(input.argv ?? [program]).join('\0')}\0`);
   await writeFile(join(processRoot, 'environ'), `${Object.entries(input.environment).map(([key, value]) => `${key}=${value}`).join('\0')}\0`);
   await writeFile(join(processRoot, 'task', String(input.pid), 'children'), `${(input.children ?? []).join(' ')}\n`);
-  await symlink(program, join(processRoot, 'exe'));
+  await symlink(executable, join(processRoot, 'exe'));
   await symlink(input.cwd ?? input.environment.HOME ?? root, join(processRoot, 'cwd'));
   await symlink('/', join(processRoot, 'root'));
   // expose one exact open rollout identity
   if (input.conversationId !== undefined) await symlink(`/account/sessions/2026/rollout-test-${input.conversationId}.jsonl`, join(processRoot, 'fd', '77'));
-  return program;
+  return executable;
 }
 
 // create one fake home and native config directory
@@ -66,6 +68,49 @@ describe('native reply process scope', () => {
     expect(scope).toMatchObject({ kind: 'codex', program, home, configDir: config, process: { pid: 101, startTime: '5001' } });
     expect(scope?.fingerprint).toMatch(/^[A-Za-z0-9_-]{40,}$/u);
     expect(JSON.stringify(scope)).not.toContain('secret');
+  });
+
+  // the native process keeps its original executable inode across a CLI update
+  it.each(['codex', 'omx'] as const)('keeps %s tied to the live Codex executable after an upgrade', async kind => {
+    const { root, environment } = await fixture();
+    const { home, config } = await fakeHome(root, 'codex');
+    const process = { pid: 101, startTime: '5001' };
+    const wrapper = { pid: 201, startTime: '6001' };
+    // an OMX leader still has to resolve the same conversation in its child
+    if (kind === 'omx') await fakeProcess(root, { ...wrapper, name: 'omx', argv: ['/usr/bin/omx', '--direct'], environment: { HOME: home }, children: [process.pid] });
+    const executable = await fakeProcess(root, { ...process, name: 'codex', environment: { HOME: home, CODEX_HOME: config }, conversationId: conversation, unlinkedExecutable: true });
+    const owner = kind === 'omx' ? wrapper : process;
+    const scope = await nativeReplyScope(kind, owner, environment, conversation);
+    expect(scope).toMatchObject({ kind: 'codex', program: executable, process });
+    // installing a new binary at the old pathname cannot substitute its identity
+    const replacement = executable.slice(0, -' (deleted)'.length);
+    await writeFile(replacement, 'different binary', { mode: 0o700 });
+    expect(await nativeReplyScope(kind, owner, environment, conversation)).toEqual(scope);
+    const link = join(root, 'proc', String(process.pid), 'exe');
+    await rm(link);
+    await symlink(replacement, link);
+    expect((await nativeReplyScope(kind, owner, environment, conversation))?.fingerprint).not.toBe(scope?.fingerprint);
+  });
+
+  // the Codex compatibility rule must not admit other deleted CLI executables
+  it('still rejects a deleted native Claude executable', async () => {
+    const { root, environment } = await fixture();
+    const { home, config } = await fakeHome(root, 'claude');
+    const process = { pid: 301, startTime: '7001' };
+    await fakeProcess(root, { ...process, name: 'claude', environment: { HOME: home, CLAUDE_CONFIG_DIR: config }, unlinkedExecutable: true });
+    expect(await nativeReplyScope('claude', process, environment)).toBeUndefined();
+  });
+
+  // overlapping process markers cannot extend Codex's exception to another owner kind
+  it.each(['claude', 'omx'] as const)('rejects a deleted Codex executable for a %s owner', async kind => {
+    const { root, environment } = await fixture();
+    const { home } = await fakeHome(root, kind === 'omx' ? 'codex' : kind);
+    const owner = { pid: 101, startTime: '5001' };
+    await fakeProcess(root, { ...owner, name: 'codex', environment: { HOME: home }, children: kind === 'omx' ? [102] : [], unlinkedExecutable: true });
+    await writeFile(join(root, 'proc', String(owner.pid), 'comm'), `${kind}\n`);
+    // a valid child cannot make a deleted OMX owner eligible
+    if (kind === 'omx') await fakeProcess(root, { pid: 102, startTime: '5002', name: 'codex', environment: { HOME: home }, conversationId: conversation });
+    expect(await nativeReplyScope(kind, owner, environment, conversation)).toBeUndefined();
   });
 
   it.each(['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'HTTPS_PROXY'])('rejects Codex environment override %s', async forbidden => {

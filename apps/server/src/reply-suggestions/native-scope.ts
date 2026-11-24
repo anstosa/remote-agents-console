@@ -17,6 +17,7 @@ const maximumEnvironmentBytes = 256 * 1024;
 const maximumConfigBytes = 256 * 1024;
 const maximumProcesses = 256;
 const maximumDescriptors = 4_096;
+const deletedExecutableSuffix = ' (deleted)';
 const selectedEnvironmentNames = new Set(['HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_SESSION_KIND']);
 const forbiddenEnvironmentNames = new Set([
   'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_PROJECT_ID', 'OPENAI_IDENTITY_TOKEN_FILE', 'OPENAI_FEDERATION_RULE_ID',
@@ -319,7 +320,7 @@ async function selectedEnvironment(procRoot: string, pid: number): Promise<Selec
 }
 
 // read one exact live process identity and first-party executable
-async function processRecord(procRoot: string, identity: ProcessIdentity): Promise<ProcessRecord | undefined> {
+async function processRecord(procRoot: string, identity: ProcessIdentity, allowDeletedCodex = false): Promise<ProcessRecord | undefined> {
   const root = join(procRoot, String(identity.pid));
   const [rawStat, rawCommand, rawName, linkedProgram, linkedCwd] = await Promise.all([
     boundedBytes(join(root, 'stat'), 16 * 1024),
@@ -340,8 +341,11 @@ async function processRecord(procRoot: string, identity: ProcessIdentity): Promi
     const argv = rawCommand.toString('utf8').split('\0').filter(Boolean);
     const comm = rawName.toString('utf8').trim();
     // require one absolute live host executable path
-    if (argv.length === 0 || !isAbsolute(linkedProgram) || linkedProgram.endsWith(' (deleted)') || /[\u0000-\u001f\u007f]/u.test(linkedProgram)
+    if (argv.length === 0 || !isAbsolute(linkedProgram) || /[\u0000-\u001f\u007f]/u.test(linkedProgram)
       || !isAbsolute(linkedCwd) || linkedCwd.endsWith(' (deleted)') || /[\u0000-\u001f\u007f]/u.test(linkedCwd)) return undefined;
+    // only Codex reads may keep using the native inode pinned by proc after an upgrade
+    if (linkedProgram.endsWith(deletedExecutableSuffix)
+      && (!allowDeletedCodex || basename(linkedProgram.slice(0, -deletedExecutableSuffix.length)) !== 'codex' || !isCodexCommand(comm, argv))) return undefined;
     return { ...identity, comm, argv, program: linkedProgram, cwd: linkedCwd };
   } finally {
     rawStat.fill(0); rawCommand.fill(0); rawName.fill(0);
@@ -570,7 +574,8 @@ async function omxCodexProcess(procRoot: string, wrapper: ProcessRecord, convers
     const parsed = rawStat === undefined ? undefined : processStat(rawStat.toString('utf8'), pid);
     // ignore exited or malformed descendants
     if (parsed === undefined) continue;
-    const candidate = await processRecord(procRoot, { pid, startTime: parsed.startTime });
+    // the exact native child can survive a Codex binary upgrade
+    const candidate = await processRecord(procRoot, { pid, startTime: parsed.startTime }, true);
     // retain only native Codex descendants
     if (candidate === undefined || !isCodexCommand(candidate.comm, candidate.argv)) continue;
     // a reported conversation must match this descendant's open rollout
@@ -623,7 +628,8 @@ async function resolvedScope(kind: 'codex' | 'claude', process: ProcessRecord, e
 // resolve one exact native cli process without reading credential contents
 export async function nativeReplyScope(kind: NativeKind, process: ProcessIdentity, environment: NodeJS.ProcessEnv = processEnv(), conversationId?: string, transport: NativeTransport = 'tmux'): Promise<NativeReplyScope | undefined> {
   const procRoot = environment.RAC_HOST_PROC ?? '/proc';
-  const initial = await processRecord(procRoot, process);
+  // Claude and OMX owners still require linked executables
+  const initial = await processRecord(procRoot, process, kind === 'codex');
   // fail closed on a replaced or unreadable process
   if (initial === undefined) return undefined;
   if (kind === 'omx') {
