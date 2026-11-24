@@ -162,6 +162,23 @@ deployment can run plain Codex in some worktrees and OMX in others.
 }
 ```
 
+**Agent updates** verify the installed version against the version selected
+before the installer runs. If the version changed but the installer reported
+an error, the menu shows the observed version and a warning rather than
+offering the same install again. Check the diagnostic before retrying.
+
+Only one console-managed agent installer can run at a time per checkout.
+The host installer has a 15-minute deadline and records its result independently
+of the console, so a reconnect or console restart can recover the same job.
+A container without a host bridge cannot keep an installer alive if the
+container itself is replaced.
+A missing result is not grounds for automatically rerunning an installer.
+If the shared installer lock cannot be verified, admission remains held for
+operator investigation rather than assuming the original job stopped.
+Private diagnostic reports under `.data/agent-updates/` contain the job ID,
+failed step, elapsed time, available version evidence, and a bounded output
+excerpt. Keep those files private.
+
 `name` identifies the current Remote Agents server. Remote entries require their
 canonical URL and may include an optional local `name` override. Without it, each
 server's name comes from its authenticated peer-status API. In Application

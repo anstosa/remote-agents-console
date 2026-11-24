@@ -1296,7 +1296,7 @@ type ServerRevision = { sha: string; committedAt: string };
 type AgentUpdateJob =
   | { id: string; kind: AgentKind; state: 'running' }
   | { id: string; kind: AgentKind; state: 'complete'; agent: AgentUpdateStatus }
-  | { id: string; kind: AgentKind; state: 'failed'; error: string };
+  | { id: string; kind: AgentKind; state: 'failed'; error: string; agent?: AgentUpdateStatus };
 type ServerUpdateCommit = { sha: string; subject: string; author: string; authoredAt: string };
 type ServerUpdateAdvisoryReason = { kind: 'config' | 'compose' | 'runtime' | 'dependency' | 'state' | 'other'; paths: string[] };
 type ServerUpdatePreview = { available: boolean; rebuildRetryAvailable: boolean; baseSha: string; targetSha: string; fastForwardable: boolean; commitCount: number; commits: ServerUpdateCommit[]; commitsTruncated: boolean; filesTruncated: boolean; advisory: { required: boolean; reasons: ServerUpdateAdvisoryReason[] }; settingsImpact?: { pendingTargets: Array<'rac' | 'cloudflared'>; warning: string } };
@@ -1347,9 +1347,10 @@ const isAgentUpdateJob = (value: unknown): value is AgentUpdateJob => {
   const job = value as { id?: unknown; kind?: unknown; state?: unknown; agent?: unknown; error?: unknown };
   // require an opaque identity and configured agent kind
   if (typeof job.id !== 'string' || job.id.length === 0 || !isAgentKind(job.kind)) return false;
+  const matchingAgent = isAgentUpdateStatus(job.agent) && job.agent.kind === job.kind;
   return job.state === 'running'
-    || job.state === 'failed' && typeof job.error === 'string'
-    || job.state === 'complete' && isAgentUpdateStatus(job.agent) && job.agent.kind === job.kind;
+    || job.state === 'failed' && typeof job.error === 'string' && (job.agent === undefined || matchingAgent)
+    || job.state === 'complete' && matchingAgent;
 };
 // validate one public voice settings response
 const isDavoSettings = (value: unknown): value is DavoSettings => value !== null
@@ -12211,6 +12212,8 @@ function App() {
   const [versionCheckError, setVersionCheckError] = useState('');
   // reuse the serialized polling owner for manual retries
   const refreshAgentVersions = useRef<(() => void) | undefined>(undefined);
+  // order provider reads behind newer terminal update evidence
+  const agentVersionEvidenceRevision = useRef(0);
   const [reconnecting, setReconnecting] = useState(!consoleReachable);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const colorTheme = useColorTheme();
@@ -12319,7 +12322,9 @@ function App() {
     const path = `/api/agents/${encodeURIComponent(kind)}/update`;
     const unknownStatus = 'Update status is unavailable. The update may still be running; check installed versions before retrying.';
     // declare a json payload so chunked tunnel framing cannot reject an empty post
-    const response = await request(path, { method: 'POST', headers: { 'content-type': 'application/json', Prefer: 'respond-async' }, body: JSON.stringify({}), signal: AbortSignal.timeout(10_000) }, false);
+    const response = await request(path, { method: 'POST', headers: { 'content-type': 'application/json', Prefer: 'respond-async' }, body: JSON.stringify({}), signal: AbortSignal.timeout(10_000) }, false).catch(() => undefined);
+    // a network failure cannot prove whether the installer was accepted
+    if (response === undefined) return { error: unknownStatus };
     const payload = await response.json().catch(() => undefined) as { agent?: unknown; update?: unknown; error?: unknown } | undefined;
     // never replay an installer after an ambiguous start response
     if (response.status >= 500) return { error: unknownStatus };
@@ -12336,15 +12341,15 @@ function App() {
     while (true) {
       // apply only a validated terminal result
       if (job.state === 'complete') return { agent: job.agent };
-      // surface installer failures without declaring the console disconnected
-      if (job.state === 'failed') return { error: job.error };
+      // keep verified versions visible alongside a partial-install failure
+      if (job.state === 'failed') return { agent: job.agent, error: job.error };
       // stop waiting without discarding a terminal response received at the deadline
       if (Date.now() >= deadline) return { error: unknownStatus };
       // pace short status reads independently of console reachability
       await new Promise<void>(resolve => window.setTimeout(resolve, 1_000));
-      const poll = await request(`${path}/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(10_000) }, false);
+      const poll = await request(`${path}/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(10_000) }, false).catch(() => undefined);
       // retry only status reads after transient proxy or transport failures
-      if (poll.status >= 500 || poll.status === 429) continue;
+      if (poll === undefined || poll.status >= 500 || poll.status === 429) continue;
       const status = await poll.json().catch(() => undefined) as { update?: unknown; error?: unknown } | undefined;
       // preserve unknown-job and authorization errors instead of rerunning the installer
       if (!poll.ok) return { error: typeof status?.error === 'string' ? status.error : unknownStatus };
@@ -12367,12 +12372,13 @@ function App() {
       // a newer intent keeps loading visible until its own response settles
       while (active) {
         const owner = generation;
+        const evidenceRevision = agentVersionEvidenceRevision.current;
         queued = false;
         const result: { agents?: AgentUpdateStatus[]; error?: string } = await agentUpdates().catch(() => ({ error: 'Unable to check agent versions.' }));
         // never publish after authentication changes or unmount
         if (!active) return;
         // older results cannot publish or clear newer intent state
-        if (owner === generation) {
+        if (owner === generation && evidenceRevision === agentVersionEvidenceRevision.current) {
           // failed reads retain the last confirmed versions
           if (result.agents === undefined) setVersionCheckError(result.error ?? 'Unable to check agent versions.');
           else {
@@ -12415,9 +12421,13 @@ function App() {
     setAgentUpdateError('');
     const result = await updateAgent(kind);
     setUpdatingAgent(undefined);
-    // retain the available version after failure
-    if (result.agent === undefined) { setAgentUpdateError(result.error ?? 'Unable to update the agent.'); return; }
+    // show the error even when the installer changed the observed version
+    if (result.error !== undefined || result.agent === undefined) setAgentUpdateError(result.error ?? 'Unable to update the agent.');
+    // keep the last known version when no new evidence is available
+    if (result.agent === undefined) return;
     const updated = result.agent;
+    // supersede provider reads started before this verified terminal result
+    agentVersionEvidenceRevision.current += 1;
     setAgentUpdateStatuses(current => [...current.filter(status => status.kind !== kind), updated]);
     // clear the completed update notification
     if (!updated.updateAvailable) {

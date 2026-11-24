@@ -942,6 +942,8 @@ test('recovers agent update polling after a transient HTML 524 response', async 
   await page.clock.install();
   let posts = 0;
   let polls = 0;
+  let releaseCompletion = () => {};
+  const completion = new Promise<void>(resolve => { releaseCompletion = resolve; });
   await page.route('**/api/agents/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -956,6 +958,8 @@ test('recovers agent update polling after a transient HTML 524 response', async 
       polls += 1;
       // simulate a proxy-owned timeout response
       if (polls === 1) return route.fulfill({ status: 524, contentType: 'text/html', body: '<!doctype html><h1>A timeout occurred</h1>' });
+      // hold the terminal response until the in-progress state is inspected
+      await completion;
       return route.fulfill({ json: { update: { id: 'update-recovery', kind: 'codex', state: 'complete', agent: { kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.153.2', updateAvailable: false } } } });
     }
     return route.fallback();
@@ -967,10 +971,95 @@ test('recovers agent update polling after a transient HTML 524 response', async 
   await openAgentMenu(page);
   await expect(update).toHaveAttribute('aria-busy', 'true');
   await expect(page.getByRole('alert', { name: 'Reconnecting to console' })).toHaveCount(0);
+  releaseCompletion();
   await page.clock.runFor(1_001);
   await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.153.2', { exact: true })).toBeVisible();
   expect({ posts, polls }).toEqual({ posts: 1, polls: 2 });
   await expect(page.getByRole('alert', { name: 'Reconnecting to console' })).toHaveCount(0);
+});
+
+// show verified installation progress without hiding a later installer failure
+test('shows the verified agent version and warning after a partial update', async ({ page }) => {
+  const adapters = {
+    codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
+    omx: { program: '/usr/local/bin/omx', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false }
+  };
+  const staleAgents = [
+    { kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true },
+    { kind: 'omx', currentVersion: '0.22.0', latestVersion: '0.22.0', updateAvailable: false }
+  ];
+  // own the periodic version timer before the application creates it
+  await page.clock.install();
+  await openSettings(page, adapters, { open: false, agentUpdates: staleAgents });
+  const menu = await openAgentMenu(page);
+  const warning = 'Codex is now at 0.153.2, but the installer did not complete successfully. Check diagnostics before retrying.';
+  let posts = 0;
+  let polls = 0;
+  let versionReads = 0;
+  let releaseStaleVersions = () => {};
+  // release only the intentionally stale provider snapshot
+  const staleVersions = new Promise<void>(resolve => { releaseStaleVersions = resolve; });
+  await page.route('**/api/agents/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    // hold one old provider read across the terminal job result
+    if (path === '/api/agents/updates' && request.method() === 'GET') {
+      versionReads += 1;
+      // release the pre-update snapshot only after terminal evidence is visible
+      if (versionReads === 1) { await staleVersions; return route.fulfill({ json: { agents: staleAgents } }); }
+      return route.fulfill({ json: { agents: [
+        { kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.154.0', updateAvailable: true },
+        staleAgents[1]
+      ] } });
+    }
+    // accept one installer even if the console restarts during polling
+    if (path === '/api/agents/codex/update' && request.method() === 'POST') {
+      posts += 1;
+      return route.fulfill({ status: 202, json: { update: { id: 'update-partial', kind: 'codex', state: 'running' } } });
+    }
+    // recover the same job and return its verified version on partial failure
+    if (path === '/api/agents/codex/update/update-partial' && request.method() === 'GET') {
+      polls += 1;
+      // simulate both transport and gateway errors while the console comes back up
+      if (polls === 1) return route.abort('failed');
+      // retry a gateway failure without starting another installer
+      if (polls === 2) return route.fulfill({ status: 503, body: 'temporarily unavailable' });
+      return route.fulfill({ json: { update: {
+        id: 'update-partial', kind: 'codex', state: 'failed', error: warning,
+        agent: { kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.153.2', updateAvailable: false }
+      } } });
+    }
+    return route.fallback();
+  });
+  // start a provider read before the installer supplies newer evidence
+  await page.clock.fastForward(15 * 60_000);
+  await expect.poll(() => versionReads).toBe(1);
+  const update = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
+  await update.click();
+  await expect.poll(() => polls).toBe(1);
+  await page.clock.runFor(1_001);
+  await expect.poll(() => polls).toBe(2);
+  await page.clock.runFor(1_001);
+  const toast = page.getByRole('alert', { name: 'Agent update failed' });
+  await expect(toast).toContainText(warning);
+  await expect(toast.locator('.toast-timer-bar')).toHaveCount(0);
+  // observe the gated response before releasing it
+  const staleResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/agents/updates');
+  releaseStaleVersions();
+  await staleResponse;
+  await openAgentMenu(page);
+  await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.153.2', { exact: true })).toBeVisible();
+  await expect(menu.getByRole('group', { name: 'OMX agent' }).getByText('v0.22.0', { exact: true })).toBeVisible();
+  await expect(update).toHaveCount(0);
+  await expect(toast).toContainText(warning);
+  // accept a provider comparison that genuinely started after terminal evidence
+  await page.clock.fastForward(15 * 60_000);
+  await expect.poll(() => versionReads).toBe(2);
+  await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.153.2 → v0.154.0', { exact: true })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Update Codex to 0.154.0' })).toBeVisible();
+  await page.clock.fastForward(60_000);
+  await expect(toast).toBeVisible();
+  expect({ posts, polls }).toEqual({ posts: 1, polls: 3 });
 });
 
 // keep failed updates visible outside their menu until explicitly dismissed

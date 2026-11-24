@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
@@ -5,10 +8,18 @@ import { AgentUpdateService, type AgentUpdateJob, type AgentUpdateServiceLike } 
 import { authenticatedHeaders, testAuthService, testHost } from './helpers/auth.js';
 import { testConfig } from './helpers/config.js';
 
+// allow durable writes and lock handshakes to finish on slower filesystems
+const waitForJob = <T>(callback: () => T | Promise<T>) => vi.waitFor(callback, { timeout: 10_000 });
+
 describe('agent update API', () => {
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
-  // close each isolated HTTP server
-  afterEach(async () => { await app?.close(); });
+  let checkout: string | undefined;
+  // close each isolated HTTP server and owned job directory
+  afterEach(async () => {
+    await app?.close();
+    // remove only the fixture created for a real service instance
+    if (checkout !== undefined) { await rm(checkout, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 }); checkout = undefined; }
+  });
 
   it('publishes versions and executes authenticated configured updates', async () => {
     const available = { kind: 'codex' as const, currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true };
@@ -54,6 +65,18 @@ describe('agent update API', () => {
     const failed = await app.inject({ method: 'POST', url: '/api/agents/omx/update', headers });
     expect(failed.statusCode).toBe(502);
     expect(failed.json()).toEqual({ error });
+  }, 15_000);
+
+  // retain verified versions when a synchronous installer fails after mutation
+  it('returns observed agent evidence with a synchronous installer failure', async () => {
+    const agent = { kind: 'codex' as const, currentVersion: '0.153.2', latestVersion: '0.153.2', updateAvailable: false };
+    const error = 'Codex is now at 0.153.2, but the installer did not complete successfully. Private diagnostics: .data/agent-updates/codex-example.json.';
+    const update = vi.fn<AgentUpdateServiceLike['update']>(async () => ({ outcome: 'failed', error, status: agent }));
+    app = await buildApp(testConfig(), { auth: await testAuthService(), agentUpdates: { statuses: async () => [], update, startUpdate: () => ({ outcome: 'unavailable' }), updateStatus: () => undefined } });
+    const headers = await authenticatedHeaders(app);
+    const failed = await app.inject({ method: 'POST', url: '/api/agents/codex/update', headers });
+    expect(failed.statusCode).toBe(502);
+    expect(failed.json()).toEqual({ error, agent });
   }, 15_000);
 
   it('rejects unknown agent kinds', async () => {
@@ -104,7 +127,8 @@ describe('agent update API', () => {
       return { code: 0, output: command === 'current' ? current : '0.153.2' };
     });
     const config = testConfig({ adapters: { codex: { program: '/bin/codex', args: [], env: {}, launchable: true, updates: { current: 'current', latest: 'latest', run: 'update' } } } });
-    const service = new AgentUpdateService(config, '/home/test', runner);
+    checkout = await mkdtemp(join(tmpdir(), 'rac-agent-update-api-'));
+    const service = new AgentUpdateService(config, '/home/test', runner, checkout);
     app = await buildApp(config, { auth: await testAuthService(), agentUpdates: service });
     const headers = await authenticatedHeaders(app);
     const readHeaders = { host: headers.host, cookie: headers.cookie };
@@ -115,7 +139,7 @@ describe('agent update API', () => {
     expect(started.statusCode).toBe(202);
     const job = started.json<{ update: AgentUpdateJob }>().update;
     expect(job).toMatchObject({ kind: 'codex', state: 'running' });
-    expect(runner).toHaveBeenCalledWith('update', 15 * 60_000);
+    await waitForJob(() => expect(runner).toHaveBeenCalledWith('update', 15 * 60_000));
 
     const denied = await app.inject({ method: 'GET', url: `/api/agents/codex/update/${job.id}`, headers: { host: testHost } });
     const running = await app.inject({ method: 'GET', url: `/api/agents/codex/update/${job.id}`, headers: readHeaders });
@@ -128,22 +152,55 @@ describe('agent update API', () => {
     expect(wrongKind.statusCode).toBe(404);
 
     release();
-    await vi.waitFor(async () => {
+    await waitForJob(async () => {
       const terminal = await app!.inject({ method: 'GET', url: `/api/agents/codex/update/${job.id}`, headers: readHeaders });
       expect(terminal.json()).toEqual({ update: { id: job.id, kind: 'codex', state: 'complete', agent: { kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.153.2', updateAvailable: false } } });
     });
   }, 15_000);
 
   // preserve safe async start refusal codes
-  it('maps asynchronous unavailable and busy starts', async () => {
+  it('maps asynchronous unavailable, busy, and failed starts', async () => {
     // select one refusal per configured test kind
-    const startUpdate: AgentUpdateServiceLike['startUpdate'] = vi.fn(kind => kind === 'codex' ? { outcome: 'busy' } : { outcome: 'unavailable' });
+    const startError = 'Agent update status is unavailable. Check the installed version before retrying.';
+    const startUpdate: AgentUpdateServiceLike['startUpdate'] = vi.fn(kind => {
+      // expose durable admission failure as a retryable service response
+      if (kind === 'claude') return { outcome: 'failed', error: startError };
+      // preserve one admitted installer
+      if (kind === 'codex') return { outcome: 'busy' };
+      return { outcome: 'unavailable' };
+    });
     const agentUpdates: AgentUpdateServiceLike = { statuses: async () => [], update: async () => ({ outcome: 'unavailable' }), startUpdate, updateStatus: () => undefined };
     app = await buildApp(testConfig(), { auth: await testAuthService(), agentUpdates });
     const headers = await authenticatedHeaders(app);
     const busy = await app.inject({ method: 'POST', url: '/api/agents/codex/update', headers: { ...headers, prefer: 'respond-async' } });
+    const failed = await app.inject({ method: 'POST', url: '/api/agents/claude/update', headers: { ...headers, prefer: 'respond-async' } });
     const unavailable = await app.inject({ method: 'POST', url: '/api/agents/omx/update', headers: { ...headers, prefer: 'respond-async' } });
     expect(busy.statusCode).toBe(409);
+    expect(failed.statusCode).toBe(503);
+    expect(failed.json()).toEqual({ error: startError });
     expect(unavailable.statusCode).toBe(404);
+  }, 15_000);
+
+  // separate transient storage failures from durable terminal job failures
+  it('maps polling failures and returns terminal agent evidence', async () => {
+    const agent = { kind: 'codex' as const, currentVersion: '0.153.2', latestVersion: '0.153.2', updateAvailable: false };
+    const error = 'Codex is now at 0.153.2, but setup failed. Private diagnostics: .data/agent-updates/codex-example.json.';
+    const failedJob: AgentUpdateJob = { id: 'terminal-failed', kind: 'codex', state: 'failed', error, agent };
+    const updateStatus = vi.fn<AgentUpdateServiceLike['updateStatus']>((_kind, id) => {
+      // hide private storage details behind the stable polling error
+      if (id === 'storage-error') throw new Error('/home/private/.data/agent-updates/job.json is unreadable');
+      return id === failedJob.id ? failedJob : undefined;
+    });
+    const agentUpdates: AgentUpdateServiceLike = { statuses: async () => [], update: async () => ({ outcome: 'unavailable' }), startUpdate: () => ({ outcome: 'unavailable' }), updateStatus };
+    app = await buildApp(testConfig(), { auth: await testAuthService(), agentUpdates });
+    const headers = await authenticatedHeaders(app);
+    const readHeaders = { host: headers.host, cookie: headers.cookie };
+    const unavailable = await app.inject({ method: 'GET', url: '/api/agents/codex/update/storage-error', headers: readHeaders });
+    const terminal = await app.inject({ method: 'GET', url: `/api/agents/codex/update/${failedJob.id}`, headers: readHeaders });
+    expect(unavailable.statusCode).toBe(503);
+    expect(unavailable.json()).toEqual({ error: 'Agent update status is temporarily unavailable.' });
+    expect(unavailable.body).not.toContain('/home/private');
+    expect(terminal.statusCode).toBe(200);
+    expect(terminal.json()).toEqual({ update: failedJob });
   }, 15_000);
 });

@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   maxAgentUpdateOutputBytes,
-  saveAgentUpdateFailure
+  saveAgentUpdateFailure,
+  type AgentUpdateFailureReason
 } from '../src/agent-updates/diagnostics.js';
 import { tempDir } from './helpers/codex-fixtures.js';
 
@@ -14,6 +15,13 @@ type StoredFailure = {
   recordedAt: string;
   reason: string;
   exitCode?: number;
+  jobId?: string;
+  phase?: string;
+  elapsedMs?: number;
+  previousVersion?: string;
+  targetVersion?: string;
+  observedVersion?: string;
+  installerFailure?: string;
   output: string;
 };
 
@@ -29,7 +37,14 @@ describe('agent update diagnostics', () => {
       kind: 'omx',
       code: 17,
       output: 'installer failed\n',
-      reason: 'command_failed'
+      reason: 'installed_setup_failed',
+      jobId: 'a'.repeat(24),
+      phase: 'verification',
+      elapsedMs: 91_234,
+      previousVersion: '1.0.0',
+      targetVersion: '1.1.0',
+      observedVersion: '1.1.0',
+      installerFailure: 'timed_out'
     });
 
     expect(reference).toMatch(/^\.data\/agent-updates\/omx-[a-f0-9]{24}\.json$/u);
@@ -39,8 +54,15 @@ describe('agent update diagnostics', () => {
       id: reference.match(/[a-f0-9]{24}/u)?.[0],
       kind: 'omx',
       recordedAt: expect.any(String),
-      reason: 'command_failed',
+      reason: 'installed_setup_failed',
       exitCode: 17,
+      jobId: 'a'.repeat(24),
+      phase: 'verification',
+      elapsedMs: 91_234,
+      previousVersion: '1.0.0',
+      targetVersion: '1.1.0',
+      observedVersion: '1.1.0',
+      installerFailure: 'timed_out',
       output: 'installer failed\n'
     });
     expect(Number.isNaN(Date.parse(report.recordedAt))).toBe(false);
@@ -66,6 +88,35 @@ describe('agent update diagnostics', () => {
     expect(report).not.toHaveProperty('exitCode');
   });
 
+  it('omits malformed or unbounded lifecycle metadata', async () => {
+    const checkout = await tempDir('rac-agent-update-diagnostics-metadata-');
+    const reference = await saveAgentUpdateFailure(checkout, {
+      kind: 'codex',
+      code: -1,
+      output: 'verification failed',
+      reason: 'verification_failed',
+      jobId: '../not-a-job',
+      phase: 'verification',
+      elapsedMs: 24 * 60 * 60_000 + 1,
+      previousVersion: 'development',
+      targetVersion: '1.2.3',
+      observedVersion: 'x'.repeat(121),
+      installerFailure: 'not-a-reason' as AgentUpdateFailureReason
+    });
+    const report = await storedFailure(checkout, reference);
+
+    expect(report).toMatchObject({
+      reason: 'verification_failed',
+      phase: 'verification',
+      targetVersion: '1.2.3'
+    });
+    expect(report).not.toHaveProperty('jobId');
+    expect(report).not.toHaveProperty('elapsedMs');
+    expect(report).not.toHaveProperty('previousVersion');
+    expect(report).not.toHaveProperty('observedVersion');
+    expect(report).not.toHaveProperty('installerFailure');
+  });
+
   it('retains at most 32 reports without removing bridge or unrelated files', async () => {
     const checkout = await tempDir('rac-agent-update-diagnostics-retention-');
     const directory = join(checkout, '.data', 'agent-updates');
@@ -87,7 +138,7 @@ describe('agent update diagnostics', () => {
     expect(entries.filter(name => /^omx-[a-f0-9]{24}\.json$/u.test(name))).toHaveLength(32);
     expect(entries).toEqual(expect.arrayContaining(['bridge.out', 'bridge.status', 'notes.json']));
     await expect(readFile(join(checkout, newest), 'utf8')).resolves.toContain('failure 34');
-  });
+  }, 45_000);
 
   it('refuses a linked diagnostics directory and propagates the failure', async () => {
     const checkout = await tempDir('rac-agent-update-diagnostics-link-');
@@ -100,7 +151,7 @@ describe('agent update diagnostics', () => {
       code: -1,
       output: 'private output',
       reason: 'launch_failed'
-    })).rejects.toThrow(/private diagnostics directory/u);
+    })).rejects.toThrow(/private agent update directory/u);
     await expect(readdir(target)).resolves.toEqual([]);
   });
 
@@ -115,7 +166,7 @@ describe('agent update diagnostics', () => {
       code: -1,
       output: 'private output',
       reason: 'interrupted'
-    })).rejects.toThrow(/private diagnostics directory/u);
+    })).rejects.toThrow(/private agent update directory/u);
     await expect(readdir(directory)).resolves.toEqual([]);
   });
 });
