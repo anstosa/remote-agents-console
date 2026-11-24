@@ -58,6 +58,23 @@ describe('Codex goal resume badge', () => {
 
 // keep composer acknowledgements independent of decorative animation
 describe('Codex draft observation', () => {
+  // codex can render its warning key without a workspace status row
+  it.each(['100% context left · ⚠ 2 warnings · \x1b[1mf2\x1b[0m to view', '100% context left · ⚠ 2 · \x1b[1mf2\x1b[0m'])('owns a draft above standalone warning chrome %j', warning => {
+    const prompt = 'check the standalone footer';
+    const pane = `\x1b[1m›\x1b[0m ${prompt}\n\n                     ${warning}`;
+    expect(codexDraftState(pane, prompt)).toBe('visible');
+    expect(codexOwnsDraft(pane, prompt)).toBe(true);
+    expect(codexOwnsDraft(pane.replace(prompt, `${prompt} plus edits`), prompt)).toBe(false);
+  });
+
+  // matching plain text and adjacent styled text are insufficient to hide an authored line
+  it.each([
+    '\n  100% context left · ⚠ 2 warnings · f2 to view',
+    '                     100% context left · ⚠ 2 warnings · \x1b[1mf2\x1b[0m to view'
+  ])('preserves text resembling standalone warning chrome %j', continuation => {
+    expect(codexOwnsDraft(`› original draft\n${continuation}`, 'original draft')).toBe(false);
+  });
+
   // native magenta identifies a lone goal footer without trusting lookalike draft text
   it('owns a wrapped draft above styled standalone goal chrome', () => {
     const draft = '› first line\n  wrapped continuation';

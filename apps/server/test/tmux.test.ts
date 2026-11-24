@@ -146,6 +146,23 @@ describe('TmuxAdapter capture', () => {
     expect(codexPaneOutputPreview(capture, 7)).toEqual({ text: '' });
   });
 
+  // a verified composer already separates output from everything beneath the draft
+  it('keeps warning-like output above a draft with a standalone warning', () => {
+    const quoted = '  100% context left · ⚠ 2 warnings · f2 to view';
+    const footer = '                   100% context left · ⚠ 2 warnings · \x1b[1mf2\x1b[0m to view';
+    const capture = ['› Current prompt', '• Working', quoted, '', '› Draft', '', footer].join('\n');
+    expect(codexPaneOutputPreview(capture, 7)).toEqual({ text: `• Working\n${quoted}` });
+  });
+
+  // a hidden composer cannot prove that a plain warning line is terminal chrome
+  it('drops only styled standalone context warnings when the composer is hidden', () => {
+    const quoted = '  100% context left · ⚠ 2 warnings · f2 to view';
+    const capture = `› Current prompt\n• Working\n  recent output\n\n${quoted}`;
+    const output = '• Working\n  recent output';
+    expect(codexPaneOutputPreview(capture, 7)).toEqual({ text: `${output}\n${quoted}` });
+    expect(codexPaneOutputPreview(capture.replace('f2', '\x1b[1mf2\x1b[0m'), 7)).toEqual({ text: output });
+  });
+
   // native choice mode replaces the composer but must retain only its content
   it('keeps a current native choice while excluding its keyboard footer', () => {
     const capture = ['• Previous answer', '› Current prompt', '• Working', '', 'Choose the next step.', '\x1b[1;7m› 1. Continue\x1b[0m', '  2. Stop', 'tab to add notes | enter to submit answer | esc to interrupt'].join('\n');

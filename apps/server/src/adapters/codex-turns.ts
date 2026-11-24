@@ -21,7 +21,12 @@ const composerWorkspaceStatusLine = /^ {2}\S[^·]* · (?:~(?:[\\/][^·]*)?|\/[^�
 // empty composers expose shortcuts and optional native agent navigation
 const composerShortcutsLine = /^ {2}(?:(?:← for agents · )?\? for shortcuts|← for agents)(?:\s|$)/u;
 // filled idle composers suppress shortcuts but retain right-aligned warning notices
-const composerWarningLine = /^ {2,}⚠ \d+(?: warnings? · \S+ to view| · \S+)?\s*$/u;
+const warningNotice = /⚠ \d+(?: warnings? · \S+ to view| · \S+)?/u;
+const composerWarningLine = new RegExp(String.raw`^ {2,}${warningNotice.source}\s*$`, 'u');
+// without workspace status the context counter shares the warning row
+const composerContextWarningLine = new RegExp(String.raw`^ {2,}(?:\d+% context left|[\d.,]+[kKmMbB]? used) · ${warningNotice.source}\s*$`, 'u');
+// a standalone warning needs its native emphasized shortcut to prove it is chrome
+const styledComposerWarningKey = / · \x1b\[1m[^\s\x1b]+\x1b\[(?:0|22)m(?: to view)?\s*$/u;
 // filled working composers expose queue hints with optional native context counters
 const composerQueueLine = /^ {2}(?:\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode)(?:\s{2,}(?:\d+% context left|[\d.,]+[kKmMbB]? used))?\s*$/u;
 // goal badges can share the right side with context or warnings
@@ -173,6 +178,10 @@ function footerChoiceGroup(rows: readonly string[], plain: readonly string[], fi
   return choices.length >= 2 && choices.some(row => /^[›❯>]\s*/u.test(row.trim())) ? group : undefined;
 }
 
+// require a blank separator and native paint before excluding standalone chrome
+const isStyledStandaloneFooter = (lines: readonly string[], row: number, styledRow: string | undefined, style: RegExp): boolean =>
+  lines[row - 1]?.trim() === '' && style.test(styledRow ?? '');
+
 // locate the live prompt or shell composer, excluding matching scrollback
 function activeComposer(lines: string[], styledRows?: readonly string[]): { index: number; draft: string } | undefined {
   let finalVisibleRow = lines.length - 1;
@@ -181,13 +190,15 @@ function activeComposer(lines: string[], styledRows?: readonly string[]): { inde
   let footerStart = finalVisibleRow;
   const auxiliary = lines[footerStart] ?? '';
   const goalAuxiliary = composerGoalLine.test(auxiliary);
-  const statusEnd = composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) || goalAuxiliary ? footerStart - 1 : footerStart;
+  const warningAuxiliary = composerWarningLine.test(auxiliary);
+  const statusEnd = composerShortcutsLine.test(auxiliary) || warningAuxiliary || composerQueueLine.test(auxiliary) || goalAuxiliary ? footerStart - 1 : footerStart;
   const statusStart = composerAgentLabelContinuation.test(lines[statusEnd] ?? '') ? statusEnd - 1 : statusEnd;
   // require the native workspace and blank separator before excluding auxiliary or wrapped rows
   if (composerWorkspaceStatusLine.test(lines[statusStart] ?? '') && lines[statusStart - 1]?.trim() === '') footerStart = statusStart;
-  // a lone goal row needs native styling and separation before it can affect draft ownership
-  else if (goalAuxiliary) {
-    footerStart = lines[finalVisibleRow - 1]?.trim() === '' && styledComposerGoalBadge.test(styledRows?.[finalVisibleRow] ?? '') ? finalVisibleRow : lines.length;
+  // standalone chrome needs native styling and separation before it can affect draft ownership
+  else if (goalAuxiliary || warningAuxiliary || composerContextWarningLine.test(auxiliary)) {
+    const style = goalAuxiliary ? styledComposerGoalBadge : styledComposerWarningKey;
+    footerStart = isStyledStandaloneFooter(lines, finalVisibleRow, styledRows?.[finalVisibleRow], style) ? finalVisibleRow : lines.length;
   }
   // absent native chrome must not hide an authored shortcuts row
   else if (!composerStatusLine.test(auxiliary)) footerStart = lines.length;
@@ -270,7 +281,7 @@ export function codexOutputFromCapture(value: string): string | undefined {
   // an incomplete selector layout cannot establish a safe input boundary
   if (ambiguousChoice) return undefined;
   // only a verified selector may hide what otherwise parses as a numbered draft
-  const composer = activeChoice ? undefined : activeComposer(plain);
+  const composer = activeChoice ? undefined : activeComposer(plain, rows);
   const submittedPrompt = plain.some(row => /^[›!]\s+\S/u.test(row) && !selectedChoice.test(row));
   const activeWork = plain.some(row => /^(?:[•■─].*\b(?:Working|esc to interrupt)\b|.*\besc to interrupt\b)/iu.test(row.trim()));
   // without an input or working boundary, pane scrollback may be another turn
@@ -278,9 +289,14 @@ export function codexOutputFromCapture(value: string): string | undefined {
   let end = composer?.index ?? rows.length;
   // a native question can replace the composer, so remove its footer explicitly
   while (end > 0 && (!plain[end - 1]!.trim() || questionFooterLine.test(plain[end - 1]!.trim()))) end -= 1;
+  // rows above a live composer are already on the output side of the footer boundary
+  if (composer !== undefined) return rows.slice(0, end).join('\n');
   // never retain a standard footer when a temporarily hidden composer cannot anchor it
   const auxiliary = plain[end - 1] ?? '';
-  if (composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) || composerGoalLine.test(auxiliary)) end -= 1;
+  const standaloneContextWarning = end - 1 === finalVisibleRow && composerContextWarningLine.test(auxiliary)
+    && isStyledStandaloneFooter(plain, finalVisibleRow, rows[finalVisibleRow], styledComposerWarningKey);
+  // do not infer new context-warning chrome from plain assistant text
+  if (composerShortcutsLine.test(auxiliary) || composerWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) || composerGoalLine.test(auxiliary) || standaloneContextWarning) end -= 1;
   const statusEnd = end - 1;
   const statusStart = composerAgentLabelContinuation.test(plain[statusEnd] ?? '') ? statusEnd - 1 : statusEnd;
   if (composerWorkspaceStatusLine.test(plain[statusStart] ?? '') && plain[statusStart - 1]?.trim() === '') end = statusStart;

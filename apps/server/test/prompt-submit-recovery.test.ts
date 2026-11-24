@@ -47,6 +47,35 @@ const fixture = async (kind: AgentKind = 'codex') => {
 describe('failed queue submission recovery', () => {
   afterEach(() => vi.useRealTimers());
 
+  // a standalone warning footer must not veto either submit or recovery
+  it('submits and retries above a native warning without a workspace row', async () => {
+    const { agent, queue, history, scope, notes, drain, cleanup } = await fixture();
+    const prompt = 'check the standalone footer';
+    let composer = prompt;
+    const sent: string[][] = [];
+    const discovery = { worktreesNow: () => [], target: async () => ({ agent, socket }) };
+    const tmux = {
+      pastePrompt: async () => true,
+      // reproduce codex with its workspace status line disabled
+      capture: async () => `\x1b[1m›\x1b[0m ${composer}\n\n                   100% context left · ⚠ 2 warnings · \x1b[1mf2\x1b[0m to view`,
+      // swallow the initial key without modifying the draft
+      sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => {
+        sent.push(keys);
+        // the second submit acknowledges the existing paste
+        if (sent.length === 2) composer = '';
+        return true;
+      }
+    };
+    const service = new PromptService(discovery as never, tmux as never, history, queue, drain);
+    try {
+      await settlePolling(service.submit(agent.id, prompt));
+      expect(sent).toEqual([['Enter'], ['Enter']]);
+      await expect(queue.list(scope)).resolves.toEqual([]);
+      await expect(history.list(scope)).resolves.toMatchObject([{ text: prompt }]);
+      expect(notes).toEqual([]);
+    } finally { await cleanup(); }
+  });
+
   // goal chrome must not veto either initial submission or a swallowed-key retry
   it.each([...codexGoalFooters, 'standalone'])('submits and retries drafts above the goal footer %s', async auxiliary => {
     const standalone = auxiliary === 'standalone';
