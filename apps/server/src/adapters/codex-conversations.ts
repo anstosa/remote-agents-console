@@ -48,6 +48,8 @@ const maxRolloutEntries = 4_096;
 const maxCwdRolloutScans = 512;
 // a catalog slot belongs to a listed conversation, not a scanned file
 const maxListedConversations = 512;
+// overlap filesystem latency without opening the whole account's rollouts at once
+const catalogReadBatchSize = 16;
 // bound the per-rollout tail read that finds a listed row's `lastActiveAt`: the newest
 // record's timestamp sits at the very end, so a small tail suffices (mirrors Claude's list)
 const maxListTailBytes = 256 * 1024;
@@ -731,22 +733,37 @@ export async function codexConversationSummaries(directories: readonly string[],
     if (!directoryByPath.has(canonical)) directoryByPath.set(canonical, directory);
   }
   const summaries: ConversationSummary[] = [];
+  const batch: Array<{ file: string; id: string; name: string }> = [];
+  // keep eligibility, cap, and equal-activity tie breaks in newest-first scan order
+  const readBatch = async () => {
+    // resolve each named candidate independently
+    const eligible = (await Promise.all(batch.splice(0).map(async candidate => {
+      const metadata = await rolloutMetadataCache.get(candidate.file).catch(() => undefined);
+      // verify identity, parentage and scope before reading activity
+      if (metadata === undefined || metadata.id !== candidate.id || metadata.parentThreadId !== undefined) return undefined;
+      const directory = directoryByPath.get(metadata.cwd);
+      return directory === undefined ? undefined : { ...candidate, directory };
+    }))).filter(candidate => candidate !== undefined);
+    // read tails only for rows that will be published
+    summaries.push(...await Promise.all(eligible.map(async ({ file, id, name, directory }) =>
+      ({ id, name, directory, lastActiveAt: await rolloutLastActiveAt(file) }))));
+  };
   // walk past unmatched filenames without reading their transcripts
   for await (const file of rolloutFiles(codexHome(env))) {
     const id = /-([0-9a-f-]{36})\.jsonl$/iu.exec(file)?.[1];
-    const conversationName = id === undefined ? undefined : names[id];
-    // an unindexed rollout cannot contribute a listed row
-    if (conversationName === undefined) continue;
-    const metadata = await rolloutMetadataCache.get(file).catch(() => undefined);
-    // verify identity and parentage before exposing a transcript
-    if (metadata === undefined || metadata.id !== id || metadata.parentThreadId !== undefined) continue;
-    const startedIn = directoryByPath.get(metadata.cwd);
-    // preserve the requested folder scope
-    if (startedIn === undefined) continue;
-    summaries.push({ id: metadata.id, name: conversationName, lastActiveAt: await rolloutLastActiveAt(file), directory: startedIn });
-    // apply the catalog limit only after all eligibility checks pass
-    if (summaries.length >= maxListedConversations) break;
+    // skip missing or unindexed IDs before queuing reads
+    if (id === undefined || names[id] === undefined) continue;
+    batch.push({ file, id, name: names[id] });
+    // near capacity read no further than the remaining eligible slots
+    if (batch.length === Math.min(catalogReadBatchSize, maxListedConversations - summaries.length)) {
+      await readBatch();
+      // only eligible rows count toward the catalog limit
+      if (summaries.length === maxListedConversations) break;
+    }
   }
+  // flush any candidates from the final partial batch
+  if (batch.length > 0) await readBatch();
+  // present the selected rows by last activity
   summaries.sort((left, right) => right.lastActiveAt - left.lastActiveAt);
   return summaries;
 }

@@ -1,8 +1,24 @@
-import { appendFile, mkdir, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { codexConversationName, codexConversationSummaries, codexLatestMessage, codexLatestResponse, codexLatestWriterResponse, codexProcessOwnsConversation, latestCodexMessageFromRecords, latestCodexResponseFromRecords, discoverCodexConversation, openPaneThreads, validCodexThreadId } from '../../src/adapters/codex-conversations.js';
 import { codexHome, fakeProc, tempDir } from '../helpers/codex-fixtures.js';
+
+// observe only the filesystem boundaries that govern catalog work
+const catalogRead = vi.hoisted(() => vi.fn((_phase: 'head' | 'tail', _file: string, read: () => Promise<string[]>) => read()));
+vi.mock('node:fs/promises', async importOriginal => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...fs, readdir: vi.fn(fs.readdir) };
+});
+vi.mock('../../src/adapters/bounded-file.js', async importOriginal => {
+  const bounded = await importOriginal<typeof import('../../src/adapters/bounded-file.js')>();
+  return {
+    ...bounded,
+    // keep real reads behind the controllable test seam
+    readFileHead: (file: string, bytes: number) => catalogRead('head', file, () => bounded.readFileHead(file, bytes)),
+    readFileTail: (file: string, bytes: number) => catalogRead('tail', file, () => bounded.readFileTail(file, bytes))
+  };
+});
 
 // write one representative Codex rollout, returning its absolute path
 async function writeSession(home: string, name: string, session: { id: string; cwd: string; prompt: string; parentThreadId?: string }): Promise<string> {
@@ -440,6 +456,98 @@ describe('Codex conversation listing', () => {
       { id: '0198c111-1111-7111-8111-111111111111', name: 'Linked chat', lastActiveAt: Date.parse('2026-09-02T10:00:00.000Z'), directory: link },
     ]);
   });
+
+  // leave one slot after the full batches and stop at the next eligible candidate
+  it('stops scanning at the last eligible catalog slot before sorting by activity', async () => {
+    const home = await codexHome();
+    const cwd = '/wt/cora';
+    const names = [];
+    // leave the two hottest entries near the cutoff in newest-first filename order
+    for (let index = 0; index <= 513; index++) {
+      const id = `0198c222-2222-7222-8222-${index.toString(16).padStart(12, '0')}`;
+      names.push({ id, thread_name: `Conversation ${index}` });
+      const lastActiveAt = index <= 2 ? '2026-09-05T00:00:00Z' : '2026-09-02T00:00:00Z';
+      await writeListRollout(home, ['2026', '09', '02'], id, { cwd: index === 256 ? '/other' : cwd, lastActiveAt });
+    }
+    const older = '0198c222-2222-7222-8222-111111111111';
+    await writeListRollout(home, ['2026', '08', '20'], older, { cwd, lastActiveAt: '2026-09-06T00:00:00Z' });
+    names.push({ id: older, thread_name: 'Older conversation' });
+    await writeSessionIndex(home, names);
+
+    catalogRead.mockClear();
+    vi.mocked(readdir).mockClear();
+    const rows = await codexConversationSummaries([cwd], { CODEX_HOME: home });
+    // protect the exact cap and stable tie ordering even beside a newer activity timestamp
+    const expected = [names[2], names[1], ...names.slice(3, -1).reverse().filter(({ id }) => id !== names[256].id)];
+    expect(rows.map(row => row.id)).toEqual(expected.map(({ id }) => id));
+    expect(catalogRead.mock.calls.some(([, file]) => file.endsWith(`-${names[0].id}.jsonl`))).toBe(false);
+    expect(readdir).not.toHaveBeenCalledWith(join(home, 'sessions', '2026', '08'), expect.anything());
+  }, 30_000);
+
+  // hold reads at the storage boundary instead of depending on filesystem speed
+  it('bounds overlapping rollout reads and isolates failures without changing tie order', async () => {
+    const home = await codexHome();
+    const cwd = '/wt/cora';
+    const lastActiveAt = '2026-09-02T00:00:00Z';
+    const names = [];
+    const files = [];
+    // supply more candidates than one full batch can launch
+    for (let index = 0; index < 18; index++) {
+      const id = `0198c444-4444-7444-8444-${index.toString(16).padStart(12, '0')}`;
+      names.push({ id, thread_name: `Conversation ${index}` });
+      files.push(await writeListRollout(home, ['2026', '09', '02'], id, { cwd, lastActiveAt }));
+    }
+    await writeSessionIndex(home, names);
+    const heads = Promise.withResolvers<void>();
+    const firstTail = Promise.withResolvers<void>();
+    let pending = 0;
+    let peak = 0;
+    let siblingFinished = false;
+    let unreadableHeadHasTail = false;
+    catalogRead.mockClear();
+    // observe rollout reads only and let the sidecar use real storage
+    catalogRead.mockImplementation(async (phase, file, read) => {
+      // ignore sidecar and other non-rollout reads
+      if (!files.includes(file)) return read();
+      peak = Math.max(peak, ++pending);
+      try {
+        // let enough heads pile up to observe the actual batch width
+        if (phase === 'head') await heads.promise;
+        // keep the first tail behind a healthy sibling
+        if (phase === 'tail' && file === files[17]) await firstTail.promise;
+        // both failure kinds must be local to their own rollout
+        if ((phase === 'head' && file === files[16]) || (phase === 'tail' && file === files[15])) throw new Error('unreadable rollout');
+        // the failed head must not trigger any tail read
+        if (phase === 'tail' && file === files[16]) unreadableHeadHasTail = true;
+        const lines = await read();
+        // release scan order only after a later tie has finished
+        if (phase === 'tail' && file === files[14]) siblingFinished = true;
+        return lines;
+      } finally {
+        pending -= 1;
+      }
+    });
+    const listing = codexConversationSummaries([cwd], { CODEX_HOME: home });
+    // observe early rejection while still asserting the original promise below
+    void listing.catch(() => {});
+    try {
+      await vi.waitFor(() => { /* require full-width overlap without clock assertions */ expect(pending).toBeGreaterThanOrEqual(16); }, { timeout: 5_000 });
+      heads.resolve();
+      await vi.waitFor(() => { /* prove a later tie really completes first */ expect(siblingFinished).toBe(true); }, { timeout: 5_000 });
+    } finally {
+      heads.resolve();
+      firstTail.resolve();
+      try { await listing; } finally { catalogRead.mockReset(); }
+    }
+    const rows = await listing;
+    const expected = [names[17], ...names.slice(0, 15).reverse(), names[15]];
+    expect(rows.map(({ id, lastActiveAt: activity }) => [id, activity])).toEqual(expected.map(({ id }) => {
+      // an unreadable tail ranks last but does not lose its row
+      return [id, id === names[15].id ? 0 : Date.parse(lastActiveAt)];
+    }));
+    expect(peak).toBe(16);
+    expect(unreadableHeadHasTail).toBe(false);
+  }, 15_000);
 
   it('lists nothing for no directories or an absent sessions tree', async () => {
     const home = await codexHome();
