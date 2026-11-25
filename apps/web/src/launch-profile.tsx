@@ -18,7 +18,7 @@ export const agentKindLabel: Record<AgentKind, string> = { codex: 'Codex', omx: 
 // keep version and update actions in the toolbar chooser
 // a `pinned` Pi version reviews the console release instead of running its own installer
 export type AgentUpdateStatus = { kind: AgentKind; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string; pinned?: true };
-type AgentLaunchSettings = { statuses: AgentUpdateStatus[]; loading: boolean; updating?: AgentKind; errors: string[]; retryVersions?: () => void; updateAgent: (kind: AgentKind) => void };
+type AgentLaunchSettings = { statuses: AgentUpdateStatus[]; loading: boolean; updating?: AgentKind; errors: string[]; refreshVersions: () => void; retryVersions?: () => void; updateAgent: (kind: AgentKind) => void };
 export const AgentLaunchSettingsContext = createContext<AgentLaunchSettings | undefined>(undefined);
 // keep per-agent account controls in the launcher without coupling this module to settings
 export type AgentAccountsMenu = { menus: Partial<Record<AgentKind, { content: ReactNode; activeName?: string }>>; onOpen: () => void; onClose: () => void };
@@ -1045,6 +1045,8 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, target, 
   // remember the control that opened this menu instance
   const openMenu = (opener: HTMLButtonElement) => {
     openerRef.current = opener;
+    // refresh only the toolbar menu that displays agent versions
+    if (showAgentSettings) settings?.refreshVersions();
     setOpen(true);
   };
   // remeasure the recreated flyout when the phone control replaces the desktop split

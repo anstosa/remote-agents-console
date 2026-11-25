@@ -124,7 +124,7 @@ export class AgentUpdateService {
   }
 
   // publish every configured update-capable or pinned agent in registry order
-  async statuses(): Promise<AgentUpdateStatus[]> {
+  async statuses(refresh = false): Promise<AgentUpdateStatus[]> {
     const kinds = agentKinds.filter(kind => this.config.adapters?.[kind]?.updates !== undefined || this.config.adapters?.[kind] !== undefined && structuredAdapterFor(kind)?.pinned() !== undefined);
     try {
       const { active, terminal } = await this.store.snapshot();
@@ -139,12 +139,12 @@ export class AgentUpdateService {
       this.recoveryScanUnavailable = true;
       return await Promise.all(kinds.map(async kind => {
         // pinned registry reads do not create host command artifacts
-        if (structuredAdapterFor(kind)?.pinned() !== undefined) return await this.status(kind);
+        if (structuredAdapterFor(kind)?.pinned() !== undefined) return await this.status(kind, refresh);
         this.invalidateVersions(kind);
         return { kind, updateAvailable: false, error: 'Version check unavailable' };
       }));
     }
-    return await Promise.all(kinds.map(kind => this.status(kind)));
+    return await Promise.all(kinds.map(kind => this.status(kind, refresh)));
   }
 
   // admit a single durable update before any command can mutate the host
@@ -480,14 +480,14 @@ ${verificationOutput}`
     this.refreshes.delete(kind);
   }
 
-  // resolve one cached version comparison
-  private async status(kind: AgentKind): Promise<AgentUpdateStatus> {
-    const cached = this.cache.get(kind);
-    // serve a fresh cached comparison
-    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.status;
+  // resolve one cached or explicitly refreshed version comparison
+  private async status(kind: AgentKind, refreshRequested = false): Promise<AgentUpdateStatus> {
     const active = this.refreshes.get(kind);
     // coalesce concurrent checks
     if (active !== undefined) return await active;
+    const cached = this.cache.get(kind);
+    // bypass only a completed cache entry for an explicit refresh
+    if (!refreshRequested && cached !== undefined && cached.expiresAt > Date.now()) return cached.status;
     const refresh = this.refresh(kind).then(status => {
       // an older version read must not be returned after terminal evidence invalidated it
       if (this.refreshes.get(kind) !== refresh) return this.status(kind);

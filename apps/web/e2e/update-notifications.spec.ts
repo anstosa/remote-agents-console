@@ -18,6 +18,7 @@ async function captureNotifications(page: Page, initial: { permission?: Notifica
     const notificationLookupGates: Array<{ released: Promise<void>; release: () => void }> = [];
     const nextNotificationLookupGates: Array<{ released: Promise<void>; release: () => void }> = [];
     let notificationLookupStarts = 0;
+    let notificationLookupCompletions = 0;
     const activeNotifications: Array<{ title: string; options?: NotificationOptions; data?: unknown; close: () => void }> = [];
     // hold the first display only when the scenario needs an initial gate
     if (initialHoldDisplay) {
@@ -48,6 +49,13 @@ async function captureNotifications(page: Page, initial: { permission?: Notifica
       registrationGateStarts: () => registrationGateStarts,
       // release the exact held notification display
       releaseHeldDisplay: () => { releaseDisplay?.(); releaseDisplay = undefined; },
+      // hold one later display without changing the fixture's default result
+      holdNextDisplay: () => {
+        let release!: () => void;
+        const released = new Promise<void>(resolve => { release = resolve; });
+        nextDisplayGate = { started: () => { displayGateStarts += 1; }, released };
+        releaseDisplay = release;
+      },
       // expose display gate handoffs and active same-tag notifications
       displayGateStarts: () => displayGateStarts,
       activeNotificationDetails: () => activeNotifications.map(notification => ({ title: notification.title, body: notification.options?.body, tag: notification.options?.tag, ownerId: (notification.options?.data as { ownerId?: unknown } | undefined)?.ownerId })),
@@ -62,6 +70,7 @@ async function captureNotifications(page: Page, initial: { permission?: Notifica
       },
       releaseNotificationLookup: (index: number) => { notificationLookupGates[index]?.release(); },
       notificationLookupStarts: () => notificationLookupStarts,
+      notificationLookupCompletions: () => notificationLookupCompletions,
       // expose exact display attempts for pending coalescing
       attempts: () => attempts
     } });
@@ -74,6 +83,7 @@ async function captureNotifications(page: Page, initial: { permission?: Notifica
         if (gate !== undefined) {
           notificationLookupStarts += 1;
           await gate.released;
+          notificationLookupCompletions += 1;
         }
         return filter?.tag === undefined ? activeNotifications : activeNotifications.filter(notification => notification.options?.tag === filter.tag);
       },
@@ -135,7 +145,7 @@ async function serveConsole(page: Page, updates: unknown[], serverUpdate: { avai
     // restore one controlling session
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // render settings on an empty console
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'both', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false } }, agents: [], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'both', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false } }, agents: [], projects: [], scratchLaunch: { kind: 'codex', origin: 'default' } } });
     // expose configured agent versions
     if (url.pathname === '/api/agents/updates') return route.fulfill({ json: { agents: updates } });
     // expose the upstream commit count
@@ -146,8 +156,18 @@ async function serveConsole(page: Page, updates: unknown[], serverUpdate: { avai
   });
 }
 
-// refresh availability through a new polling owner without waiting for its interval
+// refresh availability through the ordinary server-flyout action
 async function installAvailabilityRefresh(page: Page) {
+  // wait for the flyout-owned request instead of advancing its polling interval
+  return async () => {
+    const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname === '/api/server/update-available');
+    await page.getByRole('button', { name: /^Switch server/u }).click();
+    await (await response).finished();
+  };
+}
+
+// replace the polling owner and wait beyond the flyout's own availability request
+async function installRestartedAvailabilityRefresh(page: Page) {
   let abortNextRevision = false;
   // keep unrelated revision requests on their existing fixture path
   await page.route('**/api/server/revision', async route => {
@@ -158,14 +178,49 @@ async function installAvailabilityRefresh(page: Page) {
     }
     return route.fallback();
   });
-  // wait for the replacement owner's authoritative availability response
+  // wait for both the opening request and the replacement polling owner
   return async () => {
-    const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname === '/api/server/update-available');
+    let responses = 0;
+    let finish!: () => void;
+    const replacementFinished = new Promise<void>(resolve => { finish = resolve; });
+    const countAvailability = (response: import('@playwright/test').Response) => {
+      // ignore unrelated responses while the polling owner restarts
+      if (new URL(response.url()).pathname !== '/api/server/update-available') return;
+      responses += 1;
+      // resolve only after the replacement owner has returned
+      if (responses === 2) void response.finished().then(() => finish());
+    };
     abortNextRevision = true;
-    await page.getByRole('button', { name: /^Switch server/u }).click();
-    await (await response).finished();
+    page.on('response', countAvailability);
+    try {
+      await page.getByRole('button', { name: /^Switch server/u }).click();
+      await replacementFinished;
+    } finally {
+      // stop counting after the exact restart has settled
+      page.off('response', countAvailability);
+    }
   };
 }
+
+// trigger one forced agent read through the user-visible toolbar flyout
+async function refreshAgentUpdates(page: Page, expectedVersion: string) {
+  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+  const trigger = toolbar.getByRole('button', { name: /^(?:Choose|Launch) agent/u });
+  // close an existing menu so the next click is an opening action
+  if (await trigger.getAttribute('aria-expanded') === 'true') await page.keyboard.press('Escape');
+  const response = page.waitForResponse(candidate => {
+    const url = new URL(candidate.url());
+    return url.pathname === '/api/agents/updates' && url.searchParams.get('refresh') === 'true';
+  });
+  await trigger.click();
+  await (await response).finished();
+  // wait beyond transport completion until the comparison is reconciled
+  const menu = page.getByRole('menu', { name: 'Choose agent', exact: true });
+  await expect(menu.getByRole('group', { name: 'Codex agent' }).locator('.launch-agent-version')).toHaveText(expectedVersion);
+}
+
+// let notification continuations cross their rendered browser boundary
+const settleFrames = (page: Page) => page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 
 test('announces agent updates and opens the launcher from the notification route', async ({ page }) => {
   // allow all cold reloads while preserving exact once-only announcement checks
@@ -330,6 +385,7 @@ test('does not clear a newer upstream notification after stale availability reso
   update.targetSha = '7'.repeat(40);
   await page.keyboard.press('Escape');
   await refreshAvailability();
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string }> } }).__testNotificationFixture.activeNotificationDetails().map(notification => notification.body))).toEqual(['4 commits upstream']);
   const currentOwner = await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails()[0]?.ownerId);
   expect(typeof currentOwner).toBe('string');
 
@@ -470,15 +526,132 @@ test('transfers a pending same-target alert to a restarted polling owner', async
   await captureNotifications(page, { holdDisplay: true });
   const targetSha = '6'.repeat(40);
   await serveConsole(page, [], { available: true, commitCount: 1, targetSha });
-  const refreshAvailability = await installAvailabilityRefresh(page);
+  const refreshAvailability = await installRestartedAvailabilityRefresh(page);
   await page.goto('/');
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { displayGateStarts: () => number } }).__testNotificationFixture.displayGateStarts())).toBe(1);
   await refreshAvailability();
   await expect.poll(() => page.evaluate(() => (JSON.parse(localStorage.getItem('rac.notification-update-fingerprints.v1') ?? '{}') as { rac?: string }).rac)).toBe(targetSha);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string; ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails())).toEqual([
+    expect.objectContaining({ body: '1 commit upstream', ownerId: expect.any(String) })
+  ]);
+  const replacementOwner = await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails()[0]?.ownerId);
+  const attemptsBeforeRelease = await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { attempts: () => number } }).__testNotificationFixture.attempts());
   // release the superseded display only after its replacement has committed
   await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { releaseHeldDisplay: () => void } }).__testNotificationFixture.releaseHeldDisplay());
-  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string }> } }).__testNotificationFixture.activeNotificationDetails().map(notification => notification.body))).toEqual(['1 commit upstream']);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { attempts: () => number } }).__testNotificationFixture.attempts())).toBeGreaterThan(attemptsBeforeRelease);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string; ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails())).toEqual([
+    expect.objectContaining({ body: '1 commit upstream', ownerId: replacementOwner })
+  ]);
   expect(await page.evaluate(() => (JSON.parse(localStorage.getItem('rac.notification-update-fingerprints.v1') ?? '{}') as { rac?: string }).rac)).toBe(targetSha);
+});
+
+// restore the latest agent target after an obsolete same-tag display finishes
+test('keeps the latest agent notification when an older target displays late', async ({ page }) => {
+  await captureNotifications(page, { holdDisplay: true });
+  const updates = [{ kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true }];
+  await serveConsole(page, updates, { available: false, commitCount: 0 });
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { displayGateStarts: () => number } }).__testNotificationFixture.displayGateStarts())).toBe(1);
+
+  updates[0] = { kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.154.0', updateAvailable: true };
+  await refreshAgentUpdates(page, 'v0.152.1 → v0.154.0');
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string; ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails())).toEqual([
+    expect.objectContaining({ body: '0.152.1 -> 0.154.0', ownerId: expect.any(String) })
+  ]);
+  const latestOwner = await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails()[0]?.ownerId);
+
+  // let the obsolete display replace the current tag and trigger exact-owner recovery
+  await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { releaseHeldDisplay: () => void } }).__testNotificationFixture.releaseHeldDisplay());
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { attempts: () => number } }).__testNotificationFixture.attempts())).toBeGreaterThan(2);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string; ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails())).toEqual([
+    expect.objectContaining({ body: '0.152.1 -> 0.154.0', ownerId: latestOwner })
+  ]);
+  expect(await page.evaluate(() => (JSON.parse(localStorage.getItem('rac.notification-update-fingerprints.v1') ?? '{}') as { agents?: Record<string, string> }).agents?.codex)).toBe('0.152.1->0.154.0');
+});
+
+// disown a pending agent display as soon as the version comparison resolves
+test('suppresses a pending agent notification when the update resolves', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-11-12T12:00:00Z') });
+  await captureNotifications(page, { permission: 'default' });
+  const updates = [{ kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true }];
+  await serveConsole(page, updates, { available: false, commitCount: 0 });
+  await page.goto('/');
+  // let the authenticated dashboard and initial version comparison settle first
+  const chooser = page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^(?:Choose|Launch) agent/u });
+  await expect(chooser).toHaveAccessibleName(/update available$/u);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { registrationLookupsInFlight: () => number } }).__testNotificationFixture.registrationLookupsInFlight())).toBe(0);
+  // freeze the registration timeout before holding the lookup
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 100));
+  await page.evaluate(() => {
+    const fixture = (window as typeof window & { __testNotificationFixture: { setPermission: (permission: NotificationPermission) => void; holdNextRegistration: () => void } }).__testNotificationFixture;
+    fixture.setPermission('granted');
+    fixture.holdNextRegistration();
+  });
+  await refreshAgentUpdates(page, 'v0.152.1 → v0.153.2');
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { registrationGateStarts: () => number } }).__testNotificationFixture.registrationGateStarts())).toBe(1);
+
+  updates[0] = { kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.153.2', updateAvailable: false };
+  await refreshAgentUpdates(page, 'v0.153.2');
+  await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { releaseHeldRegistration: () => void } }).__testNotificationFixture.releaseHeldRegistration());
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { registrationLookupsInFlight: () => number } }).__testNotificationFixture.registrationLookupsInFlight())).toBe(0);
+  // resume animation frames only after the held registration has returned
+  await page.clock.resume();
+  await settleFrames(page);
+  expect(await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { attempts: () => number } }).__testNotificationFixture.attempts())).toBe(0);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => unknown[] } }).__testNotificationFixture.activeNotificationDetails())).toEqual([]);
+  expect(await page.evaluate(() => (JSON.parse(localStorage.getItem('rac.notification-update-fingerprints.v1') ?? '{}') as { agents?: Record<string, string> }).agents?.codex)).toBeUndefined();
+});
+
+// prevent an obsolete clear from removing a newer same-tag agent notification
+test('keeps a newer agent notification after an older clear finishes', async ({ page }) => {
+  await captureNotifications(page);
+  const updates = [{ kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true }];
+  await serveConsole(page, updates, { available: false, commitCount: 0 });
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => (JSON.parse(localStorage.getItem('rac.notification-update-fingerprints.v1') ?? '{}') as { agents?: Record<string, string> }).agents?.codex)).toBe('0.152.1->0.153.2');
+
+  const lookupIndex = await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { holdNextNotificationLookup: () => number } }).__testNotificationFixture.holdNextNotificationLookup());
+  updates[0] = { kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.153.2', updateAvailable: false };
+  await refreshAgentUpdates(page, 'v0.153.2');
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { notificationLookupStarts: () => number } }).__testNotificationFixture.notificationLookupStarts())).toBe(1);
+
+  updates[0] = { kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.154.0', updateAvailable: true };
+  await refreshAgentUpdates(page, 'v0.153.2 → v0.154.0');
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string; ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails())).toEqual([
+    expect.objectContaining({ body: '0.153.2 -> 0.154.0', ownerId: expect.any(String) })
+  ]);
+  const currentOwner = await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string; ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails()[0]);
+  expect(currentOwner).toEqual(expect.objectContaining({ body: '0.153.2 -> 0.154.0', ownerId: expect.any(String) }));
+
+  // finish the old enumeration only after the newer owner is visible
+  await page.evaluate(index => (window as typeof window & { __testNotificationFixture: { releaseNotificationLookup: (index: number) => void } }).__testNotificationFixture.releaseNotificationLookup(index), lookupIndex);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { notificationLookupCompletions: () => number } }).__testNotificationFixture.notificationLookupCompletions())).toBe(1);
+  await settleFrames(page);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string; ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails())).toEqual([currentOwner]);
+  expect(await page.evaluate(() => (JSON.parse(localStorage.getItem('rac.notification-update-fingerprints.v1') ?? '{}') as { agents?: Record<string, string> }).agents?.codex)).toBe('0.153.2->0.154.0');
+});
+
+// disown an uncommitted target even when the latest target is already durable
+test('restores a durable agent target after a different pending display', async ({ page }) => {
+  await captureNotifications(page);
+  const updates = [{ kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true }];
+  await serveConsole(page, updates, { available: false, commitCount: 0 });
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => (JSON.parse(localStorage.getItem('rac.notification-update-fingerprints.v1') ?? '{}') as { agents?: Record<string, string> }).agents?.codex)).toBe('0.152.1->0.153.2');
+
+  await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { holdNextDisplay: () => void } }).__testNotificationFixture.holdNextDisplay());
+  updates[0] = { kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.154.0', updateAvailable: true };
+  await refreshAgentUpdates(page, 'v0.152.1 → v0.154.0');
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { displayGateStarts: () => number } }).__testNotificationFixture.displayGateStarts())).toBe(1);
+
+  updates[0] = { kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true };
+  await refreshAgentUpdates(page, 'v0.152.1 → v0.153.2');
+  await page.evaluate(() => (window as typeof window & { __testNotificationFixture: { releaseHeldDisplay: () => void } }).__testNotificationFixture.releaseHeldDisplay());
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { attempts: () => number } }).__testNotificationFixture.attempts())).toBeGreaterThan(2);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __testNotificationFixture: { activeNotificationDetails: () => Array<{ body?: string; ownerId?: unknown }> } }).__testNotificationFixture.activeNotificationDetails())).toEqual([
+    expect.objectContaining({ body: '0.152.1 -> 0.153.2', ownerId: expect.any(String) })
+  ]);
+  expect(await page.evaluate(() => (JSON.parse(localStorage.getItem('rac.notification-update-fingerprints.v1') ?? '{}') as { agents?: Record<string, string> }).agents?.codex)).toBe('0.152.1->0.153.2');
 });
 
 test('commits an agent fingerprint only after the unchanged target displays', async ({ page }) => {

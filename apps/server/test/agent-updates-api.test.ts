@@ -32,9 +32,12 @@ describe('agent update API', () => {
     const denied = await app.inject({ method: 'GET', url: '/api/agents/updates', headers: { host: testHost } });
     const headers = await authenticatedHeaders(app);
     const listed = await app.inject({ method: 'GET', url: '/api/agents/updates', headers: { host: headers.host, cookie: headers.cookie } });
+    const refreshed = await app.inject({ method: 'GET', url: '/api/agents/updates?refresh=true', headers: { host: headers.host, cookie: headers.cookie } });
     const updated = await app.inject({ method: 'POST', url: '/api/agents/codex/update', headers });
     expect(denied.statusCode).toBe(401);
     expect(listed.json()).toEqual({ agents: [available] });
+    expect(refreshed.json()).toEqual({ agents: [available] });
+    expect(statuses.mock.calls).toEqual([[false], [true]]);
     expect(updated.json()).toEqual({ agent: current });
     expect(update).toHaveBeenCalledWith('codex');
   }, 15_000);

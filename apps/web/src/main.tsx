@@ -1315,6 +1315,7 @@ type ClientSettings = {
   loadServerRevision: () => Promise<ServerRevision | undefined>;
   reloadClient: () => Promise<boolean>;
   openServerUpdate: () => void;
+  checkForServerUpdate: () => void;
   refreshDavo: () => Promise<void>;
   disableDavo: () => Promise<string | undefined>;
   codexAccounts: () => Promise<{ accounts?: CodexAccount[]; error?: string }>;
@@ -1384,28 +1385,77 @@ const isServerUpdateAvailability = (value: unknown): value is ServerUpdateAvaila
     && (commitCount === undefined || Number.isSafeInteger(commitCount) && commitCount >= 0)
     && (targetSha === undefined || /^[0-9a-f]{40}$/u.test(targetSha));
 };
+// bind every update tag to its latest confirmed target and fingerprint slot
+type UpdateNotificationFingerprint = { reserve: (target: string) => UpdateFingerprintReservation | undefined; commit: (reservation: UpdateFingerprintReservation) => boolean; clear: () => void };
+type UpdateNotificationTarget = { target: string; title: string; body: string };
+type UpdateNotificationOwner = UpdateNotificationTarget & { id: string; scope: string; url: string; fingerprint: UpdateNotificationFingerprint; pending?: UpdateFingerprintReservation; isCurrent: () => boolean; onStaleDisplay: () => Promise<void> };
+
+// share same-tag display ownership between RAC and agent update notifications
+const reconcileUpdateNotification = async (owners: Map<string, UpdateNotificationOwner>, tag: string, url: string, scope: string, fingerprint: UpdateNotificationFingerprint, target: UpdateNotificationTarget | undefined, isActive: () => boolean) => {
+  // do not replace confirmed ownership after the caller retires
+  if (!isActive()) return;
+  const previous = owners.get(tag);
+  // retain a live same-target display without issuing another registration
+  if (target !== undefined && previous?.scope === scope && previous.target === target.target && previous.pending !== undefined && previous.isCurrent()) return;
+  // disown a pending target even when the replacement fingerprint is already durable
+  if (previous?.pending !== undefined) releaseUpdateFingerprint(previous.pending);
+  // clear only while no newer target owns the tag
+  if (target === undefined) {
+    owners.delete(tag);
+    fingerprint.clear();
+    void dismissNotification(tag, undefined, () => isActive() && !owners.has(tag));
+    return;
+  }
+  const reservation = fingerprint.reserve(target.target);
+  // keep the confirmed owner for an unchanged durable comparison
+  if (reservation === undefined && previous?.scope === scope && previous.target === target.target && previous.isCurrent()) return;
+  // repair a late same-tag display using the current owner's exact target and scope
+  const onStaleDisplay = async () => {
+    const current = owners.get(tag);
+    // skip resolved or retired targets
+    if (current === undefined || !current.isCurrent()) return;
+    const restored = await showNotification('system', current.title, current.body, tag, current.url, undefined, undefined, current).catch(() => false);
+    // do not disturb a newer owner during browser delivery
+    if (!current.isCurrent()) return;
+    current.fingerprint.clear();
+    // allow a failed repair to be retried by the next comparison
+    if (!restored) return;
+    const repair = current.fingerprint.reserve(current.target);
+    // commit the still-current repair
+    if (repair !== undefined) current.fingerprint.commit(repair);
+  };
+  const owner: UpdateNotificationOwner = { ...target, id: `${tag}:${crypto.randomUUID()}`, scope, url, fingerprint, pending: reservation, isCurrent: () => isActive() && owners.get(tag) === owner, onStaleDisplay };
+  owners.set(tag, owner);
+  // retain ownership even for a previously displayed fingerprint
+  if (reservation === undefined) return;
+  const displayed = await showNotification('system', owner.title, owner.body, tag, url, undefined, undefined, owner).catch(() => false);
+  owner.pending = undefined;
+  // discard only this obsolete owner's delivery and reservation
+  if (!owner.isCurrent()) {
+    // dismiss only an exact stale display
+    if (displayed) void dismissNotification(tag, owner.id);
+    releaseUpdateFingerprint(reservation);
+    return;
+  }
+  // commit only confirmed current displays
+  if (displayed) fingerprint.commit(reservation);
+  else releaseUpdateFingerprint(reservation);
+};
+
 // announce each newly discovered agent version once
-const announceAgentUpdates = (statuses: AgentUpdateStatus[], scope: string) => {
+const announceAgentUpdates = (statuses: AgentUpdateStatus[], scope: string, owners: Map<string, UpdateNotificationOwner>, isActive: () => boolean) => {
   // inspect every configured updater
   for (const status of statuses) {
-    const current = status.currentVersion;
-    const latest = status.latestVersion;
-    // clear obsolete notifications and fingerprints
-    if (!status.updateAvailable || current === undefined || latest === undefined) {
-      clearAgentUpdateFingerprint(scope, status.kind, agentKinds);
-      void dismissNotification(`agent-update-${status.kind}`);
-      continue;
-    }
-    const fingerprint = `${current}->${latest}`;
-    const reservation = reserveAgentUpdateFingerprint(scope, status.kind, fingerprint, agentKinds);
-    // suppress durable and concurrently pending targets
-    if (reservation === undefined) continue;
-    void (async () => {
-      const displayed = await showNotification('system', `${agentKindLabel[status.kind]} update available`, status.pinned === true ? `${current} -> ${latest}: Pi is bundled in RAC; submit a local pin-update prompt from the launcher` : `${current} -> ${latest}`, `agent-update-${status.kind}`, '/#launch').catch(() => false);
-      // commit only a confirmed still-current display
-      if (displayed) commitAgentUpdateFingerprint(scope, status.kind, reservation, agentKinds);
-      else releaseUpdateFingerprint(reservation);
-    })();
+    const { kind, currentVersion: current, latestVersion: latest } = status;
+    // resolve unavailable comparisons without leaving a pending display
+    const target = status.updateAvailable && current !== undefined && latest !== undefined
+      ? { target: `${current}->${latest}`, title: `${agentKindLabel[kind]} update available`, body: status.pinned === true ? `${current} -> ${latest}: Pi is bundled in RAC; submit a local pin-update prompt from the launcher` : `${current} -> ${latest}` }
+      : undefined;
+    void reconcileUpdateNotification(owners, `agent-update-${kind}`, '/#launch', scope, {
+      reserve: target => reserveAgentUpdateFingerprint(scope, kind, target, agentKinds),
+      commit: reservation => commitAgentUpdateFingerprint(scope, kind, reservation, agentKinds),
+      clear: () => clearAgentUpdateFingerprint(scope, kind, agentKinds)
+    }, target, isActive);
   }
 };
 // validate one bounded upstream commit
@@ -2619,6 +2669,11 @@ function ServerSelector() {
   const [revision, setRevision] = useState<ServerRevision>();
   const [revisionLoading, setRevisionLoading] = useState(false);
   const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(open);
+  // check upstream availability whenever the server menu opens
+  useEffect(() => {
+    // leave closed menus to background polling
+    if (open) settings?.checkForServerUpdate();
+  }, [open, settings?.checkForServerUpdate]);
   // refresh the deployed revision while the server menu is visible
   useEffect(() => {
     if (!open || settings === undefined) return;
@@ -12199,8 +12254,13 @@ function App() {
   const [serverUpdateAvailable, setServerUpdateAvailable] = useState(false);
   // order overlapping availability reads and terminal retry refreshes
   const serverUpdateAvailabilityRequest = useRef(0);
-  // retain the latest RAC notification for a late same-tag replacement
-  const currentRacUpdateNotification = useRef<{ id: string; title: string; body: string; target: string; pending?: UpdateFingerprintReservation; isCurrent: () => boolean; onStaleDisplay: () => Promise<void> } | undefined>(undefined);
+  // share the authenticated polling owner with the server flyout
+  const refreshServerAvailability = useRef<(() => Promise<void>) | undefined>(undefined);
+  const checkForServerUpdate = useCallback(() => { /* trigger the current polling owner */ void refreshServerAvailability.current?.(); }, []);
+  // hold ordinary reads behind the authoritative post-failure refresh
+  const serverUpdateFailureRefresh = useRef<Promise<void> | undefined>(undefined);
+  // retain one confirmed notification owner per update tag
+  const updateNotificationOwners = useRef(new Map<string, UpdateNotificationOwner>());
   const [serverUpdateOpen, setServerUpdateOpen] = useState(false);
   const [piUpdateTarget, setPiUpdateTarget] = useState<PiUpdateTarget>();
   const [serverUpdateMinimized, setServerUpdateMinimized] = useState(false);
@@ -12210,8 +12270,9 @@ function App() {
   const [updatingAgent, setUpdatingAgent] = useState<AgentKind>();
   const [agentUpdateError, setAgentUpdateError] = useState('');
   const [versionCheckError, setVersionCheckError] = useState('');
-  // reuse the serialized polling owner for manual retries
-  const refreshAgentVersions = useRef<(() => void) | undefined>(undefined);
+  // reuse the serialized polling owner for flyout opens and manual retries
+  const refreshAgentVersions = useRef<((force?: boolean) => void) | undefined>(undefined);
+  const checkAgentVersions = useCallback(() => { /* bypass the completed server cache */ refreshAgentVersions.current?.(true); }, []);
   // order provider reads behind newer terminal update evidence
   const agentVersionEvidenceRevision = useRef(0);
   const [reconnecting, setReconnecting] = useState(!consoleReachable);
@@ -12308,8 +12369,8 @@ function App() {
   // release only the matching connector recovery cover
   const onTunnelReconnectSettled = useCallback(() => finishFullscreenAction('tunnel-reconnect'), [finishFullscreenAction]);
   // load configured agent version comparisons
-  const agentUpdates = useCallback(async (): Promise<{ agents?: AgentUpdateStatus[]; error?: string }> => {
-    const response = await request('/api/agents/updates');
+  const agentUpdates = useCallback(async (force: boolean): Promise<{ agents?: AgentUpdateStatus[]; error?: string }> => {
+    const response = await request(force ? '/api/agents/updates?refresh=true' : '/api/agents/updates', { cache: 'no-store' });
     const payload = await response.json().catch(() => undefined) as { agents?: unknown; error?: unknown } | undefined;
     // surface request failures without discarding prior UI state
     if (!response.ok) return { error: typeof payload?.error === 'string' ? payload.error : `Unable to check agent versions (HTTP ${response.status}).` };
@@ -12365,6 +12426,7 @@ function App() {
     let active = true;
     let inFlight = false;
     let queued = false;
+    let forceRefresh = false;
     let generation = 0;
     // one pending owner drains scheduled intents without overlapping requests
     const drain = async () => {
@@ -12374,7 +12436,9 @@ function App() {
         const owner = generation;
         const evidenceRevision = agentVersionEvidenceRevision.current;
         queued = false;
-        const result: { agents?: AgentUpdateStatus[]; error?: string } = await agentUpdates().catch(() => ({ error: 'Unable to check agent versions.' }));
+        const force = forceRefresh;
+        forceRefresh = false;
+        const result: { agents?: AgentUpdateStatus[]; error?: string } = await agentUpdates(force).catch(() => ({ error: 'Unable to check agent versions.' }));
         // never publish after authentication changes or unmount
         if (!active) return;
         // older results cannot publish or clear newer intent state
@@ -12384,7 +12448,7 @@ function App() {
           else {
             setAgentUpdateStatuses(result.agents);
             setVersionCheckError('');
-            announceAgentUpdates(result.agents, notificationFingerprintScope);
+            announceAgentUpdates(result.agents, notificationFingerprintScope, updateNotificationOwners.current, () => active);
           }
         }
         // no queued intent remains to consume this request slot
@@ -12394,8 +12458,10 @@ function App() {
       setAgentVersionsLoading(false);
     };
     // count scheduled work separately from network request ownership
-    const refresh = () => {
+    const refresh = (force = false) => {
       generation += 1;
+      // do not let a scheduled poll erase a queued forced check
+      forceRefresh ||= force;
       setAgentVersionsLoading(true);
       // keep at most one latest refresh behind the active request
       if (inFlight) { queued = true; return; }
@@ -12429,11 +12495,8 @@ function App() {
     // supersede provider reads started before this verified terminal result
     agentVersionEvidenceRevision.current += 1;
     setAgentUpdateStatuses(current => [...current.filter(status => status.kind !== kind), updated]);
-    // clear the completed update notification
-    if (!updated.updateAvailable) {
-      clearAgentUpdateFingerprint(notificationFingerprintScope, kind, agentKinds);
-      void dismissNotification(`agent-update-${kind}`);
-    }
+    // supersede pending displays with the verified terminal comparison
+    announceAgentUpdates([updated], notificationFingerprintScope, updateNotificationOwners.current, () => true);
   }, [notificationFingerprintScope, updateAgent, updatingAgent]);
   // refresh applied voice state only after the shared file transaction commits
   const refreshDavo = useCallback(async () => {
@@ -12513,73 +12576,41 @@ function App() {
     focusServerUpdateEntry();
   }, [focusServerUpdateEntry]);
   // reconcile one authoritative availability result across polling and terminal refreshes
-  const reconcileServerUpdateAvailability = useCallback(async (payload: ServerUpdateAvailability, requestId: number, isActive: () => boolean) => {
+  const reconcileServerUpdateAvailability = useCallback((payload: ServerUpdateAvailability, requestId: number, isActive: () => boolean) => {
     // ignore a response superseded before its body was validated
     if (!isActive() || requestId !== serverUpdateAvailabilityRequest.current) return;
     setServerUpdateAvailable(payload.available);
     // retain rebuild retry visibility without advertising already installed commits
-    if (!payload.available || payload.commitCount === undefined || payload.commitCount === 0) {
-      currentRacUpdateNotification.current = undefined;
-      clearRacUpdateFingerprint(notificationFingerprintScope, agentKinds);
-      void dismissNotification('rac-update', undefined, () => isActive() && currentRacUpdateNotification.current === undefined);
-      return;
-    }
-    const target = payload.targetSha ?? `count:${payload.commitCount}`;
-    const previous = currentRacUpdateNotification.current;
-    // retain a live same-target display or transfer its exact stale reservation
-    if (previous?.target === target && previous.pending !== undefined) {
-      // coalesce a failure refresh without orphaning registration or display work
-      if (previous.isCurrent()) return;
-      releaseUpdateFingerprint(previous.pending);
-    }
-    const title = 'Remote Agent Console update available';
-    const body = `${payload.commitCount} ${payload.commitCount === 1 ? 'commit' : 'commits'} upstream`;
-    // restore the latest confirmed owner after an obsolete same-tag display finishes
-    const onStaleDisplay = async () => {
-      const current = currentRacUpdateNotification.current;
-      // retain the last confirmed notification through failed or malformed availability reads
-      if (current === undefined || !current.isCurrent()) return;
-      const restored = await showNotification('system', current.title, current.body, 'rac-update', '/#server-update', undefined, undefined, current).catch(() => false);
-      // preserve a newer owner while the repair was awaiting the browser
-      if (!current.isCurrent()) return;
-      // replace pending reservations so any successful repair is durably recorded
-      clearRacUpdateFingerprint(notificationFingerprintScope, agentKinds);
-      // leave failed repairs eligible for the next availability poll
-      if (!restored) return;
-      const reservation = reserveRacUpdateFingerprint(notificationFingerprintScope, current.target, agentKinds);
-      // commit only this still-current successful repair
-      if (reservation !== undefined) commitRacUpdateFingerprint(notificationFingerprintScope, reservation, agentKinds);
-    };
-    const reservation = reserveRacUpdateFingerprint(notificationFingerprintScope, target, agentKinds);
-    // bind display ownership to the latest confirmed availability result
-    const notificationOwner = { id: `rac-update:${crypto.randomUUID()}`, title, body, target, pending: reservation, isCurrent: (): boolean => isActive() && currentRacUpdateNotification.current === notificationOwner, onStaleDisplay };
-    currentRacUpdateNotification.current = notificationOwner;
-    // suppress durable and concurrently pending targets
-    if (reservation === undefined) return;
-    const displayed = await showNotification('system', title, body, 'rac-update', '/#server-update', undefined, undefined, notificationOwner).catch(() => false);
-    notificationOwner.pending = undefined;
-    // abandon display work only after a newer confirmed availability owner takes over
-    if (!notificationOwner.isCurrent()) {
-      // close only the notification owned by this stale response
-      if (displayed) void dismissNotification('rac-update', notificationOwner.id);
-      releaseUpdateFingerprint(reservation);
-      return;
-    }
-    // commit only a confirmed still-current display
-    if (displayed) commitRacUpdateFingerprint(notificationFingerprintScope, reservation, agentKinds);
-    else releaseUpdateFingerprint(reservation);
+    const target = payload.available && payload.commitCount !== undefined && payload.commitCount > 0
+      ? { target: payload.targetSha ?? `count:${payload.commitCount}`, title: 'Remote Agent Console update available', body: `${payload.commitCount} ${payload.commitCount === 1 ? 'commit' : 'commits'} upstream` }
+      : undefined;
+    // notification delivery must not hold the availability request slot
+    void reconcileUpdateNotification(updateNotificationOwners.current, 'rac-update', '/#server-update', notificationFingerprintScope, {
+      reserve: target => reserveRacUpdateFingerprint(notificationFingerprintScope, target, agentKinds),
+      commit: reservation => commitRacUpdateFingerprint(notificationFingerprintScope, reservation, agentKinds),
+      clear: () => clearRacUpdateFingerprint(notificationFingerprintScope, agentKinds)
+    }, target, isActive);
   }, [notificationFingerprintScope]);
   // preserve retry visibility while confirming the failed operation's current availability
-  const refreshServerUpdateAfterFailure = useCallback(async () => {
-    const requestId = ++serverUpdateAvailabilityRequest.current;
+  const refreshServerUpdateAfterFailure = useCallback(() => {
     setServerUpdateAvailable(true);
-    const response = await request('/api/server/update-available', { signal: AbortSignal.timeout(30_000) }, false);
-    // keep the retry visible when the authoritative check is unavailable
-    if (!response.ok) return;
-    const payload: unknown = await response.json().catch(() => undefined);
-    // reject stale responses and malformed availability data
-    if (!isServerUpdateAvailability(payload)) return;
-    await reconcileServerUpdateAvailability(payload, requestId, () => true);
+    // share an already-running terminal refresh
+    if (serverUpdateFailureRefresh.current !== undefined) return serverUpdateFailureRefresh.current;
+    const requestId = ++serverUpdateAvailabilityRequest.current;
+    const refresh = (async () => {
+      const response = await request('/api/server/update-available', { cache: 'no-store', signal: AbortSignal.timeout(30_000) }, false);
+      // keep retry visibility when the authoritative check is unavailable
+      if (!response.ok) return;
+      const payload: unknown = await response.json().catch(() => undefined);
+      // reject stale responses and malformed availability data
+      if (!isServerUpdateAvailability(payload)) return;
+      reconcileServerUpdateAvailability(payload, requestId, () => true);
+    })().finally(() => {
+      // release ordinary checks after terminal evidence settles
+      if (serverUpdateFailureRefresh.current === refresh) serverUpdateFailureRefresh.current = undefined;
+    });
+    serverUpdateFailureRefresh.current = refresh;
+    return refresh;
   }, [reconcileServerUpdateAvailability]);
   // open the update review from its notification route
   useEffect(() => {
@@ -12837,20 +12868,25 @@ function App() {
     // avoid host fetches before authentication
     if (state !== 'ready') return;
     let closed = false;
-    // publish only the latest valid availability response
-    const checkForServerUpdate = async () => {
+    // serialize scheduled and opening-triggered reads through the same polling owner
+    const check = async () => {
+      // never supersede the authoritative post-failure refresh
+      while (serverUpdateFailureRefresh.current !== undefined && !closed) await serverUpdateFailureRefresh.current;
+      // retire the request with its authenticated polling owner
+      if (closed) return;
       const requestId = ++serverUpdateAvailabilityRequest.current;
-      const response = await request('/api/server/update-available', { signal: AbortSignal.timeout(30_000) }, false);
-      // retry unavailable checks later
+      const response = await request('/api/server/update-available', { cache: 'no-store', signal: AbortSignal.timeout(30_000) }, false);
+      // retain confirmed availability through failed ordinary reads
       if (!response.ok || closed) return;
       const payload: unknown = await response.json().catch(() => undefined);
-      // reject malformed availability data
-      if (closed || requestId !== serverUpdateAvailabilityRequest.current || !isServerUpdateAvailability(payload)) return;
-      await reconcileServerUpdateAvailability(payload, requestId, () => !closed);
+      // reject superseded or malformed availability data
+      if (!closed && requestId === serverUpdateAvailabilityRequest.current && isServerUpdateAvailability(payload)) reconcileServerUpdateAvailability(payload, requestId, () => !closed);
     };
-    const stopPolling = pollWhileVisible(checkForServerUpdate, 300_000, true, 1_800_000);
+    const stopPolling = pollWhileVisible(check, 300_000, true, 1_800_000);
+    refreshServerAvailability.current = stopPolling.refresh;
     return () => {
       closed = true;
+      refreshServerAvailability.current = undefined;
       stopPolling();
     };
   }, [reconcileServerUpdateAvailability, reconnectAttempt, state]);
@@ -12893,12 +12929,12 @@ function App() {
           ? <ControlScreen session={sessionInfo} claimed={claimSession} />
           : <PublicEntry initialError={error} done={applySession} />;
   // expose settings without a manual server update bypass
-  const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, resourceMonitoring: sessionInfo.resourceMonitoring === true, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, sessionInfo?.resourceMonitoring, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
+  const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, resourceMonitoring: sessionInfo.resourceMonitoring === true, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, checkForServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, checkForServerUpdate, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, sessionInfo?.resourceMonitoring, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
   // resolve server preferences once for every runtime consumer
   const runtimePreferences = useMemo(() => serverPreferences(sessionInfo), [sessionInfo]);
   // share the current launch settings with every flyout
   // keep retry availability separate from provider and operation failures
-  const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, loading: agentVersionsLoading, updating: updatingAgent, errors: Array.from(new Set([versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), retryVersions: versionCheckError ? () => { /* retry through the existing request owner */ refreshAgentVersions.current?.(); } : undefined, updateAgent: dispatchAgentUpdate }), [agentUpdateStatuses, agentVersionsLoading, updatingAgent, versionCheckError, dispatchAgentUpdate]);
+  const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, loading: agentVersionsLoading, updating: updatingAgent, errors: Array.from(new Set([versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), refreshVersions: checkAgentVersions, retryVersions: versionCheckError ? checkAgentVersions : undefined, updateAgent: dispatchAgentUpdate }), [agentUpdateStatuses, agentVersionsLoading, updatingAgent, versionCheckError, checkAgentVersions, dispatchAgentUpdate]);
   return <ServerPreferencesProvider value={runtimePreferences}><SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents />{piUpdateTarget !== undefined && <PiUpdateDialog target={piUpdateTarget} request={request} onClose={closePiUpdate} onSubmitted={submittedPiUpdate} />}<ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} onUpdateFailed={refreshServerUpdateAfterFailure} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} checkingRestartUi={checkingRestartUi} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider></ServerPreferencesProvider>;
 }
 // register without surfacing legacy or private-mode failures as unhandled rejections

@@ -41,9 +41,11 @@ export const pollWhileVisible = (task: () => void | Promise<void>, intervalMs: n
   if (immediate) void run();
   else schedule();
 
-  return () => {
+  // keep manual refreshes inside the same pending-request owner
+  const stop = () => {
     stopped = true;
     clearTimer();
     document.removeEventListener('visibilitychange', visibilityChanged);
   };
+  return Object.assign(stop, { refresh: run });
 };

@@ -25,12 +25,12 @@ test('retries a failed version check immediately and preserves versions while lo
   const retryFinished = new Promise<void>(resolve => { releaseRetry = resolve; });
   await page.clock.install({ time: new Date('2026-11-02T12:00:00-08:00') });
   await page.route('**/api/agents/codex/update', route => { installers += 1; return route.fulfill({ status: 500 }); });
-  await page.route('**/api/agents/updates', async route => {
+  await page.route('**/api/agents/updates*', async route => {
     reads += 1;
-    // seed one confirmed available update
-    if (reads === 1) return route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '1.0.0', latestVersion: '1.1.0', updateAvailable: true }] } });
-    // reproduce a proxy failure without a json error envelope
-    if (reads === 2) return route.fulfill({ status: 524, contentType: 'text/html', body: '<h1>A timeout occurred</h1>' });
+    // seed and confirm one available update through the opening refresh
+    if (reads <= 2) return route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '1.0.0', latestVersion: '1.1.0', updateAvailable: true }] } });
+    // reproduce a scheduled proxy failure without a json error envelope
+    if (reads === 3) return route.fulfill({ status: 524, contentType: 'text/html', body: '<h1>A timeout occurred</h1>' });
     await retryFinished;
     return route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '1.1.0', latestVersion: '1.1.0', updateAvailable: false }] } });
   });
@@ -50,35 +50,35 @@ test('retries a failed version check immediately and preserves versions while lo
   const retry = menu.getByRole('menuitem', { name: 'Retry version check', exact: true });
   try {
     await retry.click();
-    await expect.poll(() => reads).toBe(3);
+    await expect.poll(() => reads).toBe(4);
     await expect(retry).toBeDisabled();
     await expect(menu.locator('.launch-agent-version-skeleton')).toHaveCount(1);
     // a scheduled poll must queue behind the manual retry rather than overlap it
     await page.clock.fastForward(15 * 60_000);
-    expect(reads).toBe(3);
+    expect(reads).toBe(4);
   } finally {
     // release the read even when a browser assertion fails
     releaseRetry();
   }
   // release exactly one coalesced poll after the manual request finishes
-  await expect.poll(() => reads).toBe(4);
+  await expect.poll(() => reads).toBe(5);
   await expect(version).toHaveText('v1.1.0');
   await expect(menu.getByRole('alert')).toHaveCount(0);
   await expect(retry).toHaveCount(0);
   await expect(launch).not.toHaveClass(/updates-available/u);
-  expect({ reads, installers }).toEqual({ reads: 4, installers: 0 });
+  expect({ reads, installers }).toEqual({ reads: 5, installers: 0 });
 });
 
 // distinguish invalid snapshots from explicit server failures
 test('recovers invalid version responses and preserves explicit server error details', async ({ page }) => {
   await serveConsole(page);
   let reads = 0;
-  await page.route('**/api/agents/updates', route => {
+  await page.route('**/api/agents/updates*', route => {
     reads += 1;
     // reject a malformed successful response
-    if (reads === 1) return route.fulfill({ json: { agents: [{ kind: 'codex', updateAvailable: 'yes' }] } });
+    if (reads <= 2) return route.fulfill({ json: { agents: [{ kind: 'codex', updateAvailable: 'yes' }] } });
     // preserve the server supplied error on retry
-    if (reads === 2) return route.fulfill({ status: 503, json: { error: 'Version service unavailable' } });
+    if (reads === 3) return route.fulfill({ status: 503, json: { error: 'Version service unavailable' } });
     return route.fulfill({ json: { agents: [] } });
   });
 
@@ -91,5 +91,5 @@ test('recovers invalid version responses and preserves explicit server error det
   await menu.getByRole('menuitem', { name: 'Retry version check', exact: true }).click();
   await expect(menu.getByRole('alert')).toHaveCount(0);
   await expect(menu.getByRole('menuitem', { name: 'Retry version check', exact: true })).toHaveCount(0);
-  expect(reads).toBe(3);
+  expect(reads).toBe(4);
 });

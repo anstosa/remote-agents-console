@@ -845,12 +845,11 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
     codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
     omx: { program: '/usr/local/bin/omx', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false }
   };
-  await openSettings(page, adapters, {
-    open: false, agentUpdates: [
-      { kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true },
-      { kind: 'omx', currentVersion: '0.21.3', latestVersion: '0.22.0', updateAvailable: true }
-    ]
-  });
+  const versions = [
+    { kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true },
+    { kind: 'omx', currentVersion: '0.21.3', latestVersion: '0.22.0', updateAvailable: true }
+  ];
+  await openSettings(page, adapters, { open: false, agentUpdates: versions });
   const menu = await openAgentMenu(page);
   const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
   await expect(toolbar.getByRole('button', { name: /Choose agent — update available$/u })).toBeVisible();
@@ -863,6 +862,8 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   await page.route('**/api/agents/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
+    // expose installed versions to each fresh launcher comparison
+    if (url.pathname === '/api/agents/updates') return route.fulfill({ json: { agents: versions.map(status => complete.has(status.kind) ? { ...status, currentVersion: status.latestVersion, updateAvailable: false } : status) } });
     const start = /^\/api\/agents\/(codex|omx)\/update$/u.exec(url.pathname);
     // queue one update without holding the request open
     if (start !== null && request.method() === 'POST') {
@@ -995,6 +996,7 @@ test('shows the verified agent version and warning after a partial update', asyn
   const warning = 'Codex is now at 0.153.2, but the installer did not complete successfully. Check diagnostics before retrying.';
   let posts = 0;
   let polls = 0;
+  let finishUpdate = false;
   let versionReads = 0;
   let releaseStaleVersions = () => {};
   // release only the intentionally stale provider snapshot
@@ -1024,6 +1026,8 @@ test('shows the verified agent version and warning after a partial update', asyn
       if (polls === 1) return route.abort('failed');
       // retry a gateway failure without starting another installer
       if (polls === 2) return route.fulfill({ status: 503, body: 'temporarily unavailable' });
+      // retain the running job until the opening read has reached its gate
+      if (!finishUpdate) return route.fulfill({ json: { update: { id: 'update-partial', kind: 'codex', state: 'running' } } });
       return route.fulfill({ json: { update: {
         id: 'update-partial', kind: 'codex', state: 'failed', error: warning,
         agent: { kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.153.2', updateAvailable: false }
@@ -1031,35 +1035,45 @@ test('shows the verified agent version and warning after a partial update', asyn
     }
     return route.fallback();
   });
-  // start a provider read before the installer supplies newer evidence
-  await page.clock.fastForward(15 * 60_000);
-  await expect.poll(() => versionReads).toBe(1);
   const update = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
   await update.click();
   await expect.poll(() => polls).toBe(1);
-  await page.clock.runFor(1_001);
-  await expect.poll(() => polls).toBe(2);
-  await page.clock.runFor(1_001);
+  const codex = menu.getByRole('group', { name: 'Codex agent' });
   const toast = page.getByRole('alert', { name: 'Agent update failed' });
-  await expect(toast).toContainText(warning);
-  await expect(toast.locator('.toast-timer-bar')).toHaveCount(0);
-  // observe the gated response before releasing it
-  const staleResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/agents/updates');
-  releaseStaleVersions();
-  await staleResponse;
-  await openAgentMenu(page);
-  await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.153.2', { exact: true })).toBeVisible();
-  await expect(menu.getByRole('group', { name: 'OMX agent' }).getByText('v0.22.0', { exact: true })).toBeVisible();
+  try {
+    // start one visible provider read before terminal evidence arrives
+    await openAgentMenu(page);
+    await expect.poll(() => versionReads).toBe(1);
+    await expect(codex.locator('.launch-agent-version-skeleton')).toHaveCount(1);
+    // observe both transient failures before completing the gated installer
+    await page.clock.runFor(1_001);
+    await expect.poll(() => polls).toBeGreaterThanOrEqual(2);
+    finishUpdate = true;
+    await page.clock.runFor(1_001);
+    await expect(toast).toContainText(warning);
+    await expect(toast.locator('.toast-timer-bar')).toHaveCount(0);
+  } finally {
+    // never retain a held route after an assertion failure
+    releaseStaleVersions();
+  }
+  // wait until the stale comparison is consumed without a new refresh intent
+  await expect(codex.locator('.launch-agent-version-skeleton')).toHaveCount(0);
+  // the stale comparison must not replace verified terminal evidence
+  await expect(codex.getByText('v0.153.2', { exact: true })).toBeVisible();
   await expect(update).toHaveCount(0);
-  await expect(toast).toContainText(warning);
-  // accept a provider comparison that genuinely started after terminal evidence
-  await page.clock.fastForward(15 * 60_000);
+  await expect(menu.getByRole('group', { name: 'OMX agent' }).getByText('v0.22.0', { exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await openAgentMenu(page);
+  // opening performs a newer provider check after terminal evidence
   await expect.poll(() => versionReads).toBe(2);
-  await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.153.2 → v0.154.0', { exact: true })).toBeVisible();
+  await expect(codex.getByText('v0.153.2 → v0.154.0', { exact: true })).toBeVisible();
+  await expect(menu.getByRole('group', { name: 'OMX agent' }).getByText('v0.22.0', { exact: true })).toBeVisible();
+  await expect(toast).toContainText(warning);
   await expect(menu.getByRole('menuitem', { name: 'Update Codex to 0.154.0' })).toBeVisible();
   await page.clock.fastForward(60_000);
   await expect(toast).toBeVisible();
-  expect({ posts, polls }).toEqual({ posts: 1, polls: 3 });
+  expect(posts).toBe(1);
+  expect(polls).toBeGreaterThanOrEqual(3);
 });
 
 // keep failed updates visible outside their menu until explicitly dismissed

@@ -145,6 +145,50 @@ describe('agent updates', () => {
     expect(runner).toHaveBeenCalledTimes(2);
   });
 
+  it('bypasses completed version caches for explicit refreshes and coalesces concurrent probes', async () => {
+    let current = '1.0.0';
+    let latest = '1.1.0';
+    let release = () => {};
+    let blocked = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    // isolate cache behavior from durable recovery scanning
+    const snapshot = vi.spyOn(AgentUpdateJobStore.prototype, 'snapshot').mockResolvedValue({ terminal: [] });
+    const runner = vi.fn<AgentUpdateRunner>(async command => {
+      // hold only the refreshed installed-version probe
+      if (blocked && command === 'current') await gate;
+      return { code: 0, output: command === 'current' ? current : latest };
+    });
+    const service = new AgentUpdateService(configured(), '/home/test', runner, testCheckout);
+    expect(await service.statuses()).toEqual([{ kind: 'codex', currentVersion: '1.0.0', latestVersion: '1.1.0', updateAvailable: true }]);
+    current = '1.1.0';
+    latest = '1.2.0';
+    expect(await service.statuses()).toEqual([{ kind: 'codex', currentVersion: '1.0.0', latestVersion: '1.1.0', updateAvailable: true }]);
+
+    blocked = true;
+    const first = service.statuses(true);
+    let pending = Promise.all([first]);
+    try {
+      // establish one running refreshed probe before adding callers
+      await waitForJob(() => expect(runner).toHaveBeenCalledTimes(4));
+      const second = service.statuses(true);
+      const ordinary = service.statuses();
+      pending = Promise.all([first, second, ordinary]);
+      // hand both later callers through their controlled snapshots
+      await waitForJob(() => expect(snapshot).toHaveBeenCalledTimes(5));
+      await Promise.resolve();
+      await Promise.resolve();
+      // neither a forced nor ordinary caller may start another probe pair
+      expect(runner).toHaveBeenCalledTimes(4);
+    } finally {
+      // never retain a blocked provider probe after an assertion failure
+      release();
+    }
+    const refreshed = [{ kind: 'codex' as const, currentVersion: '1.1.0', latestVersion: '1.2.0', updateAvailable: true }];
+    await expect(pending).resolves.toEqual([refreshed, refreshed, refreshed]);
+    expect(await service.statuses()).toEqual(refreshed);
+    expect(runner).toHaveBeenCalledTimes(4);
+  });
+
   // keep every version and installer command disabled without a proven launch account
   it('reports updates unavailable without HOME and never invokes a runner', async () => {
     const runner = vi.fn<AgentUpdateRunner>(async () => ({ code: 0, output: 'must not run' }));

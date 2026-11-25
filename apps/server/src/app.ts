@@ -1216,10 +1216,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await launch.setPaneTheme(theme);
     return reply.code(204).send();
   });
-  // publish cached current and upstream agent versions
+  // publish cached versions unless the caller requests fresh probes
   app.get('/api/agents/updates', async request => {
     controlled(request);
-    return { agents: await agentUpdates.statuses() };
+    const refresh = (request.query as { refresh?: unknown }).refresh === 'true';
+    return { agents: await agentUpdates.statuses(refresh) };
   });
   // execute one configured agent update command
   app.post('/api/agents/:kind/update', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } } }, async (request, reply) => {

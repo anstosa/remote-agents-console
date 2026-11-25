@@ -484,7 +484,7 @@ test('shows the active Codex account beside its version in launch menus', async 
   let switchBody: unknown;
   let switchCsrf = '';
   // publish current and available Codex versions for the launch row
-  await page.route('**/api/agents/updates', route => route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.154.0', updateAvailable: true }] } }));
+  await page.route('**/api/agents/updates*', route => route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.154.0', updateAvailable: true }] } }));
   // switch the selected account without changing the shared settings fixture
   await page.route('**/api/codex/accounts/switch', route => {
     const request = route.request();
@@ -688,7 +688,7 @@ test('keeps Restart as choice-only and defers account loading to the toolbar', a
     reviewTour: { available: false, reason: 'generator_unavailable' },
   } }));
   // keep toolbar-only version and update state available
-  await page.route('**/api/agents/updates', route => route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.154.0', updateAvailable: true }] } }));
+  await page.route('**/api/agents/updates*', route => route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.154.0', updateAvailable: true }] } }));
 
   await page.goto('/');
   expect(state.accountQueries).toBe(0);
