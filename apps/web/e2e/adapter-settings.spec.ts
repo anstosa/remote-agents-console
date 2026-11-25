@@ -486,6 +486,62 @@ test('keeps version errors visible across account disclosure', async ({ page }) 
   await expect(menu.getByRole('alert')).toHaveText('Version check failed');
 });
 
+// long per-agent errors wrap in the existing menu width without moving other agents' messages
+for (const width of [1280, 390]) {
+  test(`keeps agent errors below their names without widening the flyout at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    const adapters = {
+      codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
+      claude: { program: '/opt/claude', launchable: true, stateSource: 'reported', turnCapture: false, inlineQuestions: false, commands: true, sandbox: false }
+    };
+    const versions = [{ kind: 'codex', currentVersion: '1.0.0', updateAvailable: false }, { kind: 'claude', currentVersion: '2.0.0', updateAvailable: false }];
+    const codexError = `Version check failed: ${'longUnbrokenDiagnostic'.repeat(8)}`;
+    const claudeError = 'Unable to read Claude version because the configured command did not complete.';
+    let failed = false;
+    await openSettings(page, adapters, { open: false, agentUpdates: versions });
+    // keep the version controls identical while adding diagnostics on the next opening
+    await page.route('**/api/agents/updates*', route => route.fulfill({ json: { agents: failed ? [{ ...versions[0], error: codexError }, { ...versions[1], error: claudeError }] : versions } }));
+    const menu = await openAgentMenu(page);
+    const codex = menu.getByRole('group', { name: 'Codex agent' });
+    const claude = menu.getByRole('group', { name: 'Claude agent' });
+    await expect(codex.getByText('v1.0.0')).toBeVisible();
+    await expect(claude.getByText('v2.0.0')).toBeVisible();
+    const initialWidth = (await menu.boundingBox())!.width;
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    failed = true;
+    await openAgentMenu(page);
+    await expect(codex.getByRole('alert')).toHaveText(codexError);
+    await expect(claude.getByRole('alert')).toHaveText(claudeError);
+    // live alert names identify their agent without changing visible text
+    await expect(codex.getByRole('alert')).toHaveAccessibleName(`Codex agent version error: ${codexError}`);
+    await expect(claude.getByRole('alert')).toHaveAccessibleName(`Claude agent version error: ${claudeError}`);
+    await expect.poll(async () => Math.abs((await menu.boundingBox())!.width - initialWidth)).toBeLessThanOrEqual(1);
+    // verify the long token wraps instead of clipping or creating horizontal scroll
+    const layout = await codex.evaluate(element => {
+      const name = element.querySelector('strong')!.getBoundingClientRect();
+      const icon = element.querySelector('.launch-card-summary .launch-kind-mark')!.getBoundingClientRect();
+      const identity = element.querySelector('.launch-agent-identity')!.getBoundingClientRect();
+      const error = element.querySelector<HTMLElement>('[role="alert"]')!;
+      const bounds = error.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(error);
+      const style = getComputedStyle(error);
+      // resolve the active theme's error token to the same color format
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--red)';
+      error.append(probe);
+      const red = getComputedStyle(probe).color;
+      probe.remove();
+      return { belowName: bounds.top >= name.bottom - 1, fullWidth: Math.abs(bounds.left - icon.left) <= 1 && Math.abs(bounds.right - identity.right) <= 1, lines: range.getClientRects().length, fits: error.scrollWidth <= error.clientWidth + 1 && element.scrollWidth <= element.clientWidth + 1, color: style.color, red };
+    });
+    expect(layout).toMatchObject({ belowName: true, fullWidth: true, fits: true });
+    expect(layout.lines).toBeGreaterThan(1);
+    expect(layout.color).toBe(layout.red);
+    expect(await menu.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  });
+}
+
 test('keeps an unavailable persisted adapter read-only without default controls', async ({ page }) => {
   const adapters = {
     codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },

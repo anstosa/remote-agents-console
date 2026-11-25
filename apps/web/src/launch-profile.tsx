@@ -18,7 +18,7 @@ export const agentKindLabel: Record<AgentKind, string> = { codex: 'Codex', omx: 
 // keep version and update actions in the toolbar chooser
 // a `pinned` Pi version reviews the console release instead of running its own installer
 export type AgentUpdateStatus = { kind: AgentKind; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string; pinned?: true };
-type AgentLaunchSettings = { statuses: AgentUpdateStatus[]; loading: boolean; updating?: AgentKind; errors: string[]; refreshVersions: () => void; retryVersions?: () => void; updateAgent: (kind: AgentKind) => void };
+type AgentLaunchSettings = { statuses: AgentUpdateStatus[]; loading: boolean; updating?: AgentKind; versionCheckError?: string; refreshVersions: () => void; retryVersions?: () => void; updateAgent: (kind: AgentKind) => void };
 export const AgentLaunchSettingsContext = createContext<AgentLaunchSettings | undefined>(undefined);
 // keep per-agent account controls in the launcher without coupling this module to settings
 export type AgentAccountsMenu = { menus: Partial<Record<AgentKind, { content: ReactNode; activeName?: string }>>; onOpen: () => void; onClose: () => void };
@@ -333,6 +333,7 @@ type AgentLaunchCardProps = {
   disabled: boolean;
   loading: boolean;
   versionContent?: ReactNode;
+  versionError?: string;
   accountName?: string;
   updateControl?: ReactNode;
   accountControl?: ReactNode;
@@ -348,6 +349,7 @@ function AgentLaunchCard({
   disabled,
   loading,
   versionContent,
+  versionError,
   accountName,
   updateControl,
   accountControl,
@@ -505,7 +507,7 @@ function AgentLaunchCard({
         title={capability.unavailableReason}
       >
         <KindMark kind={kind} />
-        <span className="launch-row-copy">
+        <span className="launch-agent-identity">
           <strong>{agentKindLabel[kind]}</strong>
           {(versionContent !== undefined || accountName !== undefined) && (
             <span className="launch-agent-details">
@@ -517,8 +519,10 @@ function AgentLaunchCard({
               )}
             </span>
           )}
-          {launchUnavailableReason !== undefined && <small>{launchUnavailableReason}</small>}
         </span>
+        {/* span the icon and identity columns with each distinct diagnostic */}
+        {launchUnavailableReason !== undefined && launchUnavailableReason !== versionError && <small className="launch-agent-error">{launchUnavailableReason}</small>}
+        {versionError !== undefined && <small className="launch-agent-error" role="alert" aria-label={`${agentKindLabel[kind]} agent version error: ${versionError}`}>{versionError}</small>}
       </div>
       <div
         ref={controlsRef}
@@ -949,6 +953,7 @@ export function LaunchMenu({
               disabled={launchDisabled}
               loading={options.loading}
               versionContent={versionContent}
+              versionError={status?.error || undefined}
               accountName={accountName}
               updateControl={updateControl}
               accountControl={kindAccounts === undefined ? undefined : <button
@@ -969,11 +974,12 @@ export function LaunchMenu({
           </div>
         );
       })}
-      {settings?.errors.map((error) => (
-        <p key={error} className="launch-menu-error" role="alert">
-          {error}
+      {/* keep failures of the whole version request separate from individual agents */}
+      {settings?.versionCheckError && (
+        <p className="launch-menu-error" role="alert">
+          {settings.versionCheckError}
         </p>
-      ))}
+      )}
       {settings?.retryVersions !== undefined && (
         <button
           type="button"

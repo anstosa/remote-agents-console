@@ -93,3 +93,62 @@ test('recovers invalid version responses and preserves explicit server error det
   await expect(menu.getByRole('menuitem', { name: 'Retry version check', exact: true })).toHaveCount(0);
   expect(reads).toBe(4);
 });
+
+// compare request-level errors with the same version and retry controls
+for (const width of [1280, 390]) {
+  test(`wraps whole-request version errors without expanding the flyout at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await serveConsole(page);
+    const shortError = 'Version service unavailable';
+    const longError = `Version service unavailable: ${'longUnbrokenDiagnostic'.repeat(12)}`;
+    let message: string | undefined;
+    // vary only the request error, preserving the last confirmed agent version
+    await page.route('**/api/agents/updates*', route => message === undefined
+      ? route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '1.0.0', updateAvailable: false }] } })
+      : route.fulfill({ status: 503, json: { error: message } }));
+    await page.goto('/');
+    const opener = page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^(?:Choose|Launch) agent/u });
+    const menu = page.getByRole('menu', { name: 'Choose agent', exact: true });
+    const version = menu.getByRole('group', { name: 'Codex agent' }).getByText('v1.0.0');
+    const error = menu.getByRole('alert');
+    const retry = menu.getByRole('menuitem', { name: 'Retry version check', exact: true });
+    await opener.click();
+    await expect(version).toBeVisible();
+    const healthyWidth = (await menu.boundingBox())!.width;
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    message = shortError;
+    await opener.click();
+    await expect(error).toHaveText(shortError);
+    await expect(version).toBeVisible();
+    await expect(retry).toBeEnabled();
+    await expect.poll(async () => Math.abs((await menu.boundingBox())!.width - healthyWidth)).toBeLessThanOrEqual(1);
+    const failedWidth = (await menu.boundingBox())!.width;
+    message = longError;
+    await retry.click();
+    await expect(error).toHaveText(longError);
+    await expect(version).toBeVisible();
+    await expect.poll(async () => Math.abs((await menu.boundingBox())!.width - failedWidth)).toBeLessThanOrEqual(1);
+    // inspect the wrapped text range and active theme color
+    const layout = await error.evaluate(element => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--red)';
+      element.append(probe);
+      const red = getComputedStyle(probe).color;
+      probe.remove();
+      return { lines: range.getClientRects().length, fits: element.scrollWidth <= element.clientWidth + 1, color: getComputedStyle(element).color, red };
+    });
+    expect(layout.lines).toBeGreaterThan(1);
+    expect(layout.fits).toBe(true);
+    expect(layout.color).toBe(layout.red);
+    expect(await menu.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await expect(retry).toBeVisible();
+    message = undefined;
+    await retry.click();
+    await expect(error).toHaveCount(0);
+    await expect(retry).toHaveCount(0);
+    await expect(version).toBeVisible();
+  });
+}

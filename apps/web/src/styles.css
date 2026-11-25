@@ -2653,8 +2653,12 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .launch-card-main { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; min-width: 0; }
 .launch-card-main > .launch-row { grid-column: 1; width: 100%; min-width: 0; min-height: 0; padding: .28rem .55rem .12rem !important; }
 .launch-card-main > .launch-row:not(:disabled):hover { background: transparent; }
-.launch-card-main .launch-row-copy { display: flex; align-items: baseline; gap: .4rem; overflow: hidden; white-space: nowrap; }
-.launch-card-main .launch-row-copy > :is(strong, small) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.launch-agent-identity { display: flex; align-items: baseline; gap: .4rem; min-width: 0; overflow: hidden; white-space: nowrap; }
+.launch-agent-identity > strong { min-width: 0; color: var(--text); font-size: .82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* leave the name beside its icon and span both columns with diagnostics */
+.launch-card-main > .launch-card-summary { display: grid !important; grid-template-columns: auto minmax(0, 1fr); row-gap: .12rem; }
+/* size the menu from its controls, not long diagnostic text */
+.launch-card-main .launch-agent-error { display: block; grid-column: 1 / -1; min-width: 0; contain: inline-size; color: var(--red); font: 600 .62rem var(--font-mono); white-space: normal; overflow-wrap: anywhere; }
 /* size the chooser from its controls rather than incidental metadata text */
 .launch-card-controls { z-index: 2; display: grid; grid-template-columns: minmax(6rem, 1fr); grid-auto-flow: column; grid-auto-columns: max-content; box-sizing: border-box; width: 100%; min-width: 0; grid-column: 1; align-items: center; gap: .3rem; padding: 0 .35rem .28rem; }
 /* wrap only when the viewport cannot fit the standard controls on one line */
@@ -2706,8 +2710,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .launch-agent-details { display: flex; min-width: 0; align-items: baseline; gap: .4rem; }
 .launch-agent-version { flex: none; color: var(--mauve); font: 700 .75rem var(--font-mono); white-space: nowrap; }
 .launch-agent-account { min-width: 0; overflow: hidden; color: var(--green); font: 700 .75rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.launch-menu-error { color: var(--red) !important; }
-.launch-menu-error { margin: .4rem .5rem; font: 600 .64rem var(--font-mono); white-space: normal; }
+.launch-menu-error { color: var(--red) !important; margin: .4rem .5rem; min-width: 0; contain: inline-size; font: 600 .64rem var(--font-mono); white-space: normal; overflow-wrap: anywhere; }
 .launch-card-main .launch-agent-update { border-color: var(--mauve); background: color-mix(in srgb, var(--mauve) 14%, var(--mantle)); color: var(--mauve); }
 .launch-card-main .launch-agent-update:not(:disabled):hover { background: var(--mauve); color: var(--crust); }
 /* format the moved account section as an in-place launcher submenu */

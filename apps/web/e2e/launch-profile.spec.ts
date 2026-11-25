@@ -1175,7 +1175,7 @@ test('agent flyouts size to content and keep model labels left aligned', async (
   await expect(model).toHaveCSS('justify-content', 'flex-start');
   await expect(model.locator('span')).toHaveCSS('text-align', 'left');
   await expect(model).toHaveCSS('font-size', '12px');
-  await expect(card.locator('.launch-row-copy strong')).toHaveCSS('font-size', '13.12px');
+  await expect(card.locator('.launch-agent-identity > strong')).toHaveCSS('font-size', '13.12px');
   const shortBounds = await menu.boundingBox();
   expect(shortBounds).not.toBeNull();
   expect(await menu.evaluate(element => element.style.width)).toBe('max-content');
