@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeAdapter, claudeStructuredAdapter } from '../../src/adapters/claude.js';
 import { claudeStructuredSettings } from '../../src/adapters/claude-hooks.js';
@@ -192,6 +192,8 @@ describe('structured claude launch', () => {
       permissions: {
         defaultMode: 'dontAsk', allow: ['mcp__rac', 'mcp__operator__ask_user', 'Edit', 'Write'],
         deny: ['AskUserQuestion', ...rules('Read', ['/srv/rac/.data', ...secrets]), ...rules('Edit', ['/srv/rac/.data'])],
+        // the file tools reach what the sandbox lets commands write
+        additionalDirectories: [join(homedir(), '.cache/pnpm')],
         blockFileToolReadsOutsideWorkingDirectories: true, blockWritesOutsideWorkingDirectories: true
       }
     });
@@ -207,7 +209,8 @@ describe('structured claude launch', () => {
     const above = await launched({ role: 'conductor' }, {}, place, { ...sandbox, repositories: [join(work, 'remoteagents')] });
     const confined = JSON.parse(above.args[above.args.indexOf('--settings') + 1]!);
     expect(confined.sandbox.filesystem.denyWrite).toEqual(['/srv/rac/.data', work]);
-    expect(confined.permissions.allow).toEqual(['mcp__rac', 'mcp__operator__ask_user']);
+    // its file tools may still edit the sandbox's writable paths
+    expect(confined.permissions.allow).toEqual(['mcp__rac', 'mcp__operator__ask_user', 'Edit(~/.cache/pnpm)', 'Edit(~/.cache/pnpm/**)']);
     expect(confined.permissions.deny).toContain(`Edit(/${work}/**)`);
   });
 

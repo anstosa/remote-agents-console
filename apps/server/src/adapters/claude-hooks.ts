@@ -1,6 +1,6 @@
 import { claudeAskUserTool, claudeConductorAskUserTool } from '../transports/claude.js';
 import { join } from 'node:path';
-import { folderWritable, homeSecrets, piSecrets, piStateDir, staticPolicy } from './pi-sandbox.js';
+import { expandHome, folderWritable, homeSecrets, piSecrets, piStateDir, staticPolicy } from './pi-sandbox.js';
 import { claudeReplyObserverConfiguration } from '../reply-suggestions/claude-observer.js';
 import { responseUrlSessionHookCommand } from './response-urls.js';
 import type { AdapterFileContext, AttentionState, SandboxSettings } from './types.js';
@@ -134,8 +134,8 @@ const noSandbox: SandboxSettings = { allowedDomains: [], deniedDomains: [], allo
  * denied), with the operator's credentials, the account's Claude state and Pi's unreadable and, as
  * for a Sandboxed Pi, its folder unwritable where it holds the home directory or a console
  * repository; and, asking no one, the console's MCP tools, `ask_user` and edits allowed, the file
- * tools kept to its folder and, since they follow permission rules rather than the sandbox's lists,
- * denied the same paths. `stateDirectory` is the launch account's Claude config directory.
+ * tools kept to its folder and the paths the sandbox lets commands write and, since they follow
+ * permission rules rather than the sandbox's lists, denied the same paths. `stateDirectory` is the launch account's Claude config directory.
  */
 export function claudeConductorSettings({ cwd, stateDirectory, sandbox = noSandbox }: { cwd: string; stateDirectory: string; sandbox?: SandboxSettings }): string {
   const { network, filesystem } = staticPolicy(sandbox);
@@ -152,8 +152,10 @@ export function claudeConductorSettings({ cwd, stateDirectory, sandbox = noSandb
       filesystem: { allowWrite: filesystem.allowWrite, denyWrite, denyRead: [...secrets, join(stateDirectory, claudeTranscripts)] }
     },
     permissions: {
-      defaultMode: 'dontAsk', allow: ['mcp__rac', claudeConductorAskUserTool, ...(writable ? ['Edit', 'Write'] : [])],
+      defaultMode: 'dontAsk', allow: ['mcp__rac', claudeConductorAskUserTool, ...(writable ? ['Edit', 'Write'] : rules('Edit', filesystem.allowWrite))],
       deny: ['AskUserQuestion', ...rules('Read', secrets), ...rules('Edit', denyWrite)],
+      // the file tools may reach the paths the sandbox lets commands write
+      additionalDirectories: filesystem.allowWrite.map(expandHome),
       blockFileToolReadsOutsideWorkingDirectories: true, blockWritesOutsideWorkingDirectories: true
     }
   });
