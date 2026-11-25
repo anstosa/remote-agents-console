@@ -12,7 +12,7 @@ const socket = { path: '/tmp/tmux-test', fingerprint: 'one', device: 1, inode: 2
 // include the empty session proof column and stack metadata in every row
 const row = (dead = '0', status = '', cwd = '/worktree', keyBinding = '') => ['%1', '$1', 'main', '123', cwd, 'node', 'café ☕', '', '', '', '', '', '', '', '', 'process', '', '@1', '', 'project:/worktree', 'dev', '', dead, status, keyBinding, '', 'p42', '/worktree'].join('\t') + '\n';
 // isolate clock and command mocks
-afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); vi.unstubAllEnvs(); run.mockReset(); });
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); vi.unstubAllEnvs(); run.mockReset(); vi.mocked(socketIsCurrent).mockReset().mockResolvedValue(true); });
 
 describe('shared pane snapshots', () => {
   // successful listings are reused only by explicit dashboard snapshot readers
@@ -45,6 +45,214 @@ describe('shared pane snapshots', () => {
     run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
     await adapter.listPanes(socket);
     expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'available', panes: [] });
+  });
+
+  // tmux 3.8 cannot list panes on a running server without sessions
+  it('recognizes a confirmed empty server as healthy', async () => {
+    vi.useFakeTimers();
+    const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target\n' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+
+    await expect(adapter.listPaneInventory(socket)).resolves.toEqual({ status: 'available', panes: [] });
+    expect(run).toHaveBeenLastCalledWith('/usr/bin/tmux', ['-S', socket.path, 'list-sessions', '-F', '#{session_id}'], undefined, 2_000);
+    expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'available', panes: [] });
+    expect(adapter.socketHealthNow().get(socket.path)).toMatchObject({ status: 'healthy' });
+  });
+
+  // never infer an empty inventory from an unsuccessful or nonempty confirmation
+  it.each([
+    { code: 1, stdout: '', stderr: 'no server running' },
+    { code: 0, stdout: '$1\n', stderr: '' },
+    { code: 0, stdout: '', stderr: '', timedOut: true },
+    { code: 0, stdout: '', stderr: '', stdoutTruncated: true },
+    { code: 0, stdout: '', stderr: 'unexpected diagnostic' }
+  ])('keeps an unconfirmed empty server unavailable (%j)', async confirmation => {
+    const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target\n' });
+    run.mockResolvedValueOnce(confirmation);
+
+    await expect(adapter.listPaneInventory(socket)).resolves.toEqual({ status: 'unavailable' });
+    await expect(adapter.listPaneInventory(socket)).resolves.toEqual({ status: 'unavailable' });
+    expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'unavailable' });
+    expect(adapter.socketHealthNow().get(socket.path)).toMatchObject({ status: 'unavailable' });
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  // only the precise complete diagnostic permits an empty-server confirmation
+  it.each([
+    { code: 2, stdout: '', stderr: 'no current target' },
+    { code: 1, stdout: row(), stderr: 'no current target' },
+    { code: 1, stdout: '', stderr: 'no current target', timedOut: true },
+    { code: 1, stdout: '', stderr: 'no current target', stdoutTruncated: true },
+    { code: 1, stdout: '', stderr: 'no current target\nother error' }
+  ])('does not confirm unrelated listing failures (%j)', async listing => {
+    const adapter = new TmuxAdapter();
+    run.mockResolvedValueOnce(listing);
+    await expect(adapter.listPaneInventory(socket)).resolves.toEqual({ status: 'unavailable' });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  // subprocess rejection is also an unknown inventory
+  it('keeps a rejected confirmation unavailable', async () => {
+    const adapter = new TmuxAdapter();
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target' });
+    run.mockRejectedValueOnce(new Error('spawn failed'));
+    await expect(adapter.listPaneInventory(socket)).resolves.toEqual({ status: 'unavailable' });
+    expect(adapter.socketHealthNow().get(socket.path)).toMatchObject({ status: 'unavailable' });
+  });
+
+  // an empty confirmation must share the original listing deadline
+  it.each([1_500, 2_000])('honors the fallback budget after %i ms', async elapsed => {
+    vi.useFakeTimers();
+    const adapter = new TmuxAdapter();
+    // simulate completed listing after part or all of the budget
+    run.mockImplementationOnce(async () => {
+      await vi.advanceTimersByTimeAsync(elapsed);
+      return { code: 1, stdout: '', stderr: 'no current target' };
+    });
+    run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+    const listing = await adapter.listPaneInventory(socket);
+    // an exhausted budget cannot spawn another process
+    if (elapsed === 2_000) {
+      expect(listing).toEqual({ status: 'unavailable' });
+      expect(run).toHaveBeenCalledOnce();
+    } else {
+      expect(listing).toEqual({ status: 'available', panes: [] });
+      expect(run).toHaveBeenLastCalledWith('/usr/bin/tmux', ['-S', socket.path, 'list-sessions', '-F', '#{session_id}'], undefined, 500);
+    }
+  });
+
+  // standalone and persistent fallback paths must verify the confirmation's identity
+  it.each([false, true])('rejects replacement before confirmation (persistent: %s)', async persistent => {
+    const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(persistent ? commands : undefined);
+    // production also validates before listing panes
+    if (persistent) vi.mocked(socketIsCurrent).mockResolvedValueOnce(true);
+    vi.mocked(socketIsCurrent).mockResolvedValueOnce(false);
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+    await expect(adapter.listPaneInventory(socket)).resolves.toEqual({ status: 'unavailable' });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  // retiring a pending pane listing also prevents a late confirmation
+  it('does not confirm after the shared fallback is retired', async () => {
+    const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    let finish!: (value: { code: number; stdout: string; stderr: string }) => void;
+    // hold the pane listing itself
+    run.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const pending = adapter.listPaneInventory(socket);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+    adapter.retainSockets([]);
+    finish({ code: 1, stdout: '', stderr: 'no current target' });
+    await expect(pending).resolves.toEqual({ status: 'unavailable' });
+    expect(run).toHaveBeenCalledOnce();
+    expect(adapter.socketHealthNow().size).toBe(0);
+  });
+
+  // a retired inventory must not establish a fresh fallback after a late transport failure
+  it('does not confirm after retirement during the persistent read', async () => {
+    let finish!: (value: undefined) => void;
+    const commands = { listPanes: vi.fn(() => new Promise<undefined>(resolve => { finish = resolve; })), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+    const pending = adapter.listPaneInventory(socket);
+    adapter.retainSockets([]);
+    finish(undefined);
+    await expect(pending).resolves.toEqual({ status: 'unavailable' });
+    expect(run).not.toHaveBeenCalled();
+    expect(adapter.paneSnapshotsNow().size).toBe(0);
+  });
+
+  // invalidated confirmation results must not establish healthy emptiness
+  it.each(['replacement', 'retirement', 'shutdown'] as const)('rejects a pending confirmation after %s', async invalidation => {
+    const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    let finish!: (value: { code: number; stdout: string; stderr: string }) => void;
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target' });
+    // hold the confirmation while its read is invalidated
+    run.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const pending = adapter.listPaneInventory(socket);
+    // wait until the second subprocess has started
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    // invalidate identity, ownership or the adapter itself
+    switch (invalidation) {
+      case 'replacement': vi.mocked(socketIsCurrent).mockResolvedValue(false); break;
+      case 'retirement': adapter.retainSockets([]); break;
+      case 'shutdown': adapter.closeCommands(); break;
+    }
+    finish({ code: 0, stdout: '', stderr: '' });
+    await expect(pending).resolves.toEqual({ status: 'unavailable' });
+    expect(adapter.socketHealthNow().get(socket.path)?.status).not.toBe('healthy');
+    expect(adapter.paneSnapshotsNow().get(socket.path)?.status).not.toBe('available');
+  });
+
+  // standalone confirmations cannot lend a replacement's empty inventory to an old socket
+  it('rechecks standalone identity after confirmation', async () => {
+    const adapter = new TmuxAdapter();
+    vi.mocked(socketIsCurrent).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+    await expect(adapter.listPaneInventory(socket)).resolves.toEqual({ status: 'unavailable' });
+    expect(adapter.socketHealthNow().get(socket.path)).toMatchObject({ status: 'unavailable' });
+  });
+
+  // a fresher standalone read supersedes publication, not the socket lifetime
+  it('accepts overlapping standalone confirmations for the same socket', async () => {
+    const adapter = new TmuxAdapter();
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target' });
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+    await expect(Promise.all([adapter.listPaneInventory(socket), adapter.listPaneInventory(socket)])).resolves.toEqual([
+      { status: 'available', panes: [] }, { status: 'available', panes: [] }
+    ]);
+    expect(run).toHaveBeenCalledTimes(4);
+    expect(adapter.paneSnapshotsNow().get(socket.path)).toEqual({ status: 'available', panes: [] });
+    expect(adapter.socketHealthNow().get(socket.path)).toMatchObject({ status: 'healthy' });
+  });
+
+  // overlapping production readers share one listing and one confirmation
+  it('coalesces empty-server confirmation across concurrent readers', async () => {
+    const commands = { listPanes: vi.fn().mockResolvedValue(undefined), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    let finish!: (value: { code: number; stdout: string; stderr: string }) => void;
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target' });
+    // keep the shared confirmation in flight
+    run.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const first = adapter.listPaneInventory(socket);
+    const second = adapter.listPaneInventory(socket);
+    // check that neither caller spawns a duplicate confirmation
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    finish({ code: 0, stdout: '', stderr: '' });
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { status: 'available', panes: [] }, { status: 'available', panes: [] }
+    ]);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(adapter.socketHealthNow().get(socket.path)).toMatchObject({ status: 'healthy' });
+  });
+
+  // discovery distinguishes authoritative absence from a temporarily unreachable server
+  it('removes departed agents without reporting an outage on confirmed emptiness', async () => {
+    run.mockResolvedValue({ code: 1, stdout: '', stderr: '' });
+    const commands = { listPanes: vi.fn().mockResolvedValue(row('0', '', '/tmp')), retainSockets: vi.fn(), closeAll: vi.fn() };
+    const adapter = new TmuxAdapter(commands);
+    const discovery = new DiscoveryService(socketFinder([socket]), adapter, processInspector());
+    const id = `${socket.fingerprint}:%1`;
+    expect((await discovery.dashboard(false, true)).agents).toMatchObject([{ id }]);
+
+    commands.listPanes.mockResolvedValueOnce(undefined);
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'no current target' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+    const empty = await discovery.dashboard(false, true);
+    expect(empty.agents).toEqual([]);
+    expect(empty).not.toHaveProperty('tmuxOutage');
+    expect(await discovery.snapshotTarget(id)).toBeUndefined();
   });
 
   // a partial reply stays unknown rather than hiding panes omitted by parsing

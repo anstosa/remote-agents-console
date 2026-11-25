@@ -419,6 +419,41 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
     }
   });
 
+  // a healthy server can temporarily have no sessions
+  it('observes an empty server and its subsequent repopulation', async () => {
+    const { ref, socket } = await fixtureSession();
+    const root = fixtures.at(-1)!.root;
+    const wrapper = join(root, 'tmux');
+    const calls = join(root, 'empty-calls');
+    await writeFile(wrapper, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${tmux}' "$@"\n`, { mode: 0o700 });
+    vi.stubEnv('RAC_TMUX_BIN', wrapper);
+    const adapter = new TmuxAdapter(new TmuxCommandRegistry());
+    try {
+      expect(await adapter.listPanes(ref)).toHaveLength(1);
+      expect((await run(tmux, ['-S', socket, 'set-option', '-s', 'exit-empty', 'off'])).code).toBe(0);
+      expect((await run(tmux, ['-S', socket, 'kill-session', '-t', 'fixture'])).code).toBe(0);
+      // exercise the real fallback repeatedly without treating emptiness as an outage
+      for (let tick = 0; tick < 5; tick += 1) {
+        expect(await adapter.listPaneInventory(ref)).toEqual({ status: 'available', panes: [] });
+        expect(adapter.paneSnapshotsNow().get(socket)).toEqual({ status: 'available', panes: [] });
+        expect(adapter.socketHealthNow().get(socket)).toMatchObject({ status: 'healthy' });
+      }
+      const spawned = (await readFile(calls, 'utf8')).trim().split('\n');
+      // each fresh empty read uses at most one listing and its confirmation
+      expect(spawned.filter(call => call.includes(' list-panes '))).toHaveLength(5);
+      expect(spawned.filter(call => call.includes(' list-sessions ')).length).toBeLessThanOrEqual(5);
+      expect((await run(tmux, ['-S', socket, 'new-session', '-d', '-s', 'restored', 'cat', '-'])).code).toBe(0);
+      expect(await adapter.listPanes(ref)).toMatchObject([{ sessionName: 'restored' }]);
+      expect(adapter.socketHealthNow().get(socket)).toMatchObject({ status: 'healthy' });
+      expect((await run(tmux, ['-S', socket, 'kill-server'])).code).toBe(0);
+      expect(await adapter.listPaneInventory(ref)).toEqual({ status: 'unavailable' });
+      expect(adapter.socketHealthNow().get(socket)).toMatchObject({ status: 'unavailable' });
+    } finally {
+      adapter.closeCommands();
+      vi.stubEnv('RAC_TMUX_BIN', tmux);
+    }
+  });
+
   // a dashboard-only observer must not block spawned launch or prompt submission
   it('submits pasted input when the dashboard connection is the only attached client', async () => {
     const { ref, socket, pane } = await fixtureSession();
