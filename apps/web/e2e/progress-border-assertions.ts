@@ -5,11 +5,17 @@ export type ProgressColor = 'blue' | 'green' | 'yellow' | 'peach' | 'red' | 'mau
 type ProgressKind = 'loading' | 'working';
 
 // map semantic motion to its public keyframe contract
-const animationName = (kind: ProgressKind) => kind === 'loading' ? 'loading-border-orbit' : 'update-border-orbit';
+function animationName(kind: ProgressKind, retained: boolean) {
+  // loading takes precedence over retained status
+  if (kind === 'loading') return 'loading-border-orbit';
+  return retained ? 'working-status-orbit' : 'update-border-orbit';
+}
 
-// finite runs share the same phase without starting at the document's origin
-const cycleAligned = (start: unknown, duration: number, iterations: number) =>
-  typeof start === 'number' && (iterations === Infinity ? start === 0 : start % duration === 0);
+// distinguish retained status controls from transient actions
+const retainedStatus = (control: Locator) => control.evaluate(element => element.querySelector(':scope > .update-progress-ring > .working-progress-mask') !== null);
+
+// long-lived and transient progress loops share the document clock
+const cycleAligned = (start: unknown, iterations: number | undefined) => start === 0 && iterations === Infinity;
 
 // require the semantic owner marker without coupling tests to component internals
 async function expectProgressKind(control: Locator, kind: ProgressKind) {
@@ -78,7 +84,7 @@ export async function expectReducedMotionSpinner(control: Locator, color: Progre
       const animation = element.getAnimations({ subtree: true })[0];
       return [animation?.startTime, animation?.effect?.getTiming().iterations] as const;
     });
-    return cycleAligned(timing[0], 1_000, timing[1] ?? Infinity);
+    return cycleAligned(timing[0], timing[1]);
   }).toBe(true);
   const treatment = await control.evaluate((element, name) => {
     const spinner = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
@@ -191,14 +197,15 @@ export async function expectSplitProgressBorder(panel: Locator, color: ProgressC
 export async function expectClockwiseProgressBorder(control: Locator, expectedKind?: ProgressKind) {
   const kind: ProgressKind = expectedKind ?? await control.evaluate(element => element.classList.contains('progress-loading') ? 'loading' : 'working');
   await expectProgressKind(control, kind);
+  const name = animationName(kind, await retainedStatus(control));
   // allow a replacement animationstart event one rendered frame
   await expect.poll(async () => {
     const timing = await control.evaluate((element, name) => {
       const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
       const animation = ring?.getAnimations({ subtree: true }).find(candidate => candidate instanceof CSSAnimation && candidate.animationName === name);
       return [animation?.startTime, animation?.effect?.getTiming().iterations] as const;
-    }, animationName(kind));
-    return cycleAligned(timing[0], 2_000, timing[1] ?? Infinity);
+    }, name);
+    return cycleAligned(timing[0], timing[1]);
   }).toBe(true);
   // isolate sampling so polling does not discard the observed treatment
   const inspect = () => control.evaluate(element => {
@@ -207,7 +214,7 @@ export async function expectClockwiseProgressBorder(control: Locator, expectedKi
     if (ring === null) return null;
     const animations = ring.getAnimations({ subtree: true });
     // select the shared border instead of transient owner effects
-    const animation = animations.find(candidate => candidate instanceof CSSAnimation && candidate.effect instanceof KeyframeEffect && candidate.effect.target === ring && candidate.effect.pseudoElement === '::before');
+    const animation = animations.find(candidate => candidate instanceof CSSAnimation && candidate.effect instanceof KeyframeEffect && (candidate.effect.target === ring || candidate.effect.target === ring.querySelector(':scope > .working-progress-mask')) && candidate.effect.pseudoElement === '::before');
     // require the shared live orbit
     if (animation === undefined) return null;
     const effect = animation.effect as KeyframeEffect;
@@ -221,7 +228,13 @@ export async function expectClockwiseProgressBorder(control: Locator, expectedKi
     const samples = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 0.999].map(portion => {
       animation.pause();
       animation.currentTime = duration * portion;
-      return Number.parseFloat(getComputedStyle(ring, '::before').getPropertyValue('--update-orbit-angle'));
+      const style = getComputedStyle(effect.target as Element, '::before');
+      // read rotated status textures and legacy transient gradient angles
+      if (style.animationName === 'working-status-orbit') {
+        const matrix = new DOMMatrixReadOnly(style.transform);
+        return (Math.atan2(matrix.b, matrix.a) * 180 / Math.PI + 360) % 360;
+      }
+      return Number.parseFloat(style.getPropertyValue('--update-orbit-angle'));
     });
     // restore the synchronized shared clock after local sampling
     if (originalPlayState === 'running') {
@@ -238,7 +251,7 @@ export async function expectClockwiseProgressBorder(control: Locator, expectedKi
       name: animation instanceof CSSAnimation ? animation.animationName : '',
       ownerTransform: getComputedStyle(element).transform,
       pseudo: effect.pseudoElement,
-      ringTarget: effect.target === ring,
+      ringTarget: effect.target === ring || effect.target === ring.querySelector(':scope > .working-progress-mask'),
       samples
     };
   });
@@ -249,7 +262,7 @@ export async function expectClockwiseProgressBorder(control: Locator, expectedKi
     duration: 2_000,
     direction: 'normal',
     easing: 'linear',
-    name: animationName(kind),
+    name,
     ownerTransform: 'none',
     pseudo: '::before',
     ringTarget: true
@@ -277,7 +290,7 @@ export async function expectClockwiseProgressBorder(control: Locator, expectedKi
 // compare live phases before any helper seeks an animation locally
 export async function expectSynchronizedProgressBorders(controls: Locator, count: number, kind: ProgressKind, reducedMotion = false) {
   await expect(controls).toHaveCount(count);
-  const expectedName = reducedMotion ? 'progress-spinner' : animationName(kind);
+  const expectedName = reducedMotion ? 'progress-spinner' : animationName(kind, await retainedStatus(controls.first()));
   const expectedDuration = reducedMotion ? 1_000 : 2_000;
   // inspect every owner in one browser task
   await expect.poll(() => controls.evaluateAll((elements, expected) => {
@@ -315,8 +328,8 @@ export async function expectSynchronizedProgressBorders(controls: Locator, count
       duration: observations.every(observation => observation.duration === expected.duration),
       name: observations.every(observation => observation.name === expected.name),
       phase: maximumPhaseDelta <= 34,
-      // finite runs can start on different cycles while retaining a shared phase
-      start: observations.every(({ startTime, iterations }) => typeof startTime === 'number' && (iterations === Infinity ? startTime === 0 : startTime % expected.duration === 0))
+      // every active loop shares the document origin
+      start: observations.every(({ startTime, iterations }) => startTime === 0 && iterations === Infinity)
     };
   }, { duration: expectedDuration, kind, name: expectedName })).toEqual({ classified: true, duration: true, name: true, phase: true, start: true });
 }

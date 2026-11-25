@@ -28,7 +28,7 @@ test('moves only the working tab border while its icon, label and dot stay stead
     const movingParts = element.getAnimations({ subtree: true }).map(animation => {
       const effect = animation.effect as KeyframeEffect;
       // separate descendant label motion
-      if ((effect.target as Element | null)?.classList.contains('update-progress-ring')) return 'border';
+      if ((effect.target as Element | null)?.closest('.update-progress-ring')) return 'border';
       if (effect.target !== element) return 'content';
       return 'tab-or-dot';
     });
@@ -87,7 +87,7 @@ test('synchronizes nonlinear working borders across late tabs and motion restart
   await page.goto('/');
   const workingTabs = page.locator('.tabs [role="tab"][aria-busy="true"]');
   await expectSynchronizedProgressBorders(workingTabs, 2, 'working');
-  // join the late tab before the original animations settle
+  // join the late tab without resetting the original animations
   const requestsBeforeLateTab = dashboardRequests;
   includeLateTab = true;
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
@@ -99,7 +99,7 @@ test('synchronizes nonlinear working borders across late tabs and motion restart
   // sample the rendered orbit through both slow points and the loop seam
   const motion = await lateTab.evaluate(element => {
     const ring = element.querySelector(':scope > .update-progress-ring')!;
-    const animation = ring.getAnimations({ subtree: true }).find(candidate => candidate instanceof CSSAnimation && candidate.animationName === 'update-border-orbit')!;
+    const animation = ring.getAnimations({ subtree: true }).find(candidate => candidate instanceof CSSAnimation && candidate.animationName === 'working-status-orbit')!;
     const duration = Number(animation.effect!.getComputedTiming().duration);
     const startTime = animation.startTime;
     const currentTime = animation.currentTime;
@@ -109,7 +109,8 @@ test('synchronizes nonlinear working borders across late tabs and motion restart
       // seek in equal steps including one complete wrap
       const angles = Array.from({ length: 101 }, (_, index) => {
         animation.currentTime = duration * index / 100;
-        return Number.parseFloat(getComputedStyle(ring, '::before').getPropertyValue('--update-orbit-angle'));
+        const matrix = new DOMMatrixReadOnly(getComputedStyle((animation.effect as KeyframeEffect).target as Element, '::before').transform);
+        return (Math.atan2(matrix.b, matrix.a) * 180 / Math.PI + 360) % 360;
       });
       // unwrap clockwise advances into comparable angular speeds
       const advances = angles.slice(1).map((angle, index) => (angle - angles[index] + 360) % 360);

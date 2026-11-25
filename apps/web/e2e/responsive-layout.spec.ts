@@ -394,8 +394,6 @@ test('the phone workspace flyout moves only a working row progress border', asyn
   await expect(row.getByRole('button', { name: /^Build\s*2 Agents · 2 shells · Working$/u })).toBeVisible();
   await expectProgressBorder(row, 'peach', 'working');
   await expectClockwiseProgressBorder(row, 'working');
-  // phone rows use the same bounded cue in both motion modes
-  await expect(row.locator(':scope > .update-progress-ring')).toHaveCSS('--progress-indicator-iterations', '3');
   const paint = await row.evaluate(element => {
     const entry = element.querySelector('.workspace-sheet-entry')!;
     const label = entry.querySelector('strong')!;
@@ -403,7 +401,7 @@ test('the phone workspace flyout moves only a working row progress border', asyn
     const movingParts = element.getAnimations({ subtree: true }).flatMap(animation => {
       const effect = animation.effect as KeyframeEffect;
       // retain the working border orbit
-      if ((effect.target as Element | null)?.classList.contains('update-progress-ring')) return ['border'];
+      if ((effect.target as Element | null)?.closest('.update-progress-ring')) return ['border'];
       // surface accidental label motion
       if (effect.target === label) return ['label'];
       // surface accidental dot motion

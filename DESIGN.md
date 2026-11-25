@@ -275,10 +275,11 @@ Startup/auth and fullscreen connection loaders retain a constant-speed turn.
 Each border type shares the document timeline, including late mounts and portals.
 Reduced motion makes skeletons static and replaces retained travelling borders with
 compact synchronized one-second spinners. Working indicators in tabs, workspace
-and agent pickers, and agent state pills settle within three turns, leaving their
-colored border or compact glyph visible. Update and unread-note glows also settle
-after two pulses. In-flight loaders keep moving; status dots stay still. Do not
-run a continuous JavaScript animation clock.
+and agent pickers, and agent state pills keep moving while work is active, using
+a prepainted gradient rotated behind a stationary border mask rather than
+repainting gradient angles. Reduced-motion spinners use transform-only motion.
+Update and unread-note glows settle after two pulses. In-flight loaders keep
+moving; status dots stay still. Do not run a continuous JavaScript animation clock.
 Conversations opens immediately into one flyout with search first and a scrollable
 four-and-a-half-row maximum viewport, clamped to short screens. Size short lists
 to their content instead of reserving empty rows. A starter list with fewer than
