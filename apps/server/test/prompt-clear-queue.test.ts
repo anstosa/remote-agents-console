@@ -204,6 +204,46 @@ describe('clear then queue', () => {
     } finally { await cleanup(); }
   });
 
+  // the reset send and readiness boundary must share one bounded clock
+  it('preserves follow-ups without retrying a reset after its readiness budget', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    const { agent, cleanup, discovery, drain, history, queue, saved } = await createResetFixture();
+    const scope = `agent:${agent.id}`;
+    const sent: string[][] = [];
+    const pasted: string[] = [];
+    let composer = '';
+    const tmux = {
+      // retain the original reset draft for verified recovery
+      pastePrompt: async (_s: unknown, _p: string, _b: string, prompt: string) => { pasted.push(prompt.trimEnd()); composer = prompt; return true; },
+      capture: async () => `› ${composer}`,
+      // the first key returns after the entire reset grace has elapsed
+      sendKeys: async (_s: unknown, _p: string, keys: string[]) => {
+        sent.push(keys);
+        // a late retry would consume the draft and falsely establish a reset boundary
+        if (sent.length === 1) vi.setSystemTime(Date.now() + 11_000);
+        else composer = '';
+        return true;
+      }
+    };
+    const service = new PromptService(discovery as never, tmux as never, history, queue, drain);
+    try {
+      await settlePolling(service.submit(agent.id, '/clear'));
+      expect(sent).toEqual([['Enter']]);
+      await expect(queue.resets.get(scope)).resolves.toBeUndefined();
+      await service.submit(agent.id, 'follow-up');
+      await expect(queue.list(scope)).resolves.toMatchObject([{ text: '/clear' }, { text: 'follow-up' }]);
+
+      // recover both prompts without submitting them into an unverified conversation
+      await settlePolling(service.observe(agent));
+      expect(sent).toEqual([['Enter'], ['C-c']]);
+      expect(pasted).toEqual(['/clear']);
+      expect(saved).toEqual(['/clear', 'follow-up']);
+      await expect(queue.list(scope)).resolves.toEqual([]);
+      await expect(history.list(scope)).resolves.toEqual([]);
+    } finally { await cleanup(); }
+  });
+
   // resets must release follow-ups without waiting for a nonexistent model answer
   it.each([
     ['codex', '/clear'], ['codex', '/new'], ['omx', '/clear'], ['omx', '/new']

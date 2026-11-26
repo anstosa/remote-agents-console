@@ -47,6 +47,36 @@ const fixture = async (kind: AgentKind = 'codex') => {
 describe('failed queue submission recovery', () => {
   afterEach(() => vi.useRealTimers());
 
+  // slow captures must not consume the entire retry window before the first retry
+  it.each(['normal prompt', '/clear'])('retries a swallowed Enter for %s even when captures are slow', async prompt => {
+    const { agent, queue, history, scope, notes, drain, cleanup } = await fixture();
+    const sent: string[][] = [];
+    let composer = '';
+    const discovery = { worktreesNow: () => [], target: async () => ({ agent, socket }) };
+    const tmux = {
+      pastePrompt: async () => { composer = prompt; return true; },
+      // simulate an expensive scrollback capture after the first key
+      capture: async () => {
+        if (sent.length > 0) vi.setSystemTime(Date.now() + 1_500);
+        return `› ${composer}`;
+      },
+      // only a second Enter accepts the original draft
+      sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => {
+        sent.push(keys);
+        if (sent.length === 2 && keys.join() === 'Enter') composer = '';
+        return true;
+      }
+    };
+    const service = new PromptService(discovery as never, tmux as never, history, queue, drain);
+    try {
+      await settlePolling(service.submit(agent.id, prompt));
+      expect(sent).toEqual([['Enter'], ['Enter']]);
+      expect(composer).toBe('');
+      await expect(queue.list(scope)).resolves.toEqual([]);
+      expect(notes).toEqual([]);
+    } finally { await cleanup(); }
+  });
+
   // a standalone warning footer must not veto either submit or recovery
   it('submits and retries above a native warning without a workspace row', async () => {
     const { agent, queue, history, scope, notes, drain, cleanup } = await fixture();

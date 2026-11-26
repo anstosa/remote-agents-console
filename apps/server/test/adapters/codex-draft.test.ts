@@ -67,6 +67,15 @@ describe('Codex draft observation', () => {
     expect(codexOwnsDraft(pane.replace(prompt, `${prompt} plus edits`), prompt)).toBe(false);
   });
 
+  // the native theme paints the bold warning shortcut and its suffix in different colors
+  it('owns /clear above a colored standalone warning footer', () => {
+    const warning = '  100% context left · ⚠ \x1b[38;2;196;167;103m3 warnings\x1b[38;2;135;140;164m · \x1b[1m\x1b[38;2;205;214;244mf2\x1b[0m\x1b[38;2;135;140;164m to view\x1b[39m';
+    const pane = `› /clear\n\n${warning}`;
+    expect(codexDraftState(pane, '/clear ')).toBe('visible');
+    expect(codexOwnsDraft(pane, '/clear ')).toBe(true);
+    expect(codexOwnsDraft(pane.replace('/clear', '/clear plus edits'), '/clear ')).toBe(false);
+  });
+
   // matching plain text and adjacent styled text are insufficient to hide an authored line
   it.each([
     '\n  100% context left · ⚠ 2 warnings · f2 to view',
@@ -139,6 +148,8 @@ describe('Codex draft observation', () => {
     '                  ⚠ 2 warnings · /warnings to view',
     '             ⚠ 2 · f2',
     '       ⚠ 2',
+    '  98% context left · ⚠ 3 warnings · f2 to view',
+    '  tab to queue message  ⚠ 3 warnings · f2 to view',
     '  tab to queue message',
     '  tab to queue',
     '  tab to queue message · Plan mode',

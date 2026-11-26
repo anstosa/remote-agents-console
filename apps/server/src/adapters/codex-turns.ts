@@ -23,12 +23,12 @@ const composerShortcutsLine = /^ {2}(?:(?:← for agents · )?\? for shortcuts|�
 // filled idle composers suppress shortcuts but retain right-aligned warning notices
 const warningNotice = /⚠ \d+(?: warnings? · \S+ to view| · \S+)?/u;
 const composerWarningLine = new RegExp(String.raw`^ {2,}${warningNotice.source}\s*$`, 'u');
-// without workspace status the context counter shares the warning row
+// the context counter can share the warning row
 const composerContextWarningLine = new RegExp(String.raw`^ {2,}(?:\d+% context left|[\d.,]+[kKmMbB]? used) · ${warningNotice.source}\s*$`, 'u');
-// a standalone warning needs its native emphasized shortcut to prove it is chrome
-const styledComposerWarningKey = / · \x1b\[1m[^\s\x1b]+\x1b\[(?:0|22)m(?: to view)?\s*$/u;
-// filled working composers expose queue hints with optional native context counters
-const composerQueueLine = /^ {2}(?:\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode)(?:\s{2,}(?:\d+% context left|[\d.,]+[kKmMbB]? used))?\s*$/u;
+// standalone warnings use a bold shortcut with optional native theme colors
+const styledComposerWarningKey = / · \x1b\[1m(?:\x1b\[38;2;\d+;\d+;\d+m)?[^\s\x1b]+\x1b\[(?:0|22)m(?:\x1b\[38;2;\d+;\d+;\d+m)?(?: to view)?(?:\x1b\[39m)?\s*$/u;
+// filled working composers expose queue hints beside context counters or warnings
+const composerQueueLine = new RegExp(String.raw`^ {2}(?:\S+ to queue(?: message)?(?: · Plan mode)?|Plan mode)(?:\s{2,}(?:(?:\d+% context left|[\d.,]+[kKmMbB]? used)(?: · ${warningNotice.source})?|${warningNotice.source}))?\s*$`, 'u');
 // goal badges can share the right side with context or warnings
 const composerGoalBadge = /(?:Pursuing goal \(\d+[dhms](?: \d+[dhms])*\)|(?<resume>Goal (?:paused|stalled) \(\/goal resume\)))(?: · IDE(?: context)?)?(?: · (?:\d+% context left|[\d.,]+[kKmMbB]? used))?(?: · ⚠ \d+(?: warnings? · \S+ to view| · \S+)?)?\s*$/u;
 // native left hints can leave a one-column gap before the badge
@@ -191,7 +191,7 @@ function activeComposer(lines: string[], styledRows?: readonly string[]): { inde
   const auxiliary = lines[footerStart] ?? '';
   const goalAuxiliary = composerGoalLine.test(auxiliary);
   const warningAuxiliary = composerWarningLine.test(auxiliary);
-  const statusEnd = composerShortcutsLine.test(auxiliary) || warningAuxiliary || composerQueueLine.test(auxiliary) || goalAuxiliary ? footerStart - 1 : footerStart;
+  const statusEnd = composerShortcutsLine.test(auxiliary) || warningAuxiliary || composerContextWarningLine.test(auxiliary) || composerQueueLine.test(auxiliary) || goalAuxiliary ? footerStart - 1 : footerStart;
   const statusStart = composerAgentLabelContinuation.test(lines[statusEnd] ?? '') ? statusEnd - 1 : statusEnd;
   // require the native workspace and blank separator before excluding auxiliary or wrapped rows
   if (composerWorkspaceStatusLine.test(lines[statusStart] ?? '') && lines[statusStart - 1]?.trim() === '') footerStart = statusStart;

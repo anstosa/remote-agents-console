@@ -33,8 +33,8 @@ const composerRenderPollMs = 50;
 const composerRenderStableMs = 100;
 // recover slow native submission without keeping failed queues in flight indefinitely
 const submissionAcceptGraceMs = 4_000;
-// space retries within the acceptance deadline
-const submissionRetryAttempts: ReadonlySet<number> = new Set([6, 14, 30, 50, 70]);
+// space retries by elapsed time even when terminal captures are slow
+const submissionRetryDelaysMs = [300, 400, 800, 1_000, 1_000] as const;
 const updateAdvisorComposerAttempts = 100;
 const updateAdvisorReadyStableMs = 500;
 const updateAdvisorStartAttempts = 50;
@@ -398,7 +398,7 @@ export class TmuxTransport implements AgentTransport {
     // arm and submit Claude in one ordered tmux batch after exact draft ownership
     const submittedWithArm = calendarIntent?.arm === undefined ? undefined : await this.tmux.armAndSendKeys(submitTarget.socket, submitTarget.agent.pane.paneId, calendarIntent.arm, keys).catch(() => false);
     let submitted = submittedWithArm ?? await this.tmux.sendKeys(submitTarget.socket, submitTarget.agent.pane.paneId, keys).catch(() => false);
-    // allow reset redraws their startup budget without weakening prompt acknowledgement
+    // share the reset clock with its readiness boundary
     const acceptUntil = reset ? submittedAt + conversationResetGraceMs : Date.now() + submissionAcceptGraceMs;
     // inspect ambiguous transport failures too before abandoning a pasted draft
     if (settle) submitted = await this.waitForSubmissionAccepted(agentId, submitTarget, composed, adapter.submission, adapter.completion, rolloutBaseline, attachmentPrompt, acceptUntil);
@@ -521,6 +521,8 @@ export class TmuxTransport implements AgentTransport {
   // acknowledge a cleared composer or fresh exact structured receipt
   private async waitForSubmissionAccepted(agentId: string, target: TmuxTarget, composed: Submission, submission: Adapter['submission'], completion: Adapter['completion'] | undefined, baseline: CompletionBaseline | undefined, receiptPrompt: string, acceptUntil: number): Promise<boolean> {
     const acceptAttempts = Math.ceil((acceptUntil - Date.now()) / composerRenderPollMs);
+    let retryIndex = 0;
+    let retryAt = Date.now() + submissionRetryDelaysMs[0];
     let draft: SubmissionDraftState | undefined;
     // poll within the acceptance deadline and retry only visible server-owned drafts
     for (let attempt = 0; attempt < acceptAttempts && Date.now() < acceptUntil; attempt += 1) {
@@ -529,8 +531,11 @@ export class TmuxTransport implements AgentTransport {
       const observed = current ?? target;
       const captured = await this.tmux.capture(observed.socket, observed.agent.pane.paneId).catch(() => undefined);
       draft = captured === undefined ? undefined : submission.observeDraft!(captured, composed.text);
+      const retryDue = Date.now() >= retryAt;
+      // advance from this observation rather than bunching up missed retry slots
+      if (retryDue) retryAt = Date.now() + (submissionRetryDelaysMs[++retryIndex] ?? Infinity);
       // bound rollout reads while checking before retries and final recovery
-      const checkReceipt = draft === 'cleared' || attempt === 0 || submissionRetryAttempts.has(attempt) || attempt === acceptAttempts - 1;
+      const checkReceipt = draft === 'cleared' || attempt === 0 || retryDue || attempt === acceptAttempts - 1;
       // preserve original whitespace when checking hidden or stale composer frames
       if (checkReceipt && baseline !== undefined && completion?.accepted !== undefined && await completion.accepted(baseline, receiptPrompt).catch(() => false)) return true;
       // revalidate the native process before trusting an empty composer
@@ -540,7 +545,7 @@ export class TmuxTransport implements AgentTransport {
       // let an in-flight snapshot finish without extending recovery
       if (Date.now() >= acceptUntil) break;
       // recover submit keys swallowed while the previous turn finishes
-      if (submissionRetryAttempts.has(attempt) && draft === 'visible' && captured !== undefined && submission.ownsDraft?.(captured, composed.text) === true) {
+      if (retryDue && draft === 'visible' && captured !== undefined && submission.ownsDraft?.(captured, composed.text) === true) {
         const retryTarget = await this.submissionTarget(agentId, target).catch(() => undefined);
         // revalidate before every side effect
         if (retryTarget === undefined || agentAttentionState(retryTarget.agent) === 'question') return false;
@@ -559,6 +564,8 @@ export class TmuxTransport implements AgentTransport {
         const keys = agentAttentionState(retryTarget.agent) === 'finished' ? composed.idleKeys ?? composed.keys : composed.keys;
         // inspect again after transport failure rather than immediately giving up
         await this.tmux.sendKeys(retryTarget.socket, retryTarget.agent.pane.paneId, keys).catch(() => false);
+        // give the native composer the full interval after the actual retry key
+        retryAt = Date.now() + (submissionRetryDelaysMs[retryIndex] ?? Infinity);
       }
       await new Promise(resolve => setTimeout(resolve, composerRenderPollMs));
     }
