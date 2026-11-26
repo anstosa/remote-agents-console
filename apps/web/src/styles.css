@@ -1957,13 +1957,15 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .note-deletion-toast > button:hover { background: color-mix(in srgb, var(--red) 12%, transparent); }
 /* acknowledge queued notes without adding header or flyout status text */
 .note-send.note-queued, .note-menu-run.note-queued { color: var(--green); }
-/* retain the reload action without dismissal controls or a timeout */
+/* retain manual and optional idle reload actions without a timeout */
 .client-update-notification { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: .65rem; min-width: 0; padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--blue) 58%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 94%, var(--blue)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); }
 .client-update-copy { display: grid; flex: 1; min-width: 0; gap: .2rem; overflow-wrap: anywhere; }
 .client-update-copy h2 { margin: 0; color: var(--text); font: 700 .75rem var(--font-mono); }
 .client-update-copy > span { color: var(--subtext-0); font: 500 .66rem/1.35 var(--font-mono); }
-.client-update-notification > button { flex: none; min-height: 2rem; padding: .25rem .55rem; border-color: color-mix(in srgb, var(--blue) 72%, var(--surface-1)); background: transparent; color: var(--blue); box-shadow: none; font: 700 .68rem var(--font-mono); }
-.client-update-notification > button:hover { background: color-mix(in srgb, var(--blue) 14%, transparent); color: var(--text); }
+/* stack maintenance actions without crowding their notice copy */
+.maintenance-notice-actions { display: grid; flex: none; gap: .35rem; }
+.client-update-notification .maintenance-notice-actions > button { flex: none; min-height: 2rem; padding: .25rem .55rem; border-color: color-mix(in srgb, var(--blue) 72%, var(--surface-1)); background: transparent; color: var(--blue); box-shadow: none; font: 700 .68rem var(--font-mono); }
+.client-update-notification .maintenance-notice-actions > button:hover { background: color-mix(in srgb, var(--blue) 14%, transparent); color: var(--text); }
 /* keep tunnel recovery persistent until a verified public check succeeds */
 .tunnel-health-notice { display: flex; align-items: center; gap: .65rem; min-width: 0; padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--yellow) 65%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 92%, var(--yellow)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); }
 .tunnel-health-notice.failed { border-color: color-mix(in srgb, var(--red) 68%, var(--surface-1)); background: color-mix(in srgb, var(--mantle) 92%, var(--red)); }

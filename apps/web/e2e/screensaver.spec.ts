@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
 import type { SettingsStatus } from '../src/settings/contracts.js';
 import type { ProjectStack } from '../src/stack-controls.js';
 import { dashboardSocketReady, emitDashboard, installDashboardSocket } from './dashboard-socket-fixture.js';
@@ -6,7 +6,15 @@ import { installPaneMock, paneInputText, pushBytes, seedPaneSize } from './pane-
 
 type Preview = { kind: 'output' | 'response'; text: string; available: boolean; identity?: string; truncated?: boolean; colors?: unknown };
 type AgentFixture = { id: string; previewIdentity: string; displayLabel: string; home: string; placeId?: string; worktreeId?: string; attention?: 'working' | 'finished' | 'question'; unread?: boolean; conversationId?: string; structured?: { lifecycle: 'live'; revision: number }; panel: 'terminal' | 'transcript'; queuedPromptCount: number; title: string };
-type ScreensaverHarness = { dashboard: Record<string, unknown>; previews: Map<string, Preview>; previewReads: Map<string, number>; beforePreview?: (id: string) => Promise<number | void>; sessionActive?: boolean; settingsStatus: SettingsStatus; settingsStatusReads: number; mutations: string[] };
+type ScreensaverHarness = { dashboard: Record<string, unknown>; previews: Map<string, Preview>; previewReads: Map<string, number>; beforePreview?: (id: string) => Promise<number | void>; beforeSettingsStatus?: () => Promise<void>; sessionActive?: boolean; settingsStatus: SettingsStatus; settingsStatusReads: number; settingsStatusFailures: number; settingsStatusUnavailable: boolean; uiVersion?: string; uiVersionChecks: number; restartRequests: number; mutations: string[] };
+type Gate = { promise: Promise<void>; release: () => void };
+
+// expose one manually released async boundary
+const gate = (): Gate => {
+  let release = () => undefined;
+  const promise = new Promise<void>(resolve => { release = resolve; });
+  return { promise, release };
+};
 
 // build one agent without coupling scenarios to unrelated dashboard fields
 const agent = (id: string, displayLabel: string, target: { placeId?: string; worktreeId?: string }, attention: AgentFixture['attention'] = 'working'): AgentFixture => ({
@@ -91,7 +99,27 @@ const routeScreensaverApi = async (page: Page, harness: ScreensaverHarness): Pro
     // publish mutable durable restart state to the application runtime
     if (path === '/api/settings/status') {
       harness.settingsStatusReads += 1;
+      await harness.beforeSettingsStatus?.();
+      // fail a bounded read or every read for recovery and entry-boundary scenarios
+      if (harness.settingsStatusUnavailable || harness.settingsStatusFailures > 0) {
+        // consume only explicitly bounded failures
+        if (harness.settingsStatusFailures > 0) harness.settingsStatusFailures -= 1;
+        return json(route, { error: 'status unavailable' }, 503);
+      }
       return json(route, harness.settingsStatus);
+    }
+    // expose a mutable deployed bundle for stale-client idle actions
+    if (path === '/api/ui-version') {
+      harness.uiVersionChecks += 1;
+      return json(route, harness.uiVersion === undefined ? {} : { version: harness.uiVersion });
+    }
+    // acknowledge one deferred restart without completing its fullscreen lifecycle
+    if (path === '/api/settings/restart' && request.method() === 'POST') {
+      harness.restartRequests += 1;
+      const operation = { id: `idle-restart-${harness.restartRequests}`, state: 'running' as const, phase: 'Restarting fixture', restart: { state: 'restarting' as const, recoveryDeadline: Date.now() + 60_000 } };
+      harness.settingsStatus = { ...harness.settingsStatus, operation };
+      // match the production restart route's direct operation acknowledgement
+      return json(route, operation, 202);
     }
     // record any unexpected mutation for read-only assertions
     if (request.method() !== 'GET' && /^\/api\/(agents|worktrees|places)\//u.test(path)) harness.mutations.push(`${request.method()} ${path}`);
@@ -111,6 +139,10 @@ const openScreensaverDashboard = async (page: Page, options: { dashboard?: Recor
     previewReads: new Map(),
     settingsStatus: options.settingsStatus ?? { pending: false, targets: [], effective: 'known', restartAvailable: true },
     settingsStatusReads: 0,
+    settingsStatusFailures: 0,
+    settingsStatusUnavailable: false,
+    uiVersionChecks: 0,
+    restartRequests: 0,
     mutations: []
   };
   // expose application errors as explicit test failures
@@ -129,6 +161,39 @@ const enterScreensaver = async (page: Page, chord = 'Control+l') => {
   const overlay = page.getByRole('dialog', { name: 'Screensaver' });
   await expect(overlay).toBeVisible();
   return overlay;
+};
+
+// latch the same stale-client notice raised by a deployed bundle change
+const latchUiUpdate = async (page: Page, harness: ScreensaverHarness) => {
+  const checks = harness.uiVersionChecks;
+  harness.uiVersion = '/assets/index-idle-update.js';
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(() => harness.uiVersionChecks).toBeGreaterThan(checks);
+  const notification = page.getByRole('status', { name: 'UI update available', exact: true });
+  await expect(notification).toBeVisible();
+  return notification;
+};
+
+// force one visible settings-status refresh and wait for its response
+const refreshSettingsStatus = async (page: Page, harness: ScreensaverHarness) => {
+  const reads = harness.settingsStatusReads;
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(() => harness.settingsStatusReads).toBeGreaterThan(reads);
+};
+
+// keep every maintenance action inside its notice at narrow viewport widths
+const expectActionsInsideNotice = async (notice: Locator) => {
+  const noticeBounds = await notice.boundingBox();
+  // require rendered geometry for a meaningful containment check
+  if (noticeBounds === null) throw new Error('Maintenance notice has no layout bounds');
+  // inspect each real action independently
+  for (const button of await notice.getByRole('button').all()) {
+    const buttonBounds = await button.boundingBox();
+    // require rendered geometry for every visible action
+    if (buttonBounds === null) throw new Error('Maintenance action has no layout bounds');
+    expect(buttonBounds.x).toBeGreaterThanOrEqual(noticeBounds.x);
+    expect(buttonBounds.x + buttonBounds.width).toBeLessThanOrEqual(noticeBounds.x + noticeBounds.width);
+  }
 };
 
 // serve one focused terminal so a declined shortcut can prove native pass-through
@@ -170,6 +235,336 @@ test('disabled screensaver leaves its hotkey and idle timeout inactive', async (
   await expect.poll(() => paneInputText(page, '%5')).toBe('\u000c');
   await page.clock.fastForward(60_001);
   await expect(page.getByRole('dialog', { name: 'Screensaver' })).toHaveCount(0);
+});
+
+// idle maintenance is available only when startup policy includes automatic entry
+for (const { label, screensaver } of [
+  { label: 'disabled', screensaver: { enabled: false, idleMinutes: 1 } },
+  { label: 'manual-only', screensaver: { enabled: true, idleMinutes: 0 } }
+]) test(`${label} screensaver keeps maintenance banners immediate-only`, async ({ page }) => {
+  const harness = await openScreensaverDashboard(page, {
+    dashboard: dashboardFixture(screensaver),
+    settingsStatus: { pending: true, targets: ['rac'], effective: 'unknown', restartAvailable: true }
+  });
+  const update = await latchUiUpdate(page, harness);
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true });
+  await expect(restart).toBeVisible();
+
+  // retain both immediate actions without offering an idle queue
+  await expect(update.getByRole('button', { name: 'Reload UI', exact: true })).toBeVisible();
+  await expect(restart.getByRole('button', { name: 'Restart', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Reload UI when idle', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Restart when idle', exact: true })).toHaveCount(0);
+});
+
+// manual entry still counts as the next start under an automatic screensaver policy
+test('reloads at the next manual screensaver start after dismissing only the UI banner', async ({ page }) => {
+  const harness = await openScreensaverDashboard(page, {
+    dashboard: dashboardFixture({ enabled: true, idleMinutes: 1 }),
+    settingsStatus: { pending: true, targets: ['rac'], effective: 'unknown', restartAvailable: true }
+  });
+  const update = await latchUiUpdate(page, harness);
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true });
+  await expect(restart).toBeVisible();
+  let navigations = 0;
+  // count only replacement documents after the fixture has loaded
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations += 1; });
+
+  await update.getByRole('button', { name: 'Reload UI when idle', exact: true }).click();
+  await expect(update).toHaveCount(0);
+  await expect(restart).toBeVisible();
+  expect(navigations).toBe(0);
+  expect(harness.restartRequests).toBe(0);
+
+  const navigation = page.waitForEvent('framenavigated', { predicate: frame => frame === page.mainFrame() });
+  await page.keyboard.press('Control+l');
+  await navigation;
+  expect(navigations).toBe(1);
+  expect(harness.restartRequests).toBe(0);
+});
+
+// a queued restart owns automatic idle maintenance when both banners were deferred
+test('restarts instead of reloading when both actions are queued for automatic entry', async ({ page }) => {
+  const start = Date.parse('2026-11-25T12:00:00.000Z');
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(start + 5_000);
+  const harness = await openScreensaverDashboard(page, {
+    dashboard: dashboardFixture({ enabled: true, idleMinutes: 0.01 }),
+    settingsStatus: { pending: true, targets: ['rac'], effective: 'unknown', restartAvailable: true },
+    viewport: { width: 390, height: 844 }
+  });
+  const update = await latchUiUpdate(page, harness);
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true });
+  await expect(restart).toBeVisible();
+  await expect(update.getByRole('button')).toHaveCount(2);
+  await expect(restart.getByRole('button')).toHaveCount(2);
+  await expectActionsInsideNotice(update);
+  await expectActionsInsideNotice(restart);
+  let navigations = 0;
+  // count only replacement documents after the fixture has loaded
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations += 1; });
+
+  await update.getByRole('button', { name: 'Reload UI when idle', exact: true }).click();
+  await expect(update).toHaveCount(0);
+  await expect(restart).toBeVisible();
+  await restart.getByRole('button', { name: 'Restart when idle', exact: true }).click();
+  await expect(restart).toHaveCount(0);
+  expect(harness.restartRequests).toBe(0);
+  expect(navigations).toBe(0);
+
+  await page.clock.runFor(599);
+  expect(harness.restartRequests).toBe(0);
+  expect(navigations).toBe(0);
+  await page.clock.runFor(1);
+  const preparing = page.getByRole('alert', { name: 'Preparing restart', exact: true });
+  await expect(preparing).toBeVisible();
+  // let the fullscreen transition and compositor paint gate finish in real time
+  await page.clock.resume();
+  await expect.poll(() => harness.restartRequests).toBe(1);
+  expect(navigations).toBe(0);
+  await expect(page.getByRole('alert', { name: 'Restarting server', exact: true })).toBeVisible();
+
+  const operation = harness.settingsStatus.operation!;
+  harness.settingsStatus = {
+    pending: false,
+    targets: [],
+    effective: 'known',
+    restartAvailable: true,
+    operation: { id: operation.id, state: 'complete', phase: 'Restart complete', restart: { state: 'restarted', recoveryDeadline: Date.now() } }
+  };
+  harness.uiVersion = '/assets/index-after-idle-restart.js';
+  const checks = harness.uiVersionChecks;
+  const navigation = page.waitForEvent('framenavigated', { predicate: frame => frame === page.mainFrame() });
+  await refreshSettingsStatus(page, harness);
+  await navigation;
+  expect(navigations).toBe(1);
+  expect(harness.uiVersionChecks).toBeGreaterThan(checks);
+  expect(harness.restartRequests).toBe(1);
+});
+
+// restart-first deferral preserves the independent stale notice and consumes both actions once
+test('restores a stale notice without replay when deferred restart finds the current bundle', async ({ page }) => {
+  const harness = await openScreensaverDashboard(page, {
+    dashboard: dashboardFixture({ enabled: true, idleMinutes: 1 }),
+    settingsStatus: { pending: true, targets: ['rac'], effective: 'unknown', restartAvailable: true }
+  });
+  const loadedUiVersion = await page.evaluate(() => document.querySelector<HTMLScriptElement>('script[type="module"][src]')?.src).then(source => source === undefined ? undefined : new URL(source).pathname);
+  expect(loadedUiVersion).toBeTruthy();
+  const update = await latchUiUpdate(page, harness);
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true });
+  await expect(restart).toBeVisible();
+  let navigations = 0;
+  // count only replacement documents after the fixture has loaded
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations += 1; });
+
+  await restart.getByRole('button', { name: 'Restart when idle', exact: true }).click();
+  await expect(restart).toHaveCount(0);
+  await expect(update).toBeVisible();
+  await update.getByRole('button', { name: 'Reload UI when idle', exact: true }).click();
+  await expect(update).toHaveCount(0);
+  await page.keyboard.press('Control+l');
+  await expect(page.getByRole('alert', { name: 'Preparing restart', exact: true })).toBeVisible();
+  await expect.poll(() => harness.restartRequests).toBe(1);
+
+  const operation = harness.settingsStatus.operation!;
+  harness.settingsStatus = {
+    pending: false,
+    targets: [],
+    effective: 'known',
+    restartAvailable: true,
+    operation: { id: operation.id, state: 'complete', phase: 'Restart complete', restart: { state: 'restarted', recoveryDeadline: Date.now() } }
+  };
+  harness.uiVersion = loadedUiVersion;
+  await refreshSettingsStatus(page, harness);
+  await expect(page.locator('.fullscreen-loader')).toHaveCount(0);
+  await expect(update).toBeVisible();
+  expect(navigations).toBe(0);
+  expect(harness.restartRequests).toBe(1);
+
+  const overlay = await enterScreensaver(page);
+  await expect.poll(() => harness.restartRequests).toBe(1);
+  expect(navigations).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(overlay).toHaveCount(0);
+});
+
+// transient status loss retains restart precedence only after eligibility recovers
+test('retains queued restart through a transient status failure before entry', async ({ page }) => {
+  const harness = await openScreensaverDashboard(page, {
+    dashboard: dashboardFixture({ enabled: true, idleMinutes: 1 }),
+    settingsStatus: { pending: true, targets: ['rac'], effective: 'unknown', restartAvailable: true }
+  });
+  const update = await latchUiUpdate(page, harness);
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true });
+  await expect(restart).toBeVisible();
+  await update.getByRole('button', { name: 'Reload UI when idle', exact: true }).click();
+  await restart.getByRole('button', { name: 'Restart when idle', exact: true }).click();
+
+  harness.settingsStatusFailures = 1;
+  await refreshSettingsStatus(page, harness);
+  await expect(page.getByText('Settings status is unavailable.', { exact: true })).toBeVisible();
+  expect(harness.restartRequests).toBe(0);
+  await refreshSettingsStatus(page, harness);
+  await expect(page.getByText('Settings status is unavailable.', { exact: true })).toHaveCount(0);
+
+  await page.keyboard.press('Control+l');
+  await expect(page.getByRole('alert', { name: 'Preparing restart', exact: true })).toBeVisible();
+  await expect.poll(() => harness.restartRequests).toBe(1);
+  await expect(page.getByRole('alert', { name: 'Restarting server', exact: true })).toBeVisible();
+});
+
+// routine polling cannot supersede a slow but valid idle confirmation
+test('submits once when fresh restart status spans a routine polling tick', async ({ page }) => {
+  const start = Date.parse('2026-11-25T14:00:00.000Z');
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(start + 5_000);
+  const harness = await openScreensaverDashboard(page, {
+    dashboard: dashboardFixture({ enabled: true, idleMinutes: 1 }),
+    settingsStatus: { pending: true, targets: ['rac'], effective: 'unknown', restartAvailable: true }
+  });
+  const held = gate();
+  const started = gate();
+  let holding = true;
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true });
+  await expect(restart).toBeVisible();
+  const readsBeforePreparation = harness.settingsStatusReads;
+  await restart.getByRole('button', { name: 'Restart when idle', exact: true }).click();
+  await page.keyboard.press('Control+l');
+  await expect(page.getByRole('alert', { name: 'Preparing restart', exact: true })).toBeVisible();
+  // settle the restart-pending effect's immediate routine read before selecting preflight
+  await expect.poll(() => harness.settingsStatusReads).toBeGreaterThan(readsBeforePreparation);
+  // hold only the post-paint confirmation while later reads expose poll races
+  harness.beforeSettingsStatus = async () => {
+    // release every read after the selected confirmation
+    if (!holding) return;
+    holding = false;
+    started.release();
+    await held.promise;
+  };
+  // resume the cover paint only after the immediate routine read has settled
+  await page.clock.resume();
+  await started.promise;
+  const reads = harness.settingsStatusReads;
+  try {
+    // cross the restart-pending interval without releasing the valid response
+    await page.waitForTimeout(1_100);
+    expect(harness.settingsStatusReads).toBe(reads);
+    expect(harness.restartRequests).toBe(0);
+  } finally {
+    // release the held network response even after an assertion failure
+    held.release();
+  }
+  await expect.poll(() => harness.restartRequests).toBe(1);
+  await expect(page.getByRole('alert', { name: 'Restarting server', exact: true })).toBeVisible();
+  await page.waitForTimeout(2_000);
+  expect(harness.restartRequests).toBe(1);
+});
+
+// unresolved status consumes both requests without substituting the stale-client reload
+test('consumes queued maintenance without replay when restart status stays unavailable at entry', async ({ page }) => {
+  const harness = await openScreensaverDashboard(page, {
+    dashboard: dashboardFixture({ enabled: true, idleMinutes: 1 }),
+    settingsStatus: { pending: true, targets: ['rac'], effective: 'unknown', restartAvailable: true }
+  });
+  const update = await latchUiUpdate(page, harness);
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true });
+  await expect(restart).toBeVisible();
+  let navigations = 0;
+  // count only replacement documents after the fixture has loaded
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations += 1; });
+  await update.getByRole('button', { name: 'Reload UI when idle', exact: true }).click();
+  await restart.getByRole('button', { name: 'Restart when idle', exact: true }).click();
+
+  harness.settingsStatusUnavailable = true;
+  await refreshSettingsStatus(page, harness);
+  await expect(page.getByText('Settings status is unavailable.', { exact: true })).toBeVisible();
+  const overlay = await enterScreensaver(page);
+  await expect(overlay).toBeVisible();
+  expect(harness.restartRequests).toBe(0);
+  expect(navigations).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(overlay).toHaveCount(0);
+  await expect(update).toBeVisible();
+
+  harness.settingsStatusUnavailable = false;
+  await refreshSettingsStatus(page, harness);
+  await expect(restart).toBeVisible();
+  await expect(restart.getByRole('button', { name: 'Restart when idle', exact: true })).toBeVisible();
+  const secondEntry = await enterScreensaver(page);
+  await expect.poll(() => harness.restartRequests).toBe(0);
+  expect(navigations).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(secondEntry).toHaveCount(0);
+});
+
+// fresh post-paint status prevents an unattended retry after eligibility changes
+test('cancels deferred restart when fresh status becomes a failure before POST', async ({ page }) => {
+  const start = Date.parse('2026-11-25T13:00:00.000Z');
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(start + 5_000);
+  const harness = await openScreensaverDashboard(page, {
+    dashboard: dashboardFixture({ enabled: true, idleMinutes: 1 }),
+    settingsStatus: { pending: true, targets: ['rac'], effective: 'unknown', restartAvailable: true }
+  });
+  const restart = page.getByRole('status', { name: 'Restart pending', exact: true });
+  await expect(restart).toBeVisible();
+  await restart.getByRole('button', { name: 'Restart when idle', exact: true }).click();
+  await page.keyboard.press('Control+l');
+  const preparing = page.getByRole('alert', { name: 'Preparing restart', exact: true });
+  await expect(preparing).toBeVisible();
+
+  const reads = harness.settingsStatusReads;
+  harness.settingsStatus = {
+    pending: true,
+    targets: ['rac'],
+    effective: 'unknown',
+    restartAvailable: true,
+    operation: { id: 'failed-before-idle-restart', state: 'failed', error: 'validation-failed' }
+  };
+  await page.clock.resume();
+  await expect.poll(() => harness.settingsStatusReads).toBeGreaterThan(reads);
+  await expect(preparing).toHaveCount(0);
+  await expect(page.getByRole('alert', { name: 'Restart failed', exact: true })).toBeVisible();
+  expect(harness.restartRequests).toBe(0);
+
+  await page.keyboard.press('Control+l');
+  await expect(page.getByRole('dialog', { name: 'Screensaver' })).toBeVisible();
+  await expect.poll(() => harness.restartRequests).toBe(0);
+});
+
+// guarded reloads restore their banner instead of discarding browser-only work
+test('restores a deferred reload banner when an unsent prompt blocks idle navigation', async ({ page }) => {
+  const harness = await openScreensaverDashboard(page, { dashboard: dashboardFixture({ enabled: true, idleMinutes: 1 }) });
+  const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true });
+  await page.evaluate(() => {
+    const setItem = Storage.prototype.setItem;
+    // fail only persisted prompt drafts while preserving other browser state
+    Storage.prototype.setItem = function (key, value) {
+      // model an owner-local draft that storage cannot preserve
+      if (this === localStorage && key.startsWith('remote-agent-console:prompt-draft:')) throw new DOMException('storage full', 'QuotaExceededError');
+      return setItem.call(this, key, value);
+    };
+  });
+  await prompt.fill('Keep this browser-only draft');
+  const update = await latchUiUpdate(page, harness);
+  await expect(update).toContainText('Save or discard your unsaved work, then reload to update.');
+  let navigations = 0;
+  // count only replacement documents after the fixture has loaded
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations += 1; });
+
+  await update.getByRole('button', { name: 'Reload UI when idle', exact: true }).click();
+  await expect(update).toHaveCount(0);
+  await page.keyboard.press('Control+l');
+  const overlay = page.getByRole('dialog', { name: 'Screensaver' });
+  await expect(overlay).toBeVisible();
+  expect(navigations).toBe(0);
+
+  await page.keyboard.press('Escape');
+  await expect(overlay).toHaveCount(0);
+  await expect(update).toBeVisible();
+  await expect(update).toContainText('Save or discard your unsaved work, then reload to update.');
+  await expect(prompt).toHaveValue('Keep this browser-only draft');
+  expect(navigations).toBe(0);
 });
 
 // modifier dismissal is fenced before either shortcut dispatch or terminal input

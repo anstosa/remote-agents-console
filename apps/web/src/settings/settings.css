@@ -431,8 +431,9 @@ button.settings-installation-file-link:disabled { background: transparent; color
 .settings-restart-copy a { color: var(--subtext-0); font: 500 .63rem/1.35 var(--font-mono); overflow-wrap: anywhere; }
 .settings-restart-copy small { color: var(--red); }
 .settings-restart-copy a { color: var(--blue); }
-.settings-restart-notice > button { flex: none; min-height: 2rem; justify-content: center; border-color: color-mix(in srgb, var(--yellow) 70%, var(--surface-1)); padding: .3rem .58rem; background: transparent; color: var(--yellow); box-shadow: none; font: 800 .65rem var(--font-mono); }
-.settings-restart-notice.failed > button { border-color: var(--red); color: var(--red); }
+.settings-restart-notice > button,
+.settings-restart-notice .maintenance-notice-actions > button { flex: none; min-height: 2rem; justify-content: center; border-color: color-mix(in srgb, var(--yellow) 70%, var(--surface-1)); padding: .3rem .58rem; background: transparent; color: var(--yellow); box-shadow: none; font: 800 .65rem var(--font-mono); }
+.settings-restart-notice.failed .maintenance-notice-actions > button { border-color: var(--red); color: var(--red); }
 /* distinguish durable restart outcomes without shifting or replacing pending changes */
 .settings-restart-notice.settings-restart-result { grid-template-columns: auto minmax(0, 1fr) auto; }
 .settings-restart-result.success { border-color: var(--green); background: color-mix(in srgb, var(--mantle) 92%, var(--green)); }
@@ -462,7 +463,8 @@ button.settings-installation-file-link:disabled { background: transparent; color
   .settings-source-panel { padding: .72rem; }
   .settings-record-add { align-items: stretch; flex-direction: column; }
   .settings-restart-notice { grid-template-columns: auto minmax(0, 1fr); }
-  .settings-restart-notice > button { grid-column: 1 / -1; width: 100%; }
+  .settings-restart-notice > button,
+  .settings-restart-notice .maintenance-notice-actions { grid-column: 1 / -1; width: 100%; }
   .settings-raw-mode { align-items: stretch; flex-direction: column; }
   .settings-raw-mode button { width: 100%; }
   .settings-array-actions .settings-array-remove-label { display: none; }

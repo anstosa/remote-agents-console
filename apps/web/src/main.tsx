@@ -69,7 +69,7 @@ import { SettingsHeaderActionsContext, SettingsHeaderSearchContext } from './set
 import { isSettingsSnapshot, settingsResponseError, type SettingsStatus } from './settings/contracts.js';
 import { instanceIconHashPattern, isInstanceIconName } from '../../server/src/instance-icon-name.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
-import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useConsoleRestartCover, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
+import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useConsoleRestartCover, useIdleSettingsRestartAction, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
 import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
 import { installProgressAnimationSync, type ProgressKind } from './progress-animation.js';
 import { Skeleton } from './skeleton.js';
@@ -9827,7 +9827,7 @@ function NoteFeedbackProvider({ children }: { children: ReactNode }) {
 }
 
 // overlay transient feedback and persistent notices without resizing split content
-function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDismissUpdateError, launchErrorMessage, launchErrorExpires }: { children?: ReactNode; feedback?: OperationFeedback; onDismissFeedback: () => void; updateError?: string; onDismissUpdateError: () => void; launchErrorMessage?: string; launchErrorExpires?: number }) {
+function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDismissUpdateError, launchErrorMessage, launchErrorExpires, reloadDeferred, restartDeferred, onDeferReload, onDeferRestart }: { children?: ReactNode; feedback?: OperationFeedback; onDismissFeedback: () => void; updateError?: string; onDismissUpdateError: () => void; launchErrorMessage?: string; launchErrorExpires?: number; reloadDeferred?: boolean; restartDeferred?: boolean; onDeferReload?: () => void; onDeferRestart?: () => void }) {
   const clientSettings = useContext(ClientSettingsContext);
   const noteFeedback = useContext(NoteFeedbackContext);
   const [reloadingClient, setReloadingClient] = useState(false);
@@ -9850,19 +9850,19 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
   const showSettingsRestart = useSettingsRestartNoticeVisible();
   const showTunnelHealth = useTunnelHealthNoticeVisible();
   // keep stale-client guidance visible until the browser reloads
-  const showClientUpdate = clientSettings?.clientUpdateAvailable === true;
+  const showClientUpdate = !reloadDeferred && clientSettings?.clientUpdateAvailable === true;
   // the launch error is redundant while an error-tone operation toast already says the same thing
   const showLaunchError = Boolean(launchErrorMessage) && feedback?.tone !== 'error';
   // omit an empty stack when there is no persistent notice
   if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate && !showSettingsRestart && !showTunnelHealth && !noteFeedback?.toasts.length) return null;
   return createPortal(<div className="toast-region">
     {noteFeedback?.toasts}
-    {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>{uiReloadBlocked ? 'Save or discard your unsaved work, then reload to update.' : 'Reload to use the latest version.'}</span></div><button type="button" className="progress-border progress-loading progress-blue" data-fullscreen-focus-return="reload" disabled={reloadingClient} aria-busy={reloadingClient} onClick={() => {
+    {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>{uiReloadBlocked ? 'Save or discard your unsaved work, then reload to update.' : 'Reload to use the latest version.'}</span></div><div className="maintenance-notice-actions"><button type="button" className="progress-border progress-loading progress-blue" data-fullscreen-focus-return="reload" disabled={reloadingClient} aria-busy={reloadingClient} onClick={() => {
       // keep reload feedback visible while the replacement document is loading
       if (reloadingClient) return;
       setReloadingClient(true);
-    }}>{reloadingClient && <span className="update-progress-ring" aria-hidden="true" />}Reload UI</button></section>}
-    <SettingsRestartNotice />
+    }}>{reloadingClient && <span className="update-progress-ring" aria-hidden="true" />}Reload UI</button>{onDeferReload !== undefined && <button type="button" disabled={reloadingClient} onClick={onDeferReload}>Reload UI when idle</button>}</div></section>}
+    <SettingsRestartNotice deferred={restartDeferred} onDefer={onDeferRestart} />
     <TunnelHealthNotice />
     {feedback && <OperationFeedbackToast key={feedback.id} feedback={feedback} onDismiss={onDismissFeedback} />}
     {/* keep update failures independent from other operation feedback */}
@@ -10362,6 +10362,32 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const showRecovery = outageDashboard !== undefined || previewTmuxRecovery;
   const coverActive = fullscreenBlocked || restartCover || showRecovery;
   const screensaver = useScreensaver(data?.screensaver, coverActive);
+  // keep deferred maintenance above the workspace-specific toast hosts
+  const automaticScreensaver = data?.screensaver?.enabled === true && data.screensaver.idleMinutes > 0;
+  const [reloadWhenIdle, setReloadWhenIdle] = useState(false);
+  const [restartWhenIdle, setRestartWhenIdle] = useState(false);
+  const reloadAction = clientSettings?.clientUpdateAvailable ? clientSettings.reloadClient : undefined;
+  const { action: restartAction, unconfirmed: restartUnconfirmed } = useIdleSettingsRestartAction();
+  // consume each deferred request at the next successful screensaver entry
+  useEffect(() => {
+    // restore the reload banner if automatic entry or the pending action disappears
+    if (!automaticScreensaver || reloadAction === undefined) setReloadWhenIdle(false);
+    // retain deferred restart intent through recoverable status errors
+    if (!automaticScreensaver || restartAction === undefined && !restartUnconfirmed) setRestartWhenIdle(false);
+    // wait for the same screensaver entry that opens the passive overview
+    if (!automaticScreensaver || !screensaver.active) return;
+    // restart takes precedence because recovery already checks for a stale UI
+    if (restartWhenIdle && (restartAction !== undefined || restartUnconfirmed)) {
+      setRestartWhenIdle(false);
+      setReloadWhenIdle(false);
+      // if status is still unavailable at entry, restore both notices without attempting either action
+      void restartAction?.();
+    } else if (reloadWhenIdle && reloadAction !== undefined) {
+      // show the notice again if the ordinary reload guard prevents navigation
+      setReloadWhenIdle(false);
+      void reloadAction();
+    }
+  }, [automaticScreensaver, reloadAction, reloadWhenIdle, restartAction, restartUnconfirmed, restartWhenIdle, screensaver.active]);
   const coverActiveRef = useRef(coverActive);
   coverActiveRef.current = coverActive;
   // neither passive viewing nor automatic focus restoration acknowledges output
@@ -12023,7 +12049,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // offer one Scratch launch even before any Workspace has been opened
   const globalLaunch: ToolbarLaunch = { label: 'Scratch', resolution: data.scratchLaunch, target: { type: 'scratch' }, pending: creatingAgent, start: choice => createAgent(choice) };
   // share one toast stack while the active agent supplies its rebase action
-  const renderNotifications = (content: ReactNode = null) => <ToastRegion feedback={visibleOperationFeedback} onDismissFeedback={() => setOperationFeedback(undefined)} updateError={updateError} onDismissUpdateError={onDismissUpdateError} launchErrorMessage={launchErrorMessage} launchErrorExpires={launchErrorExpires}>{content}</ToastRegion>;
+  const renderNotifications = (content: ReactNode = null) => <ToastRegion feedback={visibleOperationFeedback} onDismissFeedback={() => setOperationFeedback(undefined)} updateError={updateError} onDismissUpdateError={onDismissUpdateError} launchErrorMessage={launchErrorMessage} launchErrorExpires={launchErrorExpires} reloadDeferred={automaticScreensaver && reloadWhenIdle} restartDeferred={automaticScreensaver && restartAction !== undefined && restartWhenIdle} onDeferReload={automaticScreensaver && reloadAction !== undefined ? () => { /* wait for the next screensaver */ setReloadWhenIdle(true); } : undefined} onDeferRestart={automaticScreensaver && restartAction !== undefined ? () => { /* wait for the next screensaver */ setRestartWhenIdle(true); } : undefined}>{content}</ToastRegion>;
   // read an inactive workspace's retained splits without activating it
   const retainedSplits = (entry: DashboardItem): WorkspaceSplit[] => {
     const live = workspaceViews.get(entry.key);

@@ -10,8 +10,8 @@ type SettingsRuntime = {
   statusError?: string;
   restartPending: boolean;
   restartError?: string;
-  restart: () => Promise<void>;
-  refreshStatus: () => Promise<void>;
+  restart: (source?: 'idle') => Promise<void>;
+  refreshStatus: () => Promise<SettingsStatus | undefined>;
   securityEpoch: number;
   canMutate: boolean;
   restartResult?: SettingsOperation;
@@ -38,6 +38,14 @@ const readDismissedRestart = (): string | undefined => {
 // distinguish a server restart from connector-only setup work
 const activeServerRestart = (operation: SettingsOperation | undefined): boolean => (operation?.state === 'queued' || operation?.state === 'running') && (operation.kind !== 'cloudflare' || operation.restart !== undefined);
 
+// unattended restarts require ordinary pending changes without unresolved failures
+const idleRestartEligible = (status: SettingsStatus | undefined): boolean => {
+  const operation = status?.operation;
+  // terminal connector history does not prevent a subsequent ordinary restart
+  return status?.pending === true && status.restartAvailable && operation?.state !== 'queued' && operation?.state !== 'running'
+    && !(operation?.state === 'failed' && operation.kind !== 'cloudflare' && operation.restart?.state !== 'recovered');
+};
+
 // retain a valid server check timestamp as an opaque proof identity
 const tunnelHealthCheckIdentity = (health: TunnelHealth | undefined): string | undefined => {
   const identity = health?.checkedAt;
@@ -59,6 +67,7 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
   const [tunnelReconnectError, setTunnelReconnectError] = useState<string>();
   const [tunnelReconnectCoverActive, setTunnelReconnectCoverActive] = useState(false);
   const statusRequest = useRef(0);
+  const idleRestartPreflight = useRef<number | undefined>(undefined);
   const tunnelHealthRequest = useRef(0);
   const restartAttempt = useRef(0);
   const tunnelReconnectAttempt = useRef(0);
@@ -288,15 +297,17 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
   }, [beforeTunnelReconnect, clearTunnelRecoveryWatchdog, onTunnelReconnectSettled, refreshTunnelHealth, request, tunnelHealth?.canReconnect]);
 
   // load server-owned pending and operation state
-  const refreshStatus = useCallback(async () => {
+  const refreshStatus = useCallback(async (confirmIdleRestart = false): Promise<SettingsStatus | undefined> => {
     // do not probe protected status before authentication
     if (!enabled || !authenticationEnabled.current || !mounted.current) return;
+    // routine reads must not supersede the bounded post-paint confirmation
+    if (idleRestartPreflight.current !== undefined && !confirmIdleRestart) return;
     const sequence = ++statusRequest.current;
     const epoch = authenticationEpoch.current;
     // reject stale reads even if authentication was lost and then restored
     const currentRead = () => sequence === statusRequest.current && epoch === authenticationEpoch.current && authenticationEnabled.current && mounted.current;
     try {
-      const response = await request('/api/settings/status', { cache: 'no-store' });
+      const response = await request('/api/settings/status', { cache: 'no-store', signal: confirmIdleRestart ? AbortSignal.timeout(8_000) : undefined });
       const payload: unknown = response.ok ? await response.json().catch(() => undefined) : undefined;
       // ignore slower reads superseded by a newer poll or accepted restart
       if (!currentRead()) return;
@@ -311,20 +322,21 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
       setStatusError(undefined);
       const identity = restartIdentity.current;
       // wait for the submission boundary before interpreting durable observations
-      if (!awaitingRestartStatus.current || submittingRestart.current || identity === undefined) return;
+      if (!awaitingRestartStatus.current || submittingRestart.current || identity === undefined) return payload;
       // recover an interrupted acknowledgement from new work in flight, not terminal history
       if (identity.tracked === undefined && operation !== undefined && operation.id !== identity.previous && operation.kind !== 'cloudflare' && activeServerRestart(operation)) identity.tracked = operation.id;
       const matches = operation !== undefined && operation.id === identity.tracked;
       // a tracked restart may settle only on its own terminal result
-      if (identity.tracked !== undefined && (!matches || activeServerRestart(operation))) return;
+      if (identity.tracked !== undefined && (!matches || activeServerRestart(operation))) return payload;
       // only an unidentified submission can run out of time to confirm
-      if (identity.tracked === undefined && (identity.confirmBy === undefined || Date.now() < identity.confirmBy)) return;
+      if (identity.tracked === undefined && (identity.confirmBy === undefined || Date.now() < identity.confirmBy)) return payload;
       awaitingRestartStatus.current = false;
       restartIdentity.current = undefined;
       // an unconfirmed operation is not a failed restart and must not trigger a reload
       if (!matches) setRestartError("Couldn't confirm the restart. Check the saved settings before retrying.");
       const restarted = matches && operation.kind !== 'cloudflare' && operation.id !== identity.previous && operation.state === 'complete' && operation.restart?.state === 'restarted';
       onRestartSettled?.(restarted ? payload : undefined);
+      return payload;
     } catch {
       // keep the countdown alive while the server is temporarily unreachable
       if (currentRead()) setStatusError('Reconnecting to the server…');
@@ -339,6 +351,7 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
       setStatus(undefined); setStatusError(undefined); setRestartError(undefined);
       lastOperationId.current = undefined;
       restartIdentity.current = undefined;
+      idleRestartPreflight.current = undefined;
       restartAttempt.current += 1;
       submittingRestart.current = false;
       setRestartPending(false);
@@ -371,7 +384,7 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
   }, []);
 
   // start the fixed server-owned restart operation
-  const restart = useCallback(async () => {
+  const restart = useCallback(async (source?: 'idle') => {
     // serialize repeated restart clicks in this browser
     if (submittingRestart.current || awaitingRestartStatus.current || !mutationAllowed.current) return;
     submittingRestart.current = true;
@@ -387,8 +400,18 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
     const currentSession = () => mounted.current && authenticationEnabled.current && epoch === authenticationEpoch.current && attempt === restartAttempt.current;
     try {
       const entered = await (beforeRestart?.() ?? Promise.resolve(true));
-      // recheck control authority after painting and never submit a cancelled transition
-      if (!entered || !mutationAllowed.current || !currentSession()) {
+      let confirmed: SettingsStatus | undefined;
+      // confirm unattended eligibility after the cover paints
+      if (source === 'idle' && entered && mutationAllowed.current && currentSession()) {
+        idleRestartPreflight.current = attempt;
+        try { confirmed = await refreshStatus(true); }
+        finally {
+          // release only this attempt's exclusive status read
+          if (idleRestartPreflight.current === attempt) idleRestartPreflight.current = undefined;
+        }
+      }
+      // recheck authority and eligibility before submission, ignoring our own local pending flag
+      if (!entered || !mutationAllowed.current || !currentSession() || source === 'idle' && !idleRestartEligible(confirmed)) {
         // an old attempt must not release a newer session's cover
         if (attempt === restartAttempt.current) {
           awaitingRestartStatus.current = false;
@@ -397,6 +420,8 @@ export function SettingsRuntimeProvider({ request, monitorRequest = request, chi
         }
         return;
       }
+      // correlate recovery with the operation immediately preceding unattended submission
+      if (source === 'idle') restartIdentity.current = { previous: confirmed?.operation?.id };
       submitted = true;
       const response = await request('/api/settings/restart', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(10_000) });
       // ignore acknowledgements after the authenticated provider has detached
@@ -497,6 +522,19 @@ export const useConsoleRestartCover = (): boolean => useContext(ConsoleRestartCo
 const hasPendingRestartNotice = (status: SettingsStatus | undefined): boolean => status !== undefined && (status.pending
   || status.operation?.state === 'queued' || status.operation?.state === 'running'
   || status.operation?.state === 'failed' && status.operation.restart?.state !== 'recovered');
+
+// distinguish unavailable actions from temporarily unconfirmed pending changes
+export function useIdleSettingsRestartAction(): { action?: () => Promise<void>; unconfirmed: boolean } {
+  const runtime = useOptionalSettingsRuntime();
+  const restart = runtime?.restart;
+  // retain a stable action while ordinary status polling updates the runtime
+  const action = useCallback(async () => { await restart?.('idle'); }, [restart]);
+  // genuinely invalid eligibility cancels any previously deferred intent
+  if (runtime === undefined || !runtime.canMutate || runtime.restartPending || runtime.restartError !== undefined || !idleRestartEligible(runtime.status)) return { unconfirmed: false };
+  // retain intent during transient read failures but show the status error and prevent submission
+  if (runtime.statusError !== undefined) return { unconfirmed: true };
+  return { action, unconfirmed: false };
+}
 
 // report whether the toast host must stay mounted
 export const useSettingsRestartNoticeVisible = (): boolean => {
@@ -622,7 +660,7 @@ function RestartResultToast({ operation, onDismiss }: { operation: SettingsOpera
 }
 
 // render one persistent restart notice in the global toast stack
-export function SettingsRestartNotice() {
+export function SettingsRestartNotice({ deferred = false, onDefer }: { deferred?: boolean; onDefer?: () => void } = {}) {
   const runtime = useOptionalSettingsRuntime();
   const status = runtime?.status;
   // terminal connector history must not own a later ordinary settings restart
@@ -643,12 +681,12 @@ export function SettingsRestartNotice() {
     : failed ? 'Your saved settings are still pending. Review them before retrying.'
     : `Restart ${targets || 'RAC'} to put your saved settings into effect.`;
   // active server progress belongs inside the single fullscreen loader
-  const pendingVisible = !runtime.restartPending && !activeServerRestart(operation) && (showUnconfirmed || hasPendingRestartNotice(status));
+  const pendingVisible = !deferred && !runtime.restartPending && !activeServerRestart(operation) && (showUnconfirmed || hasPendingRestartNotice(status));
   return <>{pendingVisible && <section className={`toast settings-restart-notice${failed ? ' failed' : ''}${running ? ' progress-border progress-yellow' : ''}`} role={failed || showUnconfirmed ? 'alert' : 'status'} aria-label={cloudflareSetup || failed || showUnconfirmed ? heading : 'Restart pending'} aria-live={failed ? 'assertive' : 'polite'} aria-busy={running || undefined}>
     {running && <span className="update-progress-ring" aria-hidden="true" />}
     <span className="settings-restart-icon" aria-hidden="true">{failed ? '!' : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8M20 4v4h-4" /></svg>}</span>
     <div className="settings-restart-copy"><strong>{heading}</strong>{!showUnconfirmed && <span>{detail}</span>}{status.reconnectOrigin && <a href={status.reconnectOrigin}>Open the new RAC address</a>}{status.reloginRequired && <span>You may need to sign in again.</span>}{recoveryFailed && status.recoveryCommand && <ManualRestartRecovery command={status.recoveryCommand} />}{!showUnconfirmed && !runtime.canMutate && !cloudflareSetup && !recoveryFailed && <span>Take control from this browser to restart.</span>}{!showUnconfirmed && !status.restartAvailable && !cloudflareSetup && <span>Ask the server administrator to restart RAC.</span>}{(runtime.restartError ?? runtime.statusError) && <small>{runtime.restartError ?? runtime.statusError}</small>}</div>
-    {showUnconfirmed ? <a href="#settings">Review settings</a> : cloudflareSetup ? <a href="#settings">Review setup</a> : !recoveryFailed && <button type="button" data-fullscreen-focus-return="restart" disabled={running || !status.restartAvailable || !runtime.canMutate} title={!runtime.canMutate ? 'Take control to restart' : undefined} onClick={() => { /* start only the fixed restart */ void runtime.restart(); }}>{failed ? 'Retry restart' : 'Restart'}</button>}
+    {showUnconfirmed ? <a href="#settings">Review settings</a> : cloudflareSetup ? <a href="#settings">Review setup</a> : !recoveryFailed && <div className="maintenance-notice-actions"><button type="button" data-fullscreen-focus-return="restart" disabled={running || !status.restartAvailable || !runtime.canMutate} title={!runtime.canMutate ? 'Take control to restart' : undefined} onClick={() => { /* start only the fixed restart */ void runtime.restart(); }}>{failed ? 'Retry restart' : 'Restart'}</button>{onDefer !== undefined && <button type="button" onClick={onDefer} disabled={running || !status.restartAvailable || !runtime.canMutate}>Restart when idle</button>}</div>}
   </section>}{runtime.restartResult !== undefined && <RestartResultToast operation={runtime.restartResult} onDismiss={runtime.dismissRestartResult} />}</>;
 }
 
