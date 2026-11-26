@@ -1,5 +1,18 @@
 # Agent notes
 
+## Agent version compatibility
+
+- Never impose an upper version bound or a release allowlist on agent
+  installations or feature availability. Compatibility floors are permitted;
+  discover actual capabilities at runtime rather than rejecting newer releases
+  solely because their version has not been audited.
+- Treat an update's selected version as a minimum, not an exact version.
+  Accept newer installations and never downgrade them to match a target.
+  Verify the actual installed version rather than assuming a zero installer
+  exit proves success.
+- Bundled dependency pins for reproducible builds are not compatibility ceilings
+  on newer host installations.
+
 ## Local-stack deployment
 
 Before giving a final summary for any change that affects the local stack, deploy

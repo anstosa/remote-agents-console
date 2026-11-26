@@ -343,7 +343,7 @@ registry probe (exit ${targetProbe.code}): ${targetProbe.output}`
     return await this.verify(job, outcome);
   }
 
-  // attest the installed binary after every installer outcome against the original target
+  // attest the installed binary against the original target as a lower bound
   private async verify(job: InstallingJob, result: InstallerResult): Promise<TerminalJob | undefined> {
     const commands = this.config.adapters?.[job.kind]?.updates;
     const probe = commands !== undefined && this.updateAuthority(job.kind) === job.authority ? await this.probe(commands.current) : undefined;
@@ -352,22 +352,22 @@ registry probe (exit ${targetProbe.code}): ${targetProbe.output}`
       kind: job.kind, currentVersion: observedVersion, latestVersion: job.targetVersion,
       updateAvailable: semanticUpdateAvailable(observedVersion, job.targetVersion) === true
     };
-    const successfulExit = result.confirmed === true && result.code === 0 && result.failure === undefined;
-    // a successful exit requires both a trustworthy receipt and target evidence
-    if (successfulExit && status?.updateAvailable === false) return await this.finish(job, status, undefined, true);
-    const installerFailure = successfulExit ? undefined : result.failure ?? (result.code > 0 ? 'command_failed' : 'interrupted');
+    const zeroExitReceipt = result.confirmed === true && result.code === 0 && result.failure === undefined;
+    // accept the target or any newer release after a confirmed zero exit
+    if (zeroExitReceipt && status?.updateAvailable === false) return await this.finish(job, status, undefined, true);
+    const installerFailure = zeroExitReceipt ? undefined : result.failure ?? (result.code > 0 ? 'command_failed' : 'interrupted');
     // distinguish known command failure from uncertainty about the installer outcome
     const completionUnknown = result.confirmed !== true || installerFailure === 'invalid_completion';
     let reason: AgentUpdateFailureReason = installerFailure ?? 'interrupted';
-    // distinguish a verification failure after a proven zero exit
-    if (successfulExit) reason = status === undefined ? 'verification_failed' : 'target_not_installed';
+    // a zero exit alone does not prove that the installer succeeded
+    if (zeroExitReceipt) reason = status === undefined ? 'verification_failed' : 'target_not_installed';
     // never describe an ambiguous completion as setup failure
     else if (completionUnknown) reason = status?.updateAvailable === false ? 'installed_completion_unconfirmed' : installerFailure === 'invalid_completion' ? 'invalid_completion' : 'interrupted';
     // a known command or supervisor failure may still have installed the target
     else if (status?.updateAvailable === false && (installerFailure === 'command_failed' || installerFailure === 'timed_out')) reason = 'installed_setup_failed';
     const verificationOutput = probe === undefined ? 'The configured updater changed before verification.' : `installed probe (exit ${probe.code}): ${probe.output}`;
     return await this.finish(job, status, {
-      phase: successfulExit ? 'verification' : 'install', reason, installerFailure, probeFailure: probe?.failure, code: result.code,
+      phase: zeroExitReceipt ? 'verification' : 'install', reason, installerFailure, probeFailure: probe?.failure, code: result.code,
       previousVersion: job.previousVersion, targetVersion: job.targetVersion, observedVersion,
       output: `installer output:
 ${result.output}
@@ -457,8 +457,8 @@ ${verificationOutput}`
       installed_completion_unconfirmed: `${name} is now at ${observedVersion}, but installer completion could not be confirmed. Check diagnostics before retrying.`,
       installed_setup_failed: `${name} is now at ${observedVersion}, but the installer did not complete successfully. Check diagnostics before retrying.`,
       version_check_failed: `${name} update did not start because versions could not be verified.`,
-      verification_failed: `${name} installer exited successfully, but the installed version could not be verified.`,
-      target_not_installed: `${name} installer exited successfully, but version ${observedVersion} does not meet the target ${targetVersion}.`
+      verification_failed: `${name} installer returned exit code 0, but the installed version could not be verified.`,
+      target_not_installed: `${name} update incomplete: installed ${observedVersion}, expected ${targetVersion} or newer. The installer returned exit code 0.`
     };
     const error = messages[reason];
     try {

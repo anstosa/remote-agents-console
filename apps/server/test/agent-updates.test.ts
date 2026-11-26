@@ -280,6 +280,46 @@ describe('agent updates', () => {
     expect(runner.mock.calls.map(call => call[0])).toEqual(['current', 'latest', 'current', 'latest', 'update', 'current']);
   });
 
+  // accept the requested release or any newer OMX release
+  it.each(['0.22.27', '0.22.29', '1.0.0', '2.0.0-rc.1'])('accepts OMX %s after requesting 0.22.27', async observed => {
+    const config = configured();
+    config.adapters!.omx!.updates = { current: 'current', latest: 'latest', run: 'update' };
+    let current = '0.22.25';
+    const runner = vi.fn<AgentUpdateRunner>(async command => {
+      // simulate a registry release advancing during installation
+      if (command === 'update') { current = observed; return { code: 0, output: 'updated' }; }
+      return { code: 0, output: command === 'current' ? current : '0.22.27' };
+    });
+    const service = new AgentUpdateService(config, '/home/test', runner, testCheckout);
+    await expect(service.update('omx')).resolves.toEqual({
+      outcome: 'updated',
+      status: { kind: 'omx', currentVersion: observed, latestVersion: '0.22.27', updateAvailable: false }
+    });
+    expect(runner.mock.calls.map(([command]) => command)).toEqual(['current', 'latest', 'update', 'current']);
+    expect(diagnostics.saveAgentUpdateFailure).not.toHaveBeenCalled();
+  });
+
+  // reproduce an upstream installer timeout reported as a zero exit
+  it('reports an unchanged OMX version as an incomplete update, not a successful installer', async () => {
+    const config = configured();
+    config.adapters!.omx!.updates = { current: 'current', latest: 'latest', run: 'update' };
+    const runner = vi.fn<AgentUpdateRunner>(async command => ({
+      code: 0,
+      output: command === 'update' ? '[omx] npm stderr: spawnSync node ETIMEDOUT' : command === 'current' ? '0.22.25' : '0.22.27'
+    }));
+    const service = new AgentUpdateService(config, '/home/test', runner, testCheckout);
+    await expect(service.update('omx')).resolves.toEqual({
+      outcome: 'failed',
+      error: 'OMX update incomplete: installed 0.22.25, expected 0.22.27 or newer. The installer returned exit code 0. Private diagnostics: .data/agent-updates/codex-test.json.',
+      status: { kind: 'omx', currentVersion: '0.22.25', latestVersion: '0.22.27', updateAvailable: true }
+    });
+    expect(diagnostics.saveAgentUpdateFailure).toHaveBeenCalledWith(testCheckout, expect.objectContaining({
+      reason: 'target_not_installed',
+      code: 0,
+      output: expect.stringContaining('ETIMEDOUT')
+    }));
+  });
+
   // never replace an equal or newer installation
   it.each([
     { current: '1.1.0', latest: '1.1.0' },
@@ -707,6 +747,8 @@ describe('agent updates', () => {
     expect(runner.mock.calls.map(([command]) => command)).toEqual(['current', 'latest', 'update', 'current']);
     expect(result.outcome).toBe(reason === undefined ? 'updated' : 'failed');
     expect(JSON.stringify(result)).not.toContain('private installer output');
+    // distinguish the process exit from a verified installation
+    if (reason === 'verification_failed') expect(result).toMatchObject({ error: expect.stringMatching(/returned exit code 0.*installed version could not be verified/u) });
     // expose observed versions without converting partial installers into success
     if (observed !== undefined) expect(result).toMatchObject({ status: { currentVersion: observed, latestVersion: '1.1.0', updateAvailable: observed === '1.0.0' } });
     // retain the phase and proof for every categorized failure

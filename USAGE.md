@@ -162,10 +162,14 @@ deployment can run plain Codex in some worktrees and OMX in others.
 }
 ```
 
-**Agent updates** verify the installed version against the version selected
-before the installer runs. If the version changed but the installer reported
-an error, the menu shows the observed version and a warning rather than
-offering the same install again. Check the diagnostic before retrying.
+**Agent updates** verify that the installed version is at least the version
+selected before the installer runs. Newer versions are accepted, never
+downgraded to match the earlier target, and not excluded from feature discovery
+solely by version. An installer returning exit code 0 does not prove that it
+actually installed an update. If the target or a newer version was installed
+but the installer reported an error, the menu shows the observed version and a
+warning rather than offering the same install again. Check the diagnostic before
+retrying.
 
 Only one console-managed agent installer can run at a time per checkout.
 The host installer has a 15-minute deadline and records its result independently

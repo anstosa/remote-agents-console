@@ -137,19 +137,22 @@ test("discovers models and effort with OMX 0.21.48", async () => {
   } finally { await fx.cleanup(); }
 });
 
-// prove model discovery for the currently installed audited wrapper
-test("discovers models and effort with OMX 0.22.6", async () => {
-  const fx = await fixture({ version: "0.22.6" });
-  try {
-    assert.equal((await proveOmxPackage(fx.program)).root, fx.packageRoot);
-    const result = await discoverOmxModels(request(fx, { args: ["--madmax", "-c", "check_for_update_on_startup=false"] }), {});
-    assert.deepEqual(result.capabilities, { model: true, effort: true });
-    assert.deepEqual(result.args, ["-c", "check_for_update_on_startup=false"]);
-    assert.equal(result.pages[0].data[0].model, "model-0");
-    assert.equal(result.config.config.observedHome, join(fx.root, "home"));
-    assert.equal(result.config.config.observedCwd, await realpath(fx.cwd));
-  } finally { await fx.cleanup(); }
-});
+// enable actual feature discovery on newer releases, not just package proof
+for (const version of ["0.22.6", "0.22.29", "1.0.0", "2.0.0-rc.1"]) {
+  // exercise the full metadata probe regardless of release number
+  test(`discovers models and effort with OMX ${version}`, async () => {
+    const fx = await fixture({ version });
+    try {
+      assert.equal((await proveOmxPackage(fx.program)).root, fx.packageRoot);
+      const result = await discoverOmxModels(request(fx, { args: ["--madmax", "-c", "check_for_update_on_startup=false"] }), {});
+      assert.deepEqual(result.capabilities, { model: true, effort: true });
+      assert.deepEqual(result.args, ["-c", "check_for_update_on_startup=false"]);
+      assert.equal(result.pages[0].data[0].model, "model-0");
+      assert.equal(result.config.config.observedHome, join(fx.root, "home"));
+      assert.equal(result.config.config.observedCwd, await realpath(fx.cwd));
+    } finally { await fx.cleanup(); }
+  });
+}
 
 // accept newer patch, minor, major, and prerelease versions without an allowlist
 for (const version of ["0.21.47", "0.21.100", "0.22.7", "0.22.10", "0.30.0", "1.0.0", "20.0.0", "0.22.0-rc.1", "0.21.46+build.2", "v0.22.6"]) {
