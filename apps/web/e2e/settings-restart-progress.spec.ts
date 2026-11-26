@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mockAccountSocket } from './account-fixture.js';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions.js';
+import { expectBreathingProgressBorder, expectProgressBorder, expectReducedMotionProgress } from './progress-border-assertions.js';
 import type { SettingsStatus } from '../src/settings/contracts.js';
 
 // isolate host restart, recovery and offline transitions from the running stack
@@ -169,7 +169,7 @@ for (const width of [390, 1440]) {
     await expect(page.getByRole('alert', { name: 'Preparing restart', exact: true })).toBeVisible();
     const card = page.locator('.fullscreen-loader > .fullscreen-card');
     await expectProgressBorder(card, 'mauve');
-    await expectClockwiseProgressBorder(card);
+    await expectBreathingProgressBorder(card);
     await page.waitForTimeout(100);
     expect(state.restarts).toBe(0);
     await expect.poll(() => state.restarts, { timeout: 2_500 }).toBe(1);
@@ -355,7 +355,7 @@ for (const preference of ['system', 'application']) {
     await startRestart();
     await expect(page.locator('.reconnecting-overlay')).toHaveCSS('transition-duration', '0s');
     await expect(page.locator('.fullscreen-loader .auth-glow')).toHaveCSS('animation-name', 'none');
-    await expectReducedMotionSpinner(page.locator('.fullscreen-loader > .fullscreen-card'), 'mauve');
+    await expectReducedMotionProgress(page.locator('.fullscreen-loader > .fullscreen-card'), 'mauve');
     expect(state.restartFrames).toEqual([{ opacity: '1', overlays: 1, rootInert: true }]);
     if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/restart-loader-reduced-${preference}.png` });
   });

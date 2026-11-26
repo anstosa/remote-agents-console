@@ -166,7 +166,7 @@ export function StackPanel({ worktreeId, title, stack, selection, onSelect, onCl
   }));
   // put process progress around the complete selectable row
   const item = (key: string, selected: boolean, onClick: () => void, dot: { state?: 'running'|'exited'|'stopped'; busy?: boolean; operation?: StackAction }, name: string, state: { state?: 'running'|'exited'|'stopped'; exitCode?: number }, warn: boolean, where?: string) =>
-    <button key={key} type="button" className={`stack-pane-item${dot.operation === undefined ? '' : ` progress-border progress-${stackProgressColor(dot.operation)}`}`} aria-current={selected || undefined} aria-busy={dot.operation !== undefined || undefined} onClick={onClick}>
+    <button key={key} type="button" className={`stack-pane-item${dot.operation === undefined ? '' : ` progress-border progress-status-button progress-${stackProgressColor(dot.operation)}`}`} aria-current={selected || undefined} aria-busy={dot.operation !== undefined || undefined} onClick={onClick}>
       {dot.operation !== undefined && <span className="update-progress-ring" aria-hidden="true" />}
       <StateDot state={dot.state} busy={dot.busy} /><span className="stack-pane-item-name">{name}</span>{warn && <WarningIcon className="stack-row-warning" />}<StateText process={state} warn={warn && where !== undefined} />
       {where !== undefined && <span className="stack-pane-item-where" title={where}>{where}</span>}

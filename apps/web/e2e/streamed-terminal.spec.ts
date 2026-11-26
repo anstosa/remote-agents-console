@@ -85,6 +85,39 @@ test('applies the seed then live bytes in order after the first size', async ({ 
   expect(text.indexOf('SEED-LINE')).toBeLessThan(text.indexOf('LIVE-LINE'));
 });
 
+// a cold sibling can start at the preceding grid without replacing the server's size authority
+test('reuses a measured startup grid and still conforms to a different server size', async ({ page }) => {
+  await setup(page, { width: '640px', height: '320px' });
+  const viewport = await drive<{ cols: number; rows: number }>(page, 'lastProposedViewport');
+  expect(viewport.cols).toBeGreaterThan(80);
+  const result = await page.evaluate(async () => {
+    const { mountStreamedTerminal } = await import('/src/streamed-terminal.ts');
+    const sibling = document.createElement('div');
+    Object.assign(sibling.style, { width: '640px', height: '320px', position: 'relative' });
+    document.body.append(sibling);
+    let handlers!: Parameters<Parameters<typeof mountStreamedTerminal>[1]['connect']>[0];
+    const handle = mountStreamedTerminal(sibling, { connect: next => { handlers = next; return { send: () => {}, close: () => {} }; } });
+    const initial = { cols: handle.terminal.cols, rows: handle.terminal.rows };
+    handlers.onFrame({ type: 'size', cols: 42, rows: 11 });
+    const authoritative = { cols: handle.terminal.cols, rows: handle.terminal.rows };
+    handle.dispose();
+    sibling.remove();
+    return { initial, authoritative };
+  });
+  expect(result.initial).toEqual({ cols: viewport.cols, rows: viewport.rows });
+  expect(result.authoritative).toEqual({ cols: 42, rows: 11 });
+});
+
+// fast ASCII capture and mixed-width capture must produce the same cell-based run semantics
+test('captures output shape across padded ASCII and wide combined rows', async ({ page }) => {
+  await setup(page, { loadingKind: 'agent' });
+  await drive(page, 'pushSize', 160, 10);
+  await drive(page, 'pushBytes', '  alpha beta  gamma\r\n  界 é  x\r\n');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  const shape = await drive<[number, number, number[][]]>(page, 'outputShape');
+  expect(shape[2]).toEqual([[0, 2, 10], [0, 14, 5], [1, 2, 4], [1, 8, 1]]);
+});
+
 // keep first-command output beside a restored shell prompt
 test('restores the prompt cursor after blank seed rows and on reseed', async ({ page }) => {
   await setup(page);
@@ -231,6 +264,126 @@ test('acks the bytes it consumes', async ({ page }) => {
   await expect.poll(() => drive(page, 'ackedBytes')).toContain(5);
 });
 
+test('paces sustained small frames without delaying parsing or the final paint', async ({ page }, testInfo) => {
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'PACING-SEED');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  // leave the seed's forced paint outside the sustained-output sample
+  await page.waitForTimeout(150);
+  const result = await drive<{
+    frames: number;
+    streamDurationMs: number;
+    expectedBytes: number;
+    acknowledgedBytes: number;
+    acknowledgementEvents: number;
+    finalAckLatencyMs: number;
+    acknowledgementP95LatencyMs: number;
+    acknowledgementMaxLatencyMs: number;
+    frameTimings: Array<{ frame: number; sentAtMs: number; cumulativeBytes: number; acknowledgedAtMs: number; acknowledgementLatencyMs: number }>;
+    publicRenderCount: number;
+    finalPaintLatencyMs: number;
+    markerPainted: boolean;
+  }>(page, 'streamPacedFrames', 60, 1000);
+  await testInfo.attach('terminal-render-pacing.json', { body: JSON.stringify(result), contentType: 'application/json' });
+
+  expect(result.frames).toBe(60);
+  expect(result.streamDurationMs).toBeGreaterThan(900);
+  expect(result.streamDurationMs).toBeLessThan(1150);
+  expect(result.acknowledgedBytes).toBe(result.expectedBytes);
+  expect(result.finalAckLatencyMs).toBeLessThan(150);
+  expect(result.frameTimings).toHaveLength(60);
+  // retain modest CI slack around the prompt parser target while bounding every frame
+  expect(result.acknowledgementP95LatencyMs).toBeLessThan(60);
+  expect(result.acknowledgementMaxLatencyMs).toBeLessThan(150);
+  expect(result.publicRenderCount).toBeGreaterThanOrEqual(8);
+  expect(result.publicRenderCount).toBeLessThanOrEqual(13);
+  expect(result.markerPainted).toBe(true);
+  // allow one shared 100ms bucket, one native animation frame and modest CI scheduling slack
+  expect(result.finalPaintLatencyMs).toBeLessThan(150);
+  await expect.poll(() => drive<string>(page, 'screenText')).toContain('FINAL-PACING-MARKER');
+});
+
+test('sends input synchronously while a trailing terminal frame is pending', async ({ page }, testInfo) => {
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'INPUT-PACING-SEED');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await page.waitForTimeout(150);
+  const result = await drive<{
+    accepted: boolean;
+    pendingBeforeInput: boolean;
+    sentSynchronously: boolean;
+    sendLatencyMs: number;
+    inputData: string;
+  }>(page, 'inputDuringTrailingFrame', 'typed while pending');
+  await testInfo.attach('terminal-render-input.json', { body: JSON.stringify(result), contentType: 'application/json' });
+
+  expect(result.pendingBeforeInput).toBe(true);
+  expect(result.accepted).toBe(true);
+  expect(result.sentSynchronously).toBe(true);
+  expect(result.sendLatencyMs).toBeLessThan(10);
+  expect(result.inputData).toBe('typed while pending');
+});
+
+test('coalesces sustained bottom-follow presentation without delaying output parsing or the quiet tail', async ({ page }, testInfo) => {
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'SCROLL-PACING-SEED\r\n');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await page.waitForTimeout(150);
+  const result = await drive<{
+    frames: number;
+    expectedBytes: number;
+    acknowledgedBytes: number;
+    acknowledgementP95LatencyMs: number;
+    publicRenderCount: number;
+    rowMutationCount: number;
+    maximumRenderGapMs: number;
+    finalPaintLatencyMs: number;
+    markerPainted: boolean;
+  }>(page, 'streamPacedFrames', 120, 2000, true);
+  await testInfo.attach('terminal-scroll-pacing.json', { body: JSON.stringify(result), contentType: 'application/json' });
+  expect(result.frames).toBe(120);
+  expect(result.acknowledgedBytes).toBe(result.expectedBytes);
+  expect(result.acknowledgementP95LatencyMs).toBeLessThan(60);
+  // maintain continuous sparse presentation after the initial responsive frames
+  expect(result.publicRenderCount).toBeGreaterThanOrEqual(7);
+  expect(result.publicRenderCount).toBeLessThanOrEqual(13);
+  expect(result.maximumRenderGapMs).toBeLessThan(365);
+  // direct renderer paths must not repaint rows outside the paced frame budget
+  expect(result.rowMutationCount).toBeGreaterThanOrEqual(7);
+  expect(result.rowMutationCount).toBeLessThanOrEqual(result.publicRenderCount + 2);
+  expect(result.markerPainted).toBe(true);
+  expect(result.finalPaintLatencyMs).toBeLessThan(150);
+  await expect.poll(() => drive<string>(page, 'screenText')).toContain('FINAL-PACING-MARKER');
+});
+
+test('holds DEC 2026 synchronized output until the real xterm commit', async ({ page }) => {
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'SYNC-SEED');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await page.waitForTimeout(150);
+  await drive(page, 'startRenderTracking');
+  const acknowledgements = await drive<number[]>(page, 'ackedBytes');
+  const acknowledgedBefore = acknowledgements.reduce((total, bytes) => total + bytes, 0);
+  const held = '\r\x1b[2K\x1b[?2026hSYNC-HELD';
+  const committed = '-COMMITTED\x1b[?2026l';
+
+  await drive(page, 'pushBytes', held);
+  await expect.poll(async () => (await drive<number[]>(page, 'ackedBytes')).reduce((total, bytes) => total + bytes, 0)).toBe(acknowledgedBefore + held.length);
+  await page.waitForTimeout(150);
+  expect(await drive(page, 'renderTrace')).toEqual([]);
+  expect(await drive<string>(page, 'renderedDomText')).not.toContain('SYNC-HELD');
+
+  await drive(page, 'pushBytes', committed);
+  await expect.poll(() => drive<string>(page, 'renderedDomText')).toContain('SYNC-HELD-COMMITTED');
+  await expect.poll(async () => (await drive<unknown[]>(page, 'renderTrace')).length).toBeGreaterThan(0);
+  await expect.poll(async () => (await drive<number[]>(page, 'ackedBytes')).reduce((total, bytes) => total + bytes, 0))
+    .toBe(acknowledgedBefore + held.length + committed.length);
+});
+
 // freeze visual events while keeping nonvisual pane notifications live
 test('selection pause defers bytes, sizes, and acknowledgements until replay', async ({ page }) => {
   await setup(page);
@@ -273,6 +426,30 @@ test('selection pause gates a write already scheduled for parsing', async ({ pag
   expect(await drive<string>(page, 'screenText')).not.toContain('BUFFERED');
   await drive(page, 'setOutputPaused', false);
   await expect.poll(() => drive(page, 'screenText')).toContain('BUFFERED');
+});
+
+// a replacement seed must not clear retained output before its parser gate opens
+test('selection pauses a replacement seed before it clears the retained screen', async ({ page }) => {
+  await setup(page);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'ORIGINAL-SEED');
+  await expect(page.locator('#term .xterm-rows')).toContainText('ORIGINAL-SEED');
+  const acknowledgements = await drive(page, 'ackedBytes');
+  // receive the replacement and begin selection before the scheduled parser task
+  await page.evaluate(async () => {
+    const fixture = await import('/e2e/streamed-terminal-fixture.ts');
+    fixture.pushFrame({ type: 'reseed' });
+    fixture.pushBytes('REPLACEMENT-SEED');
+    fixture.setOutputPaused(true);
+  });
+  await page.waitForTimeout(100);
+  expect(await drive<string>(page, 'screenText')).toContain('ORIGINAL-SEED');
+  expect(await drive<string>(page, 'screenText')).not.toContain('REPLACEMENT-SEED');
+  expect(await drive(page, 'ackedBytes')).toEqual(acknowledgements);
+  await drive(page, 'setOutputPaused', false);
+  await expect(page.locator('#term .xterm-rows')).toContainText('REPLACEMENT-SEED');
+  expect(await drive<string>(page, 'screenText')).not.toContain('ORIGINAL-SEED');
+  await expect.poll(() => drive(page, 'ackedBytes')).toEqual([...acknowledgements, 'REPLACEMENT-SEED'.length]);
 });
 
 // parse bytes at their original grid before applying the following resize
@@ -638,8 +815,8 @@ test('a socket loss reconnects and re-seeds without keeping a stale line', async
 for (const [renderer, defaultWebgl] of [['dom', false], ['webgl', true]] as const) {
   test(`a reconnect restores the saved primary screen and cursor under ${renderer}`, async ({ page }, testInfo) => {
     await setup(page, { reconnectDelayMs: 25 }, defaultWebgl);
-    await expect.poll(() => drive(page, 'rendererKind')).toBe(renderer);
     await drive(page, 'pushSize', 40, 10);
+    await expect.poll(() => drive(page, 'rendererKind')).toBe(renderer);
     await drive(page, 'pushBytes', 'OLD-SCREEN\r\n');
     await expect.poll(() => drive(page, 'screenText')).toContain('OLD-SCREEN');
 
@@ -1240,8 +1417,8 @@ const releaseTerminalFrames = (page: Page) => page.evaluate(() => (window as unk
 // parsing the seed alone must not reveal an unpainted GPU canvas
 test('keeps the WebGL agent skeleton until the seed paints', async ({ page }) => {
   await setup(page, { loadingKind: 'agent' }, true);
-  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
   await drive(page, 'pushSize', 40, 10);
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
   await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   await holdTerminalFrames(page);
   try {
@@ -1257,8 +1434,8 @@ test('keeps the WebGL agent skeleton until the seed paints', async ({ page }) =>
 // a departed stream cannot reveal a seed that was parsed but never painted
 test('keeps the reconnect skeleton when a pending WebGL seed loses its stream', async ({ page }) => {
   await setup(page, { loadingKind: 'agent' }, true);
-  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
   await drive(page, 'pushSize', 40, 10);
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
   await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   await holdTerminalFrames(page);
   try {
@@ -1279,14 +1456,29 @@ test('keeps the agent skeleton while the WebGL addon is loading', async ({ page 
   // delay only the renderer module, not the terminal stream
   await page.route('**/*addon-webgl*', async route => { await pending; await route.continue(); });
   try {
-    await setup(page, { loadingKind: 'agent' }, true);
+    await setup(page, { loadingKind: 'agent', preferNativeMouseSelection: true }, true);
     await drive(page, 'pushSize', 40, 10);
-    await drive(page, 'pushBytes', 'EARLY-SEED\r\n');
+    await drive(page, 'pushBytes', 'EARLY-SEED https://example.com/early\r\n');
     await expect.poll(() => drive(page, 'screenText')).toContain('EARLY-SEED');
     await expect(page.locator('#term .output-skeleton')).toBeVisible();
+    // a temporary renderer must not build links behind the first paint cover
+    await expect(page.locator('#term .output-link-overlay')).toHaveCount(0);
+    // parser output is retained without drawing temporary DOM rows that can never be shown
+    await expect(page.locator('#term .xterm-rows')).not.toContainText('EARLY-SEED');
+    await expect(page.locator('#term .xterm-rows')).toHaveCSS('visibility', 'hidden');
+    await expect(page.locator('#term .xterm-screen')).toHaveCSS('visibility', 'visible');
+    // a caller can still focus and type while the selected renderer is loading
+    await page.locator('#term .streamed-terminal-host').click();
+    await expect(page.locator('#term .xterm-helper-textarea')).toBeFocused();
+    await page.keyboard.type('pending input');
+    await expect.poll(() => drive(page, 'inputData')).toBe('pending input');
+    await expect(page.locator('#term .terminal-selection-surface')).toBeEmpty();
   } finally { release(); }
   await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
   await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await expect(page.locator('#term .xterm-screen > canvas').first()).toHaveCSS('visibility', 'visible');
+  await expect(page.locator('#term .output-link-overlay[href="https://example.com/early"]')).toBeVisible();
+  await expect(page.locator('#term .terminal-selection-surface')).toContainText('EARLY-SEED https://example.com/early');
 });
 
 // failed renderer assets must still reveal a painted usable fallback
@@ -1588,8 +1780,8 @@ test('falls back to DOM for the page session when the WebGL renderer throws', as
   });
   await setup(page, {}, true);
   const attempts = () => page.evaluate(() => (globalThis as unknown as { webglAttempts: number }).webglAttempts);
-  await expect.poll(attempts).toBe(1);
   await drive(page, 'pushSize', 40, 10);
+  await expect.poll(attempts).toBe(1);
   await drive(page, 'pushBytes', 'STILL-HERE\r\n');
   await expect(page.locator('#term .xterm-rows')).toContainText('STILL-HERE');
   expect(await drive(page, 'connectCalls')).toBe(1);
@@ -1599,6 +1791,8 @@ test('falls back to DOM for the page session when the WebGL renderer throws', as
     document.body.append(second);
     const module = await import('/e2e/streamed-terminal-fixture.ts');
     await module.renderStreamedTerminal(second);
+    // the second pane has a grid but must respect the page-session fallback
+    module.pushSize(40, 10);
   });
   await page.waitForTimeout(200);
   expect(await attempts()).toBe(1);
@@ -1675,6 +1869,48 @@ test('a kept terminal shows its last screen at once when shown again, then resee
   expect(await drive(page, 'disposalsOf', 'A', 'p')).toBe(0);
 });
 
+// the old dom selection cannot reappear when a parked pane is reattached and resized
+test('clears a selected kept DOM terminal before the return viewport is resized', async ({ page }) => {
+  await setup(page, keepIn('A'));
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'SELECTED-OLD-SCREEN\r\n');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await drive(page, 'selectCells', 0, 0, 8);
+  await expect(page.locator('#term .xterm-selection > div').first()).toBeVisible();
+  await drive(page, 'leavePanel');
+  expect(await drive(page, 'showPanel', 'back')).toBe(true);
+  await expect(page.locator('#back .xterm-rows')).toContainText('SELECTED-OLD-SCREEN');
+  await drive(page, 'pushSize', 45, 12);
+  await expect(page.locator('#back .xterm-selection > div')).toHaveCount(0);
+});
+
+// a retained gpu screen stays painted during the return-to-workspace seed boundary
+test('keeps a painted WebGL screen and links on reattach before the fresh seed', async ({ page }) => {
+  await setup(page, { ...keepIn('A'), captureOpenUrls: true }, true);
+  await drive(page, 'pushSize', 70, 10);
+  await drive(page, 'pushBytes', 'GPU-KEPT https://example.com/kept\r\n');
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await expect.poll(() => drive(page, 'rendererKind')).toBe('webgl');
+  await expect(page.getByRole('link', { name: 'Open https://example.com/kept' })).toBeVisible();
+  // clip the first text row so the focus/cursor state on the next row cannot alter the comparison
+  const firstRow = async (id: string) => {
+    const box = await page.locator(`#${id} .xterm-screen`).boundingBox();
+    expect(box).not.toBeNull();
+    return page.screenshot({ clip: { x: box!.x, y: box!.y, width: box!.width, height: Math.floor(box!.height / 10) } });
+  };
+  const painted = await firstRow('term');
+  await drive(page, 'leavePanel');
+  expect(await drive(page, 'showPanel', 'back')).toBe(true);
+  await expect(page.locator('#back .streamed-terminal-status')).toBeHidden();
+  await expect(page.getByRole('link', { name: 'Open https://example.com/kept' })).toBeVisible();
+  await expect.poll(async () => (await firstRow('back')).equals(painted)).toBe(true);
+  // a later seed still replaces the retained screen normally
+  await drive(page, 'pushSize', 70, 10);
+  await drive(page, 'pushBytes', 'REPLACED-GPU-SCREEN\r\n');
+  await expect.poll(() => drive<string>(page, 'screenText')).toContain('REPLACED-GPU-SCREEN');
+  await expect(page.getByRole('link', { name: 'Open https://example.com/kept' })).toHaveCount(0);
+});
+
 // a parked agent can gain an adapter identity without discarding its output
 test('a kept agent updates its cold starter and keeps warm geometry on reattach', async ({ page }) => {
   await setup(page, { ...keepIn('A'), loadingKind: 'agent' });
@@ -1729,11 +1965,11 @@ test('a parked terminal stays closed through visibilitychange, online and a late
   await expect(page.locator('#back .xterm-rows')).toContainText('LIVE');
 });
 
-test('keeps the three most recently left workspaces and disposes the rest once', async ({ page }) => {
+test('keeps the four most recently left workspaces and disposes the rest once', async ({ page }) => {
   await setup(page);
-  for (const workspace of ['A', 'B', 'C', 'D']) await seedAndLeave(page, workspace, `${workspace}-SCREEN`);
-  const disposed = async () => Object.fromEntries(await Promise.all(['A', 'B', 'C', 'D', 'E'].map(async workspace => [workspace, await drive<number>(page, 'disposalsOf', workspace, 'p')])));
-  expect(await disposed()).toEqual({ A: 1, B: 0, C: 0, D: 0, E: 0 });
+  for (const workspace of ['A', 'B', 'C', 'D', 'E']) await seedAndLeave(page, workspace, `${workspace}-SCREEN`);
+  const disposed = async () => Object.fromEntries(await Promise.all(['A', 'B', 'C', 'D', 'E', 'F'].map(async workspace => [workspace, await drive<number>(page, 'disposalsOf', workspace, 'p')])));
+  expect(await disposed()).toEqual({ A: 1, B: 0, C: 0, D: 0, E: 0, F: 0 });
   // B shown again takes its terminal back, and leaving it again makes it the most recent
   await page.evaluate(async () => {
     document.body.replaceChildren();
@@ -1744,8 +1980,38 @@ test('keeps the three most recently left workspaces and disposes the rest once',
   });
   await expect(page.locator('.xterm-rows')).toContainText('B-SCREEN');
   await drive(page, 'leavePanel');
-  await seedAndLeave(page, 'E', 'E-SCREEN');
-  expect(await disposed()).toEqual({ A: 1, B: 0, C: 1, D: 0, E: 0 });
+  await seedAndLeave(page, 'F', 'F-SCREEN');
+  expect(await disposed()).toEqual({ A: 1, B: 0, C: 1, D: 0, E: 0, F: 0 });
+});
+
+// rotate through five workspaces without rebuilding any of their kept terminal renderers
+test('reuses all five workspace screens across repeated round-robin switches', async ({ page }) => {
+  await setup(page, keepIn('A'));
+  const workspaces = ['A', 'B', 'C', 'D', 'E'];
+  // leave and reclaim in the same browser task like a react workspace commit
+  const switchWorkspace = (workspace: string) => page.evaluate(async ({ workspace, keep }) => {
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    module.leavePanel();
+    const mount = document.createElement('div');
+    mount.id = 'term';
+    document.body.append(mount);
+    await module.renderStreamedTerminal(mount, keep);
+  }, { workspace, keep: keepIn(workspace) });
+  // seed each workspace once and establish its actual committed screen
+  for (const workspace of workspaces) {
+    if (workspace !== 'A') await switchWorkspace(workspace);
+    await drive(page, 'pushSize', 40, 10);
+    await drive(page, 'pushBytes', `${workspace}-CACHED-SCREEN\r\n`);
+    await expect(page.locator('#term .xterm-rows')).toContainText(`${workspace}-CACHED-SCREEN`);
+    await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  }
+  // return through the same set twice and require each last committed screen before reseeding
+  for (const workspace of [...workspaces, ...workspaces]) {
+    await switchWorkspace(workspace);
+    await expect(page.locator('#term .xterm-rows')).toContainText(`${workspace}-CACHED-SCREEN`);
+    await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+    expect(await drive(page, 'disposalsOf', workspace, 'p')).toBe(0);
+  }
 });
 
 test('disposes a panel closed in a shown workspace, and one gone when its workspace returns', async ({ page }) => {

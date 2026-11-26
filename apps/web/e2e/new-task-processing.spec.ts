@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectSplitProgressBorder } from './progress-border-assertions';
+import { expectBreathingProgressBorder, expectProgressBorder, expectSplitProgressBorder } from './progress-border-assertions';
 import { installPaneMock, seedPaneSize, pushBytes } from './pane-stream-mock';
 
 // allow the shared host's first dashboard transform before exercising task transport
@@ -100,7 +100,7 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   const powerMenu = page.getByRole('menu', { name: 'Agent power options' });
   const startingNewTask = powerMenu.getByRole('menuitem', { name: 'Starting New Task', exact: true });
   await expectProgressBorder(startingNewTask, 'blue', 'working');
-  await expectClockwiseProgressBorder(startingNewTask, 'working');
+  await expectBreathingProgressBorder(startingNewTask, 'working');
   finishReopenedAvailability();
   await page.keyboard.press('Escape');
   const processing = page.locator('.log-loading[role="status"]');
@@ -108,11 +108,11 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await expect(processing).toContainText('preparing a fresh agent');
   await expectSplitProgressBorder(panel, 'peach');
   await expectProgressBorder(processing, 'peach', 'working');
-  await expectClockwiseProgressBorder(processing, 'working');
+  await expectBreathingProgressBorder(processing, 'working');
   await expect(page.getByRole('status').filter({ hasText: 'Starting a new task' })).toContainText('You can keep using other tabs');
   const startingTab = page.getByRole('tab', { name: 'Cora — Starting new task' });
   await expectProgressBorder(startingTab, 'blue', 'working');
-  await expectClockwiseProgressBorder(startingTab, 'working');
+  await expectBreathingProgressBorder(startingTab, 'working');
   await expect(startingTab.locator('.tab-kind-stack')).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expectSplitProgressBorder(panel, 'peach');

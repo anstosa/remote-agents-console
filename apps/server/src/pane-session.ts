@@ -10,6 +10,7 @@ import { LatestViewportScheduler, type PaneViewportCoordinator } from './logs/vi
 import { boundedViewport } from './logs/viewport.js';
 import type { Place } from './places/places.js';
 import type { PromptService } from './prompts/service.js';
+import { createPaneOutputBatcher } from './pane-output-batcher.js';
 import type { TmuxAdapter } from './tmux/adapter.js';
 import type { PaneStreamProvider } from './tmux/control.js';
 
@@ -146,10 +147,12 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
         const size = await tmux.size(socketRef, pane);
         // an unknown grid cannot authorize the initial snapshot
         if (size === undefined) return false;
+        const changed = reportedSize !== undefined && (reportedSize.cols !== size.cols || reportedSize.rows !== size.rows);
+        // preserve live-byte order before any grid or replacement-screen control frame
+        if (seeded) liveOutput.flush();
         sendFrame({ type: 'size', cols: size.cols, rows: size.rows });
         // a revoked or closed viewer must not start another capture
         if (!transport.open()) return false;
-        const changed = reportedSize !== undefined && (reportedSize.cols !== size.cols || reportedSize.rows !== size.rows);
         reportedSize = { cols: size.cols, rows: size.rows };
         // sigwinch output can precede this grid report and be clipped at the browser's old size
         if (changed && seeded) {
@@ -171,8 +174,12 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     // Flow control: drop-while-behind + reseed, and the control pipe is never paused (spec).
     const highWatermark = 256 * 1024;
     const lowWatermark = 64 * 1024;
-    let unacked = 0;
+    let sentUnacked = 0;
     let dropped = false;
+    const liveOutput = createPaneOutputBatcher(bytes => {
+      sentUnacked += bytes.length;
+      sendBinary(bytes);
+    });
     // discard pre-capture output already represented by the seed; its delivery opens the
     // live gate synchronously at the reply boundary, before any following redraw
     let seeding = true;
@@ -180,17 +187,18 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     let seedGeneration = 0;
     const forward = (bytes: Buffer) => {
       if (seeding) return;
-      if (unacked >= highWatermark) { dropped = true; return; }
-      unacked += bytes.length;
-      sendBinary(bytes);
+      // include retained bytes in the window without letting ACKs consume unsent output
+      if (sentUnacked + liveOutput.pendingBytes() >= highWatermark) { dropped = true; return; }
+      liveOutput.push(bytes);
     };
     // replace the screen and resume live bytes at the capture reply boundary
     const reseed = async () => {
       // a fresh seed re-establishes the whole screen, so the pre-reseed in-flight count is
       // void: reset it (and clear a lingering drop) so backpressure restarts from the seed
       seeding = true;
+      liveOutput.discard();
       const generation = ++seedGeneration;
-      unacked = 0;
+      sentUnacked = 0;
       dropped = false;
       const delivered = await paneClient.seed(pane, seedDepth, seed => {
         // an older capture cannot replace a newer snapshot or release its live gate
@@ -306,14 +314,15 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
       onReseed: () => {
         // the first successful viewport owns size-before-seed initialization
         if (!seeded) return;
+        liveOutput.flush();
         sendFrame({ type: 'reseed' });
         void reseed();
       },
       onResize: () => { void reclamp(); },
-      onClipboard: (text: string) => sendFrame({ type: 'clipboard', text }),
-      onForeground: (command: string) => sendFrame({ type: 'foreground', command }),
+      onClipboard: (text: string) => { liveOutput.flush(); sendFrame({ type: 'clipboard', text }); },
+      onForeground: (command: string) => { liveOutput.flush(); sendFrame({ type: 'foreground', command }); },
       // the session ended or the control client was lost; forward the reason and let the browser reconnect
-      onExit: (reason: string) => { sendFrame({ type: 'exit', reason }); transport.close(1011); }
+      onExit: (reason: string) => { liveOutput.flush(); sendFrame({ type: 'exit', reason }); transport.close(1011); }
     });
     // route input to the pane byte-exact; the Agent's own pane takes the mutation lock and
     // routes a lone Ctrl+C through queued-prompt cancellation
@@ -354,14 +363,21 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
           if (typeof frame.data !== 'string' || !/^[A-Za-z0-9_-]*$/.test(frame.data)) throw new Error();
           const bytes = Buffer.from(frame.data, 'base64url');
           if (!bytes.length || bytes.length > 65_536 || bytes.toString('base64url') !== frame.data) throw new Error();
+          // preserve prior pane output before applying causally later input
+          liveOutput.flush();
           void handleInput(bytes).catch(() => transport.close(1011));
           return;
         }
         if (frame.type === 'ack') {
           if (!Number.isInteger(frame.bytes) || frame.bytes < 0) throw new Error();
-          unacked = Math.max(0, unacked - frame.bytes);
+          sentUnacked = Math.max(0, sentUnacked - frame.bytes);
           // recovered from a drop: clear the browser and reseed to the correct screen
-          if (dropped && unacked < lowWatermark) { dropped = false; sendFrame({ type: 'reseed' }); void reseed(); }
+          if (dropped && sentUnacked + liveOutput.pendingBytes() < lowWatermark) {
+            dropped = false;
+            liveOutput.flush();
+            sendFrame({ type: 'reseed' });
+            void reseed();
+          }
           return;
         }
         if (frame.type === 'metadata') {
@@ -379,7 +395,7 @@ export function openPaneSession(deps: PaneSessionDependencies, transport: PaneTr
     // frame can slip past unbuffered.
     for (const raw of earlyFrames.splice(0)) processFrame(raw);
     handleRaw = processFrame;
-    cleanup = () => { ended = true; if (quietTimer !== undefined) clearTimeout(quietTimer); unsubscribePane(); if (paneViewport !== undefined) void paneViewport.release(); };
+    cleanup = () => { ended = true; liveOutput.close(); if (quietTimer !== undefined) clearTimeout(quietTimer); unsubscribePane(); if (paneViewport !== undefined) void paneViewport.release(); };
     // carry the derive once at subscribe, before any %output
     if (derives) void runDerive(true);
   };

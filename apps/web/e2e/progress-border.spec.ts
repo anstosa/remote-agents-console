@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
+import { expectBreathingProgressBorder, expectProgressBorder, expectReducedMotionProgress } from './progress-border-assertions';
 import { mockAccountSocket, openCodexAccounts } from './account-fixture';
 import { dropPane, installPaneMock, paneConnectCount, pushBytes, seedPaneSize } from './pane-stream-mock';
 
@@ -59,12 +59,12 @@ async function mountRestartFixture(page: Page, fixture: RestartFixture, restart:
   await page.goto('/');
 }
 
-// read the lifetime of the rendered indicator, not the owning control
-const progressIterations = (control: Locator) => control.locator(':scope > .update-progress-ring').evaluate(ring =>
-  ring.getAnimations({ subtree: true }).map(animation => animation.effect?.getTiming().iterations));
+// reject autonomous progress loops after the mount sentinel has completed
+const activeProgressAnimations = (control: Locator) => control.evaluate(element =>
+  element.getAnimations({ subtree: true }).filter(animation => animation instanceof CSSAnimation && animation.animationName.startsWith('progress-') && (animation.playState === 'running' || animation.pending)).length);
 
-// swap the startup border for a compact spinner under either reduced-motion preference
-test('frames startup with a clockwise border or reduced-motion spinner', async ({ page }) => {
+// keep startup progress recognizable without a painted sweep
+test('frames startup with a breathing border and static reduced-motion treatment', async ({ page }) => {
   const sessionGate = createGate();
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   // hold authentication on the initial loading screen
@@ -80,21 +80,21 @@ test('frames startup with a clockwise border or reduced-motion spinner', async (
     await expect(loader).toContainText('Restoring secure session');
     await expect(loader.locator('.loading-bars')).toHaveCount(0);
     await expectProgressBorder(loader, 'mauve', 'loading');
-    await expectClockwiseProgressBorder(loader, 'loading');
-    expect(await progressIterations(loader)).toEqual([Infinity]);
+    await expectBreathingProgressBorder(loader, 'loading');
+    expect(await activeProgressAnimations(loader)).toBe(0);
     await expect.poll(() => loader.locator('.loading-line').evaluate(element => ({ animations: element.getAnimations().length, transform: getComputedStyle(element).transform }))).toEqual({ animations: 0, transform: 'none' });
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    await expectReducedMotionSpinner(loader, 'mauve', 'loading');
-    expect(await progressIterations(loader)).toEqual([Infinity]);
+    await expectReducedMotionProgress(loader, 'mauve', 'loading');
+    expect(await activeProgressAnimations(loader)).toBe(0);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await expectProgressBorder(loader, 'mauve', 'loading');
-    await expectClockwiseProgressBorder(loader, 'loading');
+    await expectBreathingProgressBorder(loader, 'loading');
     await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
-    await expectReducedMotionSpinner(loader, 'mauve', 'loading');
+    await expectReducedMotionProgress(loader, 'mauve', 'loading');
     await page.evaluate(() => { delete document.documentElement.dataset.motion; });
     await expectProgressBorder(loader, 'mauve', 'loading');
-    await expectClockwiseProgressBorder(loader, 'loading');
+    await expectBreathingProgressBorder(loader, 'loading');
   } finally {
     // release authentication during failed assertions too
     sessionGate.release();
@@ -404,11 +404,11 @@ test('uses skeleton rows for cleanup reads and working motion only for cleanup s
   try {
     await expect.poll(() => cleanupSubmissions).toBe(1);
     await expectProgressBorder(footerProgress, 'red', 'working');
-    await expectClockwiseProgressBorder(footerProgress, 'working');
-    expect(await progressIterations(footerProgress)).toEqual([Infinity]);
+    await expectBreathingProgressBorder(footerProgress, 'working');
+    expect(await activeProgressAnimations(footerProgress)).toBe(0);
     // keep the mutation feedback moving until the held request settles
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    expect(await progressIterations(footerProgress)).toEqual([Infinity]);
+    expect(await activeProgressAnimations(footerProgress)).toBe(0);
   } finally {
     // release the mutation during failed assertions too
     submissionGate.release();
@@ -473,8 +473,14 @@ test('uses a toolbar skeleton for note reads and working motion for note creatio
   await page.getByRole('button', { name: '+ New note', exact: true }).click();
   try {
     await expect.poll(() => noteCreations).toBe(1);
+    await expect(notes).not.toHaveClass(/(?:^|\s)progress-(?:icon|status)-button(?:\s|$)/u);
     await expectProgressBorder(notes, 'blue', 'working');
-    await expectClockwiseProgressBorder(notes, 'working');
+    await expectBreathingProgressBorder(notes, 'working');
+    await page.setViewportSize({ width: 390, height: 844 });
+    const phoneGeometry = await notes.boundingBox();
+    await expectProgressBorder(notes, 'blue', 'working');
+    await expectBreathingProgressBorder(notes, 'working');
+    expect(await notes.boundingBox()).toEqual(phoneGeometry);
   } finally {
     // release note creation during failed assertions too
     creationGate.release();
@@ -513,11 +519,12 @@ test('paints reload progress before navigating to the fresh client', async ({ pa
     disabled: boolean;
     kind: 'loading' | 'working';
     progress: string;
-    ringAnimationName: string;
+    activeProgressAnimations: number;
+    borderPainted: boolean;
     parentAnimations: number;
     parentTransform: string;
-    ringAnimations: number;
     ringVisible: boolean;
+    spinnerPainted: boolean;
   };
   let painted: ReloadPaint | undefined;
   await page.exposeFunction('reportReloadPaint', (snapshot: ReloadPaint) => { painted = snapshot; });
@@ -532,17 +539,18 @@ test('paints reload progress before navigating to the fresh client', async ({ pa
         if (ring === null) throw new Error('pending reload button has no progress border');
         const style = getComputedStyle(button);
         const bounds = ring.getBoundingClientRect();
-        const animation = ring.getAnimations({ subtree: true })[0];
+        const borderOpacity = Number.parseFloat(getComputedStyle(ring, '::before').opacity);
         void (window as unknown as { reportReloadPaint: (snapshot: ReloadPaint) => Promise<void> }).reportReloadPaint({
           busy: button.getAttribute('aria-busy'),
           disabled: button.disabled,
           kind: button.classList.contains('progress-loading') ? 'loading' : 'working',
           progress: style.getPropertyValue('--progress-ring-color').trim(),
-          ringAnimationName: animation instanceof CSSAnimation ? animation.animationName : '',
+          activeProgressAnimations: button.getAnimations({ subtree: true }).filter(animation => animation instanceof CSSAnimation && animation.animationName.startsWith('progress-') && (animation.playState === 'running' || animation.pending)).length,
+          borderPainted: borderOpacity >= 0.35 && borderOpacity <= 1,
           parentAnimations: button.getAnimations().length,
           parentTransform: style.transform,
-          ringAnimations: ring.getAnimations({ subtree: true }).length,
-          ringVisible: bounds.width > 0 && bounds.height > 0 && getComputedStyle(ring).visibility === 'visible'
+          ringVisible: bounds.width > 0 && bounds.height > 0 && getComputedStyle(ring).visibility === 'visible',
+          spinnerPainted: getComputedStyle(ring, '::after').transform !== 'none'
         });
       });
     });
@@ -555,11 +563,12 @@ test('paints reload progress before navigating to the fresh client', async ({ pa
     disabled: true,
     kind: 'loading',
     progress: expectedBlue,
-    ringAnimationName: 'loading-border-orbit',
+    activeProgressAnimations: 0,
+    borderPainted: true,
     parentAnimations: 0,
     parentTransform: 'none',
-    ringAnimations: 1,
-    ringVisible: true
+    ringVisible: true,
+    spinnerPainted: true
   });
   await expect.poll(() => navigations).toBeGreaterThan(initialNavigations);
   await click;
@@ -594,7 +603,7 @@ test('keeps restart progress fullscreen until the operation settles', async ({ p
     await expect(loader).toBeVisible();
     await expect(notice).toHaveCount(0);
     await expectProgressBorder(card, 'mauve');
-    await expectClockwiseProgressBorder(card);
+    await expectBreathingProgressBorder(card);
     queuedStatusRead = page.waitForResponse(async response => new URL(response.url()).pathname === '/api/settings/status' && response.request().method() === 'GET' && (await response.json() as RestartStatus).operation?.state === 'queued');
   } finally {
     // release the mocked restart during failed assertions too
@@ -639,14 +648,14 @@ test('shows a reduced-motion fullscreen retry spinner and stops it after failure
     await expect.poll(() => fixture.restartRequests).toBe(1);
     await expect(loader).toBeVisible();
     await expect(notice).toHaveCount(0);
-    await expectReducedMotionSpinner(card, 'mauve');
+    await expectReducedMotionProgress(card, 'mauve');
 
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
-    await expectReducedMotionSpinner(card, 'mauve');
+    await expectReducedMotionProgress(card, 'mauve');
     await page.evaluate(() => { delete document.documentElement.dataset.motion; });
     await expectProgressBorder(card, 'mauve');
-    await expectClockwiseProgressBorder(card);
+    await expectBreathingProgressBorder(card);
   } finally {
     // release the mocked retry during failed assertions too
     restartGate.release();

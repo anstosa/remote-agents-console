@@ -1,25 +1,11 @@
 import { expect, type Locator } from '@playwright/test';
 
 export type ProgressColor = 'blue' | 'green' | 'yellow' | 'peach' | 'red' | 'mauve';
-// keep motion semantics private to this assertion module
 type ProgressKind = 'loading' | 'working';
 
-// map semantic motion to its public keyframe contract
-function animationName(kind: ProgressKind, retained: boolean) {
-  // loading takes precedence over retained status
-  if (kind === 'loading') return 'loading-border-orbit';
-  return retained ? 'working-status-orbit' : 'update-border-orbit';
-}
-
-// distinguish retained status controls from transient actions
-const retainedStatus = (control: Locator) => control.evaluate(element => element.querySelector(':scope > .update-progress-ring > .working-progress-mask') !== null);
-
-// long-lived and transient progress loops share the document clock
-const cycleAligned = (start: unknown, iterations: number | undefined) => start === 0 && iterations === Infinity;
-
-// require the semantic owner marker without coupling tests to component internals
+// require the semantic loading marker only when the scenario owns it
 async function expectProgressKind(control: Locator, kind: ProgressKind) {
-  // require the explicit loading override
+  // loading takes precedence over the retained working treatment
   if (kind === 'loading') {
     await expect(control).toHaveClass(/(?:^|\s)progress-loading(?:\s|$)/u);
     return;
@@ -34,150 +20,315 @@ export async function expectStationaryStatus(control: Locator) {
   await expect.poll(() => control.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
 }
 
-// verify the shared progress treatment belongs to the interactive surface itself
+// verify the progress treatment belongs to the semantic owner without changing its size
 export async function expectProgressBorder(control: Locator, color: ProgressColor, kind?: ProgressKind) {
   await expect(control).toHaveAttribute('aria-busy', 'true');
   // assert classification only where the scenario owns the semantic contract
   if (kind !== undefined) await expectProgressKind(control, kind);
   await expect(control).toHaveCSS('opacity', '1');
-  const theme = await control.evaluate((element, name) => {
-    const style = getComputedStyle(element);
-    return {
-      actual: style.getPropertyValue('--progress-ring-color').trim(),
-      expected: style.getPropertyValue(`--${name}`).trim()
-    };
-  }, color);
-  expect(theme.expected).not.toBe('');
-  expect(theme.actual).toBe(theme.expected);
   await expect(control).not.toHaveClass(/(?:^|\s)spinner(?:\s|$)/u);
   await expect(control.locator('.spinner')).toHaveCount(0);
   const ring = control.locator(':scope > .update-progress-ring');
   await expect(ring).toBeVisible();
-  const geometry = await control.evaluate(element => {
-    const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
-    // expose a missing direct ring to the assertion
-    if (ring === null) return null;
-    const owner = element.getBoundingClientRect();
-    const border = ring.getBoundingClientRect();
-    return {
-      bottom: Math.abs(owner.bottom + 1 - border.bottom),
-      left: Math.abs(owner.left - 1 - border.left),
-      right: Math.abs(owner.right + 1 - border.right),
-      top: Math.abs(owner.top - 1 - border.top)
-    };
-  });
-  expect(geometry).not.toBeNull();
-  expect(Math.max(geometry!.top, geometry!.right, geometry!.bottom, geometry!.left)).toBeLessThanOrEqual(1);
-}
-
-// reduced motion swaps the travelling border for one compact semantic spinner
-export async function expectReducedMotionSpinner(control: Locator, color: ProgressColor, kind?: ProgressKind) {
-  await expect(control).toHaveAttribute('aria-busy', 'true');
-  // keep loading and working semantics through the compact treatment
-  if (kind !== undefined) await expectProgressKind(control, kind);
-  await expect(control).toHaveCSS('opacity', '1');
-  const spinner = control.locator(':scope > .update-progress-ring');
-  await expect(spinner).toBeVisible();
-  // allow the animationstart synchronizer one rendered frame
-  await expect.poll(async () => {
-    const timing = await spinner.evaluate(element => {
-      const animation = element.getAnimations({ subtree: true })[0];
-      return [animation?.startTime, animation?.effect?.getTiming().iterations] as const;
-    });
-    return cycleAligned(timing[0], timing[1]);
-  }).toBe(true);
   const treatment = await control.evaluate((element, name) => {
-    const spinner = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
-    // expose a missing direct spinner to the assertion
-    if (spinner === null) return null;
+    const progressRing = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
+    // expose incomplete progress markup to the assertion
+    if (progressRing === null) return null;
+    const owner = element.getBoundingClientRect();
     const ownerStyle = getComputedStyle(element);
-    const spinnerStyle = getComputedStyle(spinner);
-    const borderStyle = getComputedStyle(spinner, '::before');
-    const indicatorStyle = getComputedStyle(spinner, '::after');
-    const animations = spinner.getAnimations({ subtree: true });
-    const animation = animations[0];
-    const originalStartTime = animation?.startTime ?? null;
-    const originalCurrentTime = animation?.currentTime ?? null;
-    const originalPlayState = animation?.playState;
+    const ringBounds = progressRing.getBoundingClientRect();
+    const ringStyle = getComputedStyle(progressRing);
+    const borderStyle = getComputedStyle(progressRing, '::before');
+    const indicatorStyle = getComputedStyle(progressRing, '::after');
     const expectedToken = ownerStyle.getPropertyValue(`--${name}`).trim();
     const sample = document.createElement('span');
     sample.style.color = expectedToken;
     element.append(sample);
     const expectedColor = getComputedStyle(sample).color;
     sample.remove();
-    let rotation: { start: number; quarter: number } | null = null;
-    // sample the painted spinner to prove its keyframes actually rotate
-    if (animation !== undefined && animation.effect instanceof KeyframeEffect) {
-      const duration = animation.effect.getComputedTiming().duration;
-      // require one finite cycle before seeking it
-      if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
-        animation.pause();
-        animation.currentTime = 0;
-        const startMatrix = new DOMMatrixReadOnly(getComputedStyle(spinner, '::after').transform);
-        animation.currentTime = duration / 4;
-        const quarterMatrix = new DOMMatrixReadOnly(getComputedStyle(spinner, '::after').transform);
-        // restore the synchronized shared clock after local sampling
-        if (originalPlayState === 'running') {
-          animation.play();
-          animation.startTime = originalStartTime;
-        } else {
-          animation.currentTime = originalCurrentTime;
-        }
-        rotation = {
-          start: Math.round(Math.atan2(startMatrix.b, startMatrix.a) * 180 / Math.PI),
-          quarter: Math.round(Math.atan2(quarterMatrix.b, quarterMatrix.a) * 180 / Math.PI)
-        };
-      }
-    }
+    const textButton = element.tagName === 'BUTTON'
+      && !element.classList.contains('progress-icon-button')
+      && !element.classList.contains('progress-status-button');
+    const responsiveToolbarText = textButton
+      && element.matches('.workspace-toolbar-actions button.toolbar-button:has(> .toolbar-label)')
+      && matchMedia('(max-width: 600px)').matches;
+    const glyph = element.querySelector<HTMLElement>(':scope > svg');
     return {
-      animationCount: animations.length,
-      animationDuration: animation?.effect?.getComputedTiming().duration,
-      animationEasing: animation?.effect?.getTiming().easing,
-      animationName: animation instanceof CSSAnimation ? animation.animationName : '',
-      backgroundImage: indicatorStyle.backgroundImage,
-      borderLeftColor: indicatorStyle.borderLeftColor,
-      borderRadius: indicatorStyle.borderRadius,
-      borderTopWidth: Number.parseFloat(indicatorStyle.borderTopWidth),
-      borderTopColor: indicatorStyle.borderTopColor,
-      borderOrbitDisplay: borderStyle.display,
-      boxShadow: indicatorStyle.boxShadow,
+      borderBackground: borderStyle.backgroundImage,
+      borderColor: borderStyle.borderTopColor,
+      borderRadius: borderStyle.borderRadius,
+      borderWidth: Number.parseFloat(borderStyle.borderTopWidth),
       expectedColor,
-      filter: spinnerStyle.filter,
-      height: Number.parseFloat(indicatorStyle.height),
-      progressToken: ownerStyle.getPropertyValue('--progress-ring-color').trim(),
       expectedToken,
-      pseudo: animation?.effect instanceof KeyframeEffect ? animation.effect.pseudoElement : null,
-      ringTarget: animation?.effect instanceof KeyframeEffect && animation.effect.target === spinner,
-      rotation,
-      width: Number.parseFloat(indicatorStyle.width)
+      hasLegacyRunner: progressRing.querySelector('.working-progress-runner') !== null,
+      iconClassificationValid: !element.classList.contains('progress-icon-button') || element.tagName === 'BUTTON',
+      indicatorLeft: Number.parseFloat(indicatorStyle.left),
+      indicatorPosition: indicatorStyle.position,
+      indicatorTop: Number.parseFloat(indicatorStyle.top),
+      indicatorTranslate: indicatorStyle.translate,
+      glyphVisibility: glyph === null ? null : getComputedStyle(glyph).visibility,
+      ownerHeight: owner.height,
+      ownerTransform: ownerStyle.transform,
+      ownerWidth: owner.width,
+      pointerEvents: ringStyle.pointerEvents,
+      progressToken: ownerStyle.getPropertyValue('--progress-ring-color').trim(),
+      ringHeight: ringBounds.height,
+      ringPosition: ringStyle.position,
+      ringWidth: ringBounds.width,
+      responsiveToolbarText,
+      textButton
     };
   }, color);
-  // fail clearly when the indicator disappeared during inspection
-  if (treatment === null) throw new Error('reduced-motion spinner is missing');
-  expect(treatment.animationCount).toBe(1);
-  expect(treatment.animationDuration).toBe(1_000);
-  expect(treatment.animationEasing).toBe('linear');
-  expect(treatment.animationName).toBe('progress-spinner');
-  expect(treatment.backgroundImage).toBe('none');
-  expect(treatment.borderLeftColor).toBe('rgba(0, 0, 0, 0)');
-  expect(treatment.borderRadius).toBe('50%');
-  expect(treatment.borderTopWidth).toBeGreaterThan(0);
-  expect(treatment.borderTopColor).toBe(treatment.expectedColor);
-  expect(treatment.borderOrbitDisplay).toBe('none');
-  expect(treatment.boxShadow).toBe('none');
-  expect(treatment.filter).toBe('none');
+  // fail clearly when the direct ring disappeared during inspection
+  if (treatment === null) throw new Error('progress border is missing');
+  expect(treatment.expectedToken).not.toBe('');
   expect(treatment.progressToken).toBe(treatment.expectedToken);
-  expect(treatment.width).toBeGreaterThan(0);
-  expect(treatment.width).toBeLessThanOrEqual(24);
-  expect(treatment.height).toBe(treatment.width);
-  expect(treatment.pseudo).toBe('::after');
-  expect(treatment.ringTarget).toBe(true);
-  expect(treatment.rotation).toEqual({ start: 0, quarter: 90 });
+  expect(treatment.borderColor).toBe(treatment.expectedColor);
+  expect(treatment.borderWidth).toBe(2);
+  expect(treatment.borderBackground).not.toContain('gradient');
+  expect(treatment.hasLegacyRunner).toBe(false);
+  expect(treatment.iconClassificationValid).toBe(true);
+  expect(treatment.ownerTransform).toBe('none');
+  expect(treatment.ownerWidth).toBeGreaterThan(0);
+  expect(treatment.ownerHeight).toBeGreaterThan(0);
+  expect(treatment.pointerEvents).toBe('none');
+  expect(treatment.ringWidth).toBeGreaterThan(0);
+  expect(treatment.ringHeight).toBeGreaterThan(0);
+  // text buttons reserve only the compact spinner slot beside their label
+  if (treatment.textButton) {
+    // narrow icon presentations center the spinner without pretending to be an icon-only control
+    if (treatment.responsiveToolbarText) {
+      expect(treatment.ringPosition).toBe('absolute');
+      expect(treatment.indicatorPosition).toBe('absolute');
+      expect(treatment.indicatorTop).toBeCloseTo(treatment.ringHeight / 2, 1);
+      expect(treatment.indicatorLeft).toBeCloseTo(treatment.ringWidth / 2, 1);
+      expect(treatment.indicatorTranslate).toBe('-50% -50%');
+      expect(treatment.glyphVisibility).toBe('hidden');
+    } else {
+      expect(treatment.ringPosition).toBe('static');
+      expect(treatment.ringWidth).toBeLessThanOrEqual(16);
+      expect(treatment.ringHeight).toBe(treatment.ringWidth);
+    }
+  } else {
+    expect(treatment.ringPosition).toBe('absolute');
+  }
+}
+
+// prove one shared phase paints the breathing border and any compact busy indicator
+export async function expectBreathingProgressBorder(control: Locator, expectedKind?: ProgressKind) {
+  const kind: ProgressKind = expectedKind ?? await control.evaluate(element => element.classList.contains('progress-loading') ? 'loading' : 'working');
+  await expectProgressKind(control, kind);
+  await expect.poll(() => control.evaluate(element => {
+    const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
+    // expose an incomplete registration until the shared clock publishes a phase
+    if (ring === null) return null;
+    const phaseTarget = element.classList.contains('progress-status-button') ? element as HTMLElement : ring;
+    const phase = Number.parseFloat(getComputedStyle(phaseTarget).getPropertyValue('--progress-phase'));
+    const borderOpacity = Number.parseFloat(getComputedStyle(ring, '::before').opacity);
+    const activeProgressAnimations = element.getAnimations({ subtree: true }).filter(animation => animation instanceof CSSAnimation
+      && animation.animationName.startsWith('progress-') && (animation.playState === 'running' || animation.pending)).length;
+    const candidates: Array<{ pseudo: string | null; target: Element }> = [];
+    // status surfaces reuse their authored dot slots
+    if (element.matches(".tabs button[role='tab'].progress-status-button")) candidates.push({ target: element, pseudo: '::after' });
+    if (element.classList.contains('progress-status-button')) {
+      candidates.push({ target: element, pseudo: '::before' }, { target: element, pseudo: '::after' });
+    }
+    const agentPill = element.querySelector('.agent-state-pill');
+    // agent rows replace the pill's leading dot
+    if (agentPill !== null) candidates.push({ target: agentPill, pseudo: '::before' });
+    const workspaceEntry = element.querySelector('.workspace-sheet-entry');
+    // workspace rows replace the entry's trailing dot
+    if (workspaceEntry !== null) candidates.push({ target: workspaceEntry, pseudo: '::after' });
+    // generic status controls animate the original dot element
+    for (const target of element.querySelectorAll(':scope > .stack-process-dot, :scope > .project-stack-status-dot, :scope > .server-switcher-attention, :scope > .git-status-dot, :scope > .launch-update-dot')) {
+      candidates.push({ target, pseudo: null });
+    }
+    const projectIndicator = element.matches('.project-open.progress-status-button') ? element.querySelector(':scope > i') : null;
+    // project launch controls reuse their compact authored indicator
+    if (projectIndicator !== null) candidates.push({ target: projectIndicator, pseudo: null });
+    // text and icon controls use the ring's compact after slot
+    candidates.push({ target: ring, pseudo: '::after' });
+    const spinner = candidates.map(({ target, pseudo }) => getComputedStyle(target, pseudo)).find(style => style.display !== 'none' && Number.parseFloat(style.borderTopWidth) > 0 && Number.parseFloat(style.width) > 0);
+    return {
+      activeProgressAnimations,
+      borderOpacity,
+      expectsSpinner: element.tagName === 'BUTTON' || element.classList.contains('progress-status-button'),
+      phase,
+      spinnerTransform: spinner?.transform ?? null
+    };
+  })).not.toBeNull();
+  const initialPaint = await control.evaluate(element => {
+    const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring')!;
+    const phaseTarget = element.classList.contains('progress-status-button') ? element as HTMLElement : ring;
+    const candidates: Array<{ pseudo: string | null; target: Element }> = [];
+    // collect every supported existing indicator slot
+    if (element.matches(".tabs button[role='tab'].progress-status-button")) candidates.push({ target: element, pseudo: '::after' });
+    if (element.classList.contains('progress-status-button')) candidates.push({ target: element, pseudo: '::before' }, { target: element, pseudo: '::after' });
+    const agentPill = element.querySelector('.agent-state-pill');
+    if (agentPill !== null) candidates.push({ target: agentPill, pseudo: '::before' });
+    const workspaceEntry = element.querySelector('.workspace-sheet-entry');
+    if (workspaceEntry !== null) candidates.push({ target: workspaceEntry, pseudo: '::after' });
+    // include each authored element indicator
+    for (const target of element.querySelectorAll(':scope > .stack-process-dot, :scope > .project-stack-status-dot, :scope > .server-switcher-attention, :scope > .git-status-dot, :scope > .launch-update-dot')) candidates.push({ target, pseudo: null });
+    const projectIndicator = element.matches('.project-open.progress-status-button') ? element.querySelector(':scope > i') : null;
+    if (projectIndicator !== null) candidates.push({ target: projectIndicator, pseudo: null });
+    candidates.push({ target: ring, pseudo: '::after' });
+    const spinner = candidates.map(({ target, pseudo }) => getComputedStyle(target, pseudo)).find(style => style.display !== 'none' && Number.parseFloat(style.borderTopWidth) > 0 && Number.parseFloat(style.width) > 0);
+    return {
+      borderOpacity: Number.parseFloat(getComputedStyle(ring, '::before').opacity),
+      phase: Number.parseFloat(getComputedStyle(phaseTarget).getPropertyValue('--progress-phase')),
+      spinnerTransform: spinner?.transform ?? null
+    };
+  });
+  // the shared presentation clock changes actual paint without native animation handles
+  await expect.poll(() => control.evaluate((element, before) => {
+    const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring')!;
+    const phaseTarget = element.classList.contains('progress-status-button') ? element as HTMLElement : ring;
+    const candidates: Array<{ pseudo: string | null; target: Element }> = [];
+    if (element.matches(".tabs button[role='tab'].progress-status-button")) candidates.push({ target: element, pseudo: '::after' });
+    if (element.classList.contains('progress-status-button')) candidates.push({ target: element, pseudo: '::before' }, { target: element, pseudo: '::after' });
+    const agentPill = element.querySelector('.agent-state-pill');
+    if (agentPill !== null) candidates.push({ target: agentPill, pseudo: '::before' });
+    const workspaceEntry = element.querySelector('.workspace-sheet-entry');
+    if (workspaceEntry !== null) candidates.push({ target: workspaceEntry, pseudo: '::after' });
+    for (const target of element.querySelectorAll(':scope > .stack-process-dot, :scope > .project-stack-status-dot, :scope > .server-switcher-attention, :scope > .git-status-dot, :scope > .launch-update-dot')) candidates.push({ target, pseudo: null });
+    const projectIndicator = element.matches('.project-open.progress-status-button') ? element.querySelector(':scope > i') : null;
+    if (projectIndicator !== null) candidates.push({ target: projectIndicator, pseudo: null });
+    candidates.push({ target: ring, pseudo: '::after' });
+    const spinner = candidates.map(({ target, pseudo }) => getComputedStyle(target, pseudo)).find(style => style.display !== 'none' && Number.parseFloat(style.borderTopWidth) > 0 && Number.parseFloat(style.width) > 0);
+    const phase = Number.parseFloat(getComputedStyle(phaseTarget).getPropertyValue('--progress-phase'));
+    const borderOpacity = Number.parseFloat(getComputedStyle(ring, '::before').opacity);
+    const spinnerTransform = spinner?.transform ?? null;
+    const expectsSpinner = element.tagName === 'BUTTON' || element.classList.contains('progress-status-button');
+    return {
+      borderPaintMoved: borderOpacity !== before.borderOpacity,
+      phaseMoved: Number.isFinite(phase) && phase !== before.phase,
+      spinnerPaintMoved: !expectsSpinner || spinnerTransform !== before.spinnerTransform
+    };
+  }, initialPaint)).toEqual({ borderPaintMoved: true, phaseMoved: true, spinnerPaintMoved: true });
+  const samples = await control.evaluate(element => {
+    const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
+    // expose an incomplete progress owner before sampling its paint
+    if (ring === null) return null;
+    const phaseTarget = element.classList.contains('progress-status-button') ? element as HTMLElement : ring;
+    const candidates: Array<{ pseudo: string | null; target: Element }> = [];
+    if (element.matches(".tabs button[role='tab'].progress-status-button")) candidates.push({ target: element, pseudo: '::after' });
+    if (element.classList.contains('progress-status-button')) candidates.push({ target: element, pseudo: '::before' }, { target: element, pseudo: '::after' });
+    const agentPill = element.querySelector('.agent-state-pill');
+    if (agentPill !== null) candidates.push({ target: agentPill, pseudo: '::before' });
+    const workspaceEntry = element.querySelector('.workspace-sheet-entry');
+    if (workspaceEntry !== null) candidates.push({ target: workspaceEntry, pseudo: '::after' });
+    for (const target of element.querySelectorAll(':scope > .stack-process-dot, :scope > .project-stack-status-dot, :scope > .server-switcher-attention, :scope > .git-status-dot, :scope > .launch-update-dot')) candidates.push({ target, pseudo: null });
+    const projectIndicator = element.matches('.project-open.progress-status-button') ? element.querySelector(':scope > i') : null;
+    if (projectIndicator !== null) candidates.push({ target: projectIndicator, pseudo: null });
+    candidates.push({ target: ring, pseudo: '::after' });
+    const originalPhase = phaseTarget.style.getPropertyValue('--progress-phase');
+    const readSpinner = () => candidates.map(({ target, pseudo }) => ({ style: getComputedStyle(target, pseudo), target, pseudo })).find(({ style }) => style.display !== 'none' && Number.parseFloat(style.borderTopWidth) > 0 && Number.parseFloat(style.width) > 0)?.style;
+    phaseTarget.style.setProperty('--progress-phase', '0deg');
+    const lowOpacity = Number.parseFloat(getComputedStyle(ring, '::before').opacity);
+    const startStyle = readSpinner();
+    const startMatrix = new DOMMatrixReadOnly(startStyle?.transform === 'none' || startStyle === undefined ? undefined : startStyle.transform);
+    phaseTarget.style.setProperty('--progress-phase', '180deg');
+    const highOpacity = Number.parseFloat(getComputedStyle(ring, '::before').opacity);
+    phaseTarget.style.setProperty('--progress-phase', '45deg');
+    const quarterStyle = readSpinner();
+    const quarterMatrix = new DOMMatrixReadOnly(quarterStyle?.transform === 'none' || quarterStyle === undefined ? undefined : quarterStyle.transform);
+    // restore ownership to the shared presentation clock
+    if (originalPhase === '') phaseTarget.style.removeProperty('--progress-phase');
+    else phaseTarget.style.setProperty('--progress-phase', originalPhase);
+    return {
+      activeProgressAnimations: element.getAnimations({ subtree: true }).filter(animation => animation instanceof CSSAnimation
+        && animation.animationName.startsWith('progress-') && (animation.playState === 'running' || animation.pending)).length,
+      expectsSpinner: element.tagName === 'BUTTON' || element.classList.contains('progress-status-button'),
+      highOpacity,
+      lowOpacity,
+      spinner: quarterStyle === undefined ? null : {
+        borderLeftColor: quarterStyle.borderLeftColor,
+        borderTopWidth: Number.parseFloat(quarterStyle.borderTopWidth),
+        quarter: Math.round(Math.atan2(quarterMatrix.b, quarterMatrix.a) * 180 / Math.PI),
+        start: Math.round(Math.atan2(startMatrix.b, startMatrix.a) * 180 / Math.PI)
+      }
+    };
+  });
+  // fail clearly when phase sampling could not find the direct ring
+  if (samples === null) throw new Error('breathing progress treatment is missing');
+  expect(samples.activeProgressAnimations).toBe(0);
+  expect(samples.lowOpacity).toBeCloseTo(0.35, 2);
+  expect(samples.highOpacity).toBeCloseTo(1, 2);
+  // buttons and status surfaces replace their indicator with the same phase-driven orbit
+  if (samples.expectsSpinner) {
+    expect(samples.spinner).toMatchObject({ borderLeftColor: 'rgba(0, 0, 0, 0)', quarter: 90, start: 0 });
+    expect(samples.spinner?.borderTopWidth).toBeGreaterThan(0);
+  } else {
+    expect(samples.spinner).toBeNull();
+  }
+}
+
+// reduced motion leaves a steady border and a static open indicator where one is reserved
+export async function expectReducedMotionProgress(control: Locator, color: ProgressColor, kind?: ProgressKind) {
+  await expectProgressBorder(control, color, kind);
+  const treatment = await control.evaluate(element => {
+    const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
+    // expose incomplete progress markup to the assertion
+    if (ring === null) return null;
+    const candidates: Array<{ pseudo: string | null; target: Element }> = [];
+    // status surfaces reuse their existing dot location
+    if (element.matches(".tabs button[role='tab'].progress-status-button")) candidates.push({ target: element, pseudo: '::after' });
+    const agentPill = element.querySelector('.agent-state-pill');
+    // agent rows replace the pill's leading dot
+    if (agentPill !== null) candidates.push({ target: agentPill, pseudo: '::before' });
+    const workspaceEntry = element.querySelector('.workspace-sheet-entry');
+    // workspace rows replace the entry's trailing dot
+    if (workspaceEntry !== null) candidates.push({ target: workspaceEntry, pseudo: '::after' });
+    // generic status controls animate the original dot element
+    for (const target of element.querySelectorAll(':scope > .stack-process-dot, :scope > .project-stack-status-dot, :scope > .server-switcher-attention, :scope > .git-status-dot, :scope > .launch-update-dot, :scope.project-open > i')) {
+      candidates.push({ target, pseudo: null });
+    }
+    // text and icon buttons reserve the ring's compact after slot
+    candidates.push({ target: ring, pseudo: '::after' });
+    const visibleIndicators = candidates.map(({ target, pseudo }) => {
+      const style = getComputedStyle(target, pseudo);
+      return {
+        animationName: style.animationName,
+        borderLeftColor: style.borderLeftColor,
+        borderTopWidth: Number.parseFloat(style.borderTopWidth),
+        display: style.display,
+        height: Number.parseFloat(style.height),
+        transform: style.transform,
+        width: Number.parseFloat(style.width)
+      };
+    }).filter(style => style.display !== 'none' && style.borderTopWidth > 0 && style.width > 0 && style.height > 0);
+    return {
+      borderAnimation: getComputedStyle(ring, '::before').animationName,
+      expectsIndicator: element.tagName === 'BUTTON' || element.classList.contains('progress-status-button'),
+      activeProgressAnimations: element.getAnimations({ subtree: true }).filter(animation => animation instanceof CSSAnimation && animation.animationName.startsWith('progress-') && (animation.playState === 'running' || animation.pending)).length,
+      visibleIndicators
+    };
+  });
+  if (treatment === null) throw new Error('reduced-motion progress treatment is missing');
+  expect(treatment.borderAnimation).toBe('none');
+  expect(treatment.activeProgressAnimations).toBe(0);
+  // buttons and status controls retain one nonrotating open ring
+  if (treatment.expectsIndicator) {
+    expect(treatment.visibleIndicators).toHaveLength(1);
+    const indicator = treatment.visibleIndicators[0];
+    expect(indicator.animationName).toBe('none');
+    expect(indicator.borderLeftColor).toBe('rgba(0, 0, 0, 0)');
+    expect(indicator.borderTopWidth).toBeGreaterThan(0);
+    expect(indicator.transform).toBe('matrix(1, 0, 0, 1, 0, 0)');
+    expect(indicator.width).toBeGreaterThan(0);
+    expect(indicator.width).toBeLessThanOrEqual(24);
+    expect(indicator.height).toBe(indicator.width);
+  } else {
+    expect(treatment.visibleIndicators).toHaveLength(0);
+  }
 }
 
 // match each loading border to its intended split surface
 export async function expectSplitProgressBorder(panel: Locator, color: ProgressColor) {
-  await expectProgressBorder(panel.locator('.log-loading'), color);
+  const loading = panel.locator('.log-loading');
+  await expectProgressBorder(loading, color);
+  await expectBreathingProgressBorder(loading);
   await expect.poll(() => panel.evaluate(element => {
     const ring = element.querySelector('.log-loading > .update-progress-ring');
     // expose a missing border to the geometry assertion
@@ -193,143 +344,45 @@ export async function expectSplitProgressBorder(panel: Locator, color: ProgressC
   })).toBeLessThanOrEqual(1);
 }
 
-// verify the visual orbit advances clockwise without moving the owning control
-export async function expectClockwiseProgressBorder(control: Locator, expectedKind?: ProgressKind) {
-  const kind: ProgressKind = expectedKind ?? await control.evaluate(element => element.classList.contains('progress-loading') ? 'loading' : 'working');
-  await expectProgressKind(control, kind);
-  const name = animationName(kind, await retainedStatus(control));
-  // allow a replacement animationstart event one rendered frame
-  await expect.poll(async () => {
-    const timing = await control.evaluate((element, name) => {
-      const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
-      const animation = ring?.getAnimations({ subtree: true }).find(candidate => candidate instanceof CSSAnimation && candidate.animationName === name);
-      return [animation?.startTime, animation?.effect?.getTiming().iterations] as const;
-    }, name);
-    return cycleAligned(timing[0], timing[1]);
-  }).toBe(true);
-  // isolate sampling so polling does not discard the observed treatment
-  const inspect = () => control.evaluate(element => {
-    const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
-    // expose a missing direct ring to the assertion
-    if (ring === null) return null;
-    const animations = ring.getAnimations({ subtree: true });
-    // select the shared border instead of transient owner effects
-    const animation = animations.find(candidate => candidate instanceof CSSAnimation && candidate.effect instanceof KeyframeEffect && (candidate.effect.target === ring || candidate.effect.target === ring.querySelector(':scope > .working-progress-mask')) && candidate.effect.pseudoElement === '::before');
-    // require the shared live orbit
-    if (animation === undefined) return null;
-    const effect = animation.effect as KeyframeEffect;
-    const duration = effect.getComputedTiming().duration;
-    // require one finite cycle before sampling it
-    if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) return null;
-    const originalStartTime = animation.startTime;
-    const originalCurrentTime = animation.currentTime;
-    const originalPlayState = animation.playState;
-    // sample equal points across both half turns
-    const samples = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 0.999].map(portion => {
-      animation.pause();
-      animation.currentTime = duration * portion;
-      const style = getComputedStyle(effect.target as Element, '::before');
-      // read rotated status textures and legacy transient gradient angles
-      if (style.animationName === 'working-status-orbit') {
-        const matrix = new DOMMatrixReadOnly(style.transform);
-        return (Math.atan2(matrix.b, matrix.a) * 180 / Math.PI + 360) % 360;
-      }
-      return Number.parseFloat(style.getPropertyValue('--update-orbit-angle'));
-    });
-    // restore the synchronized shared clock after local sampling
-    if (originalPlayState === 'running') {
-      animation.play();
-      animation.startTime = originalStartTime;
-    } else {
-      animation.currentTime = originalCurrentTime;
-    }
-    return {
-      animationCount: animations.length,
-      duration,
-      direction: effect.getTiming().direction,
-      easing: effect.getTiming().easing,
-      name: animation instanceof CSSAnimation ? animation.animationName : '',
-      ownerTransform: getComputedStyle(element).transform,
-      pseudo: effect.pseudoElement,
-      ringTarget: effect.target === ring || effect.target === ring.querySelector(':scope > .working-progress-mask'),
-      samples
-    };
-  });
-  const treatment = await inspect();
-  expect(treatment).not.toBeNull();
-  expect(treatment).toMatchObject({
-    animationCount: 1,
-    duration: 2_000,
-    direction: 'normal',
-    easing: 'linear',
-    name,
-    ownerTransform: 'none',
-    pseudo: '::before',
-    ringTarget: true
-  });
-  const samples = treatment!.samples;
-  expect(samples[0]).toBeCloseTo(0, 0);
-  expect(samples[2]).toBeCloseTo(90, 0);
-  expect(samples[4]).toBeCloseTo(180, 0);
-  expect(samples[6]).toBeCloseTo(270, 0);
-  expect(samples[8]).toBeCloseTo(360, 0);
-  // distinguish constant loading from two accelerated working intervals
-  if (kind === 'loading') {
-    expect(samples[1]).toBeCloseTo(45, 0);
-    expect(samples[3]).toBeCloseTo(135, 0);
-    expect(samples[5]).toBeCloseTo(225, 0);
-    expect(samples[7]).toBeCloseTo(315, 0);
-  } else {
-    expect(samples[1]).toBeLessThan(40);
-    expect(samples[3]).toBeGreaterThan(140);
-    expect(samples[5]).toBeLessThan(220);
-    expect(samples[7]).toBeGreaterThan(320);
-  }
-}
-
-// compare live phases before any helper seeks an animation locally
-export async function expectSynchronizedProgressBorders(controls: Locator, count: number, kind: ProgressKind, reducedMotion = false) {
+// verify every active surface receives one synchronized shared phase without native loops
+export async function expectProgressBorderGroup(controls: Locator, count: number, kind: ProgressKind, reducedMotion = false) {
   await expect(controls).toHaveCount(count);
-  const expectedName = reducedMotion ? 'progress-spinner' : animationName(kind, await retainedStatus(controls.first()));
-  const expectedDuration = reducedMotion ? 1_000 : 2_000;
-  // inspect every owner in one browser task
   await expect.poll(() => controls.evaluateAll((elements, expected) => {
-    // capture live clocks before any local seek
     const observations = elements.map(element => {
       const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring');
-      const animation = ring?.getAnimations({ subtree: true })[0];
-      const duration = animation?.effect?.getComputedTiming().duration;
+      const phaseTarget = element.classList.contains('progress-status-button') ? element as HTMLElement : ring;
+      const phase = phaseTarget === null ? Number.NaN : Number.parseFloat(getComputedStyle(phaseTarget).getPropertyValue('--progress-phase'));
+      const activeProgressAnimations = element.getAnimations({ subtree: true }).filter(animation => animation instanceof CSSAnimation
+        && animation.animationName.startsWith('progress-') && (animation.playState === 'running' || animation.pending)).length;
       return {
-        duration,
-        kind: element.classList.contains('progress-loading') ? 'loading' : 'working',
-        name: animation instanceof CSSAnimation ? animation.animationName : '',
-        phase: typeof animation?.currentTime === 'number' && typeof duration === 'number' ? ((animation.currentTime % duration) + duration) % duration : null,
-        startTime: animation?.startTime,
-        iterations: animation?.effect?.getTiming().iterations
+        activeProgressAnimations,
+        borderOpacity: ring === null ? Number.NaN : Number.parseFloat(getComputedStyle(ring, '::before').opacity),
+        busy: element.getAttribute('aria-busy'),
+        classified: element.classList.contains('progress-loading') ? 'loading' : 'working',
+        hasLegacyRunner: element.querySelector('.working-progress-runner') !== null,
+        phase,
+        ring: ring !== null
       };
     });
-    // compare phases across the cycle boundary
-    let maximumPhaseDelta = 0;
-    // visit each unique animation pair
-    for (let index = 0; index < observations.length; index += 1) {
-      // compare later animations only
-      for (let next = index + 1; next < observations.length; next += 1) {
-        const first = observations[index].phase;
-        const second = observations[next].phase;
-        // report incomplete animations until the synchronizer observes them
-        if (first === null || second === null) return { classified: false, duration: false, name: false, phase: false, start: false };
-        const delta = Math.abs(first - second);
-        maximumPhaseDelta = Math.max(maximumPhaseDelta, Math.min(delta, expected.duration - delta));
-      }
-    }
-    // reduce observations to stable poll flags
+    const phases = observations.flatMap(observation => Number.isFinite(observation.phase) ? [observation.phase] : []);
+    const opacities = observations.map(observation => observation.borderOpacity);
     return {
-      classified: observations.every(observation => observation.kind === expected.kind),
-      duration: observations.every(observation => observation.duration === expected.duration),
-      name: observations.every(observation => observation.name === expected.name),
-      phase: maximumPhaseDelta <= 34,
-      // every active loop shares the document origin
-      start: observations.every(({ startTime, iterations }) => startTime === 0 && iterations === Infinity)
+      allBusy: observations.every(observation => observation.busy === 'true'),
+      allClassified: observations.every(observation => observation.classified === expected.kind),
+      allRingsPresent: observations.every(observation => observation.ring),
+      noActiveProgressAnimations: observations.every(observation => observation.activeProgressAnimations === 0),
+      noLegacyRunner: observations.every(observation => !observation.hasLegacyRunner),
+      phaseContract: expected.reduced
+        ? phases.length === 0 && opacities.every(opacity => opacity === 1)
+        : phases.length === elements.length && Math.max(...phases) - Math.min(...phases) <= 0.01
+          && Math.max(...opacities) - Math.min(...opacities) <= 0.001
     };
-  }, { duration: expectedDuration, kind, name: expectedName })).toEqual({ classified: true, duration: true, name: true, phase: true, start: true });
+  }, { kind, reduced: reducedMotion })).toEqual({
+    allBusy: true,
+    allClassified: true,
+    allRingsPresent: true,
+    noActiveProgressAnimations: true,
+    noLegacyRunner: true,
+    phaseContract: true
+  });
 }

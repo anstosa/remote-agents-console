@@ -29,14 +29,24 @@ export const measureOutputShape = (terminal: Terminal): OutputShape | undefined 
     const line = buffer.getLine(buffer.viewportY + row);
     // an unpopulated row contributes no bars
     if (line === undefined) continue;
+    // ordinary ascii rows already expose their trimmed cells in one native string copy
+    const text = line.translateToString(true, 0, cols);
+    const ascii = /^[\x20-\x7e]*$/u.test(text);
+    const limit = ascii ? text.length : cols;
     let start = 0;
     let end = 0;
     // use cell widths instead of string lengths for wide and combined glyphs
-    for (let column = 0; column < cols && runs.length < maxRuns; column += 1) {
-      const cell = line.getCell(column, scratch);
-      const width = cell?.getWidth() ?? 0;
-      // skip empty cells and the trailing half of wide glyphs
-      if (width === 0 || !cell?.getChars().trim()) continue;
+    for (let column = 0; column < limit && runs.length < maxRuns; column += 1) {
+      let width = 1;
+      // skip padding without copying every blank cell on the common transcript path
+      if (ascii) {
+        if (text.charCodeAt(column) === 32) continue;
+      } else {
+        const cell = line.getCell(column, scratch);
+        width = cell?.getWidth() ?? 0;
+        // skip empty cells and the trailing half of wide glyphs
+        if (width === 0 || !cell?.getChars().trim()) continue;
+      }
       // bridge single spaces within prose but preserve wider gaps and indentation
       if (end === 0 || column > end + 1) {
         // finish the previous run before starting a new column

@@ -29,57 +29,68 @@ const expectPromptFitsContent = async (prompt: Locator): Promise<PromptDimension
 };
 
 // cover explicit lines, edits, and soft wrapping
-test('grows only when prompt content needs another line and shrinks again', async ({ page }) => {
-  // mock prompt dependencies
-  await page.route('**/api/**', route => {
-    const url = new URL(route.request().url());
-    // establish an active browser session
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    // render one idle agent
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready' }], projects: [] } });
-    // disable optional push setup
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    // issue one log ticket
-    if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    // return no saved prompts
-    if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+for (const fallback of [false, true]) {
+  test(`grows only when prompt content needs another line and shrinks again (${fallback ? 'measured fallback' : 'native sizing'})`, async ({ page }) => {
+    // emulate an older engine without native content sizing while retaining the same layout checks
+    if (fallback) await page.addInitScript(() => {
+      const supports = CSS.supports.bind(CSS);
+      CSS.supports = ((property: string, value?: string) => property === 'field-sizing' && value === 'content' ? false : value === undefined ? supports(property) : supports(property, value)) as typeof CSS.supports;
+    });
+    // mock prompt dependencies
+    await page.route('**/api/**', route => {
+      const url = new URL(route.request().url());
+      // establish an active browser session
+      if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+      // render one idle agent
+      if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready' }], projects: [] } });
+      // disable optional push setup
+      if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+      // issue one log ticket
+      if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
+      // return no saved prompts
+      if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
+      return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+    });
+
+    await page.goto('/');
+    // match the fallback engine's fixed field sizing as well as its feature detection
+    if (fallback) await page.addStyleTag({ content: '.prompt-composer textarea { field-sizing: fixed !important; }' });
+    const prompt = page.getByRole('textbox', { name: 'Prompt' });
+    await expect(prompt).toBeVisible();
+    // verify the native path owns the height and the fallback still sets it when needed
+    expect(await prompt.evaluate((input) => input.style.height === '')).toBe(!fallback);
+    const initial = await expectPromptFitsContent(prompt);
+
+    // build explicit prompt lines
+    const lines = Array.from({ length: 8 }, (_, index) => `Prompt line ${index + 1}`);
+    await prompt.fill(lines.join('\n'));
+    const filled = await expectPromptFitsContent(prompt);
+    expect(filled.height).toBeGreaterThan(initial.height);
+
+    await prompt.pressSequentially(' still on the last line');
+    const sameLine = await expectPromptFitsContent(prompt);
+    expect(sameLine.height).toBeCloseTo(filled.height, 0);
+
+    await prompt.press('Shift+Enter');
+    const grown = await expectPromptFitsContent(prompt);
+    expect(grown.height - sameLine.height).toBeCloseTo(grown.lineHeight, 0);
+
+    await prompt.press('Backspace');
+    const shrunk = await expectPromptFitsContent(prompt);
+    expect(shrunk.height).toBeCloseTo(sameLine.height, 0);
+
+    const wrappedText = 'This prompt wraps naturally without any explicit newline. '.repeat(12);
+    await prompt.fill(wrappedText);
+    await expect(prompt).toHaveValue(wrappedText);
+    const wrapped = await expectPromptFitsContent(prompt);
+    expect(wrapped.contentHeight).toBeGreaterThan(wrapped.minHeight);
+
+    await prompt.fill('Short prompt');
+    const short = await expectPromptFitsContent(prompt);
+    expect(short.height).toBeLessThan(wrapped.height);
+    expect(short.height).toBeCloseTo(initial.height, 0);
   });
-
-  await page.goto('/');
-  const prompt = page.getByRole('textbox', { name: 'Prompt' });
-  await expect(prompt).toBeVisible();
-  const initial = await expectPromptFitsContent(prompt);
-
-  // build explicit prompt lines
-  const lines = Array.from({ length: 8 }, (_, index) => `Prompt line ${index + 1}`);
-  await prompt.fill(lines.join('\n'));
-  const filled = await expectPromptFitsContent(prompt);
-  expect(filled.height).toBeGreaterThan(initial.height);
-
-  await prompt.pressSequentially(' still on the last line');
-  const sameLine = await expectPromptFitsContent(prompt);
-  expect(sameLine.height).toBeCloseTo(filled.height, 0);
-
-  await prompt.press('Shift+Enter');
-  const grown = await expectPromptFitsContent(prompt);
-  expect(grown.height - sameLine.height).toBeCloseTo(grown.lineHeight, 0);
-
-  await prompt.press('Backspace');
-  const shrunk = await expectPromptFitsContent(prompt);
-  expect(shrunk.height).toBeCloseTo(sameLine.height, 0);
-
-  const wrappedText = 'This prompt wraps naturally without any explicit newline. '.repeat(12);
-  await prompt.fill(wrappedText);
-  await expect(prompt).toHaveValue(wrappedText);
-  const wrapped = await expectPromptFitsContent(prompt);
-  expect(wrapped.contentHeight).toBeGreaterThan(wrapped.minHeight);
-
-  await prompt.fill('Short prompt');
-  const short = await expectPromptFitsContent(prompt);
-  expect(short.height).toBeLessThan(wrapped.height);
-  expect(short.height).toBeCloseTo(initial.height, 0);
-});
+}
 
 test('caps the prompt at half the viewport and scrolls overflowing content', async ({ page }) => {
   await page.setViewportSize({ width: 1_000, height: 600 });

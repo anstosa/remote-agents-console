@@ -1,7 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { applyPatch } from '../../server/src/settings/patches.js';
 import { applicationSettingsSchema } from '../../server/src/settings/schema.js';
-import type { SettingsPatch } from '../src/settings/contracts.js';
+import type { SettingsOperation, SettingsPatch } from '../src/settings/contracts.js';
 import { mockAccountSocket } from './account-fixture.js';
 import { confirmSettingsDiscard } from './settings-confirmation-helpers.js';
 
@@ -12,13 +12,14 @@ type FixtureState = {
   pending: boolean;
   effective: boolean;
   metricRequests: number;
+  operation?: SettingsOperation;
   saves: SettingsRequest[];
   validations: SettingsRequest[];
 };
 type StorageWindow = Window & { __resourceMonitoringStorageWrites: string[] };
 
 // publish the current restart state
-const settingsStatus = (state: FixtureState) => ({ pending: state.pending, targets: state.pending ? ['rac'] : [], effective: 'known', restartAvailable: true });
+const settingsStatus = (state: FixtureState) => ({ pending: state.pending, targets: state.pending ? ['rac'] : [], effective: 'known', restartAvailable: true, ...(state.operation === undefined ? {} : { operation: state.operation }) });
 
 // publish the current application file revision
 function applicationSource(state: FixtureState, writable: boolean) {
@@ -102,6 +103,8 @@ async function setupResourceMonitoringSettings(page: Page, options: { enabled?: 
     if (path === '/api/settings/restart' && request.method() === 'POST') {
       state.effective = state.value.resourceMonitoring === true;
       state.pending = false;
+      // the real restart observer requires the acknowledged operation identity through completion
+      state.operation = { id: 'resource-monitoring-restart', state: 'complete', phase: 'Restart complete', restart: { state: 'restarted', recoveryDeadline: Date.now() } };
       return route.fulfill({ json: settingsStatus(state) });
     }
     // publish the latest persisted application source

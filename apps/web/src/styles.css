@@ -540,7 +540,7 @@ button.model-chip:hover, button.model-chip.active, .watches-chip:hover, .watches
 .log-loading strong { max-width: 31rem; color: var(--text); font: 700 .78rem var(--font-mono); }
 .log-loading > span:not(.update-progress-ring) { max-width: 31rem; color: var(--overlay-2); font: 500 .68rem/1.5 var(--font-mono); letter-spacing: .01em; }
 /* keep loading borders inside their output or full-split boundary */
-:is(.log-output, .agent-output) > .log-loading > .update-progress-ring { inset: var(--progress-inline-inset, 0); }
+:is(.log-output, .agent-output) > .log-loading > .update-progress-ring { inset: 0; }
 .log-loading.inactive { color: var(--overlay-0); }
 .log-stale-overlay { position: absolute; inset: 0; z-index: 14; overflow: hidden; pointer-events: none; background: linear-gradient(120deg, color-mix(in srgb, var(--crust) 50%, transparent), color-mix(in srgb, var(--mantle) 26%, transparent)), repeating-linear-gradient(0deg, color-mix(in srgb, var(--crust) 10%, transparent) 0 1px, transparent 1px 5px); box-shadow: inset 0 0 5rem color-mix(in srgb, var(--crust) 72%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--surface-2) 42%, transparent); backdrop-filter: blur(1.75px) saturate(.72) brightness(.82); }
 .log-stale-overlay::after { position: absolute; inset: -20%; content: ''; background: radial-gradient(ellipse at 50% 48%, transparent 25%, color-mix(in srgb, var(--crust) 36%, transparent) 76%); filter: blur(1rem); }
@@ -1339,6 +1339,10 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 /* A streamed pane renders at its natural grid top-left; a pane smaller than the panel
    is letterboxed against the terminal background rather than stretched. */
 .streamed-terminal { position: relative; overflow: hidden; background: var(--base); }
+/* suppress the entire covered renderer, retaining only its screen hit target and input helpers */
+.streamed-terminal-host.initial-render-pending > .xterm { visibility: hidden; }
+.streamed-terminal-host.initial-render-pending .xterm-screen { visibility: visible; }
+.streamed-terminal-host.initial-render-pending .xterm-screen > :not(.xterm-helpers) { visibility: hidden; }
 /* center reconnect status over the retained terminal frame */
 .streamed-terminal-status { position: absolute; inset: 0; z-index: 12; isolation: isolate; display: grid; place-content: center; padding: 1rem; color: var(--yellow); font: 700 .85rem var(--font-mono); text-align: center; pointer-events: none; }
 .streamed-terminal-status::before { z-index: -1; content: ''; }
@@ -1352,20 +1356,23 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 /* Restore the hidden state: the global `button` display rule otherwise overrides `[hidden]`,
    which would leave Jump-to-latest showing even while following the live tail. */
 .streamed-terminal-jump[hidden] { display: none; }
-.output-link-overlay { position: absolute; z-index: 10; display: block; background: transparent; cursor: pointer; }
+/* keep link geometry contained in the already measured terminal screen */
+.terminal-link-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; contain: strict; }
+.output-link-overlay { position: absolute; z-index: 10; display: block; background: transparent; cursor: pointer; pointer-events: auto; }
 .output-link-overlay:hover { box-shadow: inset 0 -1px var(--sky); }
 /* find the native text beneath semantic links during link-start selection */
 .selection-hit-test .output-link-overlay { visibility: hidden; }
 /* own selectable text independently of xterm's delayed and replaceable render trees */
-.terminal-selection-surface { position: absolute; top: 0; left: 0; z-index: 10; color: transparent; pointer-events: none; user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; white-space: pre; }
+/* keep the mirrored text ready but out of layout when native xterm selection is active */
+.terminal-selection-surface { position: absolute; top: 0; left: 0; height: 100%; z-index: 10; display: none; contain: layout paint; color: transparent; pointer-events: none; user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; white-space: pre; }
 .terminal-selection-row { height: var(--selection-cell-height); line-height: var(--selection-cell-height); overflow: hidden; }
 .terminal-selection-row > span { display: inline-block; height: 100%; vertical-align: top; }
 .terminal-selection-surface *::selection { color: var(--crust); }
-.native-mouse-selection .xterm.enable-mouse-events .terminal-selection-surface { pointer-events: auto; }
+.native-mouse-selection .xterm.enable-mouse-events .terminal-selection-surface { display: block; pointer-events: auto; }
 .native-mouse-selection .xterm .xterm-accessibility:not(.debug) { pointer-events: none; }
 .native-mouse-selection .xterm.enable-mouse-events .xterm-helper-textarea { pointer-events: none; }
 @media (pointer: coarse) {
-  .native-mouse-selection .terminal-selection-surface { pointer-events: auto; }
+  .native-mouse-selection .terminal-selection-surface { display: block; pointer-events: auto; }
   .xterm .xterm-accessibility:not(.debug) { pointer-events: auto; user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
   .xterm .xterm-accessibility-tree, .xterm .xterm-accessibility-tree [role='listitem'] { user-select: text; -webkit-user-select: text; }
   .xterm .xterm-accessibility-tree:not(.debug) *::selection { color: var(--crust); }
@@ -1427,6 +1434,8 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 .prompt-recording-indicator { position: absolute; z-index: 2; bottom: calc(100% + .3rem); left: 50%; display: grid; width: 1.6rem; height: 1.6rem; place-items: center; border: 1px solid var(--red); border-radius: 50%; background: var(--crust); color: var(--red); transform: translateX(-50%); pointer-events: none; animation: prompt-recording-blink 1s ease-in-out infinite; }
 .prompt-recording-indicator svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .prompt-composer textarea { display: block; width: 100%; }
+/* let supported engines fit text vertically without resetting height and reading scrollHeight */
+@supports (field-sizing: content) { .prompt-composer textarea { field-sizing: content; height: auto; } }
 .command-menu { position: absolute; right: 0; bottom: calc(100% + .35rem); left: 0; z-index: var(--layer-popover); display: grid; max-height: 15rem; overflow: auto; padding: .3rem; border: 1px solid color-mix(in srgb, var(--lavender) 55%, var(--surface-1)); border-radius: var(--control-radius); background: var(--mantle); box-shadow: 0 .7rem 1.8rem color-mix(in srgb, var(--crust) 80%, transparent); }
 .command-menu button { display: grid; grid-template-columns: minmax(8rem, max-content) minmax(0, 1fr); width: 100%; gap: .7rem; align-items: center; border: 0; border-radius: calc(var(--control-radius) - .15rem); padding: .45rem .5rem; background: transparent; color: var(--subtext-0); text-align: left; box-shadow: none; }
 .command-menu button:hover, .command-menu button.active { background: color-mix(in srgb, var(--blue) 20%, transparent); color: var(--text); }
@@ -1822,71 +1831,81 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* retain static update attention when either motion preference is reduced */
 @media (prefers-reduced-motion: reduce) { :is(.launch-card-main, .server-menu, .server-update-dialog) .update-attention { animation: none; } }
 :root[data-motion="reduced"] :is(.launch-card-main, .server-menu, .server-update-dialog) .update-attention { animation: none; }
-/* ease working half turns without stopping at their shared boundaries */
-@property --update-orbit-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
-@keyframes update-border-orbit { 0% { --update-orbit-angle: 0deg; } 50% { --update-orbit-angle: 180deg; } 100% { --update-orbit-angle: 360deg; } }
-/* read-only data loads keep a constant clockwise speed */
-@keyframes loading-border-orbit { from { --update-orbit-angle: 0deg; } to { --update-orbit-angle: 360deg; } }
-.progress-loading > .update-progress-ring { --progress-orbit-animation: loading-border-orbit 2s linear infinite; }
-/* replace the attention pulse with a quiet track beneath the travelling border */
+/* a zero-duration mount signal registers one shared phase per progress owner */
+@keyframes progress-register { from { opacity: 1; } to { opacity: 1; } }
+:root { --progress-register-animation: progress-register 0s linear; --progress-breathe-center: .675; --progress-breathe-amplitude: .325; --progress-spinner-multiplier: 2; --progress-breathe-hint: opacity; --progress-spinner-hint: transform; }
+/* replace the attention pulse with a quiet track beneath the breathing border */
 .tabs .tab-row-lead .server-selector.updates-in-progress, .workspace-toolbar-actions .launch-split.updates-in-progress { animation: none; box-shadow: none; filter: none; }
 /* dim each existing track without overriding the server button's keyboard focus outline */
 .tabs .tab-row-lead .server-selector.updates-in-progress { border-color: color-mix(in srgb, var(--mauve) 30%, transparent); }
+.launch-split.updates-in-progress { position: relative; overflow: visible; }
 .workspace-toolbar-actions .launch-split.updates-in-progress { outline-color: color-mix(in srgb, var(--mauve) 30%, transparent); }
 /* keep keyboard focus inside busy controls */
 .tabs .tab-row-lead .server-selector.updates-in-progress:focus-visible, .workspace-toolbar-actions .launch-split.updates-in-progress > button:focus-visible { outline-offset: -4px; }
-/* reuse the same orbit for loaders and color-matched pending actions */
+/* reuse the same breathing border for loaders and color-matched pending actions */
 /* preserve explicit absolute and fixed positioning on loading overlays */
 :where(.progress-border) { position: relative; }
 /* keep active progress visible even when component rules dim disabled controls */
 .progress-border[aria-busy='true'] { opacity: 1 !important; }
 .progress-border:focus-visible { outline-offset: -4px; }
-.progress-blue { --progress-ring-color: var(--blue); --progress-ring-highlight: var(--sapphire); }
-.progress-yellow { --progress-ring-color: var(--yellow); --progress-ring-highlight: var(--rosewater); }
-.progress-red { --progress-ring-color: var(--red); --progress-ring-highlight: var(--flamingo); }
-.progress-mauve { --progress-ring-color: var(--mauve); --progress-ring-highlight: var(--lavender); }
-.progress-peach { --progress-ring-color: var(--peach); --progress-ring-highlight: var(--yellow); }
-.progress-green { --progress-ring-color: var(--green); --progress-ring-highlight: var(--teal); }
-.progress-teal { --progress-ring-color: var(--teal); --progress-ring-highlight: var(--sky); }
-.progress-pink { --progress-ring-color: var(--pink); --progress-ring-highlight: var(--rosewater); }
-.progress-rosewater { --progress-ring-color: var(--rosewater); --progress-ring-highlight: var(--flamingo); }
-.progress-flamingo { --progress-ring-color: var(--flamingo); --progress-ring-highlight: var(--rosewater); }
-.progress-maroon { --progress-ring-color: var(--maroon); --progress-ring-highlight: var(--red); }
-.progress-sky { --progress-ring-color: var(--sky); --progress-ring-highlight: var(--sapphire); }
-.progress-sapphire { --progress-ring-color: var(--sapphire); --progress-ring-highlight: var(--blue); }
-.progress-lavender { --progress-ring-color: var(--lavender); --progress-ring-highlight: var(--mauve); }
+.progress-blue { --progress-ring-color: var(--blue); }
+.progress-yellow { --progress-ring-color: var(--yellow); }
+.progress-red { --progress-ring-color: var(--red); }
+.progress-mauve { --progress-ring-color: var(--mauve); }
+.progress-peach { --progress-ring-color: var(--peach); }
+.progress-green { --progress-ring-color: var(--green); }
+.progress-teal { --progress-ring-color: var(--teal); }
+.progress-pink { --progress-ring-color: var(--pink); }
+.progress-rosewater { --progress-ring-color: var(--rosewater); }
+.progress-flamingo { --progress-ring-color: var(--flamingo); }
+.progress-maroon { --progress-ring-color: var(--maroon); }
+.progress-sky { --progress-ring-color: var(--sky); }
+.progress-sapphire { --progress-ring-color: var(--sapphire); }
+.progress-lavender { --progress-ring-color: var(--lavender); }
 /* let the glow escape while labels retain their own overflow clipping */
 .tabs button[role='tab'].progress-border, .workspace-sheet-row.progress-border { overflow: visible; }
 /* loading replaces attention pulses without moving the host or its contents */
 .notes-toggle.unread-queued-prompts.progress-border { animation: none; filter: none; }
-/* apply the glow outside the masked child so it follows the same moving highlight */
-.updates-in-progress > .update-progress-ring, .progress-border > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; display: block; width: auto; height: auto; min-width: 0; max-width: none; margin: 0; padding: 0; overflow: visible; border-radius: inherit; pointer-events: none; filter: var(--progress-indicator-filter, drop-shadow(0 0 .3rem var(--progress-ring-color, var(--mauve)))); }
-.update-progress-ring::before, .working-progress-mask::before { content: ''; display: var(--progress-border-display, block); position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: var(--progress-border-animation, var(--progress-orbit-animation, update-border-orbit 2s cubic-bezier(.42, .2, .58, .8) infinite)); }
-/* rotate a prepainted gradient through a stationary border mask for long-lived work */
-@keyframes working-status-orbit { 0% { transform: rotate(0deg); } 50% { transform: rotate(180deg); } 100% { transform: rotate(360deg); } }
-.working-progress-mask { display: none; }
-@supports (container-type: size) and (width: 100cqmax) and (translate: -50% -50%) and (mask-composite: exclude) and selector(:has(*)) {
-  @media (prefers-reduced-motion: no-preference) {
-    /* keep the glow on the outer ring and clip only the inner rotating layer */
-    :root:not([data-motion="reduced"]) .update-progress-ring:has(> .working-progress-mask)::before { display: none; animation: none; }
-    :root:not([data-motion="reduced"]) .working-progress-mask { position: absolute; inset: 0; display: block; border-radius: inherit; container-type: size; padding: 2px; overflow: hidden; mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; }
-    /* cover the full diagonal at any angle without resizing the rotating texture */
-    :root:not([data-motion="reduced"]) .working-progress-mask::before { inset: auto; top: 50%; left: 50%; width: calc(150cqmax + 6px); height: calc(150cqmax + 6px); translate: -50% -50%; border-radius: 0; padding: 0; mask: none; animation: working-status-orbit 2s cubic-bezier(.42, .2, .58, .8) infinite; }
-  }
+/* keep the border and glow stationary, then breathe only their composited opacity */
+.updates-in-progress > .update-progress-ring, .progress-border > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; display: block; width: auto; height: auto; min-width: 0; max-width: none; margin: 0; padding: 0; overflow: visible; border-radius: inherit; pointer-events: none; animation: var(--progress-register-animation); }
+.update-progress-ring::before { content: ''; position: absolute; inset: 0; box-sizing: border-box; border-radius: inherit; border: 2px solid var(--progress-ring-color, var(--mauve)); box-shadow: 0 0 .3rem color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 45%, transparent); will-change: var(--progress-breathe-hint); opacity: calc(var(--progress-breathe-center) - var(--progress-breathe-amplitude) * cos(var(--progress-phase, 0deg))); }
+.update-progress-ring::after { content: ''; display: none; box-sizing: border-box; width: .8rem; height: .8rem; flex: none; border: 2px solid var(--progress-ring-color, var(--mauve)); border-left-color: transparent; border-radius: 50%; will-change: var(--progress-spinner-hint); transform: rotate(calc(var(--progress-phase, 0deg) * var(--progress-spinner-multiplier))); }
+/* short-lived and large loading surfaces need no extra promoted layer on mount */
+:is(.log-loading, .loading-console, .fullscreen-card, .agent-state-pill, .client-settings-page) > .update-progress-ring::before { will-change: auto; box-shadow: none; }
+/* text actions keep their label and show a small inline spinner beside it */
+button.progress-border:not(.progress-icon-button, .progress-status-button) > .update-progress-ring { position: static; flex: none; display: inline-flex; width: .8rem; height: .8rem; }
+button.progress-border:not(.progress-icon-button, .progress-status-button) > .update-progress-ring::after { display: block; border-color: currentColor; border-left-color: transparent; }
+/* icon actions retain the original control geometry and replace the visible glyph */
+button.progress-icon-button.progress-border > :not(.update-progress-ring, .flyout-caret, .cleanup-summary-count, .notes-counts, .saved-prompts-count, .launch-update-dot, .project-stack-warning, .pull-request-issues, .server-switcher-attention) { visibility: hidden; }
+button.progress-icon-button.progress-border > .update-progress-ring::after { display: block; position: absolute; top: 50%; left: 50%; translate: -50% -50%; width: 1rem; height: 1rem; }
+/* narrow toolbar controls already hide their label, so replace only the icon in that presentation */
+@media (max-width: 600px) {
+  .workspace-toolbar-actions :is(button.toolbar-button.progress-border:not(.progress-status-button, .progress-icon-button):has(> .toolbar-label), .launch-menu-only .launch-menu-trigger.progress-border:not(.progress-status-button, .progress-icon-button)) > .update-progress-ring { position: absolute; width: auto; height: auto; }
+  .workspace-toolbar-actions :is(button.toolbar-button.progress-border:not(.progress-status-button, .progress-icon-button):has(> .toolbar-label), .launch-menu-only .launch-menu-trigger.progress-border:not(.progress-status-button, .progress-icon-button)) > .update-progress-ring::after { position: absolute; top: 50%; left: 50%; translate: -50% -50%; width: 1rem; height: 1rem; }
+  .workspace-toolbar-actions :is(button.toolbar-button.progress-border:not(.progress-status-button, .progress-icon-button):has(> .toolbar-label), .launch-menu-only .launch-menu-trigger.progress-border:not(.progress-status-button, .progress-icon-button)) > :is(svg, .launch-kind-mark) { visibility: hidden; }
 }
-/* keep reduced-motion feedback compact without shifting button contents */
-@keyframes progress-spinner { to { transform: rotate(360deg); } }
-.update-progress-ring::after { content: ''; display: var(--progress-spinner-display, none); position: absolute; top: .25rem; left: .25rem; box-sizing: border-box; width: .65rem; height: .65rem; border: 2px solid var(--progress-ring-color, var(--mauve)); border-left-color: transparent; border-radius: 50%; animation: var(--progress-spinner-animation, none); }
-/* loaders and small status pills have room for an inline spinner instead of a corner badge */
-:is(.loading-console, .log-loading, .agent-state-pill, .stack-process-state, .review-ask-pending, .new-worktree-status, .remove-worktree-loading) > .update-progress-ring { position: var(--progress-inline-position, absolute); inset: var(--progress-inline-inset, -1px); width: var(--progress-inline-size, auto); height: var(--progress-inline-size, auto); flex: none; }
-:is(.loading-console, .log-loading) > .update-progress-ring { width: var(--progress-loader-size, auto); height: var(--progress-loader-size, auto); margin: 0 auto; }
-:is(.loading-console, .log-loading, .agent-state-pill, .stack-process-state, .review-ask-pending, .new-worktree-status, .remove-worktree-loading) > .update-progress-ring::after { inset: 0; width: 100%; height: 100%; }
-.agent-state-pill.progress-border::before { display: var(--progress-border-display, block); }
-/* reset hidden animations so live preference changes restart the visible treatment */
+/* replace status dots in place, without moving labels or widening the control */
+.tabs button[role='tab'].progress-status-button.progress-border::after { content: ''; position: absolute; top: .3rem; right: .3rem; z-index: 2; box-sizing: border-box; width: .7rem; height: .7rem; padding: 0; border: 2px solid var(--progress-ring-color); border-left-color: transparent; border-radius: 50%; background: none; box-shadow: none; will-change: var(--progress-spinner-hint); transform: rotate(calc(var(--progress-phase, 0deg) * var(--progress-spinner-multiplier))); }
+/* use the existing dot slot and enlarge only its composited ring, not the layout box */
+.agent-switcher-row.progress-status-button.progress-border .agent-state-pill::before,
+.workspace-sheet-row.progress-status-button.progress-border .workspace-sheet-entry::after,
+.progress-status-button:is(.progress-border, .updates-in-progress) > :is(.stack-process-dot, .project-stack-status-dot, .server-switcher-attention, .git-status-dot, .launch-update-dot),
+.project-open.progress-status-button.progress-border > i { box-sizing: border-box; scale: 1.7; border: 1px solid var(--progress-ring-color, var(--mauve)); border-left-color: transparent; border-radius: 50%; background: none; box-shadow: none; opacity: 1; will-change: var(--progress-spinner-hint); transform: rotate(calc(var(--progress-phase, 0deg) * var(--progress-spinner-multiplier))); }
+/* keep the launch group's update indicator present even as the available-update flag clears */
+.launch-split.updates-in-progress.progress-status-button:not(:has(> .launch-update-dot)) > .update-progress-ring::after { display: block; position: absolute; top: .25rem; right: .25rem; width: .65rem; height: .65rem; }
+/* attention dots retain their distinct colors when a Notes operation is pending */
+.notes-toggle.progress-status-button.progress-border.unsaved::after,
+.notes-toggle.progress-status-button.progress-border.latest-response-available::before { box-sizing: border-box; scale: 1.7; border: 1px solid var(--red); border-left-color: transparent; background: none; box-shadow: none; will-change: var(--progress-spinner-hint); transform: rotate(calc(var(--progress-phase, 0deg) * var(--progress-spinner-multiplier))); }
+.notes-toggle.progress-status-button.progress-border.latest-response-available::before { border-color: var(--blue); border-left-color: transparent; }
+/* the binary setting retains its three-column geometry with an extra compact spinner column */
+.settings-select.settings-select-binary > .settings-select-two-way.progress-border { grid-template-columns: auto minmax(0, 1fr) 1.72rem minmax(0, 1fr); }
+.settings-select-two-way.progress-border > .settings-select-switch-choice:nth-child(2) { justify-content: flex-end; text-align: right; }
+
+/* reduced motion keeps the same geometry and a steady indication, without any looping effects */
 @media (prefers-reduced-motion: reduce) {
-  :root { --progress-border-display: none; --progress-border-animation: none; --progress-spinner-display: block; --progress-spinner-animation: progress-spinner 1s linear infinite; --progress-indicator-filter: none; --progress-inline-position: relative; --progress-inline-inset: auto; --progress-inline-size: .75rem; --progress-loader-size: 1.25rem; }
+  :root { --progress-register-animation: none; --progress-breathe-center: 1; --progress-breathe-amplitude: 0; --progress-spinner-multiplier: 0; --progress-breathe-hint: auto; --progress-spinner-hint: auto; }
 }
-:root[data-motion="reduced"] { --progress-border-display: none; --progress-border-animation: none; --progress-spinner-display: block; --progress-spinner-animation: progress-spinner 1s linear infinite; --progress-indicator-filter: none; --progress-inline-position: relative; --progress-inline-inset: auto; --progress-inline-size: .75rem; --progress-loader-size: 1.25rem; }
+:root[data-motion="reduced"] { --progress-register-animation: none; --progress-breathe-center: 1; --progress-breathe-amplitude: 0; --progress-spinner-multiplier: 0; --progress-breathe-hint: auto; --progress-spinner-hint: auto; }
 .launch-update-dot { position: absolute; top: .25rem; right: .25rem; width: var(--status-dot-size); min-width: var(--status-dot-size); height: var(--status-dot-size); border-radius: 50%; background: var(--mauve); box-shadow: 0 0 .5rem color-mix(in srgb, var(--mauve) 75%, transparent); pointer-events: none; }
 .tabs .new-agent-tab:not(:disabled):hover { border-color: var(--lavender); background: color-mix(in srgb, var(--lavender) 13%, var(--mantle)); color: var(--text); filter: none; }
 .tabs .launcher,.tabs .tab-spacer{flex:0 0 var(--standard-control-size);height:var(--standard-control-size);min-height:var(--standard-control-size)}.tabs .launcher{position:relative;display:block}.tabs .launcher .new-agent-tab{width:100%;height:100%}.launcher-menu{z-index:var(--layer-popover)}.launcher-menu button{justify-content:flex-start!important;border:0!important;padding:.55rem!important;text-align:left}
@@ -3245,7 +3264,7 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .agent-panel:has(> .log-loading) .streamed-terminal-status.loading { visibility: hidden; }
 
 /* cached links and jump actions cannot activate behind opaque loading artwork */
-.streamed-terminal:has(> .streamed-terminal-status.loading:not([hidden])) > :is(.output-link-overlay, .streamed-terminal-jump) { visibility: hidden; }
+.streamed-terminal:has(> .streamed-terminal-status.loading:not([hidden])) :is(.output-link-overlay, .streamed-terminal-jump) { visibility: hidden; }
 
 /* The Overview: replaces the Workspace (panels, composer, toolbar) above the tab row */
 .github-badge { display: inline-grid; place-items: center; border-radius: 999px; background: var(--red); color: var(--crust); }

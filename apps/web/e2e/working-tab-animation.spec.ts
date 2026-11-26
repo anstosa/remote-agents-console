@@ -1,10 +1,10 @@
 import { expect, test } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner, expectStationaryStatus, expectSynchronizedProgressBorders } from './progress-border-assertions';
+import { expectBreathingProgressBorder, expectProgressBorder, expectProgressBorderGroup, expectReducedMotionProgress, expectStationaryStatus } from './progress-border-assertions';
 
 test.describe.configure({ timeout: 60_000 });
 
-// keep work motion around steady status content
-test('moves only the working tab border while its icon, label and dot stay steady', async ({ page }) => {
+// keep work motion on composited border and status-indicator properties
+test('breathes the working tab border while orbiting in the existing status slot', async ({ page }) => {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -20,44 +20,47 @@ test('moves only the working tab border while its icon, label and dot stay stead
   const workingTab = page.getByRole('tab', { name: 'Cora — Working' });
   await expect(workingTab).toBeVisible();
   await expectProgressBorder(workingTab, 'peach');
+  await expectBreathingProgressBorder(workingTab, 'working');
+  await expect(workingTab).toHaveClass(/(?:^|\s)progress-status-button(?:\s|$)/u);
   await expect(workingTab.locator('.tab-kind-stack')).toBeVisible();
   const treatment = await workingTab.evaluate(element => {
     const dot = getComputedStyle(element, '::after');
     const label = getComputedStyle(element.querySelector('.tab-label')!);
-    // classify movement by the painted part rather than its keyframe name
-    const movingParts = element.getAnimations({ subtree: true }).map(animation => {
-      const effect = animation.effect as KeyframeEffect;
-      // separate descendant label motion
-      if ((effect.target as Element | null)?.closest('.update-progress-ring')) return 'border';
-      if (effect.target !== element) return 'content';
-      return 'tab-or-dot';
-    });
     return {
-      movingParts,
-      dotColor: dot.backgroundColor,
+      activeProgressAnimations: element.getAnimations({ subtree: true }).filter(animation => animation instanceof CSSAnimation && animation.animationName.startsWith('progress-') && (animation.playState === 'running' || animation.pending)).length,
+      dotBackground: dot.backgroundColor,
+      dotColor: dot.borderTopColor,
       dotWidth: dot.width,
       dotHeight: dot.height,
-      labelColor: label.color
+      labelColor: label.color,
+      hasLegacyRunner: element.querySelector('.working-progress-runner') !== null
     };
   });
 
-  expect(treatment.movingParts).toEqual(['border']);
-  expect([treatment.dotWidth, treatment.dotHeight]).toEqual(['6px', '6px']);
+  expect(treatment.activeProgressAnimations).toBe(0);
+  expect(treatment.hasLegacyRunner).toBe(false);
+  expect(treatment.dotBackground).toBe('rgba(0, 0, 0, 0)');
+  expect(Number.parseFloat(treatment.dotWidth)).toBeGreaterThan(0);
+  expect(treatment.dotHeight).toBe(treatment.dotWidth);
   expect(treatment.dotColor).toBe(treatment.labelColor);
   await page.setViewportSize({ width: 390, height: 844 });
   const phoneTab = page.getByRole('tab', { name: 'Cora — Working' });
   // wait for the phone chooser before testing or opening it
   await expect(phoneTab).toHaveAttribute('aria-haspopup', 'dialog');
   await expectProgressBorder(phoneTab, 'peach');
+  await expectBreathingProgressBorder(phoneTab, 'working');
+  await expect(phoneTab).toHaveClass(/(?:^|\s)progress-status-button(?:\s|$)/u);
   await phoneTab.click();
   const phoneRow = page.locator('.workspace-sheet-row').filter({ hasText: 'Cora' });
   await expectProgressBorder(phoneRow, 'peach');
+  await expectBreathingProgressBorder(phoneRow, 'working');
+  await expect(phoneRow).toHaveClass(/(?:^|\s)progress-status-button(?:\s|$)/u);
   await expect(phoneRow.locator('.tab-kind-stack')).toBeVisible();
   await page.screenshot({ path: '/tmp/remoteagents-loading-border-working-sheet-phone.png' });
 });
 
-// align working tabs that join an already running document timeline
-test('synchronizes nonlinear working borders across late tabs and motion restarts', async ({ page }) => {
+// retain existing nodes while late tabs adopt the same css-only animation contracts
+test('keeps breathing contracts consistent across late tabs and motion restarts', async ({ page }) => {
   let includeLateTab = false;
   let dashboardRequests = 0;
   const agents = [
@@ -86,54 +89,24 @@ test('synchronizes nonlinear working borders across late tabs and motion restart
 
   await page.goto('/');
   const workingTabs = page.locator('.tabs [role="tab"][aria-busy="true"]');
-  await expectSynchronizedProgressBorders(workingTabs, 2, 'working');
+  await expectProgressBorderGroup(workingTabs, 2, 'working');
+  const originalRing = await workingTabs.first().locator(':scope > .update-progress-ring').evaluateHandle(element => element);
   // join the late tab without resetting the original animations
   const requestsBeforeLateTab = dashboardRequests;
   includeLateTab = true;
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
   await expect.poll(() => dashboardRequests).toBeGreaterThan(requestsBeforeLateTab);
-  await expectSynchronizedProgressBorders(workingTabs, 3, 'working');
+  await expectProgressBorderGroup(workingTabs, 3, 'working');
+  expect(await workingTabs.first().locator(':scope > .update-progress-ring').evaluate((element, original) => element === original, originalRing)).toBe(true);
+  await originalRing.dispose();
   const lateTab = page.getByRole('tab', { name: 'Echo — Working' });
   await expectProgressBorder(lateTab, 'peach', 'working');
-  await expectClockwiseProgressBorder(lateTab, 'working');
-  // sample the rendered orbit through both slow points and the loop seam
-  const motion = await lateTab.evaluate(element => {
-    const ring = element.querySelector(':scope > .update-progress-ring')!;
-    const animation = ring.getAnimations({ subtree: true }).find(candidate => candidate instanceof CSSAnimation && candidate.animationName === 'working-status-orbit')!;
-    const duration = Number(animation.effect!.getComputedTiming().duration);
-    const startTime = animation.startTime;
-    const currentTime = animation.currentTime;
-    const playState = animation.playState;
-    animation.pause();
-    try {
-      // seek in equal steps including one complete wrap
-      const angles = Array.from({ length: 101 }, (_, index) => {
-        animation.currentTime = duration * index / 100;
-        const matrix = new DOMMatrixReadOnly(getComputedStyle((animation.effect as KeyframeEffect).target as Element, '::before').transform);
-        return (Math.atan2(matrix.b, matrix.a) * 180 / Math.PI + 360) % 360;
-      });
-      // unwrap clockwise advances into comparable angular speeds
-      const advances = angles.slice(1).map((angle, index) => (angle - angles[index] + 360) % 360);
-      // compare the slowest and fastest intervals with their shared mean
-      return { minimum: Math.min(...advances), maximum: Math.max(...advances), average: advances.reduce((sum, advance) => sum + advance, 0) / advances.length };
-    } finally {
-      // restore the shared clock even after a failed sample
-      if (playState === 'running') {
-        animation.play();
-        animation.startTime = startTime;
-      } else {
-        animation.currentTime = currentTime;
-      }
-    }
-  });
-  // slow visibly without stopping or flattening the motion to constant speed
-  expect(motion.minimum).toBeGreaterThan(motion.average * .25);
-  expect(motion.maximum).toBeGreaterThan(motion.average * 1.2);
+  await expectBreathingProgressBorder(lateTab, 'working');
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expectSynchronizedProgressBorders(workingTabs, 3, 'working', true);
-  await expectReducedMotionSpinner(workingTabs.last(), 'peach', 'working');
+  await expectProgressBorderGroup(workingTabs, 3, 'working', true);
+  await expectReducedMotionProgress(workingTabs.last(), 'peach', 'working');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await expectSynchronizedProgressBorders(workingTabs, 3, 'working');
+  await expectProgressBorderGroup(workingTabs, 3, 'working');
 
   // restart motion through the app preference boundary
   await page.evaluate(() => {
@@ -141,13 +114,13 @@ test('synchronizes nonlinear working borders across late tabs and motion restart
     window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', newValue: 'enabled' }));
   });
   await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
-  await expectSynchronizedProgressBorders(workingTabs, 3, 'working', true);
+  await expectProgressBorderGroup(workingTabs, 3, 'working', true);
   await page.evaluate(() => {
     localStorage.removeItem('rac.reduced-motion');
     window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', oldValue: 'enabled' }));
   });
   await expect(page.locator('html')).not.toHaveAttribute('data-motion', 'reduced');
-  await expectSynchronizedProgressBorders(workingTabs, 3, 'working');
+  await expectProgressBorderGroup(workingTabs, 3, 'working');
 });
 
 // completion keeps its green attention color without pretending to work
@@ -184,8 +157,8 @@ test('keeps completed tabs static while preserving their icon, label and dot', a
   await expectStationaryStatus(completedRow);
 });
 
-// use compact spinners only for active work while either motion preference is enabled
-test('reduced motion swaps working borders for spinners while waiting statuses stay still', async ({ page }) => {
+// reduced motion keeps the same affordance without looping effects
+test('reduced motion keeps static working borders and indicators while waiting statuses stay still', async ({ page }) => {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -204,17 +177,17 @@ test('reduced motion swaps working borders for spinners while waiting statuses s
   await expect(workingTab).toBeVisible();
   await expect(successTab).toBeVisible();
   await expectProgressBorder(workingTab, 'peach');
-  await expectClockwiseProgressBorder(workingTab);
+  await expectBreathingProgressBorder(workingTab);
   await expectStationaryStatus(successTab);
   await expectStationaryStatus(questionTab);
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expectReducedMotionSpinner(workingTab, 'peach');
+  await expectReducedMotionProgress(workingTab, 'peach');
   await expectStationaryStatus(successTab);
   await expectStationaryStatus(questionTab);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await expectProgressBorder(workingTab, 'peach');
-  await expectClockwiseProgressBorder(workingTab);
+  await expectBreathingProgressBorder(workingTab);
 
   // exercise the live app preference boundary used by the settings toggle
   await page.evaluate(() => {
@@ -222,22 +195,25 @@ test('reduced motion swaps working borders for spinners while waiting statuses s
     window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', newValue: 'enabled' }));
   });
   await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
-  await expectReducedMotionSpinner(workingTab, 'peach');
+  await expectReducedMotionProgress(workingTab, 'peach');
   await expectStationaryStatus(successTab);
   await expectStationaryStatus(questionTab);
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expectReducedMotionSpinner(workingTab, 'peach');
+  await expectReducedMotionProgress(workingTab, 'peach');
   await page.evaluate(() => {
     localStorage.removeItem('rac.reduced-motion');
     window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', oldValue: 'enabled' }));
   });
   await expect(page.locator('html')).not.toHaveAttribute('data-motion', 'reduced');
-  await expectReducedMotionSpinner(workingTab, 'peach');
+  await expectReducedMotionProgress(workingTab, 'peach');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await expectProgressBorder(workingTab, 'peach');
-  await expectClockwiseProgressBorder(workingTab);
+  await expectBreathingProgressBorder(workingTab);
 
-  const colors = await page.getByRole('tab').evaluateAll(tabs => tabs.map(tab => ({ border: getComputedStyle(tab).borderColor, dot: getComputedStyle(tab, '::after').backgroundColor, label: getComputedStyle(tab.querySelector('.tab-label')!).color })));
+  const colors = await page.getByRole('tab').evaluateAll(tabs => tabs.map(tab => {
+    const dot = getComputedStyle(tab, '::after');
+    return { border: getComputedStyle(tab).borderColor, dot: tab.classList.contains('progress-border') ? dot.borderTopColor : dot.backgroundColor, label: getComputedStyle(tab.querySelector('.tab-label')!).color };
+  }));
   expect(colors[0].label).toBe(colors[0].dot);
   expect(colors[1].border).toBe(colors[1].dot);
   expect(colors[1].label).toBe(colors[1].dot);

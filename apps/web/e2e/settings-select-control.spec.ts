@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { expectBreathingProgressBorder, expectProgressBorder } from './progress-border-assertions.js';
 
 // mount production SettingsSelect controls in isolated local state
 async function mountSettingsSelectControls(page: Page) {
@@ -41,6 +42,32 @@ test('renders exactly two choices as one labeled switch and changes only on inpu
   await control.press('Enter');
   await expect(control).toHaveAttribute('aria-checked', 'true');
   await expect(changes).toHaveText('two-way:right,two-way:left,two-way:right');
+});
+
+test('renders one parent progress treatment when either binary endpoint is busy', async ({ page }) => {
+  await mountSettingsSelectControls(page);
+  const leftBusy = page.getByRole('switch', { name: 'Left busy endpoint', exact: true });
+  const rightBusy = page.getByRole('switch', { name: 'Right busy endpoint', exact: true });
+
+  await expect(leftBusy.locator('.settings-select-switch-choice')).toHaveCount(2);
+  await expect(rightBusy.locator('.settings-select-switch-choice')).toHaveCount(2);
+  // prove both endpoint positions converge on the same single parent treatment
+  for (const control of [leftBusy, rightBusy]) {
+    await expect(control.locator(':scope > .update-progress-ring')).toHaveCount(1);
+    await expect(control.locator('.settings-select-switch-choice .update-progress-ring')).toHaveCount(0);
+    await expectProgressBorder(control, 'blue', 'working');
+    await expectBreathingProgressBorder(control, 'working');
+    await expect.poll(() => control.evaluate(element => {
+      const ring = element.querySelector<HTMLElement>(':scope > .update-progress-ring')!;
+      const phase = Number.parseFloat(getComputedStyle(ring).getPropertyValue('--progress-phase'));
+      return {
+        activeProgressAnimations: element.getAnimations({ subtree: true }).filter(animation => animation instanceof CSSAnimation && animation.animationName.startsWith('progress-') && (animation.playState === 'running' || animation.pending)).length,
+        borderPainted: Number.parseFloat(getComputedStyle(ring, '::before').opacity) >= 0.35,
+        phasePublished: Number.isFinite(phase),
+        spinnerPainted: getComputedStyle(ring, '::after').transform !== 'none'
+      };
+    })).toEqual({ activeProgressAnimations: 0, borderPainted: true, phasePublished: true, spinnerPainted: true });
+  }
 });
 
 test('recovers unknown two-choice values before switching to the binary control', async ({ page }) => {

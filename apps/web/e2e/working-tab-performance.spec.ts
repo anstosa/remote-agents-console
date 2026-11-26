@@ -1,139 +1,205 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import { installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock';
-import { expectProgressBorder } from './progress-border-assertions';
+import { expectBreathingProgressBorder, expectProgressBorder, expectProgressBorderGroup } from './progress-border-assertions';
 
-// keep working motion continuous without repainting the status gradient
-test('keeps working tab motion continuous with transform-only keyframes', async ({ page }) => {
+// keep progress presentation bounded while terminal output and user input are active
+test('paces shared progress effects through one visibility-aware presentation clock', async ({ page }) => {
   await installPaneMock(page);
+  let working = true;
+  let dashboardRequests = 0;
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
+    // restore one controlling browser
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({
-      json: {
+    // retain five simultaneous busy surfaces until the completion transition
+    if (url.pathname === '/api/dashboard') {
+      dashboardRequests += 1;
+      return route.fulfill({ json: {
         generation: 1,
         agents: [
-          { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: '⠋ Working in Cora', attention: 'working', kind: 'codex' },
-          { id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/delta', title: '⠙ Working in Delta', attention: 'working', kind: 'codex' },
-          { id: 'agent-3', sessionId: 'socket:$3', home: '/worktrees/echo', title: '⠹ Working in Echo', attention: 'working', kind: 'codex' }
+          { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: working ? '⠋ Working in Cora' : 'Ready in Cora', attention: working ? 'working' : 'finished', kind: 'codex' },
+          { id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/delta', title: working ? '⠙ Working in Delta' : 'Ready in Delta', attention: working ? 'working' : 'finished', kind: 'codex' },
+          { id: 'agent-3', sessionId: 'socket:$3', home: '/worktrees/echo', title: working ? '⠹ Working in Echo' : 'Ready in Echo', attention: working ? 'working' : 'finished', kind: 'codex' },
+          { id: 'agent-4', sessionId: 'socket:$4', home: '/worktrees/foxtrot', title: working ? '⠋ Working in Foxtrot' : 'Ready in Foxtrot', attention: working ? 'working' : 'finished', kind: 'codex' },
+          { id: 'agent-5', sessionId: 'socket:$5', home: '/worktrees/golf', title: working ? '⠙ Working in Golf' : 'Ready in Golf', attention: working ? 'working' : 'finished', kind: 'codex' }
         ],
         projects: []
-      }
-    });
+      } });
+    }
+    // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    // authorize each agent stream
     if (url.pathname === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (/^\/api\/agents\/agent-[1-3]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
+    // provide empty saved prompts
+    if (/^\/api\/agents\/agent-[1-5]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
   await page.goto('/');
   const tabs = page.getByRole('tab');
-  await expect(tabs).toHaveCount(3);
-  // observe the startup cue before waiting for the first terminal paint
-  const activeTabAnimations = () => tabs.evaluateAll(elements => elements.flatMap(element => element.getAnimations({ subtree: true })).length);
-  await expect.poll(activeTabAnimations).toBe(3);
+  await expect(tabs).toHaveCount(5);
+  await expectProgressBorderGroup(tabs, 5, 'working');
+  await expect.poll(() => tabs.evaluateAll(elements => elements.every(element => element.classList.contains('progress-status-button')))).toBe(true);
+  await expect.poll(() => page.evaluate(async () => {
+    const snapshot = (await import('/src/progress-animation.ts')).progressAnimationSnapshot();
+    return { cadence: snapshot.presentationFramesPerSecond, enoughRegistered: snapshot.registeredRings >= 5, running: snapshot.running };
+  })).toEqual({ cadence: 12, enoughRegistered: true, running: true });
+
+  // retain the exact tab row, launcher and ring nodes across a real workspace switch
+  const initialNodes = await page.evaluateHandle(() => ({
+    launch: document.querySelector('.new-agent-tab'),
+    nav: document.querySelector('nav.tabs'),
+    ring: document.querySelector('#tab-0 > .update-progress-ring'),
+    tab: document.querySelector('#tab-0')
+  }));
+  const initialGeometry = await tabs.evaluateAll(elements => elements.map(element => {
+    const owner = element.getBoundingClientRect();
+    const label = element.querySelector('.tab-label')!.getBoundingClientRect();
+    return { label: [label.x, label.y, label.width, label.height], owner: [owner.x, owner.y, owner.width, owner.height] };
+  }));
+  await tabs.nth(1).click();
+  await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true');
+  expect(await page.evaluate(nodes => nodes.nav === document.querySelector('nav.tabs')
+    && nodes.tab === document.querySelector('#tab-0')
+    && nodes.ring === document.querySelector('#tab-0 > .update-progress-ring')
+    && nodes.launch === document.querySelector('.new-agent-tab'), initialNodes)).toBe(true);
+  await tabs.nth(0).click();
+  await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
+  await initialNodes.dispose();
+  await expect.poll(() => tabs.evaluateAll(elements => elements.map(element => {
+    const owner = element.getBoundingClientRect();
+    const label = element.querySelector('.tab-label')!.getBoundingClientRect();
+    return { label: [label.x, label.y, label.width, label.height], owner: [owner.x, owner.y, owner.width, owner.height] };
+  }))).toEqual(initialGeometry);
+
   await seedPaneSize(page, 'agent-1', 100, 30);
   await pushBytes(page, 'agent-1', 'Quiet output\r\n');
   await expect(page.locator('.log-loading')).toHaveCount(0);
-
-  // cross the former three-turn cutoff while the real working controls stay mounted
-  await page.waitForTimeout(6_100);
-  await expect.poll(activeTabAnimations).toBe(3);
   await expectProgressBorder(tabs.first(), 'peach');
-  const ring = tabs.first().locator(':scope > .update-progress-ring');
-  // require a static gradient and compositor-friendly animation properties
-  const border = await ring.evaluate(element => {
-    const effect = element.getAnimations({ subtree: true })[0]?.effect as KeyframeEffect;
-    const style = getComputedStyle(effect.target as Element, '::before');
-    return { iterations: style.animationIterationCount, paint: style.backgroundImage, properties: effect.getKeyframes().map(frame => Object.keys(frame).filter(key => !['offset', 'computedOffset', 'easing', 'composite'].includes(key))) };
-  });
-  expect(border).toEqual({ iterations: 'infinite', paint: expect.stringContaining('conic-gradient'), properties: [['transform'], ['transform'], ['transform']] });
-});
+  await expectBreathingProgressBorder(tabs.first(), 'working');
 
-// sample rendering work without polling animation styles during the trace
-async function traceWorkingFrames(page: Page) {
-  const client = await page.context().newCDPSession(page);
-  let paints = 0;
-  let layouts = 0;
-  let rasters = 0;
-  let frames = 0;
-  // count main-thread paint and style/layout updates, not compositor frames
-  client.on('Tracing.dataCollected', ({ value }) => {
-    for (const event of value) {
-      if (event.name === 'Paint') paints += 1;
-      // count rasterization separately from composited draws
-      if (event.name === 'RasterTask') rasters += 1;
-      if (event.name === 'DrawFrame') frames += 1;
-      if (event.name === 'UpdateLayoutTree' || event.name === 'Layout') layouts += 1;
+  // sustained output shares the sparse four-hertz terminal presentation cadence
+  const burst = await page.evaluate(async () => {
+    const { progressAnimationSnapshot } = await import('/src/progress-animation.ts');
+    const pane = (window as unknown as { __pane: { bytes: (id: string, text: string) => void; ackTotal: (id: string) => number } }).__pane;
+    const before = pane.ackTotal('agent-1');
+    const started = performance.now();
+    let expectedBytes = 0;
+    let changes = 0;
+    let sparseSamples = 0;
+    let lastFrame = progressAnimationSnapshot().currentFrame;
+    let lastChange = started;
+    let longestGap = 0;
+    // generate a two-second high-volume output burst
+    for (let index = 0; index < 120; index += 1) {
+      const text = `live-output-${index}\r\n`;
+      pane.bytes('agent-1', text);
+      expectedBytes += new TextEncoder().encode(text).length;
+      const target = started + (index + 1) * 1_000 / 60;
+      await new Promise<void>(resolve => setTimeout(resolve, Math.max(0, target - performance.now())));
+      const snapshot = progressAnimationSnapshot();
+      // count only actual shared presentation updates
+      if (snapshot.currentFrame !== lastFrame) {
+        changes += 1;
+        longestGap = Math.max(longestGap, performance.now() - lastChange);
+        lastFrame = snapshot.currentFrame;
+        lastChange = performance.now();
+      }
+      // measure how quickly the clock adopts the sparse contract
+      if (snapshot.presentationFramesPerSecond === 4) sparseSamples += 1;
     }
+    await new Promise<void>(resolve => setTimeout(resolve, 150));
+    return { actualBytes: pane.ackTotal('agent-1') - before, changes, expectedBytes, longestGap, sparseSamples };
   });
-  await client.send('Tracing.start', { categories: 'devtools.timeline,cc,disabled-by-default-devtools.timeline,disabled-by-default-devtools.timeline.frame', transferMode: 'ReportEvents' });
-  const complete = new Promise<void>(resolve => client.once('Tracing.tracingComplete', () => resolve()));
-  // sample a running animation over many frames without querying computed style
-  await page.waitForTimeout(1_500);
-  await client.send('Tracing.end');
-  await complete;
-  await client.detach();
-  return { paints, layouts, rasters, frames };
-}
+  expect(burst.actualBytes).toBe(burst.expectedBytes);
+  expect(burst.sparseSamples).toBeGreaterThanOrEqual(100);
+  expect(burst.changes).toBeGreaterThanOrEqual(6);
+  expect(burst.changes).toBeLessThanOrEqual(10);
+  expect(burst.longestGap).toBeLessThan(375);
 
-// measure browser painting while isolated status borders continue moving
-test('working status borders do not repaint on every animation frame', async ({ page, browserName }) => {
-  test.skip(browserName !== 'chromium', 'Chromium tracing is required');
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
-  // isolate the production CSS from polling, terminal output and other UI motion
-  await page.route('**/working-orbit-fixture', route => route.fulfill({ contentType: 'text/html', body: `
-    <!doctype html>
-    <link rel="stylesheet" href="/src/styles.css">
-    <nav class="tabs">${Array.from({ length: 7 }, (_, index) => `<button role="tab" class="status-working progress-border progress-peach" aria-busy="true"><span class="update-progress-ring"><span class="working-progress-mask"></span></span><span class="tab-label">Workspace ${index}</span></button>`).join('')}</nav>
-    <div class="workspace-sheet-row progress-border progress-peach" style="width: 320px; height: 38px"><span class="update-progress-ring"><span class="working-progress-mask"></span></span>Working</div>
-    <button class="agent-switcher-row progress-border progress-peach" style="width: 320px; height: 38px"><span class="update-progress-ring"><span class="working-progress-mask"></span></span>Working</button>
-    <span class="agent-state-pill working progress-border progress-peach"><span class="update-progress-ring"><span class="working-progress-mask"></span></span>Working</span>
-  ` }));
-  await page.goto('/working-orbit-fixture');
-  const rings = page.locator('.update-progress-ring');
-  await expect(rings).toHaveCount(10);
-  // give the browser time to create and rasterize the rotating layers once
-  await page.waitForTimeout(1_000);
-  const { paints, layouts, rasters, frames } = await traceWorkingFrames(page);
-  expect(paints).toBeLessThan(5);
-  expect(layouts).toBeLessThan(5);
-  expect(rasters).toBeLessThan(10);
-  expect(frames).toBeGreaterThan(10);
-  // a quiet main thread must not mean that animation has stopped
-  const active = await rings.evaluateAll(elements => elements.every(element => element.getAnimations({ subtree: true }).some(animation => animation.playState === 'running' && animation.effect?.getTiming().iterations === Infinity)));
-  expect(active).toBe(true);
-  // sample a stable asymmetric control, including the glow outside its border
-  const control = page.locator('.agent-switcher-row');
-  const bounds = (await control.boundingBox())!;
-  const clip = { x: bounds.x, y: bounds.y - 5, width: bounds.width + 5, height: bounds.height + 10 };
-  // pause all rings so another indicator cannot affect the screenshot
-  await rings.evaluateAll(elements => elements.flatMap(element => element.getAnimations({ subtree: true })).forEach(animation => {
-    animation.pause();
-    animation.currentTime = 0;
+  // pointer input keeps the same sparse budget for its bounded interaction tail
+  const interaction = await page.evaluate(async () => {
+    const { progressAnimationSnapshot } = await import('/src/progress-animation.ts');
+    document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    const started = performance.now();
+    let previous = progressAnimationSnapshot().currentFrame;
+    let changes = 0;
+    let sparseSamples = 0;
+    // sample across most of the one-second input lifetime
+    for (let index = 0; index < 40; index += 1) {
+      await new Promise<void>(resolve => setTimeout(resolve, 25));
+      const snapshot = progressAnimationSnapshot();
+      // count clock updates, not polling iterations
+      if (snapshot.currentFrame !== previous) {
+        previous = snapshot.currentFrame;
+        changes += 1;
+      }
+      // every interaction sample should remain on the sparse budget
+      if (snapshot.presentationFramesPerSecond === 4) sparseSamples += 1;
+    }
+    return { changes, elapsed: performance.now() - started, sparseSamples };
+  });
+  expect(interaction.elapsed).toBeGreaterThanOrEqual(900);
+  expect(interaction.sparseSamples).toBe(40);
+  expect(interaction.changes).toBeGreaterThanOrEqual(3);
+  expect(interaction.changes).toBeLessThanOrEqual(5);
+
+  // quiet presentation returns to twelve updates per second
+  await expect.poll(() => page.evaluate(async () => (await import('/src/progress-animation.ts')).progressAnimationSnapshot().presentationFramesPerSecond)).toBe(12);
+  const quiet = await page.evaluate(async () => {
+    const { progressAnimationSnapshot } = await import('/src/progress-animation.ts');
+    let previous = progressAnimationSnapshot().currentFrame;
+    let changes = 0;
+    // observe a half-second quiet window without driving production work
+    for (let index = 0; index < 25; index += 1) {
+      await new Promise<void>(resolve => setTimeout(resolve, 20));
+      const frame = progressAnimationSnapshot().currentFrame;
+      // count only new presentation frames
+      if (frame !== previous) {
+        previous = frame;
+        changes += 1;
+      }
+    }
+    return changes;
+  });
+  expect(quiet).toBeGreaterThanOrEqual(5);
+  expect(quiet).toBeLessThanOrEqual(8);
+
+  // hidden documents stop the one clock and leave every painted phase unchanged
+  const beforeHidden = await page.evaluate(async () => ({
+    phases: Array.from(document.querySelectorAll<HTMLElement>('[role="tab"]')).map(element => getComputedStyle(element).getPropertyValue('--progress-phase')),
+    frame: (await import('/src/progress-animation.ts')).progressAnimationSnapshot().currentFrame
   }));
-  const before = await page.screenshot({ clip });
-  expect(await page.screenshot({ clip })).toEqual(before);
-  await control.locator('.update-progress-ring').evaluate(element => { /* seek a quarter turn */ element.getAnimations({ subtree: true })[0].currentTime = 500; });
-  const after = await page.screenshot({ clip });
-  expect(after).not.toEqual(before);
-  // disabling the outer filter removes visible glow beyond the fixed mask
-  await control.locator('.update-progress-ring').evaluate(element => { /* remove only the glow */ (element as HTMLElement).style.filter = 'none'; });
-  expect(await page.screenshot({ clip })).not.toEqual(after);
-
-  // suppress the feature gate to exercise the visible legacy fallback
-  const removed = await page.evaluate(() => {
-    // remove only the supports block for the rotating status mask
-    for (const sheet of document.styleSheets) {
-      const index = Array.from(sheet.cssRules).findIndex(rule => rule instanceof CSSSupportsRule && rule.conditionText.includes('100cqmax'));
-      if (index >= 0) { sheet.deleteRule(index); return true; }
-    }
-    return false;
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
   });
-  expect(removed).toBe(true);
-  await expect.poll(() => rings.evaluateAll(elements => elements.every(element => element.getAnimations({ subtree: true }).some(animation => animation instanceof CSSAnimation && animation.animationName === 'update-border-orbit' && animation.playState === 'running')))).toBe(true);
-  // the reference angle path must incur the repainting that the optimized path avoids
-  const fallback = await traceWorkingFrames(page);
-  expect(fallback.paints).toBeGreaterThanOrEqual(5);
-  expect(fallback.rasters).toBeGreaterThanOrEqual(10);
+  await expect(page.locator('html')).toHaveAttribute('data-progress-hidden', '');
+  await expect.poll(() => page.evaluate(async () => (await import('/src/progress-animation.ts')).progressAnimationSnapshot().running)).toBe(false);
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(async () => ({
+    phases: Array.from(document.querySelectorAll<HTMLElement>('[role="tab"]')).map(element => getComputedStyle(element).getPropertyValue('--progress-phase')),
+    frame: (await import('/src/progress-animation.ts')).progressAnimationSnapshot().currentFrame
+  }))).toEqual(beforeHidden);
+
+  // restoring visibility resumes the clock without recreating the progress effects
+  await page.evaluate(() => {
+    Reflect.deleteProperty(document, 'visibilityState');
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(page.locator('html')).not.toHaveAttribute('data-progress-hidden');
+  await expect.poll(() => page.evaluate(async () => (await import('/src/progress-animation.ts')).progressAnimationSnapshot().running)).toBe(true);
+  await expect.poll(() => page.evaluate(async before => (await import('/src/progress-animation.ts')).progressAnimationSnapshot().currentFrame !== before, beforeHidden.frame)).toBe(true);
+
+  // finishing every workspace unregisters all effects and retires the shared timer
+  const requestsBeforeFinish = dashboardRequests;
+  working = false;
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(() => dashboardRequests).toBeGreaterThan(requestsBeforeFinish);
+  await expect.poll(() => tabs.evaluateAll(elements => elements.filter(element => element.getAttribute('aria-busy') === 'true').length)).toBe(0);
+  await expect.poll(() => page.evaluate(async () => {
+    const snapshot = (await import('/src/progress-animation.ts')).progressAnimationSnapshot();
+    return { registered: snapshot.registeredRings, running: snapshot.running };
+  })).toEqual({ registered: 0, running: false });
 });

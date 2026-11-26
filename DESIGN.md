@@ -259,8 +259,20 @@ attachment and automatic reconnects, retaining the mounted terminal underneath.
 Keep loading artwork until the current seed has painted in the selected renderer,
 not merely finished parsing. Load terminal font faces before WebGL activation and
 never reset its shared glyph atlas when another panel mounts or unrelated fonts load.
+Keep the initial covered renderer out of browser compositing while preserving its
+transparent input target, then reveal the first committed seed and its semantic
+controls together. Retain one matching measured grid as a startup allocation hint;
+the server's size remains authoritative.
 Redraw each owner after shared glyph-atlas page merges so ongoing editor output
 does not need a manual resize or text selection to repair stale glyph coordinates.
+Keep pane parsing, byte acknowledgements and interactive input independent of
+presentation scheduling. Coalesce dirty terminal rows into the shared visual
+pulse; only sustained rapid line output uses the sparse four-hertz cadence. Reveal the seed,
+honor interactive scrolling and input, and flush a quiet output tail promptly.
+Retain exact native selection geometry for touch and mouse-reporting programs;
+plain desktop panes use xterm's own selection with a compact hidden text mirror.
+Position semantic link hit targets in the contained terminal cell grid without
+repeated layout measurement.
 When available, agent skeletons replay the last visible text geometry for that pane,
 preserving widths, indentation and blank rows without storing transcript text.
 The geometry is cached in the current tab, scales with the terminal font size and is
@@ -271,15 +283,19 @@ do not invent messages or tool output. RAC-native structured transcripts keep th
 empty conversation layout and mounted composer. Standalone terminal placeholders
 still repeat shell commands and column-shaped output through the available height.
 Fresh stream seeds clear the skeleton; explicit failure reasons remain readable.
-Startup/auth and fullscreen connection loaders retain a constant-speed turn.
-Each border type shares the document timeline, including late mounts and portals.
-Reduced motion makes skeletons static and replaces retained travelling borders with
-compact synchronized one-second spinners. Working indicators in tabs, workspace
-and agent pickers, and agent state pills keep moving while work is active, using
-a prepainted gradient rotated behind a stationary border mask rather than
-repainting gradient angles. Reduced-motion spinners use transform-only motion.
+All active progress surfaces use a stationary two-pixel breathing border and
+soft glow. Animate only its opacity over two seconds, never the gradient, mask
+or border geometry. Busy icon buttons replace the glyph with a compact spinner
+without moving the control; busy status-dot buttons replace their dot in place.
+Text buttons keep their label and show a small inline spinner beside it.
+Loading and working retain their semantic colors and busy accessibility state.
+The small spinner uses transform-only rotation. A single shared phase updates
+each busy control at 12Hz while quiet and shares the sparse 4Hz terminal
+clock during rapid output or input, without autonomous animation loops.
+Background tabs stop the clock, and reduced
+motion leaves a steady border and indicator.
 Update and unread-note glows settle after two pulses. In-flight loaders keep
-moving; status dots stay still. Do not run a continuous JavaScript animation clock.
+moving; non-busy status dots stay still. Do not run per-surface or display-refresh clocks.
 Conversations opens immediately into one flyout with search first and a scrollable
 four-and-a-half-row maximum viewport, clamped to short screens. Size short lists
 to their content instead of reserving empty rows. A starter list with fewer than

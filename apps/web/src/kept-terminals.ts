@@ -4,7 +4,8 @@ import { mountStreamedTerminal, type StreamedTerminalHandle, type StreamedTermin
 // screen kept) so going back shows the last screen at once instead of a loading cover.
 export type TerminalKeep = { workspace: string; panel: string };
 
-const keptWorkspaces = 3;
+// keep four inactive workspaces so a five-workspace rotation does not rebuild every renderer
+const keptWorkspaces = 4;
 // workspace key -> panel key -> parked terminal; the Map's order is least recently left first
 const kept = new Map<string, Map<string, StreamedTerminalHandle>>();
 const shown = new Set<string>();

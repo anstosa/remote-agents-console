@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
+import { expectBreathingProgressBorder, expectProgressBorder, expectReducedMotionProgress } from './progress-border-assertions';
 import { installPaneMock } from './pane-stream-mock';
 
 // install the shared streamed-pane fixture so the review console's agent panel mounts
@@ -129,12 +129,14 @@ test('guides a human through active-scope implementation changes and sends conso
   await expect(loadingDialog).toBeHidden();
   await expect(page.getByRole('button', { name: /Open (generating |out-of-date )?guided review/u })).toHaveCount(0);
   await expect(branchButton).toHaveAttribute('aria-busy', 'true');
+  await expect(branchButton).toHaveClass(/(?:^|\s)progress-status-button(?:\s|$)/u);
   await expectProgressBorder(branchButton, 'peach');
-  await expectClockwiseProgressBorder(branchButton);
-  // keep the branch icon steady while the border communicates progress
+  await expectBreathingProgressBorder(branchButton);
+  // keep the branch icon steady while the existing status dot orbits
   await expect(branchButton.locator('.git-branch-icon')).toBeVisible();
+  await expect(branchButton.locator('.git-status-dot')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expectReducedMotionSpinner(branchButton, 'peach', 'working');
+  await expectReducedMotionProgress(branchButton, 'peach', 'working');
   await expect(branchButton.locator(':scope > .update-progress-ring')).toBeVisible();
   await expect(branchButton.locator('.git-branch-icon')).toBeVisible();
   await page.emulateMedia({ reducedMotion: 'no-preference' });

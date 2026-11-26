@@ -4,7 +4,7 @@ import { ProjectProxy } from '../../server/src/project-proxy.js';
 import { installPaneMock, seedPaneSize, pushBytes } from './pane-stream-mock.js';
 import { clickPanelAction, expectPanelAction } from './panel-header';
 import { chooseSplit, openSplitMenu } from './split-menu.js';
-import { expectProgressBorder } from './progress-border-assertions';
+import { expectBreathingProgressBorder, expectProgressBorder } from './progress-border-assertions';
 
 // load the production browser bridge through its real proxy endpoint
 const projectBrowserBridge = async () => {
@@ -611,13 +611,17 @@ test('opens the configured project in desktop and mobile split views', async ({ 
   const stopLoading = browser.getByRole('button', { name: 'Stop loading browser' });
   await expect(stopLoading).toBeVisible();
   await expect(stopLoading).toHaveClass(/loading/u);
+  await expect(stopLoading).toHaveClass(/(?:^|\s)progress-icon-button(?:\s|$)/u);
   await expectProgressBorder(stopLoading, 'blue');
+  await expectBreathingProgressBorder(stopLoading, 'loading');
   await expect(stopLoading.locator('path')).toHaveAttribute('d', 'm6 6 12 12M18 6 6 18');
+  await expect(stopLoading.locator('svg')).toHaveCSS('visibility', 'hidden');
   await expect.poll(() => previewLoads).toBeGreaterThan(loadsBeforeStop);
   await stopLoading.click();
   const refresh = browser.getByRole('button', { name: 'Refresh browser' });
   await expect(refresh).toBeVisible();
   await expect(refresh).not.toHaveClass(/loading/u);
+  await expect(refresh.locator('svg')).toHaveCSS('visibility', 'visible');
   releasePreviewLoad?.();
   await expect(preview.locator('main')).toHaveAttribute('data-location', '/spa');
 

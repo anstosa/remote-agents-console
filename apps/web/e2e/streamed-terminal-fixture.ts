@@ -5,6 +5,7 @@ import { mountKeptTerminal, releaseKeptTerminal, showKeptWorkspace, type Termina
 import { setTerminalFontSize } from '../src/terminal-font-size.js';
 import { setColorTheme } from '../src/color-theme.js';
 import { registerKeyAction } from '../src/keyboard.js';
+import { measureOutputShape } from '../src/output-skeleton-shape.js';
 import type { PaneClientFrame, PaneConnectionHandlers, PaneServerFrame } from '../src/pane-stream.js';
 
 // Mounts the streamed terminal alone in a blank page against real xterm 6.0, driven by
@@ -18,14 +19,21 @@ let root: HTMLElement | undefined;
 let connectCount = 0;
 let closeCount = 0;
 const sent: PaneClientFrame[] = [];
+const timedSent: Array<{ at: number; frame: PaneClientFrame }> = [];
 const questions: unknown[] = [];
 const openedUrls: string[] = [];
+let renderTracking: { dispose: () => void } | undefined;
+let privateRenderTracking: { dispose: () => void } | undefined;
+let domMutationTracking: MutationObserver | undefined;
+const trackedRenders: Array<{ at: number; start: number; end: number; domText: string }> = [];
+const trackedPrivateRenders: Array<{ at: number; start: number; end: number; domText: string }> = [];
+const trackedDomMutations: Array<{ at: number; domText: string }> = [];
 
-const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
+const waitFor = async (predicate: () => boolean, timeoutMs = 4000, intervalMs = 10) => {
   const started = performance.now();
   while (!predicate()) {
     if (performance.now() - started > timeoutMs) throw new Error('timed out waiting for the streamed terminal');
-    await new Promise<void>(resolve => setTimeout(resolve, 10));
+    await new Promise<void>(resolve => setTimeout(resolve, intervalMs));
   }
 };
 
@@ -39,10 +47,20 @@ let atlasRemovals = 0;
 // mount the scripted pane with optional codex transcript controls
 export const renderStreamedTerminal = async (container: HTMLElement, options: FixtureOptions = {}): Promise<void> => {
   sent.length = 0;
+  timedSent.length = 0;
   questions.length = 0;
   openedUrls.length = 0;
   connectCount = 0;
   closeCount = 0;
+  renderTracking?.dispose();
+  renderTracking = undefined;
+  privateRenderTracking?.dispose();
+  privateRenderTracking = undefined;
+  domMutationTracking?.disconnect();
+  domMutationTracking = undefined;
+  trackedRenders.length = 0;
+  trackedPrivateRenders.length = 0;
+  trackedDomMutations.length = 0;
   lastOptions = options;
   // observe real public atlas events before the renderer activates
   if (options.trackAtlasRemovals) {
@@ -109,7 +127,7 @@ const terminalOptions = (container: HTMLElement, options: FixtureOptions): Strea
     connectCount += 1;
     // Open on the next task, as a real socket would.
     setTimeout(() => next.onOpen(), 0);
-    return { send: frame => { sent.push(frame); }, close: () => { closeCount += 1; } };
+    return { send: frame => { sent.push(frame); timedSent.push({ at: performance.now(), frame }); }, close: () => { closeCount += 1; } };
   }
 });
 
@@ -156,9 +174,170 @@ export const pushClose = (code: number, reason: string) => handlers?.onClose({ c
 // --- Accessors (browser → spec) -----------------------------------------------------
 
 const terminal = () => handle!.terminal;
+// inspect the same anonymous geometry captured when leaving a workspace
+export const outputShape = () => measureOutputShape(terminal());
 export const sentFrames = () => sent.map(frame => frame.type);
+// expose the real grid proposed to the fixture transport
+export const lastProposedViewport = () => sent.findLast((frame): frame is Extract<PaneClientFrame, { type: 'viewport' }> => frame.type === 'viewport');
 export const inputFrameCount = () => sent.filter(frame => frame.type === 'input').length;
 export const ackedBytes = () => sent.filter((frame): frame is Extract<PaneClientFrame, { type: 'ack' }> => frame.type === 'ack').map(frame => frame.bytes);
+// read the actual DOM renderer rather than xterm's already-parsed buffer
+export const renderedDomText = () => host?.querySelector<HTMLElement>('.xterm-rows')?.textContent ?? '';
+// count public render events and retain the DOM committed at each event
+export const startRenderTracking = () => {
+  renderTracking?.dispose();
+  privateRenderTracking?.dispose();
+  domMutationTracking?.disconnect();
+  trackedRenders.length = 0;
+  trackedPrivateRenders.length = 0;
+  trackedDomMutations.length = 0;
+  renderTracking = terminal().onRender(({ start, end }) => {
+    trackedRenders.push({ at: performance.now(), start, end, domText: renderedDomText() });
+  });
+  const renderService = (terminal() as unknown as { _core?: { _renderService?: { onRender?: (listener: (range: { start: number; end: number }) => void) => { dispose: () => void } } } })._core?._renderService;
+  // compare xterm's every-paint event with its filtered public viewport event
+  if (typeof renderService?.onRender === 'function') privateRenderTracking = renderService.onRender(({ start, end }) => {
+    trackedPrivateRenders.push({ at: performance.now(), start, end, domText: renderedDomText() });
+  });
+  const rows = host?.querySelector('.xterm-rows');
+  // timestamp the concrete DOM commit independently of xterm's render events
+  if (rows !== null && rows !== undefined) {
+    domMutationTracking = new MutationObserver(() => { trackedDomMutations.push({ at: performance.now(), domText: renderedDomText() }); });
+    domMutationTracking.observe(rows, { subtree: true, childList: true, characterData: true });
+  }
+};
+// copy public render evidence without exposing the mutable fixture array
+export const renderTrace = () => trackedRenders.map(render => ({ ...render }));
+
+// sum transport acknowledgements emitted after one timed-frame index
+const acknowledgedSince = (sentIndex: number) => timedSent.slice(sentIndex)
+  .filter((event): event is { at: number; frame: Extract<PaneClientFrame, { type: 'ack' }> } => event.frame.type === 'ack')
+  .reduce((total, event) => total + event.frame.bytes, 0);
+
+// drive real socket-sized frames at sixty hertz and report parser and paint timing
+export const streamPacedFrames = async (frames = 60, durationMs = 1000, scrolling = false) => {
+  const encoder = new TextEncoder();
+  const sentIndex = timedSent.length;
+  const payloads: Uint8Array[] = [];
+  const frameSends: Array<{ frame: number; sentAt: number; cumulativeBytes: number }> = [];
+  const marker = 'FINAL-PACING-MARKER';
+  const startedAt = performance.now();
+  let finalPushedAt = startedAt;
+  let cumulativeBytes = 0;
+  startRenderTracking();
+  // deliver every frame at its target wall-clock offset
+  for (let frame = 0; frame < frames; frame += 1) {
+    const target = startedAt + frame * durationMs / frames;
+    const delay = target - performance.now();
+    // wait only when the prior callback has not consumed the interval
+    if (delay > 0) await new Promise<void>(resolve => setTimeout(resolve, delay));
+    const text = frame === frames - 1 ? marker : `paced-${String(frame).padStart(2, '0')}`;
+    // preserve ordinary row-local updates and exercise sustained scrollback separately
+    const payload = encoder.encode(scrolling ? `${text}\r\n` : `\r\x1b[2K${text}`);
+    payloads.push(payload);
+    const sentAt = performance.now();
+    handlers?.onBytes(payload);
+    cumulativeBytes += payload.length;
+    frameSends.push({ frame, sentAt, cumulativeBytes });
+    // retain the exact final delivery time for paint latency
+    if (frame === frames - 1) finalPushedAt = sentAt;
+  }
+  const expectedBytes = payloads.reduce((total, payload) => total + payload.length, 0);
+  await waitFor(() => acknowledgedSince(sentIndex) >= expectedBytes, 2000);
+  await waitFor(() => renderedDomText().includes(marker), 2000);
+  // let any duplicate parser callback surface before checking exact totals
+  await new Promise<void>(resolve => setTimeout(resolve, 30));
+  const acknowledgements = timedSent.slice(sentIndex)
+    .filter((event): event is { at: number; frame: Extract<PaneClientFrame, { type: 'ack' }> } => event.frame.type === 'ack');
+  let acknowledgedBytes = 0;
+  let acknowledgementIndex = 0;
+  let acknowledgedAt = startedAt;
+  // map each sent frame boundary to the acknowledgement that covered its final byte
+  const frameTimings = frameSends.map(frame => {
+    while (acknowledgedBytes < frame.cumulativeBytes && acknowledgementIndex < acknowledgements.length) {
+      const acknowledgement = acknowledgements[acknowledgementIndex]!;
+      acknowledgedBytes += acknowledgement.frame.bytes;
+      acknowledgedAt = acknowledgement.at;
+      acknowledgementIndex += 1;
+    }
+    return {
+      frame: frame.frame,
+      sentAtMs: frame.sentAt - startedAt,
+      cumulativeBytes: frame.cumulativeBytes,
+      acknowledgedAtMs: acknowledgedAt - startedAt,
+      acknowledgementLatencyMs: acknowledgedAt - frame.sentAt
+    };
+  });
+  const acknowledgementLatencies = frameTimings.map(frame => frame.acknowledgementLatencyMs).sort((left, right) => left - right);
+  const acknowledgementP95LatencyMs = acknowledgementLatencies[Math.max(0, Math.ceil(acknowledgementLatencies.length * .95) - 1)] ?? 0;
+  const acknowledgementMaxLatencyMs = Math.max(0, ...acknowledgementLatencies);
+  const markerRender = trackedRenders.find(event => event.at >= finalPushedAt && event.domText.includes(marker));
+  const privateMarkerRender = trackedPrivateRenders.find(event => event.at >= finalPushedAt && event.domText.includes(marker));
+  const markerMutation = trackedDomMutations.find(event => event.at >= finalPushedAt && event.domText.includes(marker));
+  return {
+    frames,
+    streamDurationMs: finalPushedAt - startedAt,
+    expectedBytes,
+    acknowledgedBytes: acknowledgements.reduce((total, event) => total + event.frame.bytes, 0),
+    acknowledgementEvents: acknowledgements.length,
+    finalAckLatencyMs: (acknowledgements.at(-1)?.at ?? finalPushedAt) - finalPushedAt,
+    acknowledgementP95LatencyMs,
+    acknowledgementMaxLatencyMs,
+    frameTimings,
+    publicRenderCount: trackedRenders.length,
+    // measure committed frame gaps, not only the average render count
+    maximumRenderGapMs: Math.max(0, ...trackedRenders.slice(1).map((event, index) => event.at - trackedRenders[index]!.at)),
+    privateRenderCount: trackedPrivateRenders.length,
+    rowMutationCount: trackedDomMutations.length,
+    finalPaintLatencyMs: (markerRender?.at ?? performance.now()) - finalPushedAt,
+    markerPainted: markerRender !== undefined,
+    privateFinalPaintLatencyMs: (privateMarkerRender?.at ?? performance.now()) - finalPushedAt,
+    privateMarkerPainted: privateMarkerRender !== undefined,
+    mutationFinalPaintLatencyMs: (markerMutation?.at ?? performance.now()) - finalPushedAt,
+    mutationMarkerPainted: markerMutation !== undefined,
+    publicRenderTail: trackedRenders.slice(-3).map(event => ({ at: event.at - finalPushedAt, start: event.start, end: event.end, marker: event.domText.includes(marker) })),
+    privateRenderTail: trackedPrivateRenders.slice(-3).map(event => ({ at: event.at - finalPushedAt, start: event.start, end: event.end, marker: event.domText.includes(marker) })),
+    mutationTail: trackedDomMutations.slice(-3).map(event => ({ at: event.at - finalPushedAt, marker: event.domText.includes(marker) }))
+  };
+};
+
+// prove terminal input is sent synchronously while a trailing visual frame is pending
+export const inputDuringTrailingFrame = async (input: string) => {
+  const encoder = new TextEncoder();
+  const sentIndex = timedSent.length;
+  startRenderTracking();
+  const leading = encoder.encode('\r\x1b[2Kpacing-leading');
+  handlers?.onBytes(leading);
+  await waitFor(() => acknowledgedSince(sentIndex) >= leading.length, 4000, 1);
+  await waitFor(() => trackedRenders.length > 0);
+  let expectedBytes = leading.length;
+  let pendingBeforeInput = false;
+  let trailingLabel = '';
+  // retry only when a global frame bucket landed during the acknowledgement task
+  for (let attempt = 0; attempt < 3 && !pendingBeforeInput; attempt += 1) {
+    const label = `pacing-trailing-${attempt}`;
+    trailingLabel = label;
+    const rendersBeforeTrailing = trackedRenders.length;
+    const trailing = encoder.encode(`\r\x1b[2K${label}`);
+    expectedBytes += trailing.length;
+    handlers?.onBytes(trailing);
+    await waitFor(() => acknowledgedSince(sentIndex) >= expectedBytes, 4000, 1);
+    pendingBeforeInput = trackedRenders.length === rendersBeforeTrailing && !renderedDomText().includes(label);
+    // observe an unusually immediate bucket before attempting the next trailing frame
+    if (!pendingBeforeInput) await waitFor(() => renderedDomText().includes(label));
+  }
+  const beforeInput = performance.now();
+  const accepted = handle!.sendInput(input);
+  const inputEvent = timedSent.find(event => event.at >= beforeInput && event.frame.type === 'input');
+  await waitFor(() => renderedDomText().includes(trailingLabel));
+  return {
+    accepted,
+    pendingBeforeInput,
+    sentSynchronously: inputEvent !== undefined,
+    sendLatencyMs: (inputEvent?.at ?? performance.now()) - beforeInput,
+    inputData: inputData()
+  };
+};
 export const focusTerminal = () => handle!.focus();
 export const blurTerminal = () => (document.activeElement as HTMLElement | null)?.blur();
 // record each run of the named key actions, as the app's panel handlers would receive them
@@ -175,6 +354,8 @@ export const sendInputRaw = (text: string) => handle!.sendInput(text);
 export const requestMetadata = () => handle!.requestMetadata();
 // mirror the app's selection-mode signal without replacing the terminal renderer
 export const setOutputPaused = (paused: boolean) => handle!.setOutputPaused(paused);
+// create a real xterm selection without a synthetic mouse gesture
+export const selectCells = (column: number, row: number, length: number) => handle!.terminal.select(column, row, length);
 export const scrollUp = (lines: number) => terminal().scrollLines(-lines);
 export const jumpHidden = () => root?.querySelector<HTMLButtonElement>('.streamed-terminal-jump')?.hidden ?? true;
 export const clickJump = () => root?.querySelector<HTMLButtonElement>('.streamed-terminal-jump')?.click();

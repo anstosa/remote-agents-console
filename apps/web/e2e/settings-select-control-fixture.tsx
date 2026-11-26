@@ -9,6 +9,9 @@ const twoWayOptions: SettingsSelectOption[] = [
   { value: 'right', label: 'Command shortcuts', group: 'Second group', icon: choiceIcon('M5 12h14m0 0-5-5m5 5-5 5') }
 ];
 
+// expose either busy endpoint without adding a second rendered progress owner
+const busyTwoWayOptions = (value: 'left' | 'right'): SettingsSelectOption[] => twoWayOptions.map(option => ({ ...option, busy: option.value === value }));
+
 const threeWayOptions: SettingsSelectOption[] = [
   { value: 'alpha', label: 'Alpha', icon: choiceIcon('M5 19 12 5l7 14') },
   { value: 'beta', label: 'Beta', icon: choiceIcon('M6 4h7a5 5 0 0 1 0 10H6zm0 10h8a3 3 0 0 1 0 6H6') },
@@ -37,6 +40,8 @@ function SettingsSelectControlFixture() {
   return <main style={{ width: '230px' }}>
     <label>Two way<SettingsSelect label="Two-way mode" value={twoWay} options={twoWayOptions} onChange={value => { /* record an explicit two-way choice */ change('two-way', value, setTwoWay); }} /></label>
     <output aria-label="Two-way value">{twoWay}</output>
+    <label>Left busy<SettingsSelect label="Left busy endpoint" value="left" options={busyTwoWayOptions('left')} onChange={() => { /* keep the busy fixture stable */ }} /></label>
+    <label>Right busy<SettingsSelect label="Right busy endpoint" value="right" options={busyTwoWayOptions('right')} onChange={() => { /* keep the busy fixture stable */ }} /></label>
     <label>Unknown<SettingsSelect label="Unknown mode" value={unknown} options={[twoWayOptions[0]!, { ...twoWayOptions[1]!, disabled: true }]} onChange={value => { /* record recovery from an unknown value */ change('unknown', value, setUnknown); }} /></label>
     <output aria-label="Unknown value">{unknown}</output>
     <label>Blocked<SettingsSelect label="Blocked destination" value="left" options={[twoWayOptions[0]!, { ...twoWayOptions[1]!, disabled: true }]} onChange={value => { /* expose an unexpected blocked callback */ change('blocked', value, () => { /* keep the fixed fixture value */ }); }} /></label>

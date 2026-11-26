@@ -82,6 +82,13 @@ const terminalCellWidth = (container: Locator) => container.locator('.xterm-char
   return bounds.width / (element.textContent?.length ?? 1);
 });
 
+// call the isolated streamed-terminal fixture for projection lifecycle regressions
+const driveSelectionTerminal = <T = unknown>(page: Page, name: string, ...args: unknown[]): Promise<T> =>
+  page.evaluate(async ({ name, args }) => {
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    return (module as Record<string, (...values: unknown[]) => unknown>)[name]!(...args) as T;
+  }, { name, args });
+
 // select complete owned rows across visual wrapping boundaries
 const selectNativeRows = (page: Page, firstText: string, lastText: string) => page.locator('.terminal-selection-surface').evaluate((surface, text) => {
   const rows = [...surface.querySelectorAll<HTMLElement>('.terminal-selection-row')];
@@ -97,6 +104,108 @@ const selectNativeRows = (page: Page, firstText: string, lastText: string) => pa
   selection.addRange(range);
   document.dispatchEvent(new Event('selectionchange'));
 }, { first: firstText, last: lastText });
+
+test('selection projection batches ASCII rows and refreshes only changed terminal rows across reattach', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('rac.terminal-webgl', 'disabled'));
+  await page.goto('/');
+  await page.evaluate(async () => {
+    document.body.replaceChildren();
+    const mount = document.createElement('div');
+    mount.id = 'selection-projection';
+    document.body.append(mount);
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    await module.renderStreamedTerminal(mount, {
+      width: '640px', height: '240px', preferNativeMouseSelection: true,
+      keep: { workspace: 'selection-projection', panel: 'agent' }
+    });
+  });
+  await expect(page.locator('#selection-projection')).toHaveAttribute('data-ready', 'true');
+  await driveSelectionTerminal(page, 'pushSize', 40, 6);
+  await driveSelectionTerminal(page, 'pushBytes', '\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[2J\x1b[H\r\nStable ASCII row\r\nMutable ASCII row');
+
+  const surface = page.locator('#selection-projection .terminal-selection-surface');
+  const stable = surface.locator('.terminal-selection-row', { hasText: 'Stable ASCII row' });
+  const mutable = surface.locator('.terminal-selection-row', { hasText: 'Mutable ASCII row' });
+  await expect(stable).toHaveCount(1);
+  await expect(mutable).toHaveCount(1);
+  await expect(stable.locator(':scope > span')).toHaveCount(1);
+  await expect(mutable.locator(':scope > span')).toHaveCount(1);
+  const stableSpan = await stable.locator(':scope > span').elementHandle();
+  const mutableSpan = await mutable.locator(':scope > span').elementHandle();
+  expect(stableSpan).not.toBeNull();
+  expect(mutableSpan).not.toBeNull();
+
+  // a row-local xterm render must leave the unchanged row's selectable node intact
+  await driveSelectionTerminal(page, 'pushBytes', '\x1b[3;1H\x1b[2KMutable ASCII replaced');
+  const replaced = surface.locator('.terminal-selection-row', { hasText: 'Mutable ASCII replaced' });
+  await expect(replaced).toHaveCount(1);
+  await expect(replaced.locator(':scope > span')).toHaveCount(1);
+  expect(await stable.locator(':scope > span').evaluate((current, previous) => current === previous, stableSpan)).toBe(true);
+  expect(await mutableSpan!.evaluate(element => element.isConnected)).toBe(false);
+
+  // bottom-follow scrolling must reuse visible overlapping text nodes rather than rebuilding them
+  await driveSelectionTerminal(page, 'pushBytes', '\x1b[6;1HBottom row\r\nNew visible row');
+  await expect(surface.locator('.terminal-selection-row').first()).toHaveText('Stable ASCII row');
+  await expect(surface.locator('.terminal-selection-row').last()).toHaveText('New visible row');
+  expect(await stable.locator(':scope > span').evaluate((current, previous) => current === previous, stableSpan)).toBe(true);
+
+  const screenWidthBefore = await page.locator('#selection-projection .xterm-screen').evaluate(element => element.getBoundingClientRect().width);
+  await driveSelectionTerminal(page, 'leavePanel');
+  await page.waitForTimeout(50);
+  expect(await driveSelectionTerminal(page, 'showPanel', 'selection-projection-back')).toBe(true);
+  await page.locator('#selection-projection-back').evaluate(element => { element.style.width = '420px'; });
+  await driveSelectionTerminal(page, 'pushSize', 24, 6);
+  const reattached = page.locator('#selection-projection-back');
+  await expect(reattached.locator('.terminal-selection-row', { hasText: 'Stable ASCII row' })).toHaveCount(1);
+  await expect.poll(async () =>
+    reattached.locator('.xterm-screen').evaluate(element => element.getBoundingClientRect().width)
+  ).not.toBe(screenWidthBefore);
+  await expect.poll(async () => {
+    const [screenWidth, projectedWidth] = await Promise.all([
+      reattached.locator('.xterm-screen').evaluate(element => element.getBoundingClientRect().width),
+      reattached.locator('.terminal-selection-surface').evaluate(element => element.getBoundingClientRect().width)
+    ]);
+    return Math.abs(screenWidth - projectedWidth);
+  }).toBeLessThanOrEqual(0.01);
+  const [screenWidthAfter, projectedWidthAfter] = await Promise.all([
+    reattached.locator('.xterm-screen').evaluate(element => element.getBoundingClientRect().width),
+    reattached.locator('.terminal-selection-surface').evaluate(element => element.getBoundingClientRect().width)
+  ]);
+  expect(screenWidthAfter).not.toBe(screenWidthBefore);
+  expect(Math.abs(projectedWidthAfter - screenWidthAfter)).toBeLessThanOrEqual(0.01);
+});
+
+test('activates the full native selection grid only when a desktop terminal needs it', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('rac.terminal-webgl', 'disabled'));
+  await page.goto('/');
+  await page.evaluate(async () => {
+    document.body.replaceChildren();
+    const mount = document.createElement('div');
+    mount.id = 'selection-mode-projection';
+    document.body.append(mount);
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    await module.renderStreamedTerminal(mount, { width: '640px', height: '240px', preferNativeMouseSelection: true });
+  });
+  await expect(page.locator('#selection-mode-projection')).toHaveAttribute('data-ready', 'true');
+  await driveSelectionTerminal(page, 'pushSize', 40, 6);
+  const surface = page.locator('#selection-mode-projection .terminal-selection-surface');
+  await driveSelectionTerminal(page, 'pushBytes', 'Plain selectable output\r\n');
+  await expect(surface).toContainText('Plain selectable output');
+  await expect(surface).toBeHidden();
+  await expect(surface.locator('.terminal-selection-row')).toHaveCount(0);
+
+  // a mouse-reporting application exposes the exact previously committed text grid
+  await driveSelectionTerminal(page, 'pushBytes', '\x1b[?1003h\x1b[?1006h');
+  await expect(surface).toBeVisible();
+  await expect(surface.locator('.terminal-selection-row', { hasText: 'Plain selectable output' })).toHaveCount(1);
+  await expect(surface.locator('.terminal-selection-row')).toHaveCount(6);
+
+  // leaving mouse reporting restores xterm's normal selection and the cheap text mirror
+  await driveSelectionTerminal(page, 'pushBytes', '\x1b[?1003l\x1b[?1006l');
+  await expect(surface).toBeHidden();
+  await expect(surface.locator('.terminal-selection-row')).toHaveCount(0);
+  await expect(surface).toContainText('Plain selectable output');
+});
 
 test('default WebGL output selection adds the selected text to the prompt', async ({ page }) => {
   await installPaneMock(page, { preserveWebglDefault: true });

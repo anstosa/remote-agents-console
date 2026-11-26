@@ -1,6 +1,17 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { outputLinkSegments, outputUrlMatchesHost } from '../src/output-links';
 
+// preserve Vite's production styles while replacing only the app-owned body
+const mountOutputLinksPage = async (page: Page) => {
+  await page.goto('/');
+  // retain the loaded head while mounting an isolated fixture body
+  await page.evaluate(() => {
+    const container = document.createElement('div');
+    container.id = 'output-links';
+    document.body.replaceChildren(container);
+  });
+};
+
 // verify output host matching
 test('matches output URLs to the configured stack host', () => {
   expect(outputUrlMatchesHost('https://project.example.com/details?view=files', 'https://project.example.com')).toBe(true);
@@ -33,8 +44,7 @@ test('clips output link overlays to the visible viewport', () => {
 });
 
 test('opens the complete target for links split across captured terminal rows', async ({ page }) => {
-  await page.goto('/');
-  await page.setContent('<div id="output-links"></div>');
+  await mountOutputLinksPage(page);
   await page.evaluate(async () => {
     const { renderCapturedWrappedOutputLink } = await import('/e2e/output-links-fixture.ts');
     await renderCapturedWrappedOutputLink(document.querySelector<HTMLElement>('#output-links')!);
@@ -56,8 +66,7 @@ test('opens the complete target for links split across captured terminal rows', 
 
 // mount one captured link without leaving the deterministic fixture
 const mountCapturedLink = async (page: Page, output: string, columns = 80) => {
-  await page.goto('/');
-  await page.setContent('<div id="output-links"></div>');
+  await mountOutputLinksPage(page);
   // render the captured rows
   await page.evaluate(async ({ output, columns }) => {
     const { renderOutputLinkText } = await import('/e2e/output-links-fixture.ts');
@@ -331,8 +340,7 @@ for (const separator of ['?', ':', ',', '.']) {
   // verify every separator against terminal output rather than a string-only helper
   test(`joins captured URL rows ending in ${separator}`, async ({ page }) => {
     const uri = `https://example.com/path${separator}item=12345&view=all`;
-    await page.goto('/');
-    await page.setContent('<div id="output-links"></div>');
+    await mountOutputLinksPage(page);
     await page.evaluate(async uri => {
       const { renderOutputLinkText } = await import('/e2e/output-links-fixture.ts');
       await renderOutputLinkText(document.querySelector<HTMLElement>('#output-links')!, `Visit ${uri.slice(0, 25)}\r\n${uri.slice(25)} for details.`, 31);
@@ -349,8 +357,7 @@ for (const separator of ['?', ':', ',', '.']) {
   // keep a hard-break counterexample for each newly accepted punctuation boundary
   test(`does not append prose after a captured URL ending in ${separator}`, async ({ page }) => {
     const uri = 'https://example.com/path';
-    await page.goto('/');
-    await page.setContent('<div id="output-links"></div>');
+    await mountOutputLinksPage(page);
     await page.evaluate(async ({ uri, separator }) => {
       const { renderOutputLinkText } = await import('/e2e/output-links-fixture.ts');
       await renderOutputLinkText(document.querySelector<HTMLElement>('#output-links')!, `Visit ${uri}${separator}\r\nNext line`, 31);
@@ -364,8 +371,7 @@ for (const separator of ['?', ':', ',', '.']) {
 // retain numeric URL continuations such as an explicit port
 test('joins a captured URL split before a numeric port', async ({ page }) => {
   const uri = 'https://example.com:8443';
-  await page.goto('/');
-  await page.setContent('<div id="output-links"></div>');
+  await mountOutputLinksPage(page);
   await page.evaluate(async uri => {
     const { renderOutputLinkText } = await import('/e2e/output-links-fixture.ts');
     await renderOutputLinkText(document.querySelector<HTMLElement>('#output-links')!, `${' '.repeat(11)}${uri.slice(0, 20)}\r\n${uri.slice(20)}`, 31);
@@ -379,8 +385,7 @@ test('joins a captured URL split before a numeric port', async ({ page }) => {
 // carry a complete destination through every captured continuation row
 test('joins three captured URL rows into one destination', async ({ page }) => {
   const uri = 'https://example.com/path?item=12345&filter=complete&sort=updated&view=details';
-  await page.goto('/');
-  await page.setContent('<div id="output-links"></div>');
+  await mountOutputLinksPage(page);
   await page.evaluate(async uri => {
     const { renderOutputLinkText } = await import('/e2e/output-links-fixture.ts');
     await renderOutputLinkText(document.querySelector<HTMLElement>('#output-links')!, `Visit ${uri.slice(0, 25)}\r\n${uri.slice(25, 56)}\r\n${uri.slice(56)} for details.`, 31);
@@ -399,8 +404,7 @@ test('joins three captured URL rows into one destination', async ({ page }) => {
 // reconstruct a scheme that was captured before both slashes were printed
 test('joins captured rows split inside the URL scheme', async ({ page }) => {
   const uri = 'https://example.com/path?item=12';
-  await page.goto('/');
-  await page.setContent('<div id="output-links"></div>');
+  await mountOutputLinksPage(page);
   await page.evaluate(async uri => {
     const { renderOutputLinkText } = await import('/e2e/output-links-fixture.ts');
     await renderOutputLinkText(document.querySelector<HTMLElement>('#output-links')!, `${' '.repeat(24)}${uri.slice(0, 6)}\r\n${uri.slice(6)}`);
@@ -414,8 +418,7 @@ test('joins captured rows split inside the URL scheme', async ({ page }) => {
 // retain native soft-wrap behavior alongside captured-row reconstruction
 test('keeps the full destination across native xterm soft wraps', async ({ page }) => {
   const uri = 'https://example.com/path?item=12345&filter=complete&sort=updated&view=details';
-  await page.goto('/');
-  await page.setContent('<div id="output-links"></div>');
+  await mountOutputLinksPage(page);
   await page.evaluate(async uri => {
     const { renderOutputLinkText } = await import('/e2e/output-links-fixture.ts');
     await renderOutputLinkText(document.querySelector<HTMLElement>('#output-links')!, `Visit ${uri} for details.`, 31);
@@ -429,8 +432,7 @@ test('keeps the full destination across native xterm soft wraps', async ({ page 
 // preserve real whitespace at a soft-wrap boundary instead of extending the URL
 test('does not append the next wrapped word after a URL delimiter', async ({ page }) => {
   const uri = 'https://example.com/path';
-  await page.goto('/');
-  await page.setContent('<div id="output-links"></div>');
+  await mountOutputLinksPage(page);
   await page.evaluate(async uri => {
     const { renderOutputLinkText } = await import('/e2e/output-links-fixture.ts');
     await renderOutputLinkText(document.querySelector<HTMLElement>('#output-links')!, `Visit ${uri} next word`, 31);
@@ -464,8 +466,7 @@ test('maps a native link after emoji and combining text to exact cells', async (
 });
 
 test('keeps native output links stable, clickable, and available to the context menu', async ({ page }) => {
-  await page.goto('/');
-  await page.setContent('<div id="output-links"></div>');
+  await mountOutputLinksPage(page);
   await page.evaluate(async () => {
     const { renderOutputLinks } = await import('/e2e/output-links-fixture.ts');
     await renderOutputLinks(document.querySelector<HTMLElement>('#output-links')!);
@@ -477,10 +478,13 @@ test('keeps native output links stable, clickable, and available to the context 
   await expect(link).toHaveCSS('cursor', 'pointer');
   await page.evaluate(() => {
     document.body.dataset.linkMutations = '0';
+    document.body.dataset.linkStyleMutations = '0';
     new MutationObserver(records => {
       const changes = records.flatMap(record => [...record.addedNodes, ...record.removedNodes]).filter(node => node instanceof Element && (node.matches('.output-link-overlay') || node.querySelector('.output-link-overlay'))).length;
+      const styleChanges = records.filter(record => record.type === 'attributes' && record.target instanceof Element && record.target.matches('.output-link-overlay')).length;
       document.body.dataset.linkMutations = String(Number(document.body.dataset.linkMutations ?? '0') + changes);
-    }).observe(document.querySelector('#output-links')!, { childList: true, subtree: true });
+      document.body.dataset.linkStyleMutations = String(Number(document.body.dataset.linkStyleMutations ?? '0') + styleChanges);
+    }).observe(document.querySelector('#output-links')!, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
   });
   const bounds = await link.boundingBox();
   expect(bounds).not.toBeNull();
@@ -499,6 +503,7 @@ test('keeps native output links stable, clickable, and available to the context 
   await expect(page.locator('body')).toHaveAttribute('data-opened', 'true');
   await page.waitForTimeout(250);
   await expect(page.locator('body')).toHaveAttribute('data-link-mutations', '0');
+  await expect(page.locator('body')).toHaveAttribute('data-link-style-mutations', '0');
   await page.evaluate(() => {
     document.addEventListener('contextmenu', event => {
       const link = (event.target as Element).closest('a');

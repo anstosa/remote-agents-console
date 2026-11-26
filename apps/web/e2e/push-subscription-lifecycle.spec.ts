@@ -125,6 +125,7 @@ async function serveLifecycle(page: Page, options: {
   subscriptionResponses?: Array<{ status: number; error?: string }>;
   publicKeyResponses?: Array<{ status: number; publicKey?: string }>;
   active?: boolean;
+  agents?: unknown[];
   onSubscriptionRequest?: (count: number) => Promise<void>;
 } = {}) {
   const subscriptionBodies: unknown[] = [];
@@ -139,7 +140,7 @@ async function serveLifecycle(page: Page, options: {
     // restore one signed active or inactive session
     if (path === '/api/auth/session') { sessionRequests += 1; return route.fulfill({ json: { csrfToken: `csrf-${sessionRequests}`, active, deviceName: 'Lifecycle fixture' } }); }
     // render an empty authenticated console
-    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, serverStartedAt: 100, agents: [], projects: [] } });
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, serverStartedAt: 100, agents: options.agents ?? [], projects: [] } });
     // return each configured fresh key result
     if (path === '/api/push/public-key') {
       const response = options.publicKeyResponses?.[Math.min(publicKeyRequests, options.publicKeyResponses.length - 1)] ?? { status: 200, publicKey: encodedCurrentKey };
@@ -179,6 +180,25 @@ const pushStats = (page: Page): Promise<PushStats> => page.evaluate(() => (windo
 
 // emit one named lifecycle trigger
 const trigger = (page: Page, name: 'controllerchange' | 'online' | 'pageshow' | 'visible' | 'register' | 'recover') => page.evaluate(name => (window as typeof window & { __pushLifecycle: Record<string, () => void> }).__pushLifecycle[name]!(), name);
+
+// switching dashboard workspaces must not cancel or restart the authenticated enrollment
+test('keeps a pending push enrollment alive across workspace switches', async ({ page }) => {
+  await installPushBrowser(page, { existingKey: currentKey, stall: 'public-key' });
+  await serveLifecycle(page, { agents: [
+    { id: 'agent-a', sessionId: 'socket:$1', home: '/worktrees/a', title: 'Ready A', attention: 'finished', kind: 'codex' },
+    { id: 'agent-b', sessionId: 'socket:$2', home: '/worktrees/b', title: 'Ready B', attention: 'finished', kind: 'codex' }
+  ] });
+  await page.goto('/');
+  await expect.poll(() => pushStats(page)).toMatchObject({ stalledRequests: 1, aborts: 0 });
+  // the keyboard and tab selection still change the active workspace normally
+  for (const index of [1, 0, 1, 0]) {
+    const tab = page.getByRole('tab').nth(index);
+    await tab.click();
+    await expect(tab).toHaveAttribute('aria-selected', 'true');
+  }
+  await page.waitForTimeout(100);
+  expect(await pushStats(page)).toMatchObject({ stalledRequests: 1, aborts: 0 });
+});
 
 test('checks and reuses a matching subscription without cooldown churn', async ({ page }) => {
   await installPushBrowser(page, { existingKey: currentKey });

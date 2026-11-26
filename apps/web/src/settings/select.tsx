@@ -29,7 +29,6 @@ type OptionSegment = { group?: string; entries: IndexedOption[] };
 // render one visible endpoint of a two-way switch
 function TwoWayChoice({ option, selected }: { option: SettingsSelectOption; selected: boolean }) {
   return <span className="settings-select-switch-choice" data-selected={selected || undefined} data-has-issues={option.hasIssues || undefined} aria-disabled={option.disabled || undefined} title={option.group === undefined ? option.label : `${option.group}: ${option.label}`}>
-    {option.busy === true && <span className="update-progress-ring" aria-hidden="true" />}
     {option.icon !== undefined && <span className="settings-select-switch-icon" aria-hidden="true">{option.icon}</span>}
     <span>{option.label}</span>
   </span>;
@@ -107,6 +106,8 @@ export function SettingsSelect({ label, value, options, disabled = false, search
   const switchTarget = switchChecked ? first : second;
   const switchDisabled = disabled || switchTarget?.disabled === true;
   const busy = shown.busy === true;
+  // either busy endpoint owns one indicator on the binary control
+  const binaryBusy = first?.busy === true || second?.busy === true;
   const hasIcons = options.some(option => option.icon !== undefined);
   // retain source indexes through filtering
   const entries = options.map((option, index) => ({ option, index }));
@@ -378,16 +379,17 @@ export function SettingsSelect({ label, value, options, disabled = false, search
       ref={anchorRef}
       type="button"
       role="switch"
-      className={`settings-select-two-way${busy ? ' progress-border progress-blue' : ''}`}
+      className={`settings-select-two-way${binaryBusy ? ' progress-border progress-blue' : ''}`}
       aria-label={label}
       aria-describedby={switchDescriptionId}
       aria-checked={switchChecked}
-      aria-busy={busy || undefined}
+      aria-busy={binaryBusy || undefined}
       data-value={value}
       data-has-issues={shown.hasIssues || undefined}
       disabled={switchDisabled}
       onClick={toggleTwoWay}
     >
+      {binaryBusy && <span className="update-progress-ring" aria-hidden="true" />}
       <TwoWayChoice option={first} selected={first.value === value} />
       <span className="settings-select-switch-track" aria-hidden="true"><span /></span>
       <TwoWayChoice option={second} selected={second.value === value} />

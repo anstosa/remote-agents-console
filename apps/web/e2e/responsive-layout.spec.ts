@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { instanceIconSvg } from '../../server/src/instance-icon.js';
 import { installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock.js';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions.js';
+import { expectBreathingProgressBorder, expectProgressBorder, expectReducedMotionProgress } from './progress-border-assertions.js';
 
 test('keeps the active tab, output, and prompt controls inside a narrow viewport', async ({ page }) => {
   await page.setViewportSize({ width: 428, height: 952 });
@@ -367,8 +367,8 @@ test('the phone workspace switcher renames a worktree without selecting it', asy
   await expect(sheet.getByRole('button', { name: /^Renamed Cora\b/u })).toBeVisible();
 });
 
-// keep phone working motion around steady content
-test('the phone workspace flyout moves only a working row progress border', async ({ page }) => {
+// keep phone working motion on the breathing border and existing status slot
+test('the phone workspace flyout breathes while its status indicator orbits in place', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.route('**/api/**', route => {
@@ -388,40 +388,32 @@ test('the phone workspace flyout moves only a working row progress border', asyn
   const dropdown = page.getByRole('tab', { selected: true });
   await expect(dropdown).toBeVisible();
   await expectProgressBorder(dropdown, 'peach', 'working');
-  await expectClockwiseProgressBorder(dropdown, 'working');
+  await expectBreathingProgressBorder(dropdown, 'working');
+  await expect(dropdown).toHaveClass(/(?:^|\s)progress-status-button(?:\s|$)/u);
   await dropdown.click();
   const row = page.getByRole('dialog', { name: 'Workspaces' }).locator('.workspace-sheet-row.status-working');
   await expect(row.getByRole('button', { name: /^Build\s*2 Agents · 2 shells · Working$/u })).toBeVisible();
   await expectProgressBorder(row, 'peach', 'working');
-  await expectClockwiseProgressBorder(row, 'working');
+  await expectBreathingProgressBorder(row, 'working');
+  await expect(row).toHaveClass(/(?:^|\s)progress-status-button(?:\s|$)/u);
   const paint = await row.evaluate(element => {
     const entry = element.querySelector('.workspace-sheet-entry')!;
     const label = entry.querySelector('strong')!;
-    // keep only status-related movement from this row
-    const movingParts = element.getAnimations({ subtree: true }).flatMap(animation => {
-      const effect = animation.effect as KeyframeEffect;
-      // retain the working border orbit
-      if ((effect.target as Element | null)?.closest('.update-progress-ring')) return ['border'];
-      // surface accidental label motion
-      if (effect.target === label) return ['label'];
-      // surface accidental dot motion
-      if (effect.target === entry && effect.pseudoElement === '::after') return ['dot'];
-      return [];
-    });
     const dot = getComputedStyle(entry, '::after');
-    return { border: getComputedStyle(element).borderColor, dot: dot.backgroundColor, dotMotion: dot.animationName, dotWidth: dot.width, dotHeight: dot.height, labelMotion: getComputedStyle(label).animationName, movingParts };
+    return { activeProgressAnimations: element.getAnimations({ subtree: true }).filter(animation => animation instanceof CSSAnimation && animation.animationName.startsWith('progress-') && (animation.playState === 'running' || animation.pending)).length, dot: dot.borderTopColor, dotBackground: dot.backgroundColor, dotMotion: dot.animationName, dotWidth: dot.width, dotHeight: dot.height, labelMotion: getComputedStyle(label).animationName };
   });
-  expect(paint.border).toBe(paint.dot);
-  const dropdownPaint = await page.getByRole('tab', { selected: true }).evaluate(element => ({ border: getComputedStyle(element).borderColor, shadow: getComputedStyle(element).boxShadow }));
-  expect(dropdownPaint.border).toBe(paint.dot);
+  expect(paint.dotBackground).toBe('rgba(0, 0, 0, 0)');
+  const dropdownPaint = await page.getByRole('tab', { selected: true }).evaluate(element => ({ dot: getComputedStyle(element, '::after').borderTopColor, shadow: getComputedStyle(element).boxShadow }));
+  expect(dropdownPaint.dot).toBe(paint.dot);
   expect(dropdownPaint.shadow).not.toContain('inset');
-  expect(paint.movingParts).toEqual(['border']);
+  expect(paint.activeProgressAnimations).toBe(0);
   expect(paint.dotMotion).toBe('none');
-  expect([paint.dotWidth, paint.dotHeight]).toEqual(['6px', '6px']);
+  expect(Number.parseFloat(paint.dotWidth)).toBeGreaterThan(0);
+  expect(paint.dotHeight).toBe(paint.dotWidth);
   expect(paint.labelMotion).toBe('none');
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expectReducedMotionSpinner(dropdown, 'peach', 'working');
-  await expectReducedMotionSpinner(row, 'peach', 'working');
+  await expectReducedMotionProgress(dropdown, 'peach', 'working');
+  await expectReducedMotionProgress(row, 'peach', 'working');
   // keep status content stationary in reduced motion
   await expect.poll(() => row.evaluate(element => {
     const entry = element.querySelector('.workspace-sheet-entry')!;

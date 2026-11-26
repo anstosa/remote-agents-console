@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { TicketStore } from '../src/auth/tickets.js';
 import { codexAdapter } from '../src/adapters/codex.js';
+import { paneOutputBatchIntervalMs } from '../src/pane-output-batcher.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
 import type { PaneActivitySubscriber, PaneClient, PaneStreamProvider } from '../src/tmux/control.js';
 import { testConfig, testProject } from './helpers/config.js';
@@ -49,11 +50,17 @@ function fakePaneStream() {
   // simulated by clearing it, not by failing size()
   let windowId: string | undefined = '@7';
   let inputAccepted = true;
+  let echoInput = false;
   const client: PaneClient = {
     subscribe(pane, sub) { subscriber = sub; subscribers.set(pane, sub); return () => { if (subscribers.get(pane) === sub) subscribers.delete(pane); }; },
     capture: async () => captureText,
     windowId: async () => windowId,
-    sendInput: async (_pane, bytes) => { inputs.push(Buffer.from(bytes)); return inputAccepted; },
+    sendInput: async (_pane, bytes) => {
+      inputs.push(Buffer.from(bytes));
+      // model the pane echoing input immediately after it consumes the bytes
+      if (echoInput) subscriber?.onOutput?.(Buffer.from(bytes));
+      return inputAccepted;
+    },
     // model output immediately after the snapshot reply in the same parser turn
     seed: async (pane, depth, deliver) => {
       seedDepths.push(depth);
@@ -82,6 +89,7 @@ function fakePaneStream() {
     setSeedHandler: (value: (deliver: (bytes: Buffer) => boolean) => Promise<boolean>) => { seedHandler = value; },
     setWindowId: (value: string | undefined) => { windowId = value; },
     refuseInput: () => { inputAccepted = false; },
+    echoInputs: () => { echoInput = true; },
     setCapture: (value: string) => { captureText = value; },
     setAssistantMessage: (value: string | undefined) => { assistantMessage = value; },
     assistantMessage: () => assistantMessage,
@@ -690,6 +698,73 @@ describe('pane stream input', () => {
     expect([...stream.inputs[0]!]).toEqual([0x03]);
     expect(prompts.cancels()).toBe(1);
     await waitFor(() => prompts.releases() === 1);
+  });
+});
+
+describe('pane stream live output batching', () => {
+  it('coalesces trailing chunks byte-exactly and flushes them before reseed controls', async () => {
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport(100, 30);
+    await waitFor(() => conn.binary.length > 0);
+    const seedFrames = conn.binary.length;
+
+    stream.output(Buffer.from('leading'));
+    await waitFor(() => conn.binary.length === seedFrames + 1);
+    expect(conn.binary.at(-1)?.toString()).toBe('leading');
+    stream.output(Buffer.from('trailing-a'));
+    stream.output(Buffer.from('trailing-b'));
+    await delay(10);
+    expect(conn.binary).toHaveLength(seedFrames + 1);
+    await waitFor(() => conn.binary.length === seedFrames + 2);
+    expect(conn.binary.at(-1)?.toString()).toBe('trailing-atrailing-b');
+
+    // establish a fresh leading send so the next output is definitely retained
+    await delay(paneOutputBatchIntervalMs + 10);
+    stream.output(Buffer.from('boundary-leading'));
+    await waitFor(() => conn.binary.at(-1)?.toString() === 'boundary-leading');
+    const boundary = conn.order.length;
+    stream.output(Buffer.from('before-reseed'));
+    stream.setSeed(Buffer.from('REPLACEMENT-SEED'));
+    stream.fire('onReseed');
+    await waitFor(() => conn.binary.at(-1)?.toString() === 'REPLACEMENT-SEED');
+    expect(conn.order.slice(boundary).filter(event => event === 'binary' || event === 'frame:reseed'))
+      .toEqual(['binary', 'frame:reseed', 'binary']);
+    expect(conn.binary.at(-2)?.toString()).toBe('before-reseed');
+
+    stream.output(Buffer.from('control-leading'));
+    await waitFor(() => conn.binary.at(-1)?.toString() === 'control-leading');
+    const clipboardBoundary = conn.order.length;
+    stream.output(Buffer.from('before-clipboard'));
+    stream.clipboard('copied');
+    await waitFor(() => conn.frames.some(frame => frame.type === 'clipboard' && frame.text === 'copied'));
+    expect(conn.order.slice(clipboardBoundary).filter(event => event === 'binary' || event === 'frame:clipboard'))
+      .toEqual(['binary', 'frame:clipboard']);
+
+    const exitBoundary = conn.order.length;
+    stream.output(Buffer.from('before-exit'));
+    stream.exit('ended');
+    await waitFor(() => conn.closeCode() !== undefined);
+    expect(conn.order.slice(exitBoundary).filter(event => event === 'binary' || event === 'frame:exit'))
+      .toEqual(['binary', 'frame:exit']);
+  });
+
+  it('flushes retained output before causally later pane input', async () => {
+    const stream = fakePaneStream();
+    stream.echoInputs();
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport(100, 30);
+    await waitFor(() => conn.binary.length > 0);
+    const seedFrames = conn.binary.length;
+
+    stream.output(Buffer.from('leading'));
+    await waitFor(() => conn.binary.length === seedFrames + 1);
+    stream.output(Buffer.from('before-input'));
+    conn.send({ type: 'input', data: encode('typed') });
+    await waitFor(() => stream.inputs.length === 1 && conn.binary.length === seedFrames + 3);
+    expect(conn.binary.slice(seedFrames).map(String)).toEqual(['leading', 'before-input', 'typed']);
   });
 });
 

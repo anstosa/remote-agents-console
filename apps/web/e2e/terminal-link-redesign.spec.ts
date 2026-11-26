@@ -8,9 +8,14 @@ type LinkClipboardWindow = typeof window & { __terminalLinkClipboard: string[] }
 test.describe.configure({ timeout: 120_000 });
 
 // mount one isolated real-xterm scenario
-const mountScenario = async (page: Page, output: string, options: { columns?: number; rows?: number; scrollback?: number; fileCapability?: boolean; missingOscLookup?: boolean; missingCellMetadata?: boolean } = {}) => {
+const mountScenario = async (page: Page, output: string, options: { columns?: number; rows?: number; scrollback?: number; fileCapability?: boolean; missingOscLookup?: boolean; missingCellMetadata?: boolean; missingNativeRow?: boolean } = {}) => {
   await page.goto('/');
-  await page.setContent('<div id="terminal-link-redesign"></div>');
+  // preserve the production xterm and link-layer styles for cell geometry assertions
+  await page.evaluate(() => {
+    const container = document.createElement('div');
+    container.id = 'terminal-link-redesign';
+    document.body.replaceChildren(container);
+  });
   await page.evaluate(async ({ output, options }) => {
     const { renderTerminalLinkScenario } = await import('/e2e/terminal-link-redesign-fixture.ts');
     const container = document.querySelector<HTMLElement>('#terminal-link-redesign');
@@ -385,7 +390,13 @@ test('replaces normal and alternate OSC identities across streamed reseeds', asy
   const normal = 'https://normal.example.test/seed';
   const alternate = 'https://alternate.example.test/seed';
   await page.goto('/');
-  await page.setContent('<div id="streamed-seed" style="width:640px;height:240px"></div>');
+  // preserve terminal styles while isolating the streamed reseed fixture
+  await page.evaluate(() => {
+    const container = document.createElement('div');
+    container.id = 'streamed-seed';
+    Object.assign(container.style, { width: '640px', height: '240px' });
+    document.body.replaceChildren(container);
+  });
   await page.evaluate(async () => {
     const { renderStreamedTerminal, pushSize } = await import('/e2e/streamed-terminal-fixture.ts');
     const container = document.querySelector<HTMLElement>('#streamed-seed');
@@ -531,6 +542,211 @@ test('keeps unchanged semantic anchors stable across model refreshes', async ({ 
   });
   expect(await handle!.evaluate(element => element.isConnected)).toBe(true);
   await expect(link).toHaveCount(1);
+});
+
+test('renders screen-local overlays without synchronous layout reads', async ({ page }) => {
+  const target = 'https://target.example.test/screen-local';
+  await mountScenario(page, target);
+  const link = page.getByRole('link', { name: `Open ${target}`, exact: true });
+  await expect(link).toHaveCount(1);
+
+  const screenLocal = await page.evaluate(async () => {
+    const { refreshTerminalLinksWithoutLayoutReads } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    return refreshTerminalLinksWithoutLayoutReads();
+  });
+  expect(screenLocal).toBe(true);
+  await expect(link).toHaveAttribute('href', target);
+});
+
+test('reuses unchanged ordinary rows with one public identity read per row', async ({ page }) => {
+  const target = 'https://target.example.test/ordinary-cache';
+  await mountScenario(page, target, { rows: 4 });
+
+  const measured = await page.evaluate(async () => {
+    const { measureTerminalLinkRowReuse } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    return measureTerminalLinkRowReuse(8);
+  });
+  expect(measured.sameAnchor).toBe(true);
+  expect(measured.cellReads).toBeLessThanOrEqual(8 * 4);
+  await expect(page.getByRole('link', { name: `Open ${target}`, exact: true })).toHaveCount(1);
+});
+
+test('copies a hard row only through its last printed space with one reusable public cell', async ({ page }) => {
+  const target = 'https://target.example.test/trimmed-hard-row';
+  await mountScenario(page, `${target} `, { columns: 96, rows: 4 });
+
+  const measured = await page.evaluate(async () => {
+    const { measureFreshTerminalLinkSnapshot } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    return measureFreshTerminalLinkSnapshot();
+  });
+  const occupied = measured.rows.find(row => row.cells.length > 0);
+  expect(occupied).toBeDefined();
+  expect(measured.reads[occupied!.line]).toBe(target.length + 1);
+  expect(measured.reusedCells).toBe(1);
+  expect(occupied?.cells).toHaveLength(target.length + 1);
+  expect(occupied?.cells.at(-1)?.text).toBe(' ');
+  await expect(page.getByRole('link', { name: `Open ${target}`, exact: true })).toHaveCount(1);
+});
+
+test('keeps native-wrap null padding and invalidates a cached row when its successor starts wrapping', async ({ page }) => {
+  await mountScenario(page, `${'x'.repeat(11)}界`, { columns: 12, rows: 4 });
+  const wrapped = await page.evaluate(async () => {
+    const { measureFreshTerminalLinkSnapshot } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    return measureFreshTerminalLinkSnapshot();
+  });
+  const continuation = wrapped.rows.findIndex(row => row.wrapped);
+  expect(continuation).toBeGreaterThan(0);
+  expect(wrapped.rows[continuation - 1]?.cells).toHaveLength(12);
+  expect(wrapped.rows[continuation - 1]?.cells.at(-1)?.text).toBe('');
+
+  const target = 'https://target.example.test/wrap-cache';
+  await mountScenario(page, target, { columns: 72, rows: 4 });
+  const invalidated = await page.evaluate(async () => {
+    const { measureTerminalLinkNextWrapInvalidation } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    return measureTerminalLinkNextWrapInvalidation();
+  });
+  expect(invalidated.sameRow).toBe(false);
+  expect(invalidated.beforeCells).toBe(target.length);
+  expect(invalidated.afterCells).toBe(invalidated.columns);
+});
+
+test('keeps a full final row when its wrapped successor is beyond the snapshot bound', async ({ page }) => {
+  const lines = Array.from({ length: 50 }, (_, index) => `row-${index}`);
+  await mountScenario(page, lines.join('\r\n'), { columns: 40, rows: 4, scrollback: 100 });
+
+  const measured = await page.evaluate(async () => {
+    const { measureTruncatedTerminalLinkWrap } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    return measureTruncatedTerminalLinkWrap();
+  });
+  expect(measured.truncatedEnd).toBe(true);
+  expect(measured.sameRow).toBe(false);
+  expect(measured.cells).toBe(measured.columns);
+});
+
+test('retains full public fallback for combined, extended, and unrecognized native rows', async ({ page }) => {
+  // measure one fresh production snapshot after each isolated mount
+  const measure = async () => await page.evaluate(async () => {
+    const { measureFreshTerminalLinkSnapshot } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    return measureFreshTerminalLinkSnapshot();
+  });
+  await mountScenario(page, 'e\u0301', { columns: 20, rows: 2 });
+  expect((await measure()).reads[0]).toBe(20);
+
+  const explicit = 'https://target.example.test/full-osc-row';
+  await mountScenario(page, `\x1b]8;;${explicit}\x07label\x1b]8;;\x07`, { columns: 20, rows: 2 });
+  expect((await measure()).reads[0]).toBe(20);
+  await expect(page.getByRole('link', { name: `Open ${explicit}`, exact: true })).toHaveCount(1);
+
+  const inferred = 'https://x.test';
+  await mountScenario(page, inferred, { columns: 20, rows: 2, missingNativeRow: true });
+  expect((await measure()).cellReads).toBe(40);
+  await expect(page.getByRole('link', { name: `Open ${inferred}`, exact: true })).toHaveCount(1);
+
+  await mountScenario(page, '', { columns: 20, rows: 2, missingCellMetadata: true });
+  expect((await measure()).rows).toEqual([]);
+});
+
+test('invalidates an ordinary row cache entry when only cell style changes', async ({ page }) => {
+  const target = 'https://target.example.test/style-cache';
+  await mountScenario(page, `\x1b[31m${target}\x1b[0m`);
+  const link = page.getByRole('link', { name: `Open ${target}`, exact: true });
+  const handle = await link.elementHandle();
+  expect(handle).not.toBeNull();
+  const before = await page.evaluate(async () => {
+    const { terminalLinkCellStyles } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    return terminalLinkCellStyles();
+  });
+
+  await page.evaluate(async target => {
+    const { writeTerminalLinkOutput } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    await writeTerminalLinkOutput(`\r\x1b[2K\x1b[32m${target}\x1b[0m`);
+  }, target);
+  const after = await page.evaluate(async () => {
+    const { terminalLinkCellStyles } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    return terminalLinkCellStyles();
+  });
+  expect(after).not.toEqual(before);
+  expect(await handle!.evaluate(element => element.isConnected)).toBe(true);
+  await expect(link).toHaveAttribute('href', target);
+});
+
+test('refreshes an OSC target when its visible label is unchanged', async ({ page }) => {
+  const first = 'https://target.example.test/osc-cache-first';
+  const second = 'https://target.example.test/osc-cache-second';
+  const label = 'same visible label';
+  await mountScenario(page, `\x1b]8;;${first}\x07${label}\x1b]8;;\x07`);
+  await expect(page.getByRole('link', { name: `Open ${first}`, exact: true })).toHaveCount(1);
+
+  await page.evaluate(async ({ second, label }) => {
+    const { writeTerminalLinkOutput } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    await writeTerminalLinkOutput(`\r\x1b[2K\x1b]8;;${second}\x07${label}\x1b]8;;\x07`);
+  }, { second, label });
+  await expect(page.getByRole('link', { name: `Open ${first}`, exact: true })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: `Open ${second}`, exact: true })).toHaveCount(1);
+});
+
+test('rejects a same-URI relocation between pointerdown and click', async ({ page }) => {
+  const target = 'https://target.example.test/relocated';
+  await page.context().route(target, route => route.fulfill({ contentType: 'text/html', body: '<main>relocated target</main>' }));
+  await mountScenario(page, target);
+  const link = page.getByRole('link', { name: `Open ${target}`, exact: true });
+  const handle = await link.elementHandle();
+  expect(handle).not.toBeNull();
+  await handle!.evaluate(element => element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+  await page.evaluate(async target => {
+    const { writeTerminalBytesOnly } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    await writeTerminalBytesOnly(`\r\x1b[2K\r\n${target}`);
+  }, target);
+
+  let stalePopup = false;
+  const rejectStalePopup = (popup: Page) => { stalePopup = true; void popup.close(); };
+  page.on('popup', rejectStalePopup);
+  await handle!.evaluate(element => element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })));
+  await page.waitForTimeout(100);
+  page.off('popup', rejectStalePopup);
+  expect(stalePopup).toBe(false);
+  expect(await handle!.evaluate(element => element.isConnected)).toBe(true);
+  const popupPromise = page.waitForEvent('popup');
+  await link.click();
+  const popup = await popupPromise;
+  await expect(popup).toHaveURL(target);
+  await popup.close();
+});
+
+test('rejects a pointerdown that discovers a relocated URI and releases canceled gestures', async ({ page }) => {
+  const target = 'https://target.example.test/stale-press';
+  await page.context().route(target, route => route.fulfill({ contentType: 'text/html', body: '<main>current target</main>' }));
+  await mountScenario(page, target);
+  const link = page.getByRole('link', { name: `Open ${target}`, exact: true });
+  const handle = await link.elementHandle();
+  expect(handle).not.toBeNull();
+  // move the semantic target without first refreshing its hit rectangle
+  await page.evaluate(async target => {
+    const { writeTerminalBytesOnly } = await import('/e2e/terminal-link-redesign-fixture.ts');
+    await writeTerminalBytesOnly(`\r\x1b[2K\r\n${target}`);
+  }, target);
+  let stalePopup = false;
+  const onStalePopup = (popup: Page) => { stalePopup = true; void popup.close(); };
+  page.on('popup', onStalePopup);
+  await handle!.evaluate(anchor => {
+    anchor.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+    anchor.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  });
+  await page.waitForTimeout(100);
+  page.off('popup', onStalePopup);
+  expect(stalePopup).toBe(false);
+
+  // a canceled drag must not poison the next actual keyboard activation
+  await link.evaluate(anchor => {
+    anchor.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+    window.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true }));
+  });
+  await link.focus();
+  const popupPromise = page.waitForEvent('popup');
+  await page.keyboard.press('Enter');
+  const popup = await popupPromise;
+  await expect(popup).toHaveURL(target);
+  await popup.close();
 });
 
 test('does not expose a target cut by the hard-row search bound', async ({ page }) => {

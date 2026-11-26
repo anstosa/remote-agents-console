@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { expectProgressBorder, expectStationaryStatus } from './progress-border-assertions';
+import { expectBreathingProgressBorder, expectProgressBorder, expectStationaryStatus } from './progress-border-assertions';
 import { installPaneMock, paneConnectCount } from './pane-stream-mock';
 
 type MockAgent = { id: string; kind: 'claude' | 'codex'; attention?: 'working' | 'finished' | 'question'; hasMessageQuestion?: true; unread?: boolean; conversation?: string | null; history?: string[] };
@@ -117,10 +117,10 @@ test('the tab rolls up the most urgent state and viewing an Agent through the sw
   await expectStationaryStatus(done);
   await expectProgressBorder(working, 'peach');
   // keep both persistent status surfaces moving in the picker and panel header
-  expect(await working.locator(':scope > .update-progress-ring').evaluate(ring => ring.getAnimations({ subtree: true })[0]?.effect?.getTiming().iterations)).toBe(Infinity);
+  await expectBreathingProgressBorder(working, 'working');
   const workingStatus = agentPanel(page).locator('.panel-header-title > .agent-state-pill');
   await expect(workingStatus).toHaveAttribute('aria-busy', 'true');
-  expect(await workingStatus.locator(':scope > .update-progress-ring').evaluate(ring => ring.getAnimations({ subtree: true })[0]?.effect?.getTiming().iterations)).toBe(Infinity);
+  await expectBreathingProgressBorder(workingStatus, 'working');
   await done.click();
   await expect(cora).not.toHaveClass(/unread/u);
   await expect(cora).toHaveClass(/status-working/u);

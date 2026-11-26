@@ -205,7 +205,7 @@ async function installResourceTransports(page: Page, options: { holdMetrics?: bo
 }
 
 // provide the smallest authenticated dashboard surface used by the server flyout
-async function installFixture(page: Page, monitoring: boolean, options?: Parameters<typeof installResourceTransports>[1]): Promise<ResourceControls> {
+async function installFixture(page: Page, monitoring: boolean, options?: Parameters<typeof installResourceTransports>[1] & { agents?: unknown[] }): Promise<ResourceControls> {
   await mockAccountSocket(page);
   const controls = await installResourceTransports(page, options);
   let resourceMonitoring = monitoring;
@@ -221,7 +221,7 @@ async function installFixture(page: Page, monitoring: boolean, options?: Paramet
       return route.fulfill({ json: { csrfToken: 'resource-csrf', active: true, deviceName: 'Resource browser', resourceMonitoring, server: { name: 'Fixture server', url: 'https://fixture.example.test', remotes: [] } } });
     }
     // publish an empty ready dashboard
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, editor: false, adapters: {}, agents: [], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, editor: false, adapters: {}, agents: options?.agents ?? [], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
     // authorize the dashboard socket
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'resource-dashboard-ticket' } });
     // keep unrelated optional monitors settled
@@ -373,6 +373,32 @@ test('uses the installation session flag and ignores legacy browser storage acro
   await expect(page.getByRole('button', { name: /^Switch server/u }).locator('.server-selector-resource-gauges')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => localStorage.getItem('rac.resource-monitoring'))).toBe('enabled');
   await expect.poll(async () => (await controls.sessionSummary()).resourceMonitoring).toBe(false);
+});
+
+// switching workspaces must preserve the minute and disk cache owners
+test('keeps resource polling cache and live ownership across workspace switches', async ({ page }) => {
+  const controls = await installFixture(page, true, { agents: [
+    { id: 'agent-a', sessionId: 'socket:$1', home: '/worktrees/a', title: 'Ready A', attention: 'finished', kind: 'codex' },
+    { id: 'agent-b', sessionId: 'socket:$2', home: '/worktrees/b', title: 'Ready B', attention: 'finished', kind: 'codex' }
+  ] });
+  await expectSummary(controls, 'metrics', { requests: 1, aborts: 0, active: 0, maxActive: 1 });
+  await expectSummary(controls, 'disks', { requests: 1, aborts: 0, active: 0, maxActive: 1 });
+  // a closed selector's periodic owners survive successive card remounts
+  for (const index of [1, 0, 1, 0]) {
+    const tab = page.getByRole('tab').nth(index);
+    await tab.click();
+    await expect(tab).toHaveAttribute('aria-selected', 'true');
+  }
+  await expectSummary(controls, 'metrics', { requests: 1, aborts: 0, active: 0, maxActive: 1 });
+  await expectSummary(controls, 'disks', { requests: 1, aborts: 0, active: 0, maxActive: 1 });
+  await openResources(page);
+  await expectSummary(controls, 'live', { requests: 1, aborts: 0, active: 1, maxActive: 1 });
+  // a same-document agent notification link can navigate while the flyout owns pointer input
+  await page.evaluate(() => { location.hash = 'agent=agent-b'; });
+  await expect(page.getByRole('tab').nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expectSummary(controls, 'live', { requests: 1, aborts: 1, active: 0, maxActive: 1 });
+  await expectSummary(controls, 'metrics', { requests: 1, aborts: 0, active: 0, maxActive: 1 });
+  await expectSummary(controls, 'disks', { requests: 2, aborts: 0, active: 0, maxActive: 1 });
 });
 
 test('stays idle when off and samples metrics every minute independently from disk refreshes', async ({ page }) => {

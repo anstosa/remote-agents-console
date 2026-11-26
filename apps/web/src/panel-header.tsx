@@ -172,9 +172,10 @@ export type PanelAction = {
 
 // mark action-owned menus before generic panel context handlers
 const actionButton = (action: PanelAction, row = false) => {
-  // keep the action glyph stable while its border reports progress
+  // replace only compact icon actions while busy
   const busy = action.progress !== undefined;
-  return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}${busy && action.progressKind === 'loading' ? ' progress-loading' : ''}`} style={action.style} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onPointerDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onMouseDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onContextMenu={action.onContextMenu} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{(row || action.showLabel === true || action.icon === undefined) && <span>{action.label}</span>}</button>;
+  const iconOnly = !row && action.icon !== undefined && action.showLabel !== true;
+  return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}${busy && iconOnly ? ' progress-icon-button' : ''}${busy && action.progressKind === 'loading' ? ' progress-loading' : ''}`} style={action.style} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onPointerDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onMouseDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onContextMenu={action.onContextMenu} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{(row || action.showLabel === true || action.icon === undefined) && <span>{action.label}</span>}</button>;
 };
 
 // render a single path or a shared multi-part glyph
@@ -213,7 +214,8 @@ export function PanelHeader({ panelKey, label, title, titleControl, actions, sec
   const expand = usePanelExpand(panelKey);
   const phone = usePhoneLayout();
   const wrapRef = useRef<HTMLDivElement | null>(null);
-  const [folded, setFolded] = useState(false);
+  // a phone starts folded without forcing layout during the mount commit
+  const [folded, setFolded] = useState(phone);
   const [moreOpen, setMoreOpen] = useState(false);
   const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(moreOpen);
   const automaticSlot = ['agent', 'note', 'browser', 'files', 'code', 'review', 'stack', 'github', 'settings'].includes(panelKey) ? `split:${panelKey}` as ButtonSlot : undefined;
@@ -236,14 +238,15 @@ export function PanelHeader({ panelKey, label, title, titleControl, actions, sec
   useLayoutEffect(() => {
     const panel = wrapRef.current?.parentElement;
     if (panel === null || panel === undefined) return;
-    const measure = () => {
-      const width = panel.getBoundingClientRect().width;
+    const observer = new ResizeObserver(entries => {
+      const entry = entries[0];
+      // use the browser's settled border box instead of forcing another layout read
+      if (entry === undefined) return;
+      const width = entry.borderBoxSize?.[0]?.inlineSize ?? panel.getBoundingClientRect().width;
       // a hidden panel measures zero; keep its last layout
       if (width > 0) setFolded(width < panelFoldWidth);
-    };
-    const observer = new ResizeObserver(measure);
-    observer.observe(panel);
-    measure();
+    });
+    observer.observe(panel, { box: 'border-box' });
     return () => observer.disconnect();
   }, []);
   useEffect(() => { if (!folded) setMoreOpen(false); }, [folded]);
@@ -258,7 +261,7 @@ export function PanelHeader({ panelKey, label, title, titleControl, actions, sec
       {!folded && configuredActions.map(action => actionButton(action))}
       {actions}
       {!folded && secondary.map(action => actionButton(action))}
-      {showMore && <button ref={anchorRef} type="button" className={`panel-header-action panel-header-more${moreOpen ? ' active' : ''}${configuredMenuBusy && configuredMenuColor !== undefined ? ` progress-border progress-${configuredMenuColor}` : ''}`} aria-busy={configuredMenuBusy || undefined} aria-label={`More ${label} actions`} data-context-flyout aria-expanded={moreOpen} title="More" onClick={() => setMoreOpen(value => !value)} onKeyDown={event => { if (event.key === 'Escape' && moreOpen) { event.preventDefault(); event.stopPropagation(); closeMore(); } }}>{configuredMenuBusy && <span className="update-progress-ring" aria-hidden="true" />}<svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg><span className="flyout-caret" aria-hidden="true" /></button>}
+      {showMore && <button ref={anchorRef} type="button" className={`panel-header-action panel-header-more${moreOpen ? ' active' : ''}${configuredMenuBusy && configuredMenuColor !== undefined ? ` progress-border progress-icon-button progress-${configuredMenuColor}` : ''}`} aria-busy={configuredMenuBusy || undefined} aria-label={`More ${label} actions`} data-context-flyout aria-expanded={moreOpen} title="More" onClick={() => setMoreOpen(value => !value)} onKeyDown={event => { if (event.key === 'Escape' && moreOpen) { event.preventDefault(); event.stopPropagation(); closeMore(); } }}>{configuredMenuBusy && <span className="update-progress-ring" aria-hidden="true" />}<svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg><span className="flyout-caret" aria-hidden="true" /></button>}
       {expand !== undefined && <button type="button" className="panel-header-action panel-header-expand" disabled={expandDisabled} aria-label={`${expand.expanded ? 'Restore' : 'Expand'} ${label}`} aria-pressed={expand.expanded} title={phone ? expand.expanded ? 'Show the tabs and toolbar' : 'Full screen' : expand.expanded ? 'Restore the other panels' : 'Fill the Workspace'} onClick={expand.toggle}><PanelIcon path={expand.expanded ? panelIcons.restore : panelIcons.expand} /></button>}
       {close === undefined || isValidElement(close) ? close : actionButton(close)}
     </div>

@@ -9,6 +9,7 @@ import { attachTerminalTouchScroll } from './terminal-touch-scroll.js';
 import { createTerminalSelectionSurface } from './terminal-selection-surface.js';
 import { readTerminalFontSize, subscribeTerminalFontSize } from './terminal-font-size.js';
 import { attachWebglRenderer, wantsWebglRenderer } from './terminal-webgl.js';
+import { createTerminalRenderPacing, suppressCoveredDomRows } from './terminal-render-pacing.js';
 import { subscribeColorTheme } from './color-theme.js';
 import { createOutputLinkOverlays } from './output-links.js';
 import { safeHttpTarget } from './terminal-link-metadata.js';
@@ -53,6 +54,18 @@ export interface StreamedTerminalOptions {
   // once a fresh seed lands (a panel header can mirror it).
   onStatus?: (status: string | undefined) => void;
 }
+
+// retain one recently measured grid as a startup hint, never as server size authority
+type TerminalGridHint = { width: number; height: number; fontSize: number; dpr: number; scrollbar: boolean; webgl: boolean; cols: number; rows: number };
+let lastTerminalGrid: TerminalGridHint | undefined;
+
+// reuse only a matching live layout and renderer configuration
+const terminalGridHint = (host: HTMLElement, fontSize: number, scrollbar: boolean, webgl: boolean): { cols: number; rows: number } | undefined => {
+  const hint = lastTerminalGrid;
+  // no prior measurement is available for the first terminal in this page
+  if (hint === undefined || hint.fontSize !== fontSize || hint.dpr !== window.devicePixelRatio || hint.scrollbar !== scrollbar || hint.webgl !== webgl) return undefined;
+  return hint.width === host.clientWidth && hint.height === host.clientHeight ? { cols: hint.cols, rows: hint.rows } : undefined;
+};
 
 export interface StreamedTerminalHandle {
   readonly terminal: XTerm;
@@ -141,7 +154,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   // smaller than the panel the surrounding area shows the terminal background, so a
   // smaller pane is letterboxed rather than stretched.
   const host = document.createElement('div');
-  host.className = 'streamed-terminal-host';
+  // keep the renderer layers hidden until the first committed seed, not its input surface
+  host.className = 'streamed-terminal-host initial-render-pending';
   Object.assign(host.style, { position: 'absolute', inset: '0', overflow: 'hidden' });
 
   const status = document.createElement('div');
@@ -213,9 +227,12 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   };
   attachTo(container);
 
+  const fontSize = readTerminalFontSize();
   const terminal = new XTerm({
+    // bootstrap at the last matching measured grid instead of allocating and resizing the default grid
+    ...terminalGridHint(host, fontSize, scrollback !== 0, useWebgl),
     fontFamily: terminalFontFamily,
-    fontSize: readTerminalFontSize(),
+    fontSize,
     scrollback,
     scrollOnUserInput: false,
     // keep option-drag selection available when a mac program tracks the mouse
@@ -249,7 +266,11 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     }
   };
   terminal.open(host);
-  const selectionSurface = options.preferNativeMouseSelection ? createTerminalSelectionSurface(terminal) : undefined;
+  // only the temporary renderer is disposable work; fallback restores it before painting the seed
+  const restoreCoveredDomRows = useWebgl ? suppressCoveredDomRows(terminal) : undefined;
+  // coalesce only display work while leaving xterm parsing and transport acknowledgements immediate
+  const renderPacing = createTerminalRenderPacing(terminal);
+  const selectionSurface = options.preferNativeMouseSelection ? createTerminalSelectionSurface(terminal, () => revealed) : undefined;
   // Mirror the font size onto the element as the font-size subscription does on change, so
   // the configured size is legible in the DOM from mount (not only after the first change).
   Object.assign(terminal.element!.style, { fontFamily: terminalFontFamily, fontSize: `${readTerminalFontSize()}px`, fontKerning: 'none', fontWeight: 'normal' });
@@ -267,7 +288,13 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   let parked = false;
   // the container's pane attributes, carried from the panel a parked terminal left to the next
   let parkedData: Partial<Record<'cols' | 'rows' | 'foreground', string>> = {};
-  const revealTerminal = () => { if (revealed) return; revealed = true; cover.remove(); };
+  // expose the settled renderer and remove its initial cover in the same presentation
+  const revealTerminal = () => {
+    if (revealed) return;
+    revealed = true;
+    host.classList.remove('initial-render-pending');
+    cover.remove();
+  };
   let connection: PaneConnection | undefined;
   let sizeApplied = false;
   // The next bytes are a fresh seed: clear the scrollback right before writing them, so
@@ -315,10 +342,12 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   let seedRenderSub: IDisposable | undefined;
 
   const scheduleOverlayRender = () => {
-    if (overlayFrame !== undefined) return;
+    // covered and detached terminals have no visible link work
+    if (disposed || parked || !revealed || overlayFrame !== undefined) return;
     overlayFrame = window.requestAnimationFrame(() => {
       overlayFrame = undefined;
-      if (!disposed) overlays.render(terminal);
+      // the pane may have left between scheduling and presentation
+      if (!disposed && !parked && revealed) overlays.render(terminal);
     });
   };
 
@@ -344,8 +373,21 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   // follow both browser scrollback and codex's own transcript viewport
   const syncFollowState = () => {
     const buffer = terminal.buffer.active;
-    jump.hidden = !codexCanReturnToLatest() && buffer.viewportY >= buffer.baseY;
+    const hidden = !codexCanReturnToLatest() && buffer.viewportY >= buffer.baseY;
+    // do not invalidate layout on unchanged follow state
+    if (jump.hidden !== hidden) jump.hidden = hidden;
   };
+
+  // update semantic overlays and follow controls at the same committed display frame
+  const overlayRenderSub = terminal.onRender(() => {
+    // skip temporary dom and empty gpu frames behind the initial cover
+    if (disposed || parked || !revealed) return;
+    // absorb any geometry-only frame already waiting to render this viewport
+    if (overlayFrame !== undefined) window.cancelAnimationFrame(overlayFrame);
+    overlayFrame = undefined;
+    overlays.render(terminal);
+    syncFollowState();
+  });
 
   // invalidate app-owned controls while retaining the old screen as a placeholder
   const invalidateCodexFollowState = () => {
@@ -357,6 +399,11 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     if (disposed || connection === undefined) return;
     const dimensions = fit.proposeDimensions();
     if (!dimensions || !Number.isFinite(dimensions.cols) || !Number.isFinite(dimensions.rows) || dimensions.cols < 1 || dimensions.rows < 1) return;
+    // record only a settled renderer's visible geometry and keep the hint bounded to one grid
+    if (rendererReady && host.clientWidth > 0 && host.clientHeight > 0) {
+      const webgl = terminal.element?.querySelector('.xterm-screen > canvas') !== null && terminal.element?.querySelector('.xterm-rows') === null;
+      lastTerminalGrid = { width: host.clientWidth, height: host.clientHeight, fontSize: terminal.options.fontSize!, dpr: window.devicePixelRatio, scrollbar: scrollback !== 0, webgl, ...dimensions };
+    }
     connection.send({ type: 'viewport', cols: dimensions.cols, rows: dimensions.rows, scrollback });
     // A grid was proposable, so the cell is now measured; stop re-proposing on every render.
     firstViewportSub?.dispose();
@@ -364,7 +411,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   };
 
   const scheduleViewport = () => {
-    if (viewportFrame !== undefined) return;
+    // a parked pane has no viewport claim to update
+    if (disposed || parked || viewportFrame !== undefined) return;
     viewportFrame = window.requestAnimationFrame(() => {
       viewportFrame = undefined;
       sendViewport();
@@ -383,6 +431,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   };
   // retain visual events without acknowledging bytes the terminal has not consumed
   const queueOutput = (output: Uint8Array | VisualFrame) => {
+    // a closed or parked stream cannot retain output for a replacement connection
+    if (disposed || parked || connection === undefined) return;
     // retain the latest grid even if an earlier burst overflowed
     if (!(output instanceof Uint8Array) && output.type === 'size') queuedSize = output;
     // a new snapshot supersedes older bytes and resets server acknowledgement accounting
@@ -426,13 +476,6 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   const writeBytes = (bytes: Uint8Array) => {
     const wasSeed = awaitingSeed;
     const generation = outputGeneration;
-    if (awaitingSeed) {
-      // Clear the placeholder/scrollback and its stale link overlays the instant the
-      // fresh seed starts; the registered safety handlers survive the reset.
-      terminal.reset();
-      overlays.clear();
-      awaitingSeed = false;
-    }
     writePending = true;
     const source = connection;
     // gate at the parser task boundary before handing xterm any mutable output
@@ -440,12 +483,17 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       // an unmounted terminal must not accept another write
       if (disposed) return;
       // selection or a replacement snapshot can supersede a scheduled write
-      if (outputPaused || connection !== source || queuedOutput[0] !== bytes) {
+      if (source === undefined || outputPaused || connection !== source || queuedOutput[0] !== bytes) {
         writePending = false;
-        // a postponed first seed must still uncover the terminal when eventually parsed
-        if (wasSeed && connection === source && queuedOutput[0] === bytes) awaitingSeed = true;
         queueMicrotask(drainOutput);
         return;
+      }
+      // clear the old screen only when the replacement is actually admitted to the parser
+      // this keeps a selection-safe placeholder and the seed repaint in the same browser task
+      if (wasSeed) {
+        terminal.reset();
+        overlays.clear();
+        awaitingSeed = false;
       }
       queuedOutput.shift();
       queuedByteCount -= bytes.length;
@@ -467,13 +515,21 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
             if (disposed || parked || !rendererReady || connection !== source || generation !== outputGeneration || start !== 0 || end < terminal.rows - 1) return;
             seedRenderSub?.dispose();
             seedRenderSub = undefined;
+            // publish semantic controls on the first visible frame, never while covered
+            const firstPresentation = !revealed;
+            if (firstPresentation) {
+              overlays.render(terminal);
+              syncFollowState();
+            }
             hideStatus();
             revealTerminal();
+            // mirror only the first committed seed, not the temporary renderer behind it
+            if (firstPresentation) selectionSurface?.publish();
           });
           terminal.refresh(0, terminal.rows - 1);
+          // expose the initial or replacement seed without waiting for a trailing frame
+          renderPacing.flush();
         }
-        scheduleOverlayRender();
-        syncFollowState();
         // let xterm finish its parser turn before scheduling the next visual event
         queueMicrotask(drainOutput);
       });
@@ -484,6 +540,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   const applySize = (cols: number, rows: number) => {
     // resize only to a valid pane grid
     if (cols > 0 && rows > 0) terminal.resize(cols, rows);
+    // resize is an interactive geometry boundary rather than ordinary live output
+    renderPacing.flush();
     container.dataset.cols = String(terminal.cols);
     container.dataset.rows = String(terminal.rows);
     // release bytes buffered before the initial pane dimensions
@@ -601,8 +659,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
 
   // consume one byte chunk at a time with control frames between completed writes
   const drainOutput = () => {
-    // pause before parsing and wait for the previous write to finish
-    if (disposed || outputPaused || writePending) return;
+    // pause before parsing and never drain a departed stream between reconnects
+    if (disposed || parked || connection === undefined || outputPaused || writePending) return;
     // an incomplete stream must restart before rendering any more bytes
     if (needsFreshSeed) {
       handleDisconnect('Refreshing output…');
@@ -660,6 +718,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     if (disposed || outputPaused === paused) return;
     outputPaused = paused;
     selectionSurface?.setPaused(paused);
+    // align pending presentation with the selection transition without changing parser ownership
+    renderPacing.flush();
     // a large live seed awaiting its parser gate cannot become an unbounded paused backlog
     if (paused && queuedByteCount + pendingByteCount > maxQueuedBytes) {
       clearQueuedOutput();
@@ -674,6 +734,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   // flushes in order); `false` only while there is no connection, i.e. mid-reconnect.
   const sendBytes = (bytes: Uint8Array): boolean => {
     if (connection === undefined || bytes.length === 0) return false;
+    // release any pending visual frame before interactive terminal input
+    renderPacing.flush();
     for (let offset = 0; offset < bytes.length; offset += maxInputFrameBytes) {
       connection.send({ type: 'input', data: encodeInputBytes(bytes.subarray(offset, offset + maxInputFrameBytes)) });
     }
@@ -688,7 +750,6 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   // Legacy (non-SGR) mouse tracking reports one byte per char code on onBinary; forward
   // those raw, without the modifier transform.
   terminal.onBinary(data => sendBytes(Uint8Array.from(data, character => character.charCodeAt(0))));
-  terminal.onScroll(() => { syncFollowState(); scheduleOverlayRender(); });
 
   let codexWheelRemainder = 0;
   let codexWheelGeneration = outputGeneration;
@@ -757,6 +818,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   const preserveJumpFocus = (event: PointerEvent) => event.preventDefault();
   // route codex's dedicated ctrl-end shortcut without applying sticky input modifiers
   const jumpToBottom = () => {
+    // resume visible output at the operator's requested scroll position immediately
+    renderPacing.flush();
     // recheck the live marker before sending input into an application-owned viewport
     if (codexCanReturnToLatest()) sendInput('\x1b[1;5F');
     // ordinary panes still follow their browser-owned scrollback without sending keys
@@ -764,6 +827,12 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     syncFollowState();
   };
   host.addEventListener('click', focusOnClick);
+  // pointer and wheel interactions bypass the sustained-output visual cadence
+  const expediteRender = () => renderPacing.flush();
+  host.addEventListener('pointerdown', expediteRender, true);
+  host.addEventListener('wheel', expediteRender, true);
+  // local terminal navigation keys may scroll without emitting pane input
+  host.addEventListener('keydown', expediteRender, true);
   jump.addEventListener('pointerdown', preserveJumpFocus);
   jump.addEventListener('click', jumpToBottom);
 
@@ -790,8 +859,11 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   // fonts and the selected renderer must settle before the seed's paint can reveal it
   const releaseWebgl = useWebgl ? attachWebglRenderer(terminal, () => {
     if (disposed) return;
+    restoreCoveredDomRows?.();
     rendererReady = true;
     terminal.refresh(0, terminal.rows - 1);
+    // a newly settled renderer must paint the retained seed immediately
+    renderPacing.flush();
     scheduleViewport();
     scheduleOverlayRender();
   }) : undefined;
@@ -864,9 +936,17 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       reconnectTimer = undefined;
       closeConnection();
       clearQueuedOutput();
+      // cancel geometry work for the departing container
+      if (overlayFrame !== undefined) window.cancelAnimationFrame(overlayFrame);
+      if (viewportFrame !== undefined) window.cancelAnimationFrame(viewportFrame);
+      overlayFrame = undefined;
+      viewportFrame = undefined;
       resizeObserver.disconnect();
-      // a selection kept across the move would freeze output on the next panel's first selection sync
-      terminal.select(0, 0, 0);
+      // preserve the dom renderer's empty-range workaround for an actual selection
+      if (terminal.hasSelection()) terminal.select(0, 0, 0);
+      // avoid manufacturing a zero-width redraw for an already empty selection
+      else terminal.clearSelection();
+      renderPacing.flush();
       parkedData = { cols: container.dataset.cols, rows: container.dataset.rows, foreground: container.dataset.foreground };
       // the unmounted panel's DOM is not retained, and disposing a parked terminal touches no container
       detach();
@@ -889,7 +969,11 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       if (revealed) hideStatus();
       else showStatus('Connecting');
       subscribe();
-      terminal.refresh(0, terminal.rows - 1);
+      // the retained renderer already owns the last committed screen
+      // xterm handles newly visible geometry and the fresh seed requests its own full paint
+      if (!revealed) terminal.refresh(0, terminal.rows - 1);
+      scheduleOverlayRender();
+      renderPacing.flush();
     },
     dispose: () => {
       if (disposed) return;
@@ -904,19 +988,25 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       if (overlayFrame !== undefined) window.cancelAnimationFrame(overlayFrame);
       if (viewportFrame !== undefined) window.cancelAnimationFrame(viewportFrame);
       firstViewportSub?.dispose();
+      overlayRenderSub.dispose();
       closeConnection();
       resizeObserver.disconnect();
       releaseTouchScroll();
       releaseLongPress();
       host.removeEventListener('click', focusOnClick);
+      host.removeEventListener('pointerdown', expediteRender, true);
+      host.removeEventListener('wheel', expediteRender, true);
+      host.removeEventListener('keydown', expediteRender, true);
       jump.removeEventListener('pointerdown', preserveJumpFocus);
       jump.removeEventListener('click', jumpToBottom);
       unsubscribeFont();
       unsubscribeTheme();
       releaseWebgl?.();
+      restoreCoveredDomRows?.();
       document.fonts.removeEventListener('loadingdone', remeasureCell);
       if (!parked) detach();
       selectionSurface?.dispose();
+      renderPacing.dispose();
       terminal.dispose();
     }
   };
