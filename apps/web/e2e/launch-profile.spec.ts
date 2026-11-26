@@ -262,16 +262,56 @@ test('an unavailable kind is disabled in the menu with its reason', async ({ pag
 test('keeps the explicit Launch action disabled while launch options load', async ({ page }) => {
   let release: (() => void) | undefined;
   const pending = new Promise<void>(resolve => { release = resolve; });
-  const options = { kinds: [{ kind: 'codex', optionsRevision: 'loading-rev', modelPolicy: { state: 'native-default', allowed: [], defaultSelection: { mode: 'native-default' }, catalog: [], catalogStatus: 'ready' }, security: { controls: [], defaults: {}, constraints: [], status: 'unsupported' } }] };
-  const posts = await mount(page, { generation: 1, adapters: { codex }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'codex', origin: 'default' })] }] });
+  // keep the model available apart from the pending request
+  const allowedModels = [{ model: 'test-model' }];
+  const configuredCodex = adapter('/bin/codex', { allowedModels });
+  const options = { kinds: [{ kind: 'codex', optionsRevision: 'loading-rev', modelPolicy: { state: 'explicit', allowed: allowedModels, defaultSelection: { mode: 'model', id: 'test-model' }, catalog: [{ id: 'test-model', name: 'Test model', efforts: [] }], catalogStatus: 'ready' }, security: { controls: [], defaults: {}, constraints: [], status: 'unsupported' } }] };
+  const posts = await mount(page, { generation: 1, adapters: { codex: configuredCodex }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'codex', origin: 'default' })] }] });
   await page.route('**/api/launch/options', async route => { await pending; await route.fulfill({ json: options }); });
   await toolbar(page).getByRole('button', { name: 'Choose agent' }).click();
-  const launch = page.getByRole('menu', { name: 'Choose agent' }).getByRole('menuitem', { name: 'Launch Codex', exact: true });
-  await expect(launch).toBeDisabled();
-  await expect(launch).toHaveAttribute('title', 'Launch Codex');
-  expect(posts).toEqual([]);
-  release?.();
+  const menu = page.getByRole('menu', { name: 'Choose agent' });
+  const card = menu.getByRole('group', { name: 'Codex agent' });
+  const launch = card.getByRole('menuitem', { name: 'Launch Codex', exact: true });
+  const model = card.getByRole('button', { name: /^Codex model and Effort:/u });
+  const security = card.getByRole('button', { name: /^Codex security/u });
+  const status = menu.getByRole('status').filter({ hasText: 'Loading launch options' });
+  try {
+    await expect(launch).toHaveAttribute('title', 'Launch Codex');
+    // keep each pending control natively disabled with its own decorative placeholder
+    for (const control of [model, security, launch]) {
+      await expect(control).toHaveJSProperty('disabled', true);
+      const skeleton = control.locator('.launch-option-skeleton');
+      await expect(skeleton).toBeVisible();
+      await expect(skeleton).toHaveAttribute('aria-hidden', 'true');
+    }
+    // retain accessible status without occupying a visible row
+    await expect(status).toBeAttached();
+    await expect(status).toHaveCSS('position', 'absolute');
+    await expect(status).toHaveCSS('clip', 'rect(0px, 0px, 0px, 0px)');
+    await expect(menu.locator('.launch-menu-note')).toHaveCount(0);
+    // keep pending placeholders distinct from the system palette's menu background
+    await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
+    await expect(launch).toHaveCSS('color', 'rgba(0, 0, 0, 0)');
+    const menuBackground = await menu.evaluate(element => getComputedStyle(element).backgroundColor);
+    // verify contrast and reduced motion for each placeholder
+    for (const control of [model, security, launch]) {
+      const skeleton = control.locator('.launch-option-skeleton');
+      await expect(skeleton).not.toHaveCSS('background-color', menuBackground);
+      await expect(skeleton).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      await expect(skeleton).toHaveCSS('animation-name', 'none');
+    }
+    await page.emulateMedia({ forcedColors: 'none', reducedMotion: 'no-preference' });
+    expect(posts).toEqual([]);
+  } finally {
+    // release the pending fixture even after a failed assertion
+    release?.();
+  }
   await expect(launch).toBeEnabled();
+  await expect(model).toBeEnabled();
+  // clear every placeholder once the options resolve
+  await expect(card.locator('.launch-option-skeleton')).toHaveCount(0);
+  await expect(status).toHaveCount(0);
+  await expect(security).toHaveJSProperty('disabled', true);
 });
 
 test('zero configured adapters disables the primary with the config hint and a disabled chevron', async ({ page }) => {

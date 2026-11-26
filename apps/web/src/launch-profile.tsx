@@ -547,6 +547,8 @@ function AgentLaunchCard({
           <ModelIcon />
           <span>{modelSelectionLabel(manifest, model)}</span>
           <ChevronIcon />
+          {/* preserve the model control footprint while options load */}
+          {loading && <Skeleton className="launch-option-skeleton" />}
         </button>
         {updateControl}
         {accountControl}
@@ -574,6 +576,8 @@ function AgentLaunchCard({
         >
           <span className="flyout-caret" aria-hidden="true" />
           <ShieldIcon dangerous={dangerous} />
+          {/* reserve the security control's space */}
+          {loading && <Skeleton className="launch-option-skeleton" />}
         </button>
         <button
           type="button"
@@ -588,6 +592,8 @@ function AgentLaunchCard({
           }}
         >
           {verb}
+          {/* retain the action's original width during loading */}
+          {loading && <Skeleton className="launch-option-skeleton" />}
         </button>
       </div>
       {panel !== undefined && <div className="launch-card-backdrop" aria-hidden="true" onPointerDown={event => { /* contain outside presses within the chooser */ event.stopPropagation(); }} onMouseDown={event => { /* block document mouse dismissal */ event.stopPropagation(); }} onClick={closePanel} />}
@@ -858,11 +864,8 @@ export function LaunchMenu({
       <p className="launch-menu-heading">
         {verb} · {label}
       </p>
-      {options.loading && (
-        <p className="launch-menu-note" role="status">
-          Loading target-specific launch options…
-        </p>
-      )}
+      {/* announce loading without adding a visible row */}
+      {options.loading && <span className="sr-only" role="status">Loading launch options</span>}
       {options.error !== undefined && (
         <p className="launch-menu-note" role="status">
           {options.error} Showing configured fallback options.

@@ -3141,6 +3141,15 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .server-menu-revision-skeleton { display: grid; gap: .4rem; width: 12rem; padding: .3rem 0; }
 .server-menu-revision-skeleton .skeleton:first-child { width: 45%; }
 .launch-agent-version-skeleton { width: 5.5rem; height: .65rem; }
+/* cover only controls waiting for options without changing their size or disabled state */
+.launch-card-main .launch-card-trigger:has(> .launch-option-skeleton) { position: relative; opacity: 1; background: transparent; border-color: transparent; color: transparent; }
+.launch-card-trigger:has(> .launch-option-skeleton) > :not(.launch-option-skeleton) { visibility: hidden; }
+.launch-card-trigger > .launch-option-skeleton { position: absolute; inset: -1px; width: auto; height: auto; border-radius: var(--control-radius); }
+/* preserve placeholder contrast and hidden labels in forced colors */
+@media (forced-colors: active) {
+  .launch-card-main .launch-card-trigger:has(> .launch-option-skeleton) { forced-color-adjust: none; }
+  .launch-card-trigger > .launch-option-skeleton { background: GrayText; }
+}
 /* one flyout owns search and a partially visible fifth conversation */
 .conversations-menu { --conversation-row-height: 4rem; --conversation-row-gap: .3rem; display: flex; flex-direction: column; gap: .4rem; width: min(31rem, calc(100vw - 1rem)); max-width: calc(100vw - 1rem); max-height: var(--flyout-available-height, calc(100dvh - 1rem)); padding: .5rem; overflow: hidden; }
 /* directory metadata occupies a third line only in all mode */
