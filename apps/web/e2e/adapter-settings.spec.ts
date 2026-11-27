@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expectBreathingProgressBorder, expectProgressBorder, expectReducedMotionProgress } from './progress-border-assertions';
 
 type VoiceSettings = { enabled: boolean; available: boolean; name: string; context: string };
 type SettingsPatch = { op: string; path: string[]; value?: unknown };
@@ -137,25 +138,6 @@ async function updateAttention(control: Locator) {
   });
 }
 
-// sample the registered angle at deterministic points without relying on wall-clock timing
-async function sampleUpdateOrbit(ring: Locator) {
-  return ring.evaluate(element => {
-    const animation = element.getAnimations({ subtree: true })[0];
-    // require one live ring animation
-    if (animation === undefined) throw new Error('update progress ring is not orbiting');
-    const duration = animation.effect?.getComputedTiming().duration;
-    // require a finite cycle before sampling its quarter turn
-    if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) throw new Error('update progress ring has no finite duration');
-    animation.pause();
-    animation.currentTime = 0;
-    const startAngle = Number.parseFloat(getComputedStyle(element, '::before').getPropertyValue('--update-orbit-angle'));
-    animation.currentTime = duration / 4;
-    const quarterAngle = Number.parseFloat(getComputedStyle(element, '::before').getPropertyValue('--update-orbit-angle'));
-    animation.play();
-    return { startAngle, quarterAngle };
-  });
-}
-
 // start one codex update that remains active for visual state checks
 async function startRunningCodexUpdate(page: Page) {
   const adapters = { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } };
@@ -167,6 +149,23 @@ async function startRunningCodexUpdate(page: Page) {
   const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
   await expect(toolbar.getByRole('button', { name: /Choose agent — update in progress$/u })).toBeVisible();
   return { toolbar, ring: toolbar.locator('.update-progress-ring') };
+}
+
+// the launch group retains a static border and indicator without a busy button role
+async function expectSteadyLauncherUpdate(ring: Locator) {
+  await expect(ring).toBeVisible();
+  await expect.poll(() => ring.evaluate(element => {
+    // use the authored status dot or its compact fallback
+    const dot = element.parentElement?.querySelector(':scope > .launch-update-dot');
+    const indicator = dot ? getComputedStyle(dot) : getComputedStyle(element, '::after');
+    return {
+      borderAnimation: getComputedStyle(element, '::before').animationName,
+      borderOpacity: getComputedStyle(element, '::before').opacity,
+      indicatorAnimation: indicator.animationName,
+      indicatorVisible: indicator.display !== 'none' && Number.parseFloat(indicator.borderTopWidth) > 0,
+      indicatorTransform: indicator.transform
+    };
+  })).toEqual({ borderAnimation: 'none', borderOpacity: '1', indicatorAnimation: 'none', indicatorVisible: true, indicatorTransform: 'matrix(1, 0, 0, 1, 0, 0)' });
 }
 
 const piAdapter = { program: '/usr/bin/node', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: false, sandbox: true };
@@ -836,31 +835,28 @@ test('opens the full settings workspace beside desktop output and above narrow s
   await expect(consoleView.locator('.log').first()).toHaveCSS('width', '800px');
 });
 
-// keep one active update orbiting through responsive launcher replacements
-test('keeps the agent update orbit visible across desktop and phone launcher states', async ({ page }) => {
+// keep one active update breathing through responsive launcher replacements
+test('keeps agent update progress visible across desktop and phone launcher states', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   const { toolbar, ring } = await startRunningCodexUpdate(page);
   await expect(ring).toBeVisible();
   const ringParent = ring.locator('..');
-  await expect.poll(() => ringParent.evaluate(element => element.getAnimations().length)).toBe(0);
-  await expect.poll(() => ringParent.getByRole('button').evaluateAll(elements => elements.every(element => element.getAnimations().length === 0))).toBe(true);
-  await expect.poll(() => ringParent.getByRole('button').locator('[aria-hidden="true"]').evaluateAll(elements => elements.every(element => element.getAnimations().length === 0))).toBe(true);
-  await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+  await expectBreathingProgressBorder(ringParent);
   const busyMenu = await openAgentMenu(page);
   const busyUpdate = busyMenu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
-  await expect(busyUpdate).toHaveAttribute('aria-busy', 'true');
-  await expect(busyUpdate).toHaveClass(/progress-border/u);
+  await expectProgressBorder(busyUpdate, 'mauve');
+  await expectBreathingProgressBorder(busyUpdate);
   expect((await updateAttention(busyUpdate)).name).toBe('none');
   await page.keyboard.press('Escape');
 
-  // keep the same orbit on the phone's single launch control
+  // keep the same progress treatment on the phone's single launch control
   await page.setViewportSize({ width: 430, height: 932 });
   await expect(toolbar.getByRole('button', { name: /Launch agent — update in progress$/u })).toBeVisible();
   await expect(ring).toBeVisible();
-  await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+  await expectBreathingProgressBorder(ringParent);
 
-  // preserve the orbit while minimizing and restoring the phone agent panel
+  // preserve progress while minimizing and restoring the phone agent panel
   // keep another split visible while the agent is minimized
   await page.getByRole('button', { name: 'Global settings' }).click();
   await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
@@ -869,30 +865,30 @@ test('keeps the agent update orbit visible across desktop and phone launcher sta
   const showAgent = toolbar.getByRole('button', { name: /Show agent — update in progress$/u });
   await expect(showAgent).toBeVisible();
   await expect(ring).toBeVisible();
-  await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+  await expectBreathingProgressBorder(ringParent);
   await showAgent.click();
   await expect(page.locator('.log-output')).toBeVisible();
   await expect(toolbar.getByRole('button', { name: /Launch agent — update in progress$/u })).toBeVisible();
   await expect(ring).toBeVisible();
-  await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+  await expectBreathingProgressBorder(ringParent);
 });
 
-// replace border motion with a compact spinner for both reduced-motion preferences
-test('keeps a compact agent update spinner when motion is reduced', async ({ page }) => {
+// leave a steady border and indicator for both reduced-motion preferences
+test('keeps steady agent update feedback when motion is reduced', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const { ring } = await startRunningCodexUpdate(page);
-  await expect(ring).toBeVisible();
-  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::before').animationName)).toBe('none');
-  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::after').animationName)).not.toBe('none');
-  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::after').display)).not.toBe('none');
+  await expectSteadyLauncherUpdate(ring);
+  const menu = await openAgentMenu(page);
+  const busyUpdate = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
+  await expectReducedMotionProgress(busyUpdate, 'mauve');
+  await expect(busyUpdate.locator('.launch-update-icon')).toHaveCSS('visibility', 'hidden');
 
   // apply the in-app preference independently of the operating system
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
-  await expect(ring).toBeVisible();
-  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::before').animationName)).toBe('none');
-  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::after').animationName)).not.toBe('none');
-  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::after').display)).not.toBe('none');
+  await expectSteadyLauncherUpdate(ring);
+  await expectReducedMotionProgress(busyUpdate, 'mauve');
+  await expect(busyUpdate.locator('.launch-update-icon')).toHaveCSS('visibility', 'hidden');
 });
 
 // keep long-running codex and omx updates attached to one queued job
@@ -953,10 +949,11 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   await expect.poll(() => polls.codex).toBeGreaterThan(0);
   await openAgentMenu(page);
   await expect(menu.getByRole('alert')).toHaveCount(0);
-  // busy icon actions retain progress semantics without a text label
-  await expect(codexUpdate).toHaveAttribute('aria-busy', 'true');
+  // busy icon actions replace their glyph without losing progress semantics
+  await expectProgressBorder(codexUpdate, 'mauve');
+  await expectBreathingProgressBorder(codexUpdate);
   await expect(codexUpdate).toHaveText('');
-  await expect(codexUpdate.locator('.launch-update-icon')).toBeVisible();
+  await expect(codexUpdate.locator('.launch-update-icon')).toHaveCSS('visibility', 'hidden');
   await expect(codexUpdate).toBeDisabled();
   await expect(omxUpdate).toBeDisabled();
   await expect(toolbar.getByRole('button', { name: /Choose agent — update in progress$/u })).toBeVisible();

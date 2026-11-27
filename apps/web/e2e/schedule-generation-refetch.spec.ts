@@ -19,13 +19,13 @@ const expectStaticNoteAlert = async (toggle: Locator) => {
   await expect(toggle).not.toHaveCSS('box-shadow', 'none');
 };
 
-// require the same pulse cadence as the cleanup alert
+// require the same finite pulse cadence as the cleanup alert
 const expectAnimatedNoteAlert = async (toggle: Locator) => {
   await expectStaticNoteAlert(toggle);
   await expect(toggle).not.toHaveCSS('animation-name', 'none');
   await expect(toggle).toHaveCSS('animation-duration', '1.6s');
   await expect(toggle).toHaveCSS('animation-timing-function', 'ease-in-out');
-  await expect(toggle).toHaveCSS('animation-iteration-count', 'infinite');
+  await expect(toggle).toHaveCSS('animation-iteration-count', '2');
 };
 
 // require ordinary and acknowledged notes to retain the neutral control treatment
