@@ -828,38 +828,183 @@ describe('failed queue submission recovery', () => {
     } finally { await cleanup(); }
   });
 
-  // a failed post-paste scan must reserve cleanup rather than allow repasting
-  it('holds a pasted draft through its first forced discovery failure', async () => {
-    const { agent, queue, scope, notes, drain, cleanup } = await fixture();
+  // a temporary post-paste scan must neither abandon nor duplicate the original draft
+  it.each(['throw', 'missing'] as const)('submits a pasted draft after a %s post-paste discovery failure', async failure => {
+    const { agent, queue, history, scope, notes, drain, cleanup } = await fixture('omx');
     let pasted = 0;
     let unavailable = true;
     let composer = '';
+    let pid: number | undefined = 123;
     const sent: string[][] = [];
     const discovery = {
       worktreesNow: () => [],
+      agentProcessId: () => pid,
       // fail one scan immediately after the native paste lands
       target: async (_id: string, force = false) => {
-        // retain the queue and cleanup descriptor through the failed scan
-        if (force && pasted > 0 && unavailable) { unavailable = false; throw new Error('post-paste scan unavailable'); }
+        // model both an exception and a temporarily absent recognized process
+        if (force && pasted > 0 && unavailable) {
+          unavailable = false;
+          pid = undefined;
+          // throw only for the exceptional lookup variant
+          if (failure === 'throw') throw new Error('post-paste scan unavailable');
+          return undefined;
+        }
+        pid = 123;
         return { agent, socket };
       }
     };
     const tmux = {
       // count any accidental duplicate paste after failed discovery
       pastePrompt: async () => { pasted += 1; composer = 'pasted before scan failure'; return true; },
-      capture: async () => `› ${composer}`,
-      // only cleanup may run after the failed delivery
+      capture: async () => codexComposerWithFooter(composer),
+      // accept the original prompt with the first submit key
       sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => { sent.push(keys); composer = ''; return true; }
+    };
+    const service = new PromptService(discovery as never, tmux as never, history, queue, drain);
+    try {
+      await settlePolling(service.submit(agent.id, 'pasted before scan failure'));
+      expect(pasted).toBe(1);
+      expect(sent).toEqual([['Enter']]);
+      expect(notes).toEqual([]);
+      await expect(history.list(scope)).resolves.toMatchObject([{ text: 'pasted before scan failure' }]);
+      await expect(queue.list(scope)).resolves.toEqual([]);
+    } finally { await cleanup(); }
+  });
+
+  // transient discovery gaps must not discard an already-pasted reset command
+  it.each([
+    ['render', 'before:cached:1'], ['before-key', 'before:forced:2'], ['final-key', 'before:forced:3'],
+    ['after-key', 'after:cached:1'], ['retry-key', 'after:forced:1'],
+    ['acknowledge', 'after:cached:1'], ['acknowledge-scan', 'after:forced:1']
+  ] as const)('recovers an OMX /clear when discovery misses during %s', async (stage, missAt) => {
+    const { agent, queue, scope, notes, drain, cleanup } = await fixture('omx');
+    let composer = '';
+    let pasted = 0;
+    let missedAt: string | undefined;
+    const lookupCounts = new Map<string, number>();
+    let pid: number | undefined = 123;
+    const sent: string[][] = [];
+    const discovery = {
+      worktreesNow: () => [],
+      agentProcessId: () => pid,
+      // lose exactly one scan in the selected delivery stage
+      target: async (_id: string, force = false) => {
+        // count actual discovery requests independently of composer polling
+        if (pasted > 0) {
+          const phase = `${sent.length === 0 ? 'before' : 'after'}:${force ? 'forced' : 'cached'}`;
+          const ordinal = (lookupCounts.get(phase) ?? 0) + 1;
+          lookupCounts.set(phase, ordinal);
+          const lookup = `${phase}:${ordinal}`;
+          // simulate unavailable discovery without changing the native pane
+          if (lookup === missAt) { missedAt = lookup; pid = undefined; return undefined; }
+        }
+        pid = 123;
+        return { agent, socket };
+      }
+    };
+    const tmux = {
+      // count pastes to detect replay after a discovery gap
+      pastePrompt: async () => { pasted += 1; composer = '/clear'; return true; },
+      // render the observed two-row footer during every capture
+      capture: async () => codexComposerWithFooter(composer),
+      // swallow the first key only in the retry variants
+      sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => {
+        sent.push(keys);
+        // the same original composer acknowledges the successful submit
+        if (stage !== 'after-key' && stage !== 'retry-key' || sent.length === 2) composer = '';
+        return true;
+      }
     };
     const service = new PromptService(discovery as never, tmux as never, undefined, queue, drain);
     try {
-      await settlePolling(service.submit(agent.id, 'pasted before scan failure'));
-      expect(sent).toEqual([]);
-      await settlePolling(service.observe(agent));
+      await settlePolling(service.submit(agent.id, '/clear'));
+      expect(missedAt).toBe(missAt);
       expect(pasted).toBe(1);
-      expect(sent).toEqual([['C-c']]);
-      expect(notes).toEqual(['pasted before scan failure']);
+      expect(sent).toEqual(stage === 'after-key' || stage === 'retry-key' ? [['Enter'], ['Enter']] : [['Enter']]);
+      expect(composer).toBe('');
+      expect(notes).toEqual([]);
       await expect(queue.list(scope)).resolves.toEqual([]);
+    } finally { await cleanup(); }
+  });
+
+  // a live target returned too late cannot authorize a submit key
+  it.each([
+    ['post-paste', 1], ['before-key', 2], ['final-key', 3]
+  ] as const)('holds /clear after a late successful %s scan', async (_stage, lateScan) => {
+    const { agent, queue, scope, notes, drain, cleanup } = await fixture('omx');
+    let pasted = 0;
+    let forced = 0;
+    let delayed = false;
+    const sent: string[][] = [];
+    const discovery = {
+      worktreesNow: () => [],
+      agentProcessId: () => 123,
+      // finish an exact identity lookup after its delivery deadline
+      target: async (_id: string, force = false) => {
+        // count only forced scans after the paste
+        if (pasted > 0 && force && ++forced === lateScan) {
+          delayed = true;
+          vi.setSystemTime(Date.now() + 5_000);
+        }
+        return { agent, socket };
+      }
+    };
+    const tmux = {
+      // retain the original draft to detect duplicate pastes
+      pastePrompt: async () => { pasted += 1; return true; },
+      capture: async () => codexComposerWithFooter('/clear'),
+      // record any unsafe submit after the deadline
+      sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => { sent.push(keys); return true; }
+    };
+    const service = new PromptService(discovery as never, tmux as never, undefined, queue, drain);
+    try {
+      await settlePolling(service.submit(agent.id, '/clear'));
+      expect(delayed).toBe(true);
+      expect(pasted).toBe(1);
+      expect(sent).toEqual([]);
+      expect(notes).toEqual([]);
+      await expect(queue.list(scope)).resolves.toMatchObject([{ text: '/clear' }]);
+    } finally { await cleanup(); }
+  });
+
+  // recovery must still refuse a replaced process, native question or edited draft
+  it.each(['replacement', 'question', 'edit'] as const)('does not resubmit when a discovery gap reveals a %s', async change => {
+    const { agent, queue, history, scope, notes, drain, cleanup } = await fixture();
+    const prompt = 'preserve the original draft';
+    let composer = prompt;
+    let missed = false;
+    let pid: number | undefined = 123;
+    const sent: string[][] = [];
+    const discovery = {
+      worktreesNow: () => [],
+      agentProcessId: () => pid,
+      // reveal the intervening change after one unavailable observation
+      target: async () => {
+        // the first key was swallowed and discovery briefly lost the pane
+        if (sent.length > 0 && !missed) { missed = true; pid = undefined; return undefined; }
+        // the next observation may no longer authorize the old draft
+        if (missed) {
+          pid = change === 'replacement' ? 456 : 123;
+          agent.attention = change === 'question' ? 'question' : 'finished';
+          composer = change === 'edit' ? `${prompt} plus operator edits` : prompt;
+        }
+        return { agent, socket };
+      }
+    };
+    const tmux = {
+      pastePrompt: async () => true,
+      capture: async () => codexComposerWithFooter(composer),
+      // keep the draft visible after a swallowed submit
+      sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => { sent.push(keys); return true; }
+    };
+    const service = new PromptService(discovery as never, tmux as never, history, queue, drain);
+    try {
+      await settlePolling(service.submit(agent.id, prompt));
+      expect(missed).toBe(true);
+      expect(sent).toEqual([['Enter']]);
+      await expect(queue.list(scope)).resolves.toMatchObject([{ text: prompt }]);
+      await expect(history.list(scope)).resolves.toEqual([]);
+      expect(notes).toEqual([]);
     } finally { await cleanup(); }
   });
 

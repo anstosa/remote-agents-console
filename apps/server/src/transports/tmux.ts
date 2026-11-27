@@ -59,6 +59,8 @@ export type AdapterView = Pick<Adapter, 'stateSource' | 'submission' | 'turns' |
 // `finished` itself.
 export const reportsOwnState = (adapter: AdapterView) => adapter.stateSource !== 'title';
 export type TmuxTarget = NonNullable<Awaited<ReturnType<DiscoveryService['target']>>> & { processId?: number };
+// distinguish an unavailable observation from proof of a different native target
+type SubmissionTargetObservation = TmuxTarget | 'missing' | 'replaced';
 // retain a failed native draft until clearing succeeds or ownership is lost
 export type FailedDraft = { agentId: string; target: TmuxTarget; prompt: string; submission: Adapter['submission'] };
 // the pane marks a Turn's completion is read past: the last completed turn on screen and the rollout position
@@ -321,7 +323,7 @@ export class TmuxTransport implements AgentTransport {
       await removeStagedAttachments(workspace, staged);
       return { status: 'refused' };
     }
-    const second = await this.submissionTarget(agentId, first).catch(() => undefined);
+    const second = await this.submissionTarget(agentId, first, true, settle ? Date.now() + submissionAcceptGraceMs : undefined).catch(() => undefined);
     // never adopt a new process after the paste
     if (!second) {
       await removeStagedAttachments(workspace, staged);
@@ -366,7 +368,9 @@ export class TmuxTransport implements AgentTransport {
     // retain durable ownership when the final proof fails; a recorded intent no longer holds
     const abortBeforeKeys = (): Delivery => ({ status: 'held', failedDraft, ...(calendarIntent === undefined ? {} : { intended: true as const }) });
     // refresh after every settle/baseline delay so key selection reflects send-time state
-    let submitTarget = await this.submissionTarget(agentId, second).catch(() => undefined);
+    // let a transient discovery gap recover without giving up the already-pasted draft
+    const preSubmitUntil = settle ? Date.now() + submissionAcceptGraceMs : undefined;
+    let submitTarget = await this.submissionTarget(agentId, second, true, preSubmitUntil).catch(() => undefined);
     // never submit through a replacement pane or native question
     if (!submitTarget || agentAttentionState(submitTarget.agent) === 'question') {
       return abortBeforeKeys();
@@ -378,7 +382,7 @@ export class TmuxTransport implements AgentTransport {
       if (captured === undefined || observeDraft(captured, composed.text) !== 'visible' || adapter.submission.ownsDraft?.(captured, composed.text) === false) {
         return abortBeforeKeys();
       }
-      submitTarget = await this.submissionTarget(agentId, second).catch(() => undefined);
+      submitTarget = await this.submissionTarget(agentId, second, true, preSubmitUntil).catch(() => undefined);
       // captures may outlive the original native process or reveal a new question
       if (!submitTarget || agentAttentionState(submitTarget.agent) === 'question') {
         return abortBeforeKeys();
@@ -504,7 +508,7 @@ export class TmuxTransport implements AgentTransport {
     const renderUntil = Date.now() + composerRenderAttempts * composerRenderPollMs;
     // poll within the bounded render window
     for (let attempt = 0; attempt < composerRenderAttempts && Date.now() < renderUntil; attempt += 1) {
-      const current = await this.submissionTarget(agentId, target, false).catch(() => undefined);
+      const current = await this.submissionTarget(agentId, target, false, renderUntil).catch(() => undefined);
       // never render-gate a replacement pane or native question
       if (current === undefined || agentAttentionState(current.agent) === 'question') return false;
       const captured = await this.tmux.capture(current.socket, current.agent.pane.paneId).catch(() => undefined);
@@ -526,31 +530,46 @@ export class TmuxTransport implements AgentTransport {
     let draft: SubmissionDraftState | undefined;
     // poll within the acceptance deadline and retry only visible server-owned drafts
     for (let attempt = 0; attempt < acceptAttempts && Date.now() < acceptUntil; attempt += 1) {
-      const current = await this.submissionTarget(agentId, target, false).catch(() => undefined);
+      const observation = await this.observeSubmissionTarget(agentId, target, false).catch(() => 'missing' as const);
+      const current = typeof observation === 'string' ? undefined : observation;
       // read the original pane without writing when discovery temporarily loses it
       const observed = current ?? target;
       const captured = await this.tmux.capture(observed.socket, observed.agent.pane.paneId).catch(() => undefined);
       draft = captured === undefined ? undefined : submission.observeDraft!(captured, composed.text);
       const retryDue = Date.now() >= retryAt;
-      // advance from this observation rather than bunching up missed retry slots
-      if (retryDue) retryAt = Date.now() + (submissionRetryDelaysMs[++retryIndex] ?? Infinity);
+      // preserve retry opportunities during missing discovery observations
+      if (retryDue && current !== undefined) retryAt = Date.now() + (submissionRetryDelaysMs[++retryIndex] ?? Infinity);
       // bound rollout reads while checking before retries and final recovery
       const checkReceipt = draft === 'cleared' || attempt === 0 || retryDue || attempt === acceptAttempts - 1;
       // preserve original whitespace when checking hidden or stale composer frames
       if (checkReceipt && baseline !== undefined && completion?.accepted !== undefined && await completion.accepted(baseline, receiptPrompt).catch(() => false)) return true;
+      // a positively observed replacement cannot acknowledge the original draft
+      if (observation === 'replaced') return false;
       // revalidate the native process before trusting an empty composer
-      if (draft === 'cleared') return await this.submissionTarget(agentId, target).catch(() => undefined) !== undefined || target.processId === undefined && current === undefined;
-      // lost targets and native questions never authorize additional keys
-      if (current === undefined || agentAttentionState(current.agent) === 'question') return false;
+      if (draft === 'cleared') {
+        const confirmed = await this.observeSubmissionTarget(agentId, target, true).catch(() => 'missing' as const);
+        // never acknowledge a replacement discovered during the fresh scan
+        if (confirmed === 'replaced') return false;
+        // retain the legacy receipt contract when no process identity was available
+        if (confirmed !== 'missing' || target.processId === undefined && observation === 'missing') return true;
+        return await this.submissionTarget(agentId, target, true, acceptUntil).catch(() => undefined) !== undefined;
+      }
+      // transient misses keep polling without authorizing any input
+      if (current === undefined) {
+        await new Promise(resolve => setTimeout(resolve, composerRenderPollMs));
+        continue;
+      }
+      // native questions never authorize additional keys
+      if (agentAttentionState(current.agent) === 'question') return false;
       // let an in-flight snapshot finish without extending recovery
       if (Date.now() >= acceptUntil) break;
       // recover submit keys swallowed while the previous turn finishes
       if (retryDue && draft === 'visible' && captured !== undefined && submission.ownsDraft?.(captured, composed.text) === true) {
-        const retryTarget = await this.submissionTarget(agentId, target).catch(() => undefined);
+        const retryTarget = await this.submissionTarget(agentId, target, true, acceptUntil).catch(() => undefined);
+        // an expired scan enters verified cleanup rather than another submit attempt
+        if (Date.now() >= acceptUntil) break;
         // revalidate before every side effect
         if (retryTarget === undefined || agentAttentionState(retryTarget.agent) === 'question') return false;
-        // a slow identity scan cannot extend the retry deadline
-        if (Date.now() >= acceptUntil) break;
         const latestCapture = await this.tmux.capture(retryTarget.socket, retryTarget.agent.pane.paneId).catch(() => undefined);
         // terminal captures also consume the bounded acceptance window
         if (Date.now() >= acceptUntil) break;
@@ -586,14 +605,48 @@ export class TmuxTransport implements AgentTransport {
     return false;
   }
 
-  // retain the original pane identity through recovery
-  private async submissionTarget(agentId: string, expected: TmuxTarget, force = true): Promise<TmuxTarget | undefined> {
+  // retain the original pane identity through bounded discovery gaps
+  private async submissionTarget(agentId: string, expected: TmuxTarget, force = true, retryUntil?: number): Promise<TmuxTarget | undefined> {
+    const attempts = retryUntil === undefined ? 1 : Math.max(1, Math.ceil((retryUntil - Date.now()) / composerRenderPollMs));
+    // wait only while the original target remains unproven rather than disproven
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      // never start another scan after the delivery window expires
+      if (retryUntil !== undefined && Date.now() >= retryUntil) return undefined;
+      const observed = await this.observeSubmissionTarget(agentId, expected, force).catch(error => {
+        // preserve the one-shot failure contract for cleanup and non-durable delivery
+        if (retryUntil === undefined) throw error;
+        return 'missing' as const;
+      });
+      // even an exact identity cannot authorize late input
+      if (retryUntil !== undefined && Date.now() >= retryUntil) return undefined;
+      // a known replacement ends the wait even if time remains
+      if (observed === 'replaced') return undefined;
+      // return only the exact currently recognized target
+      if (observed !== 'missing') return observed;
+      // stop at the original deadline without issuing input
+      if (retryUntil === undefined || attempt + 1 === attempts) break;
+      await new Promise(resolve => setTimeout(resolve, composerRenderPollMs));
+    }
+    return undefined;
+  }
+
+  // classify one discovery read without treating a lack of evidence as a replacement
+  private async observeSubmissionTarget(agentId: string, expected: TmuxTarget, force: boolean): Promise<SubmissionTargetObservation> {
     const current = await this.discovery.target(agentId, force);
-    // reject replaced sockets, panes, and agent kinds
-    return current !== undefined && current.socket.fingerprint === expected.socket.fingerprint
-      && current.agent.pane.paneId === expected.agent.pane.paneId && current.agent.kind === expected.agent.kind
-      && this.submissionProcessCurrent(agentId, expected)
-      ? { ...current, ...(expected.processId === undefined ? {} : { processId: expected.processId }) } : undefined;
+    // reject positively observed replacement sockets, panes, and agent kinds
+    if (current !== undefined && (current.socket.fingerprint !== expected.socket.fingerprint
+      || current.agent.pane.paneId !== expected.agent.pane.paneId || current.agent.kind !== expected.agent.kind)) return 'replaced';
+    const processId = this.discovery.agentProcessId?.(agentId);
+    // a different recognized process is not a temporary missing observation
+    if (expected.processId !== undefined && processId !== undefined && processId !== expected.processId) return 'replaced';
+    // never return an unverified target to a caller that may send keys
+    if (current !== undefined && (expected.processId === undefined || processId === expected.processId)) {
+      return { ...current, ...(expected.processId === undefined ? {} : { processId: expected.processId }) };
+    }
+    const listing = this.tmux.paneSnapshotsNow?.().get(expected.socket.path);
+    // a complete inventory can prove the original pane departed
+    if (listing?.status === 'available' && !listing.panes.some(pane => pane.paneId === expected.agent.pane.paneId && pane.dead !== true)) return 'replaced';
+    return 'missing';
   }
 
   // reject observed process changes without another slow scan after inspecting input
