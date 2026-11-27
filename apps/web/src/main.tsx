@@ -3084,6 +3084,52 @@ function MobileTerminalKeys({ id }: { id: string }) {
 }
 
 const goalResumeCommand = '/goal resume';
+type SuggestionFocusHandoff = 'send' | 'invalidated';
+
+// preview the full reply before either explicit composer action
+function SuggestedReplyPill({ label, text, disabled, editDisabled = false, disabledReason, onEdit, onSend, onFocusHandoff }: { label: string; text: string; disabled: boolean; editDisabled?: boolean; disabledReason?: string; onEdit: () => void; onSend: () => void; onFocusHandoff: (reason: SuggestionFocusHandoff) => void }) {
+  const [open, setOpen] = useState(false);
+  const previewOpen = open && !disabled;
+  const previewOwnsFocus = useRef(false);
+  const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(previewOpen, { placement: 'above', align: 'start', trackAnchor: { clippingSelector: '.prompt-reply-suggestions', halfWidth: 7 } });
+  // clear retained preview state on disabling
+  useEffect(() => {
+    // do not reopen when the reply becomes actionable again
+    if (disabled) setOpen(false);
+  }, [disabled]);
+  // move keyboard focus into the positioned preview
+  useEffect(() => {
+    // wait until the flyout is visible
+    if (previewOpen && style.visibility === 'visible') flyoutRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+  }, [previewOpen, style.visibility, flyoutRef]);
+  // hand off focus after an asynchronously invalidated preview is removed
+  useLayoutEffect(() => {
+    // only an open preview can own focus
+    if (!previewOpen) return;
+    // wait for the replacement composer or question controls to mount
+    return () => {
+      // explicit actions already own their own focus handoff
+      if (!previewOwnsFocus.current) return;
+      previewOwnsFocus.current = false;
+      window.requestAnimationFrame(() => { /* restore only lost focus */ onFocusHandoff('invalidated'); });
+    };
+  }, [previewOpen, onFocusHandoff]);
+  // return focus only when dismissing without editing
+  const dismiss = () => {
+    previewOwnsFocus.current = false;
+    setOpen(false);
+    anchorRef.current?.focus();
+  };
+  return <><button ref={anchorRef} type="button" title={disabledReason ?? text} aria-description={disabledReason ?? text} aria-haspopup="dialog" aria-expanded={previewOpen} disabled={disabled} onClick={() => { /* preview without touching the draft */ setOpen(true); }}>{label}</button>
+    {previewOpen && <FlyoutPortal onDismiss={dismiss}><div ref={flyoutRef} style={style} className="reply-suggestion-preview" role="dialog" aria-label="Suggested prompt" onFocusCapture={() => { /* track focus owned by the preview */ previewOwnsFocus.current = true; }} onBlurCapture={event => { /* preserve ownership until an actual successor receives focus */ if (event.relatedTarget !== null && !event.currentTarget.contains(event.relatedTarget)) previewOwnsFocus.current = false; }}>
+      <p>{text}</p>
+      <div className="reply-suggestion-actions">
+        <button className="reply-suggestion-edit icon-button" type="button" aria-label="Edit" title="Edit" disabled={editDisabled} onClick={() => { /* close before transferring focus to the draft */ previewOwnsFocus.current = false; setOpen(false); onEdit(); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.pencil} /></svg></button>
+        <button className="queue icon-button" type="button" aria-label="Send" title="Send" onClick={() => { /* keep focus away from the soon-disabled pill */ previewOwnsFocus.current = false; setOpen(false); onFocusHandoff('send'); onSend(); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.send} /></svg></button>
+      </div>
+    </div>{/* keep the pointer outside the scrollable preview */}<svg className="reply-suggestion-arrow" aria-hidden="true" viewBox="0 0 14 7" style={{ left: style['--flyout-anchor-x'], top: style['--flyout-anchor-top'], visibility: style['--flyout-anchor-x'] === undefined ? 'hidden' : style.visibility }}><path d="M.5 0 7 6.5 13.5 0" /></svg></FlyoutPortal>}
+  </>;
+}
 
 // render the agent panel's composer: prompt history above attach on the left, the prompt, and
 // queued prompts above send on the right; a detected question swaps in the answer layout
@@ -3147,6 +3193,19 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const copiedSelectionTimer = useRef<number | undefined>(undefined);
   const attachmentInput = useRef<HTMLInputElement | null>(null);
   const promptInput = useRef<HTMLTextAreaElement | null>(null);
+  const suggestionFocusContext = useRef({ panelVisible, phone });
+  suggestionFocusContext.current = { panelVisible, phone };
+  // restore the visible composer without stealing a newer focus target
+  const handoffSuggestionFocus = useCallback((reason: SuggestionFocusHandoff) => {
+    const section = composerVisibilityRef.current;
+    // a hidden or replaced agent cannot reclaim focus
+    if (!suggestionFocusContext.current.panelVisible || document.visibilityState !== 'visible' || section === null || !section.isConnected) return;
+    // asynchronous invalidation must not interrupt another interaction
+    if (reason === 'invalidated' && document.activeElement !== document.body && document.activeElement !== null) return;
+    // keep the phone keyboard closed and use a persistent region on send
+    const target = reason === 'invalidated' && !suggestionFocusContext.current.phone ? promptInput.current ?? section : section;
+    target.focus({ preventScroll: true });
+  }, []);
   const promptSelection = useRef<number | undefined>(undefined);
   const historyIndex = useRef<number | undefined>(undefined);
   const historyDraft = useRef('');
@@ -3482,22 +3541,30 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
       setAttachmentError('Unable to steer the agent. It may have finished; send the prompt instead.');
     } finally { setPendingOperation(pendingKey, false); }
   };
-  const submit = async () => {
+  // submit the composer or a standalone suggestion through the same queue
+  const submit = async (suggestion?: string) => {
+    const submittedValue = suggestion ?? value;
+    const submittedAttachments = suggestion === undefined ? attachments : [];
     // preserve startup drafts on enter
-    if (!ready || pending || (!value && attachments.length === 0)) return;
+    if (!ready || pending || (!submittedValue && submittedAttachments.length === 0)) return;
     stopVoice();
+    // share the existing submission lock
     if (!beginPendingOperation(pendingKey, agentItemKey({ id, placeId, worktreeId }))) return;
-    const submittedValue = value;
-    const submittedAttachments = attachments;
+    // recover only a draft that was actually removed
     const restoreSubmission = () => {
+      // a failed direct send has not modified the draft
+      if (suggestion !== undefined) return;
       setValue(current => submittedValue ? current ? `${submittedValue}\n\n${current}` : submittedValue : current);
       setAttachments(current => [...submittedAttachments, ...current]);
     };
-    historyIndex.current = undefined;
-    historyDraft.current = '';
-    setValue('');
-    setAttachments([]);
-    setCommandToken(undefined);
+    // direct suggestions leave unrelated draft content and files untouched
+    if (suggestion === undefined) {
+      historyIndex.current = undefined;
+      historyDraft.current = '';
+      setValue('');
+      setAttachments([]);
+      setCommandToken(undefined);
+    }
     setAttachmentError(undefined);
     try {
       const payload = await Promise.all(submittedAttachments.map(encodeAttachment));
@@ -3511,7 +3578,7 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
       }
     } catch {
       restoreSubmission();
-      setAttachmentError('Unable to read the selected attachments.');
+      setAttachmentError(suggestion === undefined ? 'Unable to read the selected attachments.' : 'Unable to queue the prompt.');
     }
     finally { setPendingOperation(pendingKey, false); }
   };
@@ -3845,19 +3912,19 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const questionNotesId = `question-notes-${id}`;
   const questionNotes = questionNotesOpen ? <div className="question-notes" id={questionNotesId}><textarea aria-label="Reply" maxLength={32_000} placeholder="Answer in your own words…" value={value} onFocus={() => { /* leave terminal input */ exitTerminalInput.get(id)?.(); }} onChange={event => { /* update note draft */ setValue(event.target.value); }} /><div className="question-notes-actions"><button type="button" className={pending ? 'progress-border progress-blue' : undefined} aria-busy={pending || undefined} disabled={pending || !value.trim()} aria-label="Send reply" onClick={() => { /* answer the active question directly */ void answer(value); }}><ProgressRing busy={pending} />{pending ? 'Sending' : 'Send reply'}</button></div></div> : null;
   // render numbered answers
-  if (question && answerMode) return <section ref={composerVisibilityRef} className="prompt question-prompt" aria-label="Agent question" onFocusCapture={event => { /* acknowledge entry to the question controls */ if (!event.currentTarget.contains(event.relatedTarget)) onPromptFocus(); }} onDragEnter={dragAttachments} onDragOver={dragAttachments} onDragLeave={leaveAttachmentDrag} onDragEnd={clearAttachmentDrag} onDrop={dropAttachments}><div className="question-heading"><div className="question-copy"><strong>{question.permission ? 'Permission request' : 'Agent question'}{question.page !== undefined && <span className="question-page"> · {question.page.index + 1} of {question.page.count} · <button type="button" className="question-page-next" onClick={question.page.next}>next</button></span>}{question.expiresAt !== undefined && <QuestionCountdown key={question.id} expiresAt={question.expiresAt} />}</strong><span>{question.text}</span>{question.detail !== undefined && <pre className="question-detail">{question.detail}</pre>}</div><div className="question-tools">{!choiceOnlyParsedPermission && <button type="button" className="question-notes-toggle" aria-controls={questionNotesId} data-context-flyout aria-expanded={questionNotesOpen} onClick={() => { /* toggle answer notes */ setNotesQuestionId(questionNotesOpen ? undefined : question.id); }}>{questionNotesOpen ? 'Hide reply' : 'Reply in your own words'}</button>}{questionModeToggle}</div></div>{question.textAnswer !== undefined && <QuestionTextAnswer key={question.id} field={question.textAnswer} pending={pending} onAnswer={text => void answer(text)} />}{question.dismissable && <button type="button" className="question-dismiss" disabled={pending} onClick={() => void answer({ dismiss: true })}>Dismiss</button>}<div className="question-choices">{question.choices.map(choice => <button key={`${choice.answerIndex}-${choice.label}`} className="question-choice" disabled={pending} onClick={() => void answer(choice.answerIndex)}><b aria-hidden="true">{choice.number}</b><span>{choice.label}{choice.description && <small>{choice.description}</small>}</span></button>)}</div>{questionNotes}{attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}</section>;
+  if (question && answerMode) return <section ref={composerVisibilityRef} tabIndex={-1} className="prompt question-prompt" aria-label="Agent question" onFocusCapture={event => { /* acknowledge entry to the question controls */ if (!event.currentTarget.contains(event.relatedTarget)) onPromptFocus(); }} onDragEnter={dragAttachments} onDragOver={dragAttachments} onDragLeave={leaveAttachmentDrag} onDragEnd={clearAttachmentDrag} onDrop={dropAttachments}><div className="question-heading"><div className="question-copy"><strong>{question.permission ? 'Permission request' : 'Agent question'}{question.page !== undefined && <span className="question-page"> · {question.page.index + 1} of {question.page.count} · <button type="button" className="question-page-next" onClick={question.page.next}>next</button></span>}{question.expiresAt !== undefined && <QuestionCountdown key={question.id} expiresAt={question.expiresAt} />}</strong><span>{question.text}</span>{question.detail !== undefined && <pre className="question-detail">{question.detail}</pre>}</div><div className="question-tools">{!choiceOnlyParsedPermission && <button type="button" className="question-notes-toggle" aria-controls={questionNotesId} data-context-flyout aria-expanded={questionNotesOpen} onClick={() => { /* toggle answer notes */ setNotesQuestionId(questionNotesOpen ? undefined : question.id); }}>{questionNotesOpen ? 'Hide reply' : 'Reply in your own words'}</button>}{questionModeToggle}</div></div>{question.textAnswer !== undefined && <QuestionTextAnswer key={question.id} field={question.textAnswer} pending={pending} onAnswer={text => void answer(text)} />}{question.dismissable && <button type="button" className="question-dismiss" disabled={pending} onClick={() => void answer({ dismiss: true })}>Dismiss</button>}<div className="question-choices">{question.choices.map(choice => <button key={`${choice.answerIndex}-${choice.label}`} className="question-choice" disabled={pending} onClick={() => void answer(choice.answerIndex)}><b aria-hidden="true">{choice.number}</b><span>{choice.label}{choice.description && <small>{choice.description}</small>}</span></button>)}</div>{questionNotes}{attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}</section>;
   const queueLabel = pending ? 'Queueing' : 'Queue';
   const queuePanel = queuedPromptsOpen && <FlyoutPortal onDismiss={() => setQueuedPromptsOpen(false)}><section className="queued-prompts-panel more-menu flyout-menu" ref={queuedPromptFlyoutRef} style={queuedPromptFlyoutStyle} aria-label="Queued prompts"><header><strong>Queued prompts</strong></header>{pendingSteers.length > 0 && <div className="pending-steers" aria-label="Pending steers"><small>Steers pending: held by the agent, not in the queue</small><ul>{pendingSteers.map((steer, index) => <li key={index}>{steer}</li>)}</ul></div>}{queuedPromptError && <p className="queued-prompt-error" role="alert">{queuedPromptError}</p>}<div className="queued-prompts-list">{queuedPrompts.map((queued, index) => { const label = queued.text || queued.attachments?.map(attachment => attachment.name).join(', ') || 'Attachments only'; const editing = queuedPromptEdit?.id === queued.id; const busy = queuedPromptAction !== undefined; return <div className={`queued-prompt-item${editing ? ' editing' : ''}`} key={queued.id}><span className="queued-prompt-order"><strong className="queued-prompt-position" aria-label={`Queue position ${index + 1}`}>{index + 1}</strong><span className="queued-prompt-order-buttons"><button type="button" disabled={busy || index === 0} aria-label={`Move queued prompt earlier: ${label}`} title="Move earlier" onClick={() => void moveQueuedPrompt(queued, 'earlier')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg></button><button type="button" disabled={busy || index === queuedPrompts.length - 1} aria-label={`Move queued prompt later: ${label}`} title="Move later" onClick={() => void moveQueuedPrompt(queued, 'later')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg></button></span></span>{editing ? <textarea aria-label={`Edit queued prompt: ${label}`} value={queuedPromptEdit.text} maxLength={32_000} autoFocus onChange={event => setQueuedPromptEdit({ id: queued.id, text: event.target.value })} /> : <span className="prompt-with-sender"><PromptSenderChips sender={queued} /><button className="queued-prompt-copy" type="button" disabled={busy} title={label} onClick={() => setQueuedPromptEdit({ id: queued.id, text: queued.text })}><span>{queued.text || 'Attachments only'}</span>{queued.attachments?.length ? <small>{queued.attachments.map(attachment => attachment.name).join(', ')}</small> : null}</button></span>}<span className="queued-prompt-actions">{editing ? <><button type="button" disabled={busy || !queuedPromptEdit.text.trim() && queued.attachments === undefined} aria-label={`Save queued prompt changes: ${label}`} title="Save changes" onClick={() => void saveQueuedPromptEdit(queued)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg></button><button type="button" disabled={busy} aria-label={`Stop editing queued prompt: ${label}`} title="Stop editing" onClick={() => setQueuedPromptEdit(undefined)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></> : <button type="button" className={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save' ? 'progress-icon-button progress-border progress-blue' : 'progress-icon-button'} aria-busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save' || undefined} disabled={busy} aria-label={`Save queued prompt as note: ${label}`} title="Save as note" onClick={() => void saveQueuedPromptAsNote(queued)}><ProgressRing busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'save'} /><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true">{workspacePanelGlyphs.notes}</svg></button>}<button className={`queued-prompt-cancel progress-icon-button${progressBorder(queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel', 'red')}`} type="button" aria-busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel' || undefined} disabled={busy} aria-label={`Cancel queued prompt: ${label}`} title="Cancel queued prompt" onClick={() => void cancelQueuedPrompt(queued)}><ProgressRing busy={queuedPromptAction?.id === queued.id && queuedPromptAction.kind === 'cancel'} /><svg className="action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg></button></span></div>; })}</div></section></FlyoutPortal>;
   // the queued prompts stay one tap away: counted, and disabled while the queue is empty
   const queuedToggle = <button className={`queued-prompts-toggle icon-button${queuedPromptsOpen ? ' active' : ''}`} type="button" disabled={pending || queuedPrompts.length === 0 && pendingSteers.length === 0} aria-label={`Queued prompts (${queuedPrompts.length})`} data-context-flyout aria-expanded={queuedPromptsOpen} title={queuedPrompts.length === 0 ? 'No queued prompts' : `${queuedPrompts.length} queued prompt${queuedPrompts.length === 1 ? '' : 's'}`} onClick={() => setQueuedPromptsOpen(open => !open)}><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.queue} /></svg>{queuedPrompts.length > 0 && <span className="saved-prompts-count queued-prompts-count" aria-hidden="true">{queuedPrompts.length}</span>}</button>;
   const sendButton = <button className={`queue icon-button progress-icon-button${progressBorder(pending, 'blue')}`} aria-busy={pending || undefined} disabled={!ready || pending || (!value && attachments.length === 0)} aria-label={queueLabel} title={queueLabel} onClick={() => void submit()}><ProgressRing busy={pending} /><svg viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.send} /></svg></button>;
-  // keep every shortcut draft-only and available before the editable prompt
+  // keep every shortcut available before the editable prompt
   const proseReplies = replySuggestions?.filter(suggestion => /* prefer the live command over a duplicate model reply */ !goalResumeAvailable || suggestion.text !== goalResumeCommand);
   const suggestedReplies = goalResumeAvailable || proseReplies?.length ? <div className="prompt-reply-suggestions" role="group" aria-label="Suggested replies">
-    {goalResumeAvailable && <button type="button" title={canDraftGoalResume ? goalResumeCommand : 'Clear the draft and attachments to insert /goal resume'} aria-description={canDraftGoalResume ? 'Insert the resume command into the draft' : 'Requires an empty draft without attachments'} disabled={!ready || pending || !canDraftGoalResume} onClick={() => { /* draft the command without sending */ selectSuggestedReply(goalResumeCommand, true); }}>{goalResumeCommand}</button>}
-    {proseReplies?.map(suggestion => /* keep each generated reply editable */ <button type="button" key={suggestion.text} title={suggestion.text} aria-description={suggestion.text} disabled={!ready || pending || appendTextBlock(value, suggestion.text).length > 32_000} onClick={() => selectSuggestedReply(suggestion.text)}>{suggestion.label}</button>)}
+    {goalResumeAvailable && <SuggestedReplyPill key={`${id}:goal-resume`} label={goalResumeCommand} text={goalResumeCommand} onFocusHandoff={handoffSuggestionFocus} disabled={!ready || pending || !canDraftGoalResume || !panelVisible} {...(!canDraftGoalResume ? { disabledReason: 'Clear the draft and attachments to insert /goal resume' } : {})} onEdit={() => { /* keep the command standalone */ selectSuggestedReply(goalResumeCommand, true); }} onSend={() => { /* queue the standalone command */ void submit(goalResumeCommand); }} />}
+    {proseReplies?.map(suggestion => /* bind preview state to the current reply source */ <SuggestedReplyPill key={`${id}:${replySuggestionKey}:${suggestion.text}`} label={suggestion.label} text={suggestion.text} onFocusHandoff={handoffSuggestionFocus} disabled={!ready || pending} editDisabled={appendTextBlock(value, suggestion.text).length > 32_000} onEdit={() => { /* append the editable text */ selectSuggestedReply(suggestion.text); }} onSend={() => { /* queue only the suggested text */ void submit(suggestion.text); }} />)}
   </div> : null;
-  return <section ref={composerVisibilityRef} className="prompt agent-composer" aria-label="Prompt composer" onDragEnter={dragAttachments} onDragOver={dragAttachments} onDragLeave={leaveAttachmentDrag} onDragEnd={clearAttachmentDrag} onDrop={dropAttachments}>{suggestedReplies}{draggingAttachments && <div className="prompt-drop-overlay" role="status">Drop files to attach</div>}<div className="agent-composer-column" aria-label="Prompt shortcuts">{historyControl}{attachmentButton}</div><div className="prompt-content">{composer}{attachments.length > 0 && <div className="prompt-attachments" aria-label="Selected attachments">{attachments.map((file, index) => <span key={`${file.name}-${index}`} title={file.name}>{file.name}<button type="button" disabled={pending} aria-label={`Remove ${file.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><PanelIcon path={panelIcons.close} /></button></span>)}</div>}{attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}{queuedPromptError && !queuedPromptsOpen && <p className="queued-prompt-error" role="alert">{queuedPromptError}</p>}<input ref={attachmentInput} className="attachment-input" type="file" multiple onChange={event => { chooseAttachments(event.target.files); event.target.value = ''; }} />{questionModeToggle && <div className="prompt-actions">{questionModeToggle}</div>}</div><div className="agent-composer-column" ref={queuedPromptAnchorRef} role="group" aria-label="Prompt submission controls">{queuedToggle}{sendButton}</div>{queuePanel}</section>;
+  return <section ref={composerVisibilityRef} tabIndex={-1} className="prompt agent-composer" aria-label="Prompt composer" onDragEnter={dragAttachments} onDragOver={dragAttachments} onDragLeave={leaveAttachmentDrag} onDragEnd={clearAttachmentDrag} onDrop={dropAttachments}>{suggestedReplies}{draggingAttachments && <div className="prompt-drop-overlay" role="status">Drop files to attach</div>}<div className="agent-composer-column" aria-label="Prompt shortcuts">{historyControl}{attachmentButton}</div><div className="prompt-content">{composer}{attachments.length > 0 && <div className="prompt-attachments" aria-label="Selected attachments">{attachments.map((file, index) => <span key={`${file.name}-${index}`} title={file.name}>{file.name}<button type="button" disabled={pending} aria-label={`Remove ${file.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><PanelIcon path={panelIcons.close} /></button></span>)}</div>}{attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}{queuedPromptError && !queuedPromptsOpen && <p className="queued-prompt-error" role="alert">{queuedPromptError}</p>}<input ref={attachmentInput} className="attachment-input" type="file" multiple onChange={event => { chooseAttachments(event.target.files); event.target.value = ''; }} />{questionModeToggle && <div className="prompt-actions">{questionModeToggle}</div>}</div><div className="agent-composer-column" ref={queuedPromptAnchorRef} role="group" aria-label="Prompt submission controls">{queuedToggle}{sendButton}</div>{queuePanel}</section>;
 }
 
 // a text answer to an Agent's question: one line or several, starting from its prefill

@@ -194,16 +194,23 @@ Claude account routes stay unavailable rather than selecting a fallback.
 When the live OMX footer advertises `/goal resume`, show that command first in
 the suggestion row independently of the Reply suggestions toggle, assistant
 questions, or provider availability. Activation drafts the standalone command
-without sending it. If text or attachments are already present, keep the option
+only after Edit is selected in its preview, or queues the command on Send.
+If text or attachments are already present, keep the option
 visible but disabled rather than altering the existing draft. Remove it when the
 footer no longer advertises it or the pane disconnects.
 
-Labels contain at most three words. Each pill exposes its full editable draft in its
-tooltip and accessible description. Suggestions are never selected, inserted or sent by
-default. Activating a generated reply appends to and focuses the existing draft without
-submitting a prompt, answering a question or sending terminal input. Preserve typed text
-and earlier selections. Pills use half the standard control height with sufficient target
-separation, without shrinking Send or answer-mode controls. Keep them in one horizontally
+Labels contain at most three words. Activating a pill opens a clickable preview with
+the full suggested prompt, without changing the draft or sending anything. A small
+triangle points to the visible center of the triggering pill even when the preview
+shifts or the pill is clipped by the scroll row. The
+preview's Edit action closes it and appends to and focuses the existing draft;
+Send uses the normal queue to submit only the suggested text, leaving any unrelated
+draft and attachments untouched. Dismiss the preview on Escape, outside click or
+source invalidation. Return lost keyboard focus to the current composer or question
+when a preview is invalidated, and keep focus on the composer when sending.
+Suggestions never implicitly answer a question or send terminal
+input. Preserve typed text and earlier selections. Pills use half the standard control
+height with sufficient target separation, without shrinking Send or answer-mode controls. Keep them in one horizontally
 scrollable row on narrow screens without page overflow. Hide stale results during work,
 conversation/model/account changes, non-question replies or native question/permission
 presentation. Native answer-mode questions and permissions continue submitting on click.

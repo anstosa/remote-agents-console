@@ -51,8 +51,10 @@ requests and may consume paid usage; run them only after choosing to do so.
 5. **Verify reply suggestions.** On an installation where **Agents → Reply
    suggestions** has deliberately been enabled and restarted, finish a turn with
    `End your reply with one direct question asking which smoke step to repeat.`
-   Confirm reply chips appear. Select one and confirm it only drafts editable text
-   in the composer; it must not submit the text. Then discard the draft.
+   Confirm reply chips appear. Select one and confirm it previews the full prompt
+   without altering the composer or submitting the text. Select Edit, confirm the
+   text appears in the composer, then discard the draft. Reopen a suggestion and
+   select Send to verify it reaches the candidate through normal prompt submission.
 6. **Clean up.** Close only the disposable Agent/Conversation created for the
    smoke. Restore any operator setting that was deliberately changed for the test.
 
@@ -67,8 +69,8 @@ version check or parser without evidence from the failing candidate.
 - **Codex:** exercise the native inline question UI.
 - **OMX:** confirm the session is detected as OMX rather than plain Codex and that
   hidden worker panes do not become operator Agents. Repeat the paused-goal
-  `/goal resume` check when applicable: the suggestion must appear and only draft
-  the command before submission.
+  `/goal resume` check when applicable: the suggestion must preview the standalone
+  command and allow editing it before submission or sending it explicitly.
 - **Claude:** use Claude's built-in `AskUserQuestion` in Terminal (`tmux`).
   In Transcript (`structured`), use the console's `ask_user` tool instead;
   that transport denies `AskUserQuestion`. If a structured Claude Conductor
