@@ -125,6 +125,13 @@ describe('screensaver Agent content', () => {
     await expect(fixture.content.read('agent-1', fixture.identity)).resolves.toBeUndefined();
   });
 
+  // an unreported writer change is just as much a conversation handoff
+  it('discards a preview when the fallback conversation changes in place', async () => {
+    const current = agent({ attention: 'working', previewConversationId: 'first', recoveryProcessKey: 'same-process' });
+    const fixture = service({ current, afterRead: { ...current, previewConversationId: 'second' }, tail: 'wrong conversation' });
+    await expect(fixture.content.read(current.id, fixture.identity)).resolves.toBeUndefined();
+  });
+
   // distinguish unavailable content and departed Agents
   it('returns explicit unavailable content and no result for a departed Agent', async () => {
     const unavailable = service({ current: agent({ attention: 'working' }), tailError: true });

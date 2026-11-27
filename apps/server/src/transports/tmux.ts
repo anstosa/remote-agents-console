@@ -793,15 +793,15 @@ export class TmuxTransport implements AgentTransport {
     return typeof this.discovery.paneProcessId === 'function' ? this.discovery.paneProcessId(agentId) : undefined;
   }
 
-  // bind screensaver bytes to one reported conversation and freshly verified process generation
+  // bind screensaver bytes to one proven conversation and freshly verified process generation
   private async nativePreviewProof(agentId: string, target: TmuxTarget, mode: ScreensaverPreviewMode, expectedIdentity: string | undefined) {
-    const { conversationId, recoveryProcessKey } = target.agent;
+    const { conversationId, previewConversationId, recoveryProcessKey } = target.agent;
     // native history and pane bytes require the server-issued conversation/process token
-    if (expectedIdentity === undefined || conversationId === undefined || recoveryProcessKey === undefined
+    if (expectedIdentity === undefined || (conversationId ?? previewConversationId) === undefined || recoveryProcessKey === undefined
       || screensaverPreviewMode(target.agent, expectedIdentity) !== mode) return undefined;
     const proof = this.discovery.replySuggestionTarget(agentId);
     // require one atomic discovery projection for the same pane-native generation
-    if (proof === undefined || proof.id !== agentId || proof.kind !== target.agent.kind || proof.conversationId !== conversationId
+    if (proof === undefined || proof.id !== agentId || proof.kind !== target.agent.kind || proof.conversationId !== conversationId || proof.previewConversationId !== previewConversationId
       || proof.panePid !== this.paneProcessId(agentId) || proof.process.pid !== this.discovery.agentProcessId?.(agentId)) return undefined;
     // pane reports alone can survive replacement, so require native process ownership
     return await this.discovery.previewConversationOwned(proof).catch(() => false) ? proof : undefined;
@@ -814,6 +814,7 @@ export class TmuxTransport implements AgentTransport {
     if (current === undefined || current.socket.fingerprint !== expected.socket.fingerprint
       || current.agent.pane.paneId !== expected.agent.pane.paneId || current.agent.kind !== expected.agent.kind
       || current.agent.conversationId !== conversationId
+      || current.agent.previewConversationId !== expected.agent.previewConversationId
       || current.agent.recoveryProcessKey !== recoveryProcessKey) return false;
     // reject process replacements whenever discovery can prove either generation
     if (panePid !== undefined && this.paneProcessId(agentId) !== panePid) return false;
@@ -1040,7 +1041,7 @@ export class TmuxTransport implements AgentTransport {
     const target = await this.discovery.target(agentId);
     // never read a transcript for a departed pane
     if (target === undefined) return undefined;
-    const { kind, conversationId, recoveryProcessKey } = target.agent;
+    const { kind, conversationId, previewConversationId, recoveryProcessKey } = target.agent;
     const proof = await this.nativePreviewProof(agentId, target, 'response', expectedIdentity);
     // unknown conversations and unverified native generations have no safe response source
     if (proof === undefined) return undefined;
@@ -1052,12 +1053,13 @@ export class TmuxTransport implements AgentTransport {
     if (kind === 'claude') response = conversationId === undefined ? undefined : await claudeLatestResponse(conversationId, this.discovery.paneDirectory(agentId));
     // Codex requires the known pane process before resolving its writer-owned rollout
     else if (pid !== undefined && codexFamily(kind)) {
-      response = conversationId === undefined || agentPid === undefined ? undefined : await codexLatestWriterResponse(agentPid, conversationId);
+      const writer = conversationId ?? previewConversationId;
+      response = writer === undefined || agentPid === undefined ? undefined : await codexLatestWriterResponse(agentPid, writer);
     }
     // unknown terminal formats cannot safely provide a response preview
     else return undefined;
     const current = await this.previewTargetCurrent(agentId, target, conversationId, recoveryProcessKey, pid, agentPid);
-    const paneCurrent = pid !== undefined && conversationId !== undefined
+    const paneCurrent = pid !== undefined
       && await this.tmux.previewTargetMatches(target.socket, target.agent.pane.paneId, pid, conversationId, proof.conversationProof).catch(() => false);
     // fresh conversation and process reads close replacement races hidden by stale inventory
     return current && paneCurrent && await this.discovery.previewConversationOwned(proof).catch(() => false)
@@ -1077,7 +1079,7 @@ export class TmuxTransport implements AgentTransport {
     const output = await this.tmux.capturePreview(target.socket, target.agent.pane.paneId, expectedIdentity);
     // a failed pane-local capture needs no separate identity subprocess
     if (output === undefined) return undefined;
-    const paneCurrent = panePid !== undefined && conversationId !== undefined
+    const paneCurrent = panePid !== undefined
       && await this.tmux.previewTargetMatches(target.socket, target.agent.pane.paneId, panePid, conversationId, proof.conversationProof).catch(() => false);
     // report an unreadable pane rather than reviving an older response
     if (!paneCurrent || !await this.previewTargetCurrent(agentId, target, conversationId, recoveryProcessKey, panePid, agentPid)

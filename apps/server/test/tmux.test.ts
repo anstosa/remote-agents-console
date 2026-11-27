@@ -89,6 +89,16 @@ describe('TmuxAdapter capture', () => {
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'display-message', '-p', '-t', '%1', '#{pane_id}\t#{pane_pid}\t#{@rac_session}\t#{@rac_session_processes}']);
   });
 
+  // an unreported pane can be bound by independent native writer proof
+  it('checks the absence of a report without accepting a new conversation report', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const adapter = new TmuxAdapter();
+    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t10\t\t\n', stderr: '' });
+    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t10\tnew-session\t\n', stderr: '' });
+    await expect(adapter.previewTargetMatches(socket, '%1', 10, undefined)).resolves.toBe(true);
+    await expect(adapter.previewTargetMatches(socket, '%1', 10, undefined)).resolves.toBe(false);
+  });
+
   // preserve semantic color state while browser snapshots retain their own row resets
   it('preserves composer background across wrapped rows for draft observation', async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
@@ -326,6 +336,28 @@ describe('TmuxAdapter capture', () => {
 
     await expect(transport.previewOutput('agent', 7, screensaverRuntimeIdentity(agent as never, 'output'))).resolves.toBeUndefined();
     expect(run).not.toHaveBeenCalled();
+  });
+
+  // external omx panes may have no hook report but still own a verified writer
+  it('shows live output for a writer-bound unreported conversation and rejects a writer change', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    const agent = { id: 'agent', transport: 'tmux' as const, kind: 'omx' as const, previewConversationId: '0198c777-7777-7777-8777-777777777777', recoveryProcessKey: 'process-one', pane: { paneId: '%1', socketFingerprint: socket.fingerprint } };
+    const proof = { id: agent.id, kind: agent.kind, attention: 'working' as const, panePid: 10, cwd: '/example', previewConversationId: agent.previewConversationId, process: { pid: 11, startTime: '100' }, generation: 1 };
+    const previewConversationOwned = vi.fn(async () => true);
+    const discovery = { target: async () => ({ socket, agent }), paneProcessId: () => 10, agentProcessId: () => 11, replySuggestionTarget: () => proof, previewConversationOwned, validateReplySuggestionTarget: async () => true };
+    const tmux = new TmuxAdapter();
+    const transport = new TmuxTransport(discovery as never, tmux, {} as never);
+    const identity = screensaverRuntimeIdentity(agent, 'output');
+    const capture = { code: 0, stdout: '› Prompt\n• New output\n\n› Draft\n\n  model · ~/worktree', stderr: '' };
+    const pane = { code: 0, stdout: '%1\t10\t\t\n', stderr: '' };
+    run.mockResolvedValueOnce(capture).mockResolvedValueOnce(pane);
+    await expect(transport.previewOutput(agent.id, 7, identity)).resolves.toMatchObject({ text: '• New output' });
+    expect(previewConversationOwned).toHaveBeenCalledTimes(2);
+
+    previewConversationOwned.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    run.mockResolvedValueOnce(capture).mockResolvedValueOnce(pane);
+    await expect(transport.previewOutput(agent.id, 7, identity)).resolves.toBeUndefined();
+    expect(screensaverRuntimeIdentity({ ...agent, previewConversationId: '0198c666-6666-7666-8666-666666666666' }, 'output')).not.toBe(identity);
   });
 
   it('reports the tmux session name used to distinguish internal command panes', async () => {

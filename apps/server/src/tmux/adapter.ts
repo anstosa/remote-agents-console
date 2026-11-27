@@ -518,16 +518,16 @@ export class TmuxAdapter {
     return await entry.value;
   }
 
-  // freshly verify the pane and reported conversation that own passive preview bytes
-  async previewTargetMatches(socket: SocketRef, pane: string, expectedPid: number, expectedConversationId: string, expectedConversationProof?: string): Promise<boolean> {
+  // freshly verify the pane and its report or confirmed absence of one
+  async previewTargetMatches(socket: SocketRef, pane: string, expectedPid: number, expectedConversationId: string | undefined, expectedConversationProof?: string): Promise<boolean> {
     // reject unsafe coordinates and option values before invoking tmux
-    if (!paneId.test(pane) || !Number.isSafeInteger(expectedPid) || expectedPid <= 0 || expectedConversationId === ''
-      || expectedConversationId.length > 256 || /[\0\r\n\t]/u.test(expectedConversationId)
+    if (!paneId.test(pane) || !Number.isSafeInteger(expectedPid) || expectedPid <= 0
+      || expectedConversationId !== undefined && (expectedConversationId === '' || expectedConversationId.length > 256 || /[\0\r\n\t]/u.test(expectedConversationId))
       || expectedConversationProof !== undefined && (expectedConversationProof.length > 4_096 || /[\0\r\n\t]/u.test(expectedConversationProof))) return false;
     const out = await run(this.binary, ['-S', socket.path, 'display-message', '-p', '-t', pane, '#{pane_id}\t#{pane_pid}\t#{@rac_session}\t#{@rac_session_processes}']);
     // require one complete current-pane identity record
-    const match = out.code === 0 ? /^(%\d+)\t([1-9]\d*)\t([^\r\n\t]+)\t([^\r\n\t]*)\r?\n?$/u.exec(out.stdout) : null;
-    return match !== null && match[1] === pane && Number(match[2]) === expectedPid && match[3] === expectedConversationId
+    const match = out.code === 0 ? /^(%\d+)\t([1-9]\d*)\t([^\r\n\t]*)\t([^\r\n\t]*)\r?\n?$/u.exec(out.stdout) : null;
+    return match !== null && match[1] === pane && Number(match[2]) === expectedPid && match[3] === (expectedConversationId ?? '')
       && (expectedConversationProof === undefined || match[4] === expectedConversationProof);
   }
 

@@ -56,7 +56,7 @@ describe('screensaver content API', () => {
   // keep per-Agent polling off the full dashboard lifecycle
   it('reads state from the selected Transport without refreshing the dashboard', async () => {
     let dashboardReads = 0;
-    const raw = { id: 'agent-1', transport: 'tmux', panel: 'terminal', home: '/pane/root', title: 'Agent', kind: 'codex', attention: 'finished', placeId: 'place-a', conversationId: 'conversation', recoveryProcessKey: 'process' } as const;
+    const raw = { id: 'agent-1', transport: 'tmux', panel: 'terminal', home: '/pane/root', title: 'Agent', kind: 'codex', attention: 'finished', placeId: 'place-a', previewConversationId: 'conversation', recoveryProcessKey: 'process' } as const;
     // model dashboard-only Place enrichment and an inferred Inline question
     const placeA = { ...raw, home: '/canonical/a', worktreeId: 'worktree-a', attention: 'question' as const };
     const placeB = { ...raw, home: '/canonical/b', placeId: 'place-b', worktreeId: 'worktree-b', attention: 'question' as const };
@@ -92,6 +92,7 @@ describe('screensaver content API', () => {
     expect(dashboard.statusCode, dashboard.body).toBe(200);
     const identity: string = dashboard.json().agents[0].previewIdentity;
     expect(identity).not.toBe(retiredIdentity);
+    expect(dashboard.json().agents[0]).not.toHaveProperty('previewConversationId');
     const baseline = dashboardReads;
     const retired = await app.inject({ method: 'GET', url: previewUrl('agent-1', retiredIdentity), headers: { host: 'agents.example.com', cookie: '__Host-rac=signed' } });
     const shown = await app.inject({ method: 'GET', url: previewUrl('agent-1', identity), headers: { host: 'agents.example.com', cookie: '__Host-rac=signed' } });

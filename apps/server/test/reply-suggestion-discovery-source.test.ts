@@ -1,9 +1,51 @@
 import { describe, expect, it, vi } from 'vitest';
 import { adapterFor } from '../src/adapters/registry.js';
+import * as codexConversations from '../src/adapters/codex-conversations.js';
 import { DiscoveryService } from '../src/discovery/service.js';
+import { screensaverPreviewIdentity } from '../src/screensaver/identity.js';
 import { paneLister, socketFinder } from './helpers/discovery-stubs.js';
 
 describe('DiscoveryService reply source targets', () => {
+  // the preview fallback must not impersonate a session hook
+  it('discovers writer-bound previews only when enabled and invalidates them on writer replacement', async () => {
+    const first = '0198c777-7777-7777-8777-777777777777';
+    const second = '0198c666-6666-7666-8666-666666666666';
+    const processes = { recognizeAgent: vi.fn(async () => ({ kind: 'omx' as const, pid: 456, startTime: '100', wrapped: false })) };
+    const pane = { paneId: '%1', sessionId: '$0', pid: 123, path: '/tmp', title: 'Working', reportedSession: undefined as string | undefined };
+    const writer = vi.spyOn(codexConversations, 'codexWriterConversationId').mockResolvedValue(first);
+    const owns = vi.spyOn(codexConversations, 'codexProcessOwnsConversation').mockResolvedValue(true);
+    const service = new DiscoveryService(socketFinder(), paneLister([pane]) as never, processes);
+    try {
+      const [disabled] = await service.refresh(true);
+      expect(disabled?.previewConversationId).toBeUndefined();
+      expect(writer).not.toHaveBeenCalled();
+
+      service.enableScreensaverPreviews();
+      const [agent] = await service.refresh(true);
+      expect(agent?.conversationId).toBeUndefined();
+      expect(agent?.previewConversationId).toBe(first);
+      expect(writer).toHaveBeenCalledWith(456);
+      const proof = service.replySuggestionTarget(agent!.id)!;
+      await expect(service.previewConversationOwned(proof)).resolves.toBe(true);
+      expect(owns).toHaveBeenCalledWith(456, first);
+
+      writer.mockResolvedValue(second);
+      const [changed] = await service.refresh(true);
+      expect(screensaverPreviewIdentity(changed!, 'output')).not.toBe(screensaverPreviewIdentity(agent!, 'output'));
+      await expect(service.previewConversationOwned(proof)).resolves.toBe(false);
+
+      pane.reportedSession = first;
+      writer.mockClear();
+      const [reported] = await service.refresh(true);
+      expect(reported?.conversationId).toBe(first);
+      expect(reported?.previewConversationId).toBeUndefined();
+      expect(writer).not.toHaveBeenCalled();
+    } finally {
+      writer.mockRestore();
+      owns.mockRestore();
+    }
+  });
+
   it('publishes stable atomic identities and rejects recognized PID reuse', async () => {
     let process = { kind: 'codex' as const, pid: 456, startTime: '100', wrapped: false };
     const processes = { recognizeAgent: vi.fn(async () => ({ ...process })) };

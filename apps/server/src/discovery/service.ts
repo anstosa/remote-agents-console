@@ -8,7 +8,7 @@ import { TmuxAdapter } from '../tmux/adapter.js';
 import { ProcInspector, type ProcessInspector } from './processes.js';
 import { GithubService } from '../github/service.js';
 import { messageAsksQuestion, parseReportedAttention, resolveAttention } from '../adapters/attention.js';
-import { codexProcessOwnsConversation } from '../adapters/codex-conversations.js';
+import { codexProcessOwnsConversation, codexWriterConversationId } from '../adapters/codex-conversations.js';
 import type { ReplySuggestionService } from '../reply-suggestions/service.js';
 import { adapterCapabilities, adapterFor, adapters, paneExcluded, structuredAdapters } from '../adapters/registry.js';
 import { projectIdOf, worktreeMatchesWorkspace, worktreePathOf, worktreeWireId } from '../workspaces/resolver.js';
@@ -40,6 +40,7 @@ export type TmuxReplySuggestionTarget = {
   panePid: number;
   cwd: string;
   conversationId?: string;
+  previewConversationId?: string;
   conversationProof?: string;
   process: { pid: number; startTime: string };
   generation: number;
@@ -204,6 +205,8 @@ export class DiscoveryService {
   // atomically published native reply targets never trigger dashboard refreshes
   private replyTargets = new Map<string, TmuxReplySuggestionTarget>();
   private replyTargetCounter = 0;
+  // resolve unreported writers only when passive previews are configured
+  private screensaverPreviews = false;
   // raw `#{pane_current_path}` per agent id, so the Adapter can match a sandboxed
   // pane's rollout by its working directory without readlink-ing its descriptors
   private paneCwds = new Map<string, string>();
@@ -279,6 +282,8 @@ export class DiscoveryService {
   private static readonly closedGitMetadataCacheMs = 10 * 60_000;
   // take only the GitHub reads discovery needs
   constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly github: BranchLookup = new GithubService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels' | 'issues'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string, private readonly launchHome?: string | null) {}
+  // opt into writer-bound identity discovery without changing reported session semantics
+  enableScreensaverPreviews(): void { this.screensaverPreviews = true; }
   // list the structured Agents on the dashboard beside the panes' Agents, fresh on every change
   useStructuredAgents(source: { agents(): Promise<readonly Agent[]>; onChange(listener: () => void): void; turns: { latestAnswer(agentId: string): Promise<string | undefined> } }): void {
     this.structuredAgents = () => source.agents();
@@ -505,6 +510,9 @@ export class DiscoveryService {
       if (pane.reportedQuestion !== undefined && pane.reportedQuestion.length > 0) paneQuestionPayloads.set(id, pane.reportedQuestion);
       const attention = resolveAttention({ kind: recognized.kind, title: pane.title, reported, hasQuestion: false });
       const conversationId = pane.reportedSession !== undefined && pane.reportedSession.length > 0 ? pane.reportedSession : undefined;
+      // codex-family panes launched outside RAC may not have installed hooks
+      const previewConversationId = this.screensaverPreviews && conversationId === undefined && recognized.startTime !== undefined && codexFamily(recognized.kind)
+        ? await codexWriterConversationId(recognized.pid).catch(() => undefined) : undefined;
       const proofSeparator = pane.reportedSessionProcesses?.indexOf('|') ?? -1;
       const proofSession = proofSeparator < 0 ? undefined : pane.reportedSessionProcesses?.slice(0, proofSeparator);
       const proofProcesses = proofSeparator < 0 ? undefined : pane.reportedSessionProcesses?.slice(proofSeparator + 1);
@@ -518,7 +526,7 @@ export class DiscoveryService {
       const agentPane: AgentPane = { paneId: pane.paneId, sessionId: `${pane.socket.fingerprint}:${pane.sessionId}`, socketFingerprint: pane.socket.fingerprint, ...(pane.paneMode === undefined ? {} : { paneMode: pane.paneMode }) };
       // expose only an opaque match hint when discovery proved one exact process lifetime
       const processKey = recognized.startTime === undefined ? {} : { recoveryProcessKey: recoveryProcessKey(recognized.kind, recognized.pid, recognized.startTime) };
-      const agent: Agent = { id, home, title: pane.title, kind: recognized.kind, attention, ...processKey, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), ...(pane.spawnedBy === undefined ? {} : { spawnedBy: pane.spawnedBy }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
+      const agent: Agent = { id, home, title: pane.title, kind: recognized.kind, attention, ...processKey, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(previewConversationId === undefined ? {} : { previewConversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), ...(pane.spawnedBy === undefined ? {} : { spawnedBy: pane.spawnedBy }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
       // reply inference requires a closed native kind and a proven process lifetime
       if ((recognized.kind === 'codex' || recognized.kind === 'omx' || recognized.kind === 'claude') && recognized.startTime !== undefined) {
         replyCandidates.set(id, {
@@ -528,6 +536,7 @@ export class DiscoveryService {
           panePid: pane.pid,
           cwd: pane.path,
           ...(conversationId === undefined ? {} : { conversationId }),
+          ...(previewConversationId === undefined ? {} : { previewConversationId }),
           ...(conversationProof === undefined ? {} : { conversationProof }),
           process: { pid: recognized.pid, startTime: recognized.startTime }
         });
@@ -628,7 +637,7 @@ export class DiscoveryService {
 
   // identify one target without object-identity or ordinary-scan churn
   private replyTargetKey(target: Omit<TmuxReplySuggestionTarget, 'generation'> | TmuxReplySuggestionTarget): string {
-    return JSON.stringify([target.id, target.kind, target.attention, target.panePid, target.cwd, target.conversationId, target.conversationProof, target.process.pid, target.process.startTime]);
+    return JSON.stringify([target.id, target.kind, target.attention, target.panePid, target.cwd, target.conversationId, target.previewConversationId, target.conversationProof, target.process.pid, target.process.startTime]);
   }
 
   // return a defensive copy from the last atomic pane scan
@@ -640,14 +649,15 @@ export class DiscoveryService {
   // require one conversation source owned by the exact native process generation
   async previewConversationOwned(expected: TmuxReplySuggestionTarget): Promise<boolean> {
     const before = this.replyTargets.get(expected.id);
+    const conversationId = expected.conversationId ?? expected.previewConversationId;
     // reject retired or mixed atomic targets before native source discovery
-    if (before === undefined || expected.conversationId === undefined || before.generation !== expected.generation
+    if (before === undefined || conversationId === undefined || before.generation !== expected.generation
       || this.replyTargetKey(before) !== this.replyTargetKey(expected)) return false;
     if (expected.kind === 'claude') {
       return expected.conversationProof !== undefined && this.paneConversationProcessProofs.get(expected.id) === expected.conversationProof;
     }
     // Codex/OMX ownership requires the exact process's open writer, never cwd fallback
-    const owned = await codexProcessOwnsConversation(expected.process.pid, expected.conversationId).catch(() => false);
+    const owned = await codexProcessOwnsConversation(expected.process.pid, conversationId).catch(() => false);
     const after = this.replyTargets.get(expected.id);
     // a concurrent replacement invalidates even a matching writer result
     return owned && after !== undefined && after.generation === expected.generation

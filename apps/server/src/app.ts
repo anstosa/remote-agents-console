@@ -319,6 +319,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     : undefined;
   // publish source keys only while suggestions are enabled
   if (replySuggestions !== undefined) discovery.useReplySuggestions?.(replySuggestions);
+  // only configured screensavers need unreported native preview identities
+  if (screensaverEnabled) discovery.enableScreensaverPreviews?.();
   // preserve the launch account even with a partial injected service
   const nativeHome = (projectId?: string): string | undefined => config.launchHome === null ? undefined : typeof launch.agentHome === 'function' ? launch.agentHome(projectId) : config.launchHome ?? accountHome(config.projects, projectId);
   // keep picker discovery separate from launch side effects
@@ -685,7 +687,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const published = agents.map(agent => {
       const preview = screensaverPreviewPublication(agent, screensaverShowsOutput(agent) ? 'output' : 'response');
       publications.set(agent.id, preview);
-      return { ...agent, previewIdentity: preview.identity };
+      // only the opaque preview token crosses the browser boundary
+      const { previewConversationId: _writer, ...publicAgent } = agent;
+      return { ...publicAgent, previewIdentity: preview.identity };
     });
     // a slower earlier dashboard build cannot restore retired identities
     if (publication === screensaverPreviewPublicationVersion) screensaverPreviewPublications = publications;

@@ -132,7 +132,12 @@ export async function openPaneThreads(root: number): Promise<{ rollouts: Rollout
 export async function codexProcessOwnsConversation(pid: number, conversationId: string): Promise<boolean> {
   // malformed identifiers never reach proc or profile paths
   if (!validCodexThreadId(conversationId)) return false;
-  return (await writerOwnedRollout(pid))?.id === conversationId;
+  return await codexWriterConversationId(pid) === conversationId;
+}
+
+// resolve only the native process's unambiguous top-level writer
+export async function codexWriterConversationId(pid: number): Promise<string | undefined> {
+  return (await writerOwnedRollout(pid))?.id;
 }
 
 // parse bounded metadata from one Codex rollout

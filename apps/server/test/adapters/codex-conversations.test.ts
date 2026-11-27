@@ -1,8 +1,12 @@
 import { appendFile, mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { codexConversationName, codexConversationSummaries, codexLatestMessage, codexLatestResponse, codexLatestWriterResponse, codexProcessOwnsConversation, latestCodexMessageFromRecords, latestCodexResponseFromRecords, discoverCodexConversation, openPaneThreads, validCodexThreadId } from '../../src/adapters/codex-conversations.js';
+import { codexConversationName, codexConversationSummaries, codexLatestMessage, codexLatestResponse, codexLatestWriterResponse, codexProcessOwnsConversation, codexWriterConversationId, latestCodexMessageFromRecords, latestCodexResponseFromRecords, discoverCodexConversation, openPaneThreads, validCodexThreadId } from '../../src/adapters/codex-conversations.js';
 import { codexHome, fakeProc, tempDir } from '../helpers/codex-fixtures.js';
+import { DiscoveryService } from '../../src/discovery/service.js';
+import { screensaverRuntimeIdentity } from '../../src/screensaver/identity.js';
+import { TmuxTransport } from '../../src/transports/tmux.js';
+import { paneLister, socketFinder, testSocket } from '../helpers/discovery-stubs.js';
 
 // observe only the filesystem boundaries that govern catalog work
 const catalogRead = vi.hoisted(() => vi.fn((_phase: 'head' | 'tail', _file: string, read: () => Promise<string[]>) => read()));
@@ -115,6 +119,7 @@ describe('Codex conversation lookup', () => {
 
     await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toEqual({ id, title: 'Resumed conversation' });
     await expect(codexProcessOwnsConversation(123, id)).resolves.toBe(true);
+    await expect(codexWriterConversationId(123)).resolves.toBe(id);
   });
 
   // multiple writers do not say which conversation is foreground
@@ -130,6 +135,7 @@ describe('Codex conversation lookup', () => {
     await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toBeUndefined();
     await expect(codexProcessOwnsConversation(123, first)).resolves.toBe(false);
     await expect(codexProcessOwnsConversation(123, second)).resolves.toBe(false);
+    await expect(codexWriterConversationId(123)).resolves.toBeUndefined();
   });
 
   // a known child writer does not obscure its sole parent
@@ -144,6 +150,7 @@ describe('Codex conversation lookup', () => {
     process.env.RAC_HOST_PROC = await fakeWriterProc(home, [id, child], { open: [primary] });
 
     await expect(discoverCodexConversation({ pid: 123, cwd })).resolves.toEqual({ id, title: 'Parent conversation' });
+    await expect(codexWriterConversationId(123)).resolves.toBe(id);
   });
 
   // a previous rollout can stay open while the new thread is unwritten
@@ -274,6 +281,40 @@ describe('Codex conversation lookup', () => {
     // losing the writer cannot fall back to a still-open rollout descriptor
     process.env.RAC_HOST_PROC = await fakeProc(123, [current]);
     await expect(codexLatestWriterResponse(123, currentId)).resolves.toBeUndefined();
+  });
+
+  // idle previews use the exact writer even without a session hook
+  it('reads an unreported idle response and withholds it if the writer changes during the read', async () => {
+    const home = await codexHome();
+    const cwd = '/tmp';
+    const currentId = '0198c777-7777-7777-8777-777777777777';
+    const nextId = '0198c888-8888-7888-8888-888888888888';
+    const current = await writeSession(home, 'rollout-current', { id: currentId, cwd, prompt: 'Current prompt' });
+    const next = await writeSession(home, 'rollout-next', { id: nextId, cwd, prompt: 'Other prompt' });
+    await appendFile(current, `${JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', last_agent_message: 'Current response' } })}\n`);
+    await appendFile(next, `${JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', last_agent_message: 'Other response' } })}\n`);
+    process.env.CODEX_HOME = home;
+    process.env.RAC_HOST_PROC = await fakeWriterProc(home, [currentId], { open: [next] });
+    const replacement = await fakeWriterProc(home, [nextId], { open: [current] });
+    // retain the same recognized process throughout the conversation switch
+    const processes = { recognizeAgent: async () => ({ kind: 'omx' as const, pid: 123, startTime: '100', wrapped: false }) };
+    const previewTargetMatches = vi.fn().mockResolvedValue(true);
+    const tmux = { ...paneLister([{ paneId: '%1', sessionId: '$0', pid: 123, path: cwd, title: 'Ready', reportedAttention: 'finished' }]), previewTargetMatches };
+    const discovery = new DiscoveryService(socketFinder(), tmux as never, processes);
+    discovery.enableScreensaverPreviews();
+    const [agent] = await discovery.refresh(true);
+    expect(agent).toMatchObject({ previewConversationId: currentId });
+    expect(agent?.conversationId).toBeUndefined();
+    const identity = screensaverRuntimeIdentity(agent!, 'response');
+    const transport = new TmuxTransport(discovery, tmux as never, {} as never);
+
+    await expect(transport.previewAnswer(agent!.id, identity)).resolves.toBe('Current response');
+    expect(previewTargetMatches).toHaveBeenCalledWith(testSocket, '%1', 123, undefined, undefined);
+
+    // switch writers after the original answer is read but before publication
+    previewTargetMatches.mockImplementationOnce(async () => { process.env.RAC_HOST_PROC = replacement; return true; });
+    await expect(transport.previewAnswer(agent!.id, identity)).resolves.toBeUndefined();
+    expect(previewTargetMatches).toHaveBeenCalledTimes(2);
   });
 
   // a writer can precede its first persisted rollout and is authoritative over old cwd history
