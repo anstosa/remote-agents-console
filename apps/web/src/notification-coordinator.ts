@@ -17,6 +17,7 @@ type NotificationWorkerAck = {
 };
 type ExactNotificationEntry = Pick<NotificationEvent, 'displayTag' | 'eventId' | 'eventEpoch' | 'eventSequence'>;
 type NotificationIdentity = Pick<NotificationEvent, 'entityId' | 'eventId' | 'eventEpoch' | 'eventSequence'>;
+type ViewedReceipt = { event: NotificationEvent; expiresAt: number };
 type NotificationInventoryEntry = ExactNotificationEntry & Pick<NotificationEvent, 'entityId' | 'kind'>;
 export type CapturedNotificationInventory = { entries: readonly NotificationInventoryEntry[] };
 type SnapshotAgent = {
@@ -42,16 +43,23 @@ type WorkerDisplayedMessage = {
 const protocolVersion = 1;
 const acknowledgementTimeoutMs = 1_500;
 const maximumBatchBytes = 65_536;
+// keep historical receipts for the longest push TTL plus a conservative delivery margin
+const viewedHistoryLifetimeMs = 2 * 60 * 60 * 1_000;
+const maximumViewedEventsPerAgent = 1_024;
 const noControls = /^[^\u0000-\u001f\u007f]+$/u;
 const safeIdentifier = /^[A-Za-z0-9._:-]{1,128}$/u;
 const outcomes = new Set<NotificationWorkerOutcome>(['displayed', 'duplicate', 'stale', 'muted', 'not-found', 'closed', 'retained', 'listed', 'unavailable', 'invalid']);
 const currentEvents = new Map<string, NotificationEvent>();
+// retain exact local view receipts independently of whether a question is answered
+const viewedEvents = new Map<string, ViewedReceipt>();
 const previousAgents = new Map<string, SnapshotAgentState>();
 const obsoleteEvents = new Map<string, ExactNotificationEntry>();
 const displayedEntries = new Map<string, Map<string, ExactNotificationEntry>>();
+const nativeDisplays = new Map<string, Notification>();
 const inventoriedEvents = new Map<string, { event: NotificationInventoryEntry; observedWorking?: NotificationState }>();
 const pendingRequests = new Set<() => void>();
 const entityRequests = new Map<string, Set<() => void>>();
+let coordinatorLifetime = 0;
 let requestCounter = 0;
 let latestSnapshotToken = '';
 let inventorySequence = 0;
@@ -212,8 +220,41 @@ const cancelEntityRequests = (entityId: string): void => {
   entityRequests.delete(entityId);
 };
 
-// publish one current event and invalidate an older page operation
+// an unanswered current event retains its receipt even beyond the history window
+const viewedReceiptExpired = (receipt: ViewedReceipt, now: number): boolean => receipt.expiresAt <= now
+  && !sameEvent(previousAgents.get(receipt.event.agentId)?.notificationEvent, receipt.event);
+
+// consult an exact receipt against the latest accepted snapshot and local view time
+const viewedEvent = (event: NotificationIdentity): NotificationEvent | undefined => {
+  const identity = eventIdentityKey(event);
+  const receipt = viewedEvents.get(identity);
+  // no unknown event acquires view authority
+  if (receipt === undefined) return undefined;
+  // worker messages can arrive before a new snapshot has pruned history
+  if (viewedReceiptExpired(receipt, Date.now())) { viewedEvents.delete(identity); return undefined; }
+  return receipt.event;
+};
+
+// recognize only the exact retained event the user has already viewed
+const eventWasViewed = (event: NotificationIdentity): boolean => viewedEvent(event) !== undefined;
+
+// retain independent receipts while bounding each agent's delayed delivery history
+const rememberViewedEvent = (event: NotificationEvent): void => {
+  const identity = eventIdentityKey(event);
+  // refresh the exact receipt's insertion order and view-time retention
+  viewedEvents.delete(identity);
+  viewedEvents.set(identity, { event, expiresAt: Date.now() + viewedHistoryLifetimeMs });
+  const history = [...viewedEvents].filter(([, receipt]) => receipt.event.entityId === event.entityId);
+  const current = previousAgents.get(event.agentId)?.notificationEvent;
+  // cap exceptionally busy agents while preserving their current viewed event
+  const historical = history.filter(([, receipt]) => !sameEvent(receipt.event, current));
+  for (const [oldest] of historical.slice(0, Math.max(0, history.length - maximumViewedEventsPerAgent))) viewedEvents.delete(oldest);
+};
+
+// publish one current unviewed event and invalidate an older page operation
 const noteCurrentNotificationEvent = (event: NotificationEvent): void => {
+  // a replay must not restore a canceled display claim
+  if (eventWasViewed(event)) return;
   const current = currentEvents.get(event.entityId);
   // retain exact duplicate operations
   if (sameEvent(current, event)) return;
@@ -339,14 +380,29 @@ const showFailOpen = async (event: NotificationEvent, title: string, body: strin
     try {
       const registration = await boundedRegistration(250);
       // use a quickly available registration only
-      if (registration !== undefined && isCurrent()) { await registration.showNotification(title, { ...options, silent: !soundStillRequested() }); return true; }
+      if (registration !== undefined && isCurrent()) {
+        await registration.showNotification(title, { ...options, silent: !soundStillRequested() });
+        // a registration fallback may finish after the user's first close request
+        if (eventWasViewed(event)) { void closeNotificationDisplay(event); return false; }
+        return true;
+      }
     }
     catch { /* use the window notification fallback */ }
   }
   // refuse a superseded event after registration lookup
   if (!isCurrent()) return false;
   // preserve a visible fallback without a service worker
-  try { new Notification(title, { ...options, silent: !soundStillRequested() }); return true; }
+  try {
+    const notification = new Notification(title, { ...options, silent: !soundStillRequested() });
+    const identity = eventIdentityKey(event);
+    nativeDisplays.set(identity, notification);
+    // release the exact window-owned resource when the browser closes it
+    notification.onclose = () => {
+      // a replacement may already own this event identity
+      if (nativeDisplays.get(identity) === notification) nativeDisplays.delete(identity);
+    };
+    return true;
+  }
   catch { /* notification failure remains non-blocking */ }
   return false;
 };
@@ -362,7 +418,7 @@ export const displayNotificationEvent = async (input: {
 }): Promise<boolean> => {
   const { event, title, body, soundRequested, soundStillRequested, playCustomSound } = input;
   // reject malformed server metadata conservatively
-  if (!isBrowserNotificationEvent(event)) return false;
+  if (!isBrowserNotificationEvent(event) || eventWasViewed(event)) return false;
   noteCurrentNotificationEvent(event);
   const isCurrent = () => eventIsCurrent(event);
   const wantsSound = () => soundRequested && soundStillRequested();
@@ -394,28 +450,55 @@ export const displayNotificationEvent = async (input: {
 const markNotificationEventObsolete = (event: NotificationEvent): void => {
   // retain only validated exact identities
   if (!isBrowserNotificationEvent(event)) return;
+  const identity = eventIdentityKey(event);
+  const native = nativeDisplays.get(identity);
+  // the window owns its own exact fallback notification instance
+  if (native !== undefined) {
+    nativeDisplays.delete(identity);
+    native.close();
+  }
   const strict = { displayTag: event.displayTag, eventId: event.eventId, eventEpoch: event.eventEpoch, eventSequence: event.eventSequence };
   obsoleteEvents.set(eventKey(strict), strict);
-  const displayed = displayedEntries.get(eventIdentityKey(event));
+  const displayed = displayedEntries.get(identity);
   // include every actual display variant known to this page
   for (const entry of displayed?.values() ?? []) obsoleteEvents.set(eventKey(entry), entry);
 };
 
-// request one exact close without any direct page fallback
-export const closeNotificationEvent = async (event: NotificationEvent, resolved = false): Promise<void> => {
-  // cancel audible work only when the page proved resolution or read state
-  if (resolved) invalidateNotificationEvent(event);
+// close exact display variants without renewing the local view receipt
+const closeNotificationDisplay = async (event: NotificationEvent): Promise<void> => {
+  const lifetime = coordinatorLifetime;
+  invalidateNotificationEvent(event);
   markNotificationEventObsolete(event);
+  // a pending worker display may not have reported its actual compatibility tag yet
+  let digest: string | undefined;
+  try { digest = await notificationEventDigest(event); }
+  catch { /* retain the already known exact tags */ }
+  // only disposal cancels this close continuation, not a subsequent view
+  if (coordinatorLifetime !== lifetime) return;
+  // include deterministic variants even if display acknowledgement has not arrived
+  if (digest !== undefined) {
+    rememberDisplayedEntry(event, `rac-v1-compat-${digest}`);
+    rememberDisplayedEntry(event, `rac-v1-failopen-${digest}`);
+    markNotificationEventObsolete(event);
+  }
   const identity = eventIdentityKey(event);
   const candidates = [...obsoleteEvents.values()].filter(candidate => candidate.eventId === event.eventId && candidate.eventEpoch === event.eventEpoch && candidate.eventSequence === event.eventSequence);
-  // close every captured actual display identity serially
-  for (const candidate of candidates) {
+  // post exact closes concurrently within the worker’s serialized arbiter
+  await Promise.all(candidates.map(async candidate => {
     const ack = await requestNotificationWorker({ operation: 'close', event: candidate }, { timeoutMs: acknowledgementTimeoutMs });
     // retire only a proved exact close or absence
     if (ack?.outcome === 'closed' || ack?.outcome === 'not-found') { obsoleteEvents.delete(eventKey(candidate)); forgetDisplayedEntry(candidate); }
-  }
+  }));
   // release captured display variants after every exact candidate retires
   if (!candidates.some(candidate => obsoleteEvents.has(eventKey(candidate)))) displayedEntries.delete(identity);
+};
+
+// acknowledge a user view independently of any late worker display
+export const closeNotificationEvent = async (event: NotificationEvent): Promise<void> => {
+  // do not record malformed metadata as a view receipt
+  if (!isBrowserNotificationEvent(event)) return;
+  rememberViewedEvent(event);
+  await closeNotificationDisplay(event);
 };
 
 // compare a current state to one prior event
@@ -506,18 +589,25 @@ export const reconcileNotificationSnapshot = async (agents: readonly SnapshotAge
     if (previous?.event !== undefined && (previousEventObsolete(previous.event, { ...agent, notificationEvent: event }) || workingBridgeSupersedes)) { markNotificationEventObsolete(previous.event); invalidateNotificationEvent(previous.event); }
     // close a current exact completion already read or resolved question
     if (event !== undefined && eventObsolete) { markNotificationEventObsolete(event); invalidateNotificationEvent(event); }
+    const observedWorking = snapshotAttention(agent) === 'working' && agent.notificationState !== undefined ? agent.notificationState : previous?.observedWorking;
+    // publish the latest exact snapshot before consulting view receipt expiry
+    previousAgents.set(agent.id, { ...agent, event: event ?? previous?.event, ...(observedWorking === undefined ? {} : { observedWorking }) });
     // invalidate pending display work only for a proved newer/current event
     if (event !== undefined && !eventObsolete) noteCurrentNotificationEvent(event);
-    const observedWorking = snapshotAttention(agent) === 'working' && agent.notificationState !== undefined ? agent.notificationState : previous?.observedWorking;
-    previousAgents.set(agent.id, { ...agent, event: event ?? previous?.event, ...(observedWorking === undefined ? {} : { observedWorking }) });
     const entityId = event?.entityId ?? previous?.event?.entityId ?? `agent:${agent.id}`;
     // index only bounded derived entity identities
     if (entityId.length <= 256 && noControls.test(entityId)) agentsByEntity.set(entityId, { ...agent, notificationEvent: event });
   }
+  const now = Date.now();
+  // prune historical receipts by view time, not server generation or assumed provider delivery time
+  for (const [identity, receipt] of viewedEvents) {
+    // removed agents use authoritative removal semantics and current events stay acknowledged
+    if (!currentIds.has(receipt.event.agentId) || viewedReceiptExpired(receipt, now)) viewedEvents.delete(identity);
+  }
   // never classify a newly reported worker identity against a pre-inventory snapshot
   for (const [identity, remembered] of inventoriedEvents) {
     const agent = agentsByEntity.get(remembered.event.entityId);
-    const obsolete = inventoryEventObsolete(remembered.event, agent, remembered.observedWorking);
+    const obsolete = eventWasViewed(remembered.event) || inventoryEventObsolete(remembered.event, agent, remembered.observedWorking);
     // retain working evidence for a later identified progression across epochs
     if (agent !== undefined && snapshotAttention(agent) === 'working' && agent.notificationState !== undefined) remembered.observedWorking = agent.notificationState;
     // leave unknown, unread, current, and future resources untouched
@@ -588,6 +678,9 @@ export const listenForWorkerNotificationDisplays = (refresh: () => void | Promis
       inventorySequence += 1;
       inventoryCursor = undefined;
       rememberDisplayedEntry(event.data, event.data.displayTag);
+      const viewed = viewedEvent(event.data);
+      // a late push for an exact viewed event needs no new snapshot or renewed receipt
+      if (viewed !== undefined) void closeNotificationDisplay(viewed);
       void refresh();
     }
   };
@@ -597,14 +690,17 @@ export const listenForWorkerNotificationDisplays = (refresh: () => void | Promis
 
 // cancel every pending timer and late acknowledgement on disposal
 export const disposeNotificationCoordinator = (): void => {
+  coordinatorLifetime += 1;
   // release every request-owned timer and port
   for (const cancel of [...pendingRequests]) cancel();
   pendingRequests.clear();
   entityRequests.clear();
   currentEvents.clear();
+  viewedEvents.clear();
   previousAgents.clear();
   obsoleteEvents.clear();
   displayedEntries.clear();
+  nativeDisplays.clear();
   inventoriedEvents.clear();
   inventorySequence += 1;
   inventoryCursor = undefined;

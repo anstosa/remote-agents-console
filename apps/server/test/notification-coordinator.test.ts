@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { captureNotificationInventory, displayNotificationEvent, disposeNotificationCoordinator, listenForWorkerNotificationDisplays, reconcileNotificationSnapshot } from '../../web/src/notification-coordinator.js';
+import { captureNotificationInventory, closeNotificationEvent, displayNotificationEvent, disposeNotificationCoordinator, listenForWorkerNotificationDisplays, reconcileNotificationSnapshot } from '../../web/src/notification-coordinator.js';
 
 const epoch = '11111111-1111-4111-8111-111111111111';
 const otherEpoch = '22222222-2222-4222-8222-222222222222';
@@ -226,6 +226,143 @@ describe('cold notification inventory', () => {
     expect(harness.messages.filter(message => message.operation === 'reconcile')).toEqual([]);
     await reconcileNotificationSnapshot([{ id: 'one', attention: 'finished', unread: true, completionId: 'turn-one', notificationEvent: event(), notificationState: { eventEpoch: epoch, eventSequence: 2 } }], 'new-after-B', inventory);
     expect(harness.messages.filter(message => message.operation === 'reconcile')).toEqual([]);
+  });
+});
+
+describe('viewed notification ownership', () => {
+  // an acknowledgement cancels an in-flight chime without resolving the question itself
+  it('does not revive a viewed question on a repeated dashboard snapshot or late push', async () => {
+    const question = event({ kind: 'question', eventId: 'question-one' });
+    const agent = { id: 'one', attention: 'question' as const, notificationEvent: question, notificationState: { eventEpoch: epoch, eventSequence: 2 } };
+    let release!: (reply: Reply) => void;
+    const pending = new Promise<Reply>(resolve => { release = resolve; });
+    const harness = browser(message => {
+      // hold the first display until the user has viewed its question
+      if (message.operation === 'display' && message.event?.eventId === question.eventId) return pending;
+      // retain exact identities for close and subsequent display acknowledgements
+      if (message.operation === 'display') return { outcome: 'displayed', audibleClaim: true, eventId: message.event?.eventId, eventEpoch: message.event?.eventEpoch, eventSequence: message.event?.eventSequence, displayTag: message.event?.displayTag };
+      return { ...reconciled(message), ...message.event };
+    });
+    const play = vi.fn(async () => true);
+    await reconcileNotificationSnapshot([agent], 'question');
+    const display = displayNotificationEvent({ event: question, title: 'Question', body: 'Reply', soundRequested: true, soundStillRequested: () => true, playCustomSound: play });
+    await vi.waitFor(() => expect(harness.messages.some(message => message.operation === 'display')).toBe(true));
+    await closeNotificationEvent(question);
+    release({ outcome: 'displayed', audibleClaim: true, eventId: question.eventId, eventEpoch: epoch, eventSequence: 2, displayTag: question.displayTag });
+    await display;
+    await reconcileNotificationSnapshot([agent], 'repeated-question');
+    await displayNotificationEvent({ event: question, title: 'Question', body: 'Reply', soundRequested: true, soundStillRequested: () => true, playCustomSound: play });
+    expect(play).not.toHaveBeenCalled();
+    expect(harness.messages.filter(message => message.operation === 'display')).toHaveLength(1);
+    // a subsequent push can use a different actual display tag
+    const late = entry({ kind: 'question', eventId: question.eventId, displayTag: 'rac-v1-compat-late' });
+    await reconcileNotificationSnapshot([agent], 'late-question', { entries: [late] });
+    expect(harness.messages.filter(message => message.operation === 'reconcile').flatMap(message => message.entries ?? [])).toContainEqual(expect.objectContaining({ displayTag: late.displayTag, eventId: question.eventId }));
+    // a new question for the same agent must still be deliverable
+    const next = { ...question, eventId: 'question-two', eventSequence: 3 };
+    await reconcileNotificationSnapshot([{ ...agent, notificationEvent: next, notificationState: next }], 'new-question');
+    const nextDisplay = displayNotificationEvent({ event: next, title: 'Question', body: 'Next', soundRequested: true, soundStillRequested: () => true, playCustomSound: play });
+    await vi.waitFor(() => expect(harness.messages.filter(message => message.operation === 'display')).toHaveLength(2));
+    await nextDisplay;
+    expect(play).toHaveBeenCalledOnce();
+  });
+
+  // a late worker push must close only the exact already-viewed question
+  it('recloses a delayed display notification without waiting for the dashboard', async () => {
+    const question = event({ kind: 'question' });
+    const harness = browser(message => ({ outcome: 'closed', audibleClaim: false, ...message.event }));
+    await closeNotificationEvent(question);
+    harness.messages.length = 0;
+    const refresh = vi.fn();
+    const stop = listenForWorkerNotificationDisplays(refresh);
+    const late = { type: 'rac-notification-displayed', protocolVersion: 1, entityId: question.entityId, eventId: question.eventId, eventEpoch: question.eventEpoch, eventSequence: question.eventSequence, displayTag: 'rac-v1-compat-late' };
+    harness.serviceWorkers.dispatchEvent(new MessageEvent('message', { data: late }));
+    harness.serviceWorkers.dispatchEvent(new MessageEvent('message', { data: { ...late, entityId: 'agent:two', eventId: 'sibling-question', displayTag: 'rac-v1-agent-status-two' } }));
+    await vi.waitFor(() => expect(harness.messages.some(message => message.operation === 'close' && message.event?.displayTag === late.displayTag)).toBe(true));
+    expect(harness.messages.every(message => message.event?.eventId === question.eventId)).toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  // an overlapping view must not abandon either close or forget the first exact receipt
+  it.each([epoch, otherEpoch])('retains both viewed events when their closes overlap (%s)', async secondEpoch => {
+    const first = event({ kind: 'question', eventId: 'question-one' });
+    const second = { ...first, eventId: 'question-two', eventEpoch: secondEpoch, eventSequence: 3 };
+    const harness = browser(message => ({ outcome: 'closed', audibleClaim: false, ...message.event }));
+    await Promise.all([closeNotificationEvent(first), closeNotificationEvent(second)]);
+    expect(harness.messages.filter(message => message.operation === 'close').map(message => message.event?.eventId)).toEqual(expect.arrayContaining([first.eventId, second.eventId]));
+
+    harness.messages.length = 0;
+    const refresh = vi.fn();
+    const stop = listenForWorkerNotificationDisplays(refresh);
+    const late = { type: 'rac-notification-displayed', protocolVersion: 1, entityId: first.entityId, eventId: first.eventId, eventEpoch: first.eventEpoch, eventSequence: first.eventSequence, displayTag: 'rac-v1-compat-late' };
+    harness.serviceWorkers.dispatchEvent(new MessageEvent('message', { data: late }));
+    harness.serviceWorkers.dispatchEvent(new MessageEvent('message', { data: { ...late, entityId: 'agent:two', eventId: 'sibling-question', displayTag: 'rac-v1-agent-status-two' } }));
+    await vi.waitFor(() => expect(harness.messages.some(message => message.operation === 'close' && message.event?.displayTag === late.displayTag)).toBe(true));
+    expect(harness.messages.every(message => message.event?.eventId === first.eventId && message.event?.eventEpoch === first.eventEpoch)).toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  // expired historical receipts can retire without rearming a still-current question
+  it('prunes old view history while retaining the currently viewed event', async () => {
+    const first = event({ kind: 'question', eventId: 'question-one' });
+    const second = { ...first, eventId: 'question-two', eventEpoch: otherEpoch, eventSequence: 3 };
+    const current = { id: 'one', attention: 'question' as const, notificationEvent: second, notificationState: second };
+    const harness = browser(message => ({ outcome: 'closed', audibleClaim: false, ...message.event }));
+    await closeNotificationEvent(first);
+    await closeNotificationEvent(second);
+    await reconcileNotificationSnapshot([current], 'current-question');
+    vi.setSystemTime(Date.now() + 2 * 60 * 60 * 1_000 + 1);
+    await reconcileNotificationSnapshot([current], 'aged-question');
+    harness.messages.length = 0;
+    const stop = listenForWorkerNotificationDisplays(() => undefined);
+    const late = { type: 'rac-notification-displayed', protocolVersion: 1, entityId: first.entityId, eventId: first.eventId, eventEpoch: first.eventEpoch, eventSequence: first.eventSequence, displayTag: 'rac-v1-compat-first' };
+    harness.serviceWorkers.dispatchEvent(new MessageEvent('message', { data: late }));
+    harness.serviceWorkers.dispatchEvent(new MessageEvent('message', { data: { ...late, eventId: second.eventId, eventEpoch: second.eventEpoch, eventSequence: second.eventSequence, displayTag: 'rac-v1-compat-second' } }));
+    await vi.waitFor(() => expect(harness.messages.some(message => message.operation === 'close' && message.event?.displayTag === 'rac-v1-compat-second')).toBe(true));
+    expect(harness.messages.every(message => message.event?.eventId === second.eventId)).toBe(true);
+    stop();
+  });
+
+  // worker deliveries cannot renew a historical receipt or bypass expiry between snapshots
+  it('expires historical views from local view time without another dashboard snapshot', async () => {
+    const first = event({ kind: 'question', eventId: 'historical-question' });
+    const second = { ...first, eventId: 'current-question', eventEpoch: otherEpoch, eventSequence: 3 };
+    const harness = browser(message => ({ outcome: 'closed', audibleClaim: false, ...message.event }));
+    await closeNotificationEvent(first);
+    await closeNotificationEvent(second);
+    await reconcileNotificationSnapshot([{ id: 'one', attention: 'question', notificationEvent: second, notificationState: second }], 'current-question');
+    const stop = listenForWorkerNotificationDisplays(() => undefined);
+    const historical = { type: 'rac-notification-displayed', protocolVersion: 1, entityId: first.entityId, eventId: first.eventId, eventEpoch: first.eventEpoch, eventSequence: first.eventSequence, displayTag: 'rac-v1-compat-historical' };
+    vi.setSystemTime(Date.now() + 119 * 60 * 1_000);
+    harness.messages.length = 0;
+    harness.serviceWorkers.dispatchEvent(new MessageEvent('message', { data: historical }));
+    await vi.waitFor(() => expect(harness.messages.some(message => message.operation === 'close' && message.event?.displayTag === historical.displayTag)).toBe(true));
+    // the late delivery must not renew the two-hour view receipt
+    vi.setSystemTime(Date.now() + 2 * 60 * 1_000);
+    harness.messages.length = 0;
+    harness.serviceWorkers.dispatchEvent(new MessageEvent('message', { data: historical }));
+    harness.serviceWorkers.dispatchEvent(new MessageEvent('message', { data: { ...historical, eventId: second.eventId, eventEpoch: second.eventEpoch, eventSequence: second.eventSequence, displayTag: 'rac-v1-compat-current' } }));
+    await vi.waitFor(() => expect(harness.messages.some(message => message.operation === 'close' && message.event?.displayTag === 'rac-v1-compat-current')).toBe(true));
+    expect(harness.messages.every(message => message.event?.eventId === second.eventId)).toBe(true);
+    stop();
+  });
+
+  // a window-owned fail-open notification cannot be closed by the registration worker
+  it('closes the native window fallback when its event is viewed', async () => {
+    browser(() => ({ outcome: 'unavailable', audibleClaim: false }));
+    vi.stubGlobal('navigator', {});
+    const close = vi.fn();
+    class DirectNotification {
+      static permission = 'granted';
+      close = close;
+    }
+    vi.stubGlobal('Notification', DirectNotification);
+    const original = event();
+    expect(await displayNotificationEvent({ event: original, title: 'Done', body: 'Ready', soundRequested: false, soundStillRequested: () => false, playCustomSound: async () => false })).toBe(true);
+    await closeNotificationEvent(original);
+    expect(close).toHaveBeenCalledOnce();
   });
 });
 

@@ -244,6 +244,62 @@ async function mountConsole(page: Page, rejectAudio = false, receipts?: (route: 
   };
 }
 
+// viewing a completion during grace must cancel the browser's delayed display attempt
+test('focusing during completion grace cancels the delayed notification', async ({ context, page }) => {
+  await context.grantPermissions(['notifications'], { origin });
+  const finish = await mountConsole(page);
+  const completed = event(2);
+  await finish(completed);
+  await expect(page.getByRole('tab', { name: /Prompt done — Unread/u })).toBeVisible();
+  await page.getByRole('textbox', { name: 'Prompt' }).focus();
+  await expect(page.getByRole('tab', { name: /Prompt done$/u })).toBeVisible();
+  // replay the same completion after the canceled two-second grace period
+  await page.waitForTimeout(2_100);
+  await finish(completed);
+  await rpc(page, 'inventory', {});
+  const displays = await page.evaluate(eventId => {
+    const records = (window as typeof window & { __coordinationOperations: Array<{ direction: string; value: { operation?: string; event?: { eventId?: string } } }> }).__coordinationOperations;
+    return records.filter(record => record.direction === 'request' && record.value.operation === 'display' && record.value.event?.eventId === eventId);
+  }, completed.eventId);
+  expect(displays).toEqual([]);
+  expect(await notices(page)).toEqual([]);
+});
+
+// returning to the same selected agent must dismiss its question without answering it
+test('refocusing an agent closes late question pushes and preserves its sibling', async ({ context, page }) => {
+  await context.grantPermissions(['notifications'], { origin });
+  const session = await context.newCDPSession(page);
+  const registrationId = await register(page, session);
+  const question = { ...event(2), kind: 'question' as const };
+  const sibling = { ...event(3, 'agent-2'), kind: 'question' as const };
+  const agents = [question, sibling].map(value => ({
+    id: value.agentId, panel: 'terminal', kind: 'codex', home: '/fixtures/worktree', title: 'Ready', attention: 'finished', hasMessageQuestion: true,
+    worktreeId: value.worktreeId, queuedPromptCount: 0, notificationEvent: value, notificationState: { eventEpoch: epoch, eventSequence: value.eventSequence }
+  }));
+  await mountConsole(page, false, undefined, agents);
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeVisible();
+  await push(session, registrationId, question);
+  await push(session, registrationId, sibling);
+  await expect.poll(async () => (await notices(page)).map(notice => notice.data.eventId).sort()).toEqual([question.eventId, sibling.eventId].sort());
+  // simulate the browser's blur and return while its selected Agent stays unchanged
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+    window.dispatchEvent(new Event('blur'));
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true });
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect.poll(async () => (await notices(page)).map(notice => notice.data.eventId)).toEqual([sibling.eventId]);
+  const operationsBefore = await page.evaluate(() => (window as typeof window & { __coordinationOperations: unknown[] }).__coordinationOperations.length);
+  await push(session, registrationId, question);
+  // wait for a fresh close request so an early empty tray cannot satisfy the late-push assertion
+  await expect.poll(() => page.evaluate(({ eventId, operationsBefore }) => {
+    const records = (window as typeof window & { __coordinationOperations: Array<{ direction: string; value: { operation?: string; event?: { eventId?: string } } }> }).__coordinationOperations.slice(operationsBefore);
+    return records.some(record => record.direction === 'request' && record.value.operation === 'close' && record.value.event?.eventId === eventId);
+  }, { eventId: question.eventId, operationsBefore })).toBe(true);
+  await expect.poll(async () => (await notices(page)).map(notice => notice.data.eventId)).toEqual([sibling.eventId]);
+  await session.detach();
+});
+
 // davo-owned questions retain strict reconciliation identity but display only generic davo copy
 test('suppresses ordinary question alerts for Davo-owned work while retaining the generic push', async ({ context, page }) => {
   test.setTimeout(45_000);
