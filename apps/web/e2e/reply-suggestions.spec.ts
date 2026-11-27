@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { dropPaneSocket, installPaneMock, paneInputCount, pushMetadata, pushQuestion, seedPaneSize } from './pane-stream-mock.js';
 
 type ReplySuggestion = { label: string; text: string };
@@ -18,6 +18,7 @@ type ConsoleState = {
   promptPosts: Array<{ agentId: string; prompt: string; attachments: unknown[] }>;
   suggestionPosts?: Array<{ agentId: string; body: unknown }>;
   suggestionResponses?: Record<string, SuggestionResponse>;
+  promptStatus?: number;
 };
 
 const worktree = { id: 'app:/worktrees/cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: true, order: 0 };
@@ -93,6 +94,8 @@ async function mockConsole(page: Page, state: ConsoleState) {
       const agentId = decodeURIComponent(path.split('/')[3]!);
       const body = request.postDataJSON() as { prompt: string; attachments: unknown[] };
       state.promptPosts.push({ agentId, ...body });
+      // let focused tests exercise queue rejection and an explicit retry
+      if (state.promptStatus !== undefined && state.promptStatus >= 400) return route.fulfill({ status: state.promptStatus, json: { error: 'prompt unavailable' } });
       // clear canonical message metadata after a new conversation
       if (body.prompt === '/clear') {
         state.generation += 1;
@@ -134,6 +137,43 @@ function deferred() {
   return { wait, release };
 }
 
+// open one interactive suggestion preview without changing the composer
+async function openSuggestedPrompt(pill: Locator, page: Page) {
+  await pill.click();
+  const preview = page.getByRole('dialog', { name: 'Suggested prompt' });
+  await expect(preview).toBeVisible();
+  return preview;
+}
+
+// align the pointer tip with the pill and keep its base attached to the preview
+async function expectSuggestionArrow(pill: Locator, preview: Locator, page: Page) {
+  const arrow = page.locator('.reply-suggestion-arrow');
+  await expect(arrow).toBeVisible();
+  await expect.poll(async () => {
+    const [pointer, card, anchor] = await Promise.all([arrow.boundingBox(), preview.boundingBox(), pill.evaluate(element => {
+      // only the portion exposed by the scroll row is clickable
+      const bounds = element.getBoundingClientRect();
+      const row = element.parentElement!.getBoundingClientRect();
+      return { left: Math.max(bounds.left, row.left, 0), right: Math.min(bounds.right, row.right, innerWidth), top: bounds.top };
+    })]);
+    // wait for the anchored layout to settle
+    if (pointer === null || card === null) return false;
+    const center = pointer.x + pointer.width / 2;
+    return Math.abs(center - (anchor.left + anchor.right) / 2) < 1
+      && Math.abs(pointer.y + pointer.height - anchor.top) < 1
+      && pointer.x >= card.x - 1 && pointer.x + pointer.width <= card.x + card.width + 1
+      && pointer.y <= card.y + card.height
+      && pointer.y + pointer.height > card.y + card.height;
+  }).toBe(true);
+}
+
+// choose the preview's explicit edit action
+async function editSuggestedPrompt(pill: Locator, page: Page) {
+  const preview = await openSuggestedPrompt(pill, page);
+  await preview.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(preview).toHaveCount(0);
+}
+
 // a paused OMX goal does not need an assistant question or model generation
 test('paused OMX goals offer a standalone command without requesting AI suggestions', async ({ page }) => {
   const state: ConsoleState = { generation: 1, agents: [
@@ -166,7 +206,9 @@ test('paused OMX goals offer a standalone command without requesting AI suggesti
   await pushQuestion(page, 'agent-1', null);
   await expect(resume).toBeEnabled();
 
-  await resume.click();
+  const preview = await openSuggestedPrompt(resume, page);
+  await expect(preview).toContainText('/goal resume');
+  await preview.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect(prompt).toHaveValue('/goal resume');
   await expect(prompt).toBeFocused();
   expect(state.promptPosts).toEqual([]);
@@ -217,8 +259,8 @@ test('paused OMX goals keep the command alongside AI replies and through provide
   expect(state.promptPosts).toEqual([]);
 });
 
-// verify draft-only selection and explicit submission
-test('suggested replies populate and focus the draft without submitting it', async ({ page }) => {
+// verify preview, edit and later explicit submission
+test('suggested replies preview in full before Edit populates and focuses the draft', async ({ page }) => {
   const state: ConsoleState = { generation: 1, agents: [{ id: 'agent-1', kind: 'codex', panel: 'terminal', attention: 'finished', hasMessageQuestion: true, messageReplySuggestionKey: 'source-1' }], promptPosts: [] };
   await mockConsole(page, state);
   await page.goto('/#agent=agent-1');
@@ -231,6 +273,7 @@ test('suggested replies populate and focus the draft without submitting it', asy
   await expect(first).toHaveAttribute('type', 'button');
   await expect(first).toHaveAttribute('title', longReply);
   await expect(first).toHaveAttribute('aria-description', longReply);
+  await expect(first).toHaveAttribute('aria-haspopup', 'dialog');
   await expect(prompt).toHaveValue('');
   await expect.poll(() => state.suggestionPosts).toEqual([{ agentId: 'agent-1', body: { sourceKey: 'source-1' } }]);
   expect(state.promptPosts).toEqual([]);
@@ -238,18 +281,98 @@ test('suggested replies populate and focus the draft without submitting it', asy
 
   await first.focus();
   await page.keyboard.press('Enter');
-  await expect(prompt).toBeFocused();
-  await expect(prompt).toHaveValue(longReply);
+  const preview = page.getByRole('dialog', { name: 'Suggested prompt' });
+  await expect(preview).toContainText(longReply);
+  await expect(preview.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+  await expect(preview.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
+  await expectSuggestionArrow(first, preview, page);
+  await expect(prompt).toHaveValue('');
   expect(state.promptPosts).toEqual([]);
   expect(await paneInputCount(page, 'agent-1')).toBe(0);
 
+  await preview.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(preview).toHaveCount(0);
+  await expect(prompt).toBeFocused();
+  await expect(prompt).toHaveValue(longReply);
+
   // every repeated selection appends another editable draft
-  await first.click();
+  await editSuggestedPrompt(first, page);
   await expect(prompt).toHaveValue(`${longReply}\n\n${longReply}`);
   expect(state.promptPosts).toEqual([]);
 
   await page.getByRole('button', { name: 'Queue', exact: true }).click();
   await expect.poll(() => state.promptPosts).toEqual([{ agentId: 'agent-1', prompt: `${longReply}\n\n${longReply}`, attachments: [] }]);
+});
+
+// direct Send must not consume or combine unrelated composer state
+test('suggestion Send queues only the full preview and preserves the draft and attachments', async ({ page }) => {
+  const state: ConsoleState = { generation: 1, agents: [{ id: 'agent-1', kind: 'codex', panel: 'terminal', attention: 'finished', hasMessageQuestion: true, messageReplySuggestionKey: 'source-1' }], promptPosts: [] };
+  await mockConsole(page, state);
+  await page.goto('/#agent=agent-1');
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await prompt.fill('Keep this unsent draft.');
+  await page.locator('.prompt input[type="file"]').setInputFiles({ name: 'keep.txt', mimeType: 'text/plain', buffer: Buffer.from('Keep this attachment.') });
+  const removeAttachment = page.getByRole('button', { name: 'Remove keep.txt', exact: true });
+  await expect(removeAttachment).toBeVisible();
+
+  const pill = page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: 'Use PostgreSQL', exact: true });
+  const preview = await openSuggestedPrompt(pill, page);
+  await preview.getByRole('button', { name: 'Send', exact: true }).click();
+
+  await expect.poll(() => state.promptPosts).toEqual([{ agentId: 'agent-1', prompt: longReply, attachments: [] }]);
+  await expect(preview).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Prompt composer' })).toBeFocused();
+  await expect(prompt).toHaveValue('Keep this unsent draft.');
+  await expect(removeAttachment).toBeVisible();
+  expect(await paneInputCount(page, 'agent-1')).toBe(0);
+});
+
+// a rejected direct send stays recoverable without absorbing the current draft
+test('failed suggestion Send closes the preview, reports the queue error, and can retry', async ({ page }) => {
+  const state: ConsoleState = { generation: 1, agents: [{ id: 'agent-1', kind: 'codex', panel: 'terminal', attention: 'finished', hasMessageQuestion: true, messageReplySuggestionKey: 'source-1' }], promptPosts: [], promptStatus: 503 };
+  await mockConsole(page, state);
+  await page.goto('/#agent=agent-1');
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  const pill = page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: 'Explain tradeoffs', exact: true });
+  await prompt.fill('Keep this retry draft.');
+  let preview = await openSuggestedPrompt(pill, page);
+  await preview.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText('Unable to queue the prompt.');
+  await expect(preview).toHaveCount(0);
+  await expect(prompt).toHaveValue('Keep this retry draft.');
+
+  state.promptStatus = 204;
+  preview = await openSuggestedPrompt(pill, page);
+  await preview.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect.poll(() => state.promptPosts).toEqual([
+    { agentId: 'agent-1', prompt: tradeoffReply, attachments: [] },
+    { agentId: 'agent-1', prompt: tradeoffReply, attachments: [] }
+  ]);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(prompt).toHaveValue('Keep this retry draft.');
+});
+
+// previews remain dismissible without changing or submitting the draft
+test('suggestion preview dismisses with Escape or an outside press', async ({ page }) => {
+  const state: ConsoleState = { generation: 1, agents: [{ id: 'agent-1', kind: 'codex', panel: 'terminal', attention: 'finished', hasMessageQuestion: true, messageReplySuggestionKey: 'source-1' }], promptPosts: [] };
+  await mockConsole(page, state);
+  await page.goto('/#agent=agent-1');
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  const pill = page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: 'Use PostgreSQL', exact: true });
+  let preview = await openSuggestedPrompt(pill, page);
+  await page.keyboard.press('Escape');
+  await expect(preview).toHaveCount(0);
+  await expect(pill).toBeFocused();
+
+  preview = await openSuggestedPrompt(pill, page);
+  await page.locator('.flyout-backdrop').click({ position: { x: 1, y: 1 } });
+  await expect(preview).toHaveCount(0);
+  await expect(pill).toBeFocused();
+  await expect(prompt).toHaveValue('');
+  expect(state.promptPosts).toEqual([]);
 });
 
 // verify every suggestion appends after existing drafts and later edits
@@ -261,15 +384,15 @@ test('switching pills appends after the complete existing draft', async ({ page 
   const group = page.getByRole('group', { name: 'Suggested replies' });
   const prompt = page.getByRole('textbox', { name: 'Prompt' });
   await prompt.fill('Keep the API stable.');
-  await group.getByRole('button', { name: 'Use PostgreSQL', exact: true }).click();
+  await editSuggestedPrompt(group.getByRole('button', { name: 'Use PostgreSQL', exact: true }), page);
   await expect(prompt).toHaveValue(`Keep the API stable.\n\n${longReply}`);
-  await group.getByRole('button', { name: 'Explain tradeoffs', exact: true }).click();
+  await editSuggestedPrompt(group.getByRole('button', { name: 'Explain tradeoffs', exact: true }), page);
   await expect(prompt).toHaveValue(`Keep the API stable.\n\n${longReply}\n\n${tradeoffReply}`);
 
   // edits remain in place before the next appended suggestion
   await prompt.press('End');
   await prompt.type(' Keep this note.');
-  await group.getByRole('button', { name: 'Use PostgreSQL', exact: true }).click();
+  await editSuggestedPrompt(group.getByRole('button', { name: 'Use PostgreSQL', exact: true }), page);
   await expect(prompt).toHaveValue(`Keep the API stable.\n\n${longReply}\n\n${tradeoffReply} Keep this note.\n\n${longReply}`);
   expect(state.promptPosts).toEqual([]);
 });
@@ -284,7 +407,7 @@ test('switching agents never treats an equal draft as the previous agent suggest
   await mockConsole(page, state);
   await page.goto('/#agent=agent-1');
 
-  await page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: 'Use PostgreSQL', exact: true }).click();
+  await editSuggestedPrompt(page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: 'Use PostgreSQL', exact: true }), page);
   await expect.poll(() => state.suggestionPosts).toEqual([{ agentId: 'agent-1', body: { sourceKey: 'source-1' } }]);
   await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveValue(longReply);
   const switcher = page.getByRole('button', { name: /^Switch Agent at Cora/u });
@@ -292,7 +415,7 @@ test('switching agents never treats an equal draft as the previous agent suggest
   await page.getByRole('menu', { name: 'Agents at Cora' }).getByRole('menuitemradio', { name: /agent-2/u }).click();
   const prompt = page.getByRole('textbox', { name: 'Prompt' });
   await expect(prompt).toHaveValue(longReply);
-  await page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: 'Explain tradeoffs', exact: true }).click();
+  await editSuggestedPrompt(page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: 'Explain tradeoffs', exact: true }), page);
   await expect.poll(() => state.suggestionPosts).toEqual([
     { agentId: 'agent-1', body: { sourceKey: 'source-1' } },
     { agentId: 'agent-2', body: { sourceKey: 'source-2' } }
@@ -349,6 +472,55 @@ test('suggested replies scroll within the composer without widening a phone view
   const labels = await group.getByRole('button').allTextContents();
   expect(labels.every(label => label.trim().split(/\s+/u).length <= 3)).toBe(true);
   await expect(prompt).toHaveValue('');
+
+  // the interactive preview and its full-sized actions remain inside the phone viewport
+  const first = group.getByRole('button', { name: 'Use PostgreSQL', exact: true });
+  const preview = await openSuggestedPrompt(first, page);
+  await expectSuggestionArrow(first, preview, page);
+  const previewGeometry = await preview.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    const edit = element.querySelector<HTMLButtonElement>('[aria-label="Edit"]')!.getBoundingClientRect();
+    const send = element.querySelector<HTMLButtonElement>('[aria-label="Send"]')!.getBoundingClientRect();
+    const composerSend = document.querySelector<HTMLButtonElement>('.agent-composer-column .queue')!.getBoundingClientRect();
+    return {
+      insideViewport: bounds.left >= 0 && bounds.right <= window.innerWidth && bounds.top >= 0 && bounds.bottom <= window.innerHeight,
+      editWidth: edit.width,
+      editHeight: edit.height,
+      sendWidth: send.width,
+      sendHeight: send.height,
+      composerSendWidth: composerSend.width,
+      composerSendHeight: composerSend.height,
+      editBeforeSend: edit.right <= send.left
+    };
+  });
+  expect(previewGeometry).toMatchObject({ insideViewport: true, editBeforeSend: true });
+  expect(previewGeometry.editWidth).toBeCloseTo(previewGeometry.composerSendWidth, 0);
+  expect(previewGeometry.editHeight).toBeCloseTo(previewGeometry.composerSendHeight, 0);
+  expect(previewGeometry.sendWidth).toBeCloseTo(previewGeometry.composerSendWidth, 0);
+  expect(previewGeometry.sendHeight).toBeCloseTo(previewGeometry.composerSendHeight, 0);
+
+  // point to a scrolled pill independently of the clamped preview position
+  await page.keyboard.press('Escape');
+  // activate a genuinely clipped pill without locator click auto-scrolling it
+  await group.evaluate(row => { row.scrollLeft = row.firstElementChild!.getBoundingClientRect().width - 24; });
+  const clipped = await first.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    const row = element.parentElement!.getBoundingClientRect();
+    return { clipped: box.left < row.left, x: (row.left + box.right) / 2, y: (box.top + box.bottom) / 2 };
+  });
+  expect(clipped.clipped).toBe(true);
+  await page.mouse.click(clipped.x, clipped.y);
+  await expect(preview).toBeVisible();
+  await expectSuggestionArrow(first, preview, page);
+  // the arrow follows subsequent scrolling rather than its original position
+  await group.evaluate(row => { row.scrollLeft = 0; });
+  await expectSuggestionArrow(first, preview, page);
+  await page.keyboard.press('Escape');
+  const last = group.getByRole('button', { name: 'Show migration steps', exact: true });
+  const lastPreview = await openSuggestedPrompt(last, page);
+  await expectSuggestionArrow(last, lastPreview, page);
+  await page.setViewportSize({ width: 360, height: 844 });
+  await expectSuggestionArrow(last, lastPreview, page);
 });
 
 // verify canonical lifecycle and native-question precedence
@@ -376,8 +548,11 @@ test('suggestions follow the selected finished prose question and clear for nati
   await refreshDashboard(page, state);
   await expect(group).toBeVisible();
 
+  const nativePreview = await openSuggestedPrompt(group.getByRole('button', { name: 'Use PostgreSQL', exact: true }), page);
+  await expect(nativePreview.getByRole('button', { name: 'Edit', exact: true })).toBeFocused();
   await pushQuestion(page, 'agent-1', { id: 'native-question', text: 'Which path?', field: { kind: 'choice', choices: ['First', 'Second'] }, source: 'parsed' });
-  await expect(page.getByRole('region', { name: 'Agent question' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Agent question' })).toBeFocused();
+  await expect(nativePreview).toHaveCount(0);
   await expect(group).toHaveCount(0);
   await pushQuestion(page, 'agent-1', null);
   await expect(group).toBeVisible();
@@ -397,6 +572,33 @@ test('suggestions follow the selected finished prose question and clear for nati
   await expect(group).toHaveCount(0);
 });
 
+// a preview cannot outlive the opaque source that supplied its text
+test('changing the reply suggestion source closes an open preview', async ({ page }) => {
+  const state: ConsoleState = {
+    generation: 1,
+    agents: [{ id: 'agent-1', kind: 'codex', panel: 'terminal', attention: 'finished', hasMessageQuestion: true, messageReplySuggestionKey: 'source-1' }],
+    promptPosts: [],
+    suggestionResponses: { 'source-2': { suggestions: [{ label: 'Current reply', text: 'Use the current conversation response.' }] } }
+  };
+  await mockConsole(page, state);
+  await page.goto('/#agent=agent-1');
+
+  const oldPill = page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: 'Use PostgreSQL', exact: true });
+  await oldPill.focus();
+  await page.keyboard.press('Enter');
+  const preview = page.getByRole('dialog', { name: 'Suggested prompt' });
+  await expect(preview.getByRole('button', { name: 'Edit', exact: true })).toBeFocused();
+  await expect(preview).toContainText(longReply);
+
+  state.agents[0] = { ...state.agents[0]!, messageReplySuggestionKey: 'source-2' };
+  await refreshDashboard(page, state);
+  await expect.poll(() => state.suggestionPosts?.at(-1)).toEqual({ agentId: 'agent-1', body: { sourceKey: 'source-2' } });
+  await expect(preview).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Current reply', exact: true })).toBeVisible();
+  expect(state.promptPosts).toEqual([]);
+});
+
 // verify transcript agents use dashboard metadata alone
 test('structured transcript agents offer the same draft-only replies', async ({ page }) => {
   const state: ConsoleState = { generation: 1, agents: [{ id: 'agent-1', kind: 'pi', panel: 'transcript', attention: 'finished', hasMessageQuestion: true, messageReplySuggestionKey: 'source-1' }], promptPosts: [] };
@@ -406,7 +608,7 @@ test('structured transcript agents offer the same draft-only replies', async ({ 
   const group = page.getByRole('group', { name: 'Suggested replies' });
   const prompt = page.getByRole('textbox', { name: 'Prompt' });
   await expect(group).toBeVisible();
-  await group.getByRole('button', { name: 'Explain tradeoffs', exact: true }).click();
+  await editSuggestedPrompt(group.getByRole('button', { name: 'Explain tradeoffs', exact: true }), page);
   await expect(prompt).toBeFocused();
   await expect(prompt).toHaveValue(tradeoffReply);
   expect(state.promptPosts).toEqual([]);
@@ -572,8 +774,8 @@ for (const target of crossAgentPanels) {
     const pill = page.getByRole('group', { name: 'Suggested replies' }).getByRole('button', { name: 'Explain tradeoffs', exact: true });
     await expect(pill).toBeVisible();
     await prompt.fill('Keep the existing design.');
-    await pill.click();
-    await pill.click();
+    await editSuggestedPrompt(pill, page);
+    await editSuggestedPrompt(pill, page);
     const draft = `Keep the existing design.\n\n${tradeoffReply}\n\n${tradeoffReply}`;
     await expect(prompt).toHaveValue(draft);
     await expect(prompt).toBeFocused();
