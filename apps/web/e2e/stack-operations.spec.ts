@@ -344,7 +344,8 @@ test('lists several Stack processes as rows that expand one at a time, each with
   await expect(restartState).toHaveText('Restarting…');
   await expectProgressBorder(restartState, 'yellow');
   await expectProgressBorder(restartApi, 'yellow');
-  await expect(restartApi.locator('svg')).toBeVisible();
+  // the isolated fixture verifies busy ownership and glyph replacement
+  await expect(restartApi.locator('svg')).toHaveCSS('visibility', 'hidden');
   await expect(api).toHaveAttribute('aria-busy', 'true');
   await expect(api.getByRole('button', { name: 'Restart api', exact: true })).toBeDisabled();
   await expect(menu.getByRole('button', { name: 'Stop stack', exact: true })).toBeDisabled();
@@ -352,6 +353,7 @@ test('lists several Stack processes as rows that expand one at a time, each with
   await page.evaluate(() => (window as unknown as { releaseProcessAction: () => void }).releaseProcessAction());
   await expect(row('api').locator('.stack-process-state')).toHaveText('running');
   await expect(api.getByRole('button', { name: 'Restart api', exact: true })).toBeEnabled();
+  await expect(restartApi.locator('svg')).toHaveCSS('visibility', 'visible');
   await expect(menu).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as { processActions?: unknown }).processActions)).toEqual([{ name: 'api', action: 'restart' }]);
 

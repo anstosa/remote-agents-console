@@ -46,6 +46,8 @@ const routeApi = async (page: Page) => {
     if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
     // keep queued prompts empty
     if (url.pathname === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
+    // acknowledge focus-driven notification dismissal without hiding request failures
+    if (url.pathname === '/api/agents/agent-1/notifications/dismiss' && route.request().method() === 'POST') return route.fulfill({ status: 204 });
     // expose no commands or named conversation
     if (url.pathname === '/api/agents/agent-1/commands') return route.fulfill({ json: { commands: [] } });
     // let the panel use its agent title

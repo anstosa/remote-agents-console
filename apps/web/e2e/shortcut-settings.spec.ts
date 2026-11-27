@@ -430,8 +430,9 @@ for (const width of [390, 1440]) {
       tools: { "C-S-k": "command-palette" },
       root: { "C-b": { table: "tools" } },
     });
+    // wait for the durable restart acknowledgement after persistence
     await expect(
-      page.getByRole("status").filter({ hasText: "Restart pending" }),
+      page.getByRole("status", { name: "Restart pending", exact: true }),
     ).toBeVisible();
   });
 }
