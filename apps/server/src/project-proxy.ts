@@ -2,6 +2,7 @@ import { request as sendHttpRequest, type IncomingHttpHeaders, type IncomingMess
 import { connect } from 'node:net';
 import type { Duplex } from 'node:stream';
 import type { Worktree } from './domain/models.js';
+import { projectBrowserZoom } from './project-browser-zoom.js';
 import { projectBrowserPermissions } from './project-browser-permissions.js';
 
 const browserBridgePath = '/__rac/browser-bridge.js';
@@ -83,6 +84,7 @@ const browserBridge = (parentOrigin: string, profile?: BrowserDeviceProfile) => 
     override('userAgentData', userAgentData);
   }
   `}
+  ${projectBrowserZoom(parentOrigin)}
   let reportedThemeColor;
   let hasReportedThemeColor = false;
   let themeQueued = false;

@@ -1,6 +1,7 @@
 import { cloneElement, Component, createContext, type Dispatch, lazy, type ReactElement, type ReactNode, type SetStateAction, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
+import { useBrowserZoom } from './browser-zoom.js';
 import { PublicHomepage } from './public-homepage.js';
 import { PiUpdateDialog, type PiUpdateTarget } from './pi-update-dialog.js';
 import { Terminal as XTerm } from '@xterm/xterm';
@@ -5727,7 +5728,6 @@ type WorktreeNotes = ReturnType<typeof useWorktreeNotes>;
 const browserViewportKey = (worktreeId: string) => `rac.browser-viewport:${worktreeId}`;
 const browserSplitKey = (worktreeId: string) => `rac.browser-split:${worktreeId}`;
 const browserUrlKey = (worktreeId: string) => `rac.browser-url:${worktreeId}`;
-const browserDesktopViewportWidth = 980;
 type ProjectBrowserNavigationRequest = { sequence: number; url: string };
 // normalize safe web locations relative to the configured project
 const normalizeBrowserUrl = (candidate: string, homeUrl: string) => {
@@ -6028,30 +6028,12 @@ function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationReque
     const timer = window.setTimeout(() => setAddressCopyStatus(undefined), 2000);
     return () => window.clearTimeout(timer);
   }, [addressCopyStatus]);
-  // scale one desktop layout viewport into the visible phone frame
-  useEffect(() => {
-    const shell = frameShellRef.current;
-    // skip an unavailable frame shell
-    if (shell === null) return;
-    // publish dimensions used by phone-only desktop emulation
-    const measure = () => {
-      const width = shell.clientWidth;
-      const height = shell.clientHeight;
-      // wait for a measurable frame
-      if (width <= 0 || height <= 0) return;
-      const scale = Math.min(width / browserDesktopViewportWidth, 1);
-      shell.style.setProperty('--browser-desktop-width', `${browserDesktopViewportWidth}px`);
-      shell.style.setProperty('--browser-desktop-scale', String(scale));
-      shell.style.setProperty('--browser-desktop-height', `${height / scale}px`);
-    };
-    const observer = new ResizeObserver(measure);
-    observer.observe(shell);
-    measure();
-    return () => observer.disconnect();
-  }, []);
+  // keep pinch and pan confined to the phone desktop preview
+  const resetBrowserZoom = useBrowserZoom(frameShellRef, frameRef, phone && !mobile, proxied ? homeOrigin : undefined);
   // navigate without replacing the frame
   const loadFrame = useCallback((target: string, device = mobile) => {
     revokeFramePermissions();
+    resetBrowserZoom();
     loadedFrameSource.current = target;
     loadedFrameProxied.current = isManagedBrowserUrl(target, homeUrl, proxied);
     const source = loadedFrameProxied.current ? browserDeviceUrl(target, device) : target;
@@ -6059,7 +6041,7 @@ function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationReque
     setChromeColor(undefined);
     setFrameSource(source);
     frameRef.current?.setAttribute('src', source);
-  }, [homeUrl, mobile, proxied, revokeFramePermissions]);
+  }, [homeUrl, mobile, proxied, resetBrowserZoom, revokeFramePermissions]);
   // refresh the retained location
   const refreshFrame = useCallback(() => {
     expectedFrameLoad.current = true;
@@ -6102,6 +6084,8 @@ function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationReque
         if (reportedUrl === undefined || new URL(reportedUrl).origin !== event.origin || !loadedFrameProxied.current && expectedFrameLoad.current) return;
         // retain the current managed location
         if (onNavigate(reportedUrl)) {
+          // refit only for a genuinely different location
+          if (loadedFrameSource.current !== reportedUrl) resetBrowserZoom();
           loadedFrameSource.current = reportedUrl;
           setFrameAwayFromKnownUrl(false);
           // reapply the selected identity after returning from an outside page
@@ -6124,7 +6108,7 @@ function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationReque
     };
     window.addEventListener('message', syncReportedFrame);
     return () => window.removeEventListener('message', syncReportedFrame);
-  }, [homeUrl, loadFrame, onNavigate, proxied, refreshFrame]);
+  }, [homeUrl, loadFrame, onNavigate, proxied, refreshFrame, resetBrowserZoom]);
   // sync readable same-origin frame locations
   const syncFrameLocation = () => {
     permissionBroker.frameLoaded();

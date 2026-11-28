@@ -722,6 +722,26 @@ test('fills an agentless workspace when the browser is its only panel', async ({
   await expect(page.frameLocator('iframe[title="Project browser"]').getByText('Browser-only preview')).toBeVisible();
 });
 
+// provide the shared phone workspace with scenario-specific notes
+const installPhoneBrowserApi = async (page: import('@playwright/test').Page, notes: { id: string; text: string }[]) => {
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    // serve the active phone session
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // serve one project-enabled agent
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', projectUrl: 'https://project.example.com', stack: { running: true, tunnel: true } }], projects: [] } });
+    // serve the required log ticket
+    if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    // serve empty agent collections
+    if (path === '/api/agents/agent-1/saved-prompts' || path === '/api/agents/agent-1/prompt-history' || path === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
+    // serve scenario notes
+    if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes } });
+    // serve an unavailable push key
+    if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+};
+
 test.describe('phone browser split', () => {
   test.use({
     hasTouch: true,
@@ -762,22 +782,7 @@ test.describe('phone browser split', () => {
       const location = `${projectUrl.pathname}${projectUrl.search}${projectUrl.hash}`;
       await route.fulfill({ contentType: 'text/html', body: `<meta name="viewport" content="width=device-width, initial-scale=1"><main data-location="${location}">Phone preview</main>` });
     });
-    await page.route('**/api/**', async route => {
-      const path = new URL(route.request().url()).pathname;
-      // serve the active phone session
-      if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-      // serve one project-enabled agent
-      if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', projectUrl: 'https://project.example.com', stack: { running: true, tunnel: true } }], projects: [] } });
-      // serve the required log ticket
-      if (path === '/api/panes/ticket') return route.fulfill({ json: { ticket: 'log-ticket' } });
-      // serve empty agent collections
-      if (path === '/api/agents/agent-1/saved-prompts' || path === '/api/agents/agent-1/prompt-history' || path === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
-      // serve one mobile note
-      if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [{ id: 'note-cora-000001', text: 'Keep notes beside the browser.' }] } });
-      // serve an unavailable push key
-      if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-      return route.fulfill({ status: 404, json: { error: 'not mocked' } });
-    });
+    await installPhoneBrowserApi(page, [{ id: 'note-cora-000001', text: 'Keep notes beside the browser.' }]);
 
     await page.goto('/');
     expect(await page.evaluate(() => navigator.userAgent)).toContain('Mobile');
@@ -864,5 +869,130 @@ test.describe('phone browser split', () => {
     await expect(browser).toBeInViewport({ ratio: 0.99 });
     await expect(output).not.toBeInViewport();
     await expect(splitTrigger).toBeVisible();
+  });
+
+  // exercise native touch routing through the injected project bridge
+  test('desktop preview pinches and pans', async ({ page, browserName }) => {
+    // CDP supplies real multi-touch input in Chromium
+    test.skip(browserName !== 'chromium');
+    test.setTimeout(60_000);
+    const bridge = await projectBrowserBridge();
+    await installPaneMock(page);
+    await page.route('https://project.example.com/**', async route => {
+      const url = new URL(route.request().url());
+      // load the actual bridge as a separate resource
+      if (url.pathname === '/__rac/browser-bridge.js') return route.fulfill({ contentType: 'text/javascript', body: bridge });
+      // model the final document URL before the bridge reports its location
+      const retained = url.pathname === '/__rac/browser-device' ? url.searchParams.get('location') ?? '/' : url.pathname + url.search;
+      return route.fulfill({ contentType: 'text/html', body: `<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;height:2400px;background:linear-gradient(#f00,#00f)}button{margin:300px;font-size:80px}</style><button onclick="this.textContent='Tapped'">Target</button><script>history.replaceState(null, '', ${JSON.stringify(retained)});</script><script src="/__rac/browser-bridge.js"></script>` });
+    });
+    await installPhoneBrowserApi(page, []);
+    await page.goto('/');
+    await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: 'More options' }).click();
+    await page.getByRole('button', { name: 'Browser', exact: true }).click();
+    const browser = page.getByRole('dialog', { name: 'Browser' });
+    const address = browser.getByRole('textbox', { name: 'Browser address' });
+    const shell = page.locator('.browser-frame-shell');
+    const frame = page.locator('iframe[title="Project browser"]');
+    const preview = page.frameLocator('iframe');
+    await expect(browser).toBeInViewport({ ratio: 0.99 });
+    await expect(address).toHaveValue('https://project.example.com/');
+    await preview.getByRole('button', { name: 'Target' }).tap();
+    await expect(preview.getByRole('button', { name: 'Tapped' })).toBeVisible();
+
+    // measure rendered geometry instead of implementation variables
+    const geometry = () => frame.evaluate(el => {
+      const { x, y, width, height } = el.getBoundingClientRect();
+      return { x, y, width, height };
+    });
+    const before = await geometry();
+    const box = await shell.boundingBox();
+    // require measurable preview bounds
+    if (!box) throw new Error('missing frame bounds');
+    const cdp = await page.context().newCDPSession(page);
+    const y = box.y + Math.min(250, box.height / 2);
+    // send a native page-scroll gesture at fit scale
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [
+      { x: box.x + 210, y: y + 180, radiusX: 4, radiusY: 4, id: 9 }
+    ]});
+    // move through multiple scroll samples
+    for (const offset of [140, 100, 60, 20]) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [
+      { x: box.x + 210, y: y + offset, radiusX: 4, radiusY: 4, id: 9 }
+    ]});
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await expect.poll(() => preview.locator('body').evaluate(() => window.scrollY)).toBeGreaterThan(50);
+    expect(await geometry()).toEqual(before);
+
+    // pinch around the same visible midpoint
+    const pinch = async (keepTouches = false) => {
+      // wait for the latest preview document to finish loading
+      await expect(browser.getByRole('button', { name: 'Refresh browser' })).toBeVisible();
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [
+        { x: box.x + 120, y, radiusX: 4, radiusY: 4, id: 1 },
+        { x: box.x + 300, y, radiusX: 4, radiusY: 4, id: 2 }
+      ]});
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [
+        { x: box.x + 50, y, radiusX: 4, radiusY: 4, id: 1 },
+        { x: box.x + 370, y, radiusX: 4, radiusY: 4, id: 2 }
+      ]});
+      await expect.poll(async () => (await geometry()).width).toBeGreaterThan(before.width * 1.5);
+      // leave the pinch active when testing interruption
+      if (!keepTouches) await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    };
+    await pinch();
+    const pinched = await geometry();
+    const ratio = pinched.width / before.width;
+    expect(pinched.x + (box.x + 210 - before.x) * ratio).toBeCloseTo(box.x + 210, -1);
+    expect(pinched.y + (y - before.y) * ratio).toBeCloseTo(y, -1);
+
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [
+      { x: box.x + 250, y: y + 100, radiusX: 4, radiusY: 4, id: 3 }
+    ]});
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [
+      { x: box.x + 130, y: y - 50, radiusX: 4, radiusY: 4, id: 3 }
+    ]});
+    await expect.poll(async () => {
+      const panned = await geometry();
+      return Math.min(pinched.x - panned.x, pinched.y - panned.y);
+    }).toBeGreaterThan(50);
+    expect((await geometry()).width).toBe(pinched.width);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    // keep the desktop layout width and the console scale unchanged
+    expect(await preview.locator('body').evaluate(() => window.innerWidth)).toBe(980);
+    expect(await page.evaluate(() => window.visualViewport?.scale)).toBe(1);
+
+    // same-document navigation must restore fit without reloading the preview
+    await preview.locator('body').evaluate(() => history.pushState({}, '', '/details'));
+    await expect(address).toHaveValue('https://project.example.com/details');
+    await expect.poll(geometry).toEqual(before);
+    await pinch();
+    // switching viewport modes restores the original fit and retained address
+    await clickPanelAction(browser, 'Use mobile viewport and user agent');
+    await expect(shell).toHaveClass(/mobile/u);
+    await expect(preview.getByRole('button', { name: 'Target' })).toBeVisible();
+    await expect(address).toHaveValue('https://project.example.com/details');
+    await clickPanelAction(browser, 'Use desktop viewport and user agent');
+    await expect.poll(geometry).toEqual(before);
+    await expect(address).toHaveValue('https://project.example.com/details');
+
+    // explicit navigation and refresh restore fit as well
+    await pinch();
+    await address.fill('https://project.example.com/next');
+    await address.press('Enter');
+    await expect(preview.getByRole('button', { name: 'Target' })).toBeVisible();
+    await expect(address).toHaveValue('https://project.example.com/next');
+    await expect.poll(geometry).toEqual(before);
+    await pinch();
+    await browser.getByRole('button', { name: 'Refresh browser' }).click();
+    await expect.poll(geometry).toEqual(before);
+
+    // interrupt a live pinch by resizing the phone
+    await pinch(true);
+    await page.setViewportSize({ width: 390, height: 850 });
+    await expect.poll(async () => Math.abs((await geometry()).width - (await shell.boundingBox())!.width)).toBeLessThan(2);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.setViewportSize({ width: 428, height: 900 });
+    await expect.poll(geometry).toEqual(before);
+    await pinch();
   });
 });

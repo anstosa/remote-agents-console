@@ -1215,8 +1215,8 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 }
 @media (max-width: 768px) {
   .browser-frame-shell.mobile iframe { width: 100%; }
-  .browser-frame-shell.desktop { overflow: hidden; place-items: start; }
-  .browser-frame-shell.desktop iframe { width: var(--browser-desktop-width, 980px); height: var(--browser-desktop-height, 100%); transform: scale(var(--browser-desktop-scale, 1)); transform-origin: top left; }
+  .browser-frame-shell.desktop { overflow: clip; place-items: start; }
+  .browser-frame-shell.desktop iframe { width: 980px; height: var(--browser-desktop-height, 100%); transform: translate(var(--browser-desktop-x, 0px), var(--browser-desktop-y, 0px)) scale(var(--browser-desktop-scale, 1)); transform-origin: top left; }
   /* A phone shows one panel per screen: the split is a horizontal swipe carousel that snaps to
      each panel in turn (the toolbar's dots show where it is). */
   .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .github-pane, .terminal-pane, .client-settings-page)) { display: flex; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scrollbar-width: none; }
